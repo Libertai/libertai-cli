@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub const DEFAULT_API_BASE: &str = "https://api.libertai.io";
-pub const DEFAULT_CHAT_MODEL: &str = "gemma-3-27b";
+pub const DEFAULT_CHAT_MODEL: &str = "qwen3.5-122b-a10b";
 pub const DEFAULT_IMAGE_MODEL: &str = "z-image-turbo";
+pub const DEFAULT_OPUS_MODEL: &str = "gemma-4-31b-it";
+pub const DEFAULT_FAST_MODEL: &str = "qwen3.6-35b-a3b";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -24,20 +26,20 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherDefaults {
-    #[serde(default = "default_chat_model_s")]
+    #[serde(default = "default_opus_model_s")]
     pub opus_model: String,
-    #[serde(default = "default_chat_model_s")]
+    #[serde(default = "default_fast_model_s")]
     pub sonnet_model: String,
-    #[serde(default = "default_chat_model_s")]
+    #[serde(default = "default_fast_model_s")]
     pub haiku_model: String,
 }
 
 impl Default for LauncherDefaults {
     fn default() -> Self {
         Self {
-            opus_model: DEFAULT_CHAT_MODEL.into(),
-            sonnet_model: DEFAULT_CHAT_MODEL.into(),
-            haiku_model: DEFAULT_CHAT_MODEL.into(),
+            opus_model: DEFAULT_OPUS_MODEL.into(),
+            sonnet_model: DEFAULT_FAST_MODEL.into(),
+            haiku_model: DEFAULT_FAST_MODEL.into(),
         }
     }
 }
@@ -63,6 +65,12 @@ fn default_chat_model_s() -> String {
 }
 fn default_image_model_s() -> String {
     DEFAULT_IMAGE_MODEL.into()
+}
+fn default_opus_model_s() -> String {
+    DEFAULT_OPUS_MODEL.into()
+}
+fn default_fast_model_s() -> String {
+    DEFAULT_FAST_MODEL.into()
 }
 
 impl Default for Config {

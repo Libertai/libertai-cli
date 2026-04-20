@@ -6,7 +6,11 @@ use libertai_cli::config::{mask_key, Auth, Config, LauncherDefaults};
 fn empty_toml_parses_as_defaults() {
     let cfg: Config = toml::from_str("").unwrap();
     assert_eq!(cfg.api_base, "https://api.libertai.io");
-    assert_eq!(cfg.default_chat_model, "gemma-3-27b");
+    assert_eq!(cfg.default_chat_model, "qwen3.5-122b-a10b");
+    assert_eq!(cfg.default_image_model, "z-image-turbo");
+    assert_eq!(cfg.launcher_defaults.opus_model, "gemma-4-31b-it");
+    assert_eq!(cfg.launcher_defaults.sonnet_model, "qwen3.6-35b-a3b");
+    assert_eq!(cfg.launcher_defaults.haiku_model, "qwen3.6-35b-a3b");
     assert!(cfg.auth.api_key.is_none());
 }
 

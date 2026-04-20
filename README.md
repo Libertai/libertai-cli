@@ -51,13 +51,13 @@ libertai claude         # launch Claude Code against LibertAI
 ```toml
 api_base           = "https://api.libertai.io"
 account_base       = "https://api.libertai.io"
-default_chat_model = "gemma-3-27b"
+default_chat_model  = "qwen3.5-122b-a10b"
 default_image_model = "z-image-turbo"
 
 [launcher_defaults]
-opus_model   = "gemma-3-27b"
-sonnet_model = "gemma-3-27b"
-haiku_model  = "gemma-3-27b"
+opus_model   = "gemma-4-31b-it"
+sonnet_model = "qwen3.6-35b-a3b"
+haiku_model  = "qwen3.6-35b-a3b"
 
 [auth]
 api_key = "LTAI_..."
@@ -79,9 +79,9 @@ libertai config set launcher_defaults.opus_model gemma-3-27b
 env \
   ANTHROPIC_BASE_URL=https://api.libertai.io \
   ANTHROPIC_AUTH_TOKEN=$LTAI_API_KEY \
-  ANTHROPIC_DEFAULT_OPUS_MODEL=gemma-3-27b \
-  ANTHROPIC_DEFAULT_SONNET_MODEL=gemma-3-27b \
-  ANTHROPIC_DEFAULT_HAIKU_MODEL=gemma-3-27b \
+  ANTHROPIC_DEFAULT_OPUS_MODEL=gemma-4-31b-it \
+  ANTHROPIC_DEFAULT_SONNET_MODEL=qwen3.6-35b-a3b \
+  ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3.6-35b-a3b \
   CLAUDE_CODE_ATTRIBUTION_HEADER=0 \
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
   CLAUDE_CODE_DISABLE_1M_CONTEXT=1 \
