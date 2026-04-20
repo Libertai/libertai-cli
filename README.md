@@ -1,0 +1,128 @@
+# libertai
+
+A single-binary CLI for [LibertAI](https://libertai.io): log in once, then run
+inference, generate images, and launch agent tools (Claude Code, OpenCode,
+Aider) pre-wired to talk to LibertAI.
+
+## Install
+
+From source (requires Rust 1.80+):
+
+```sh
+git clone https://github.com/Libertai/libertai-cli
+cd libertai-cli
+cargo install --path .
+```
+
+The binary is named `libertai` and installs into `~/.cargo/bin`.
+
+## Quick start
+
+```sh
+libertai login          # pick: [1] paste API key  [2] sign with wallet  [3] open console
+libertai ask "explain EIP-191 signing in two sentences"
+libertai chat           # streaming REPL, Ctrl-D to exit
+libertai image "a lighthouse at dusk" --out dusk.png
+libertai claude         # launch Claude Code against LibertAI
+```
+
+## Commands
+
+| Command | Description |
+| --- | --- |
+| `libertai login` | Interactive login: API key, wallet signing (Base), or browser fallback. |
+| `libertai logout` | Back up the current config to `config.toml.bak`. |
+| `libertai status` | Show current auth state and default models. |
+| `libertai models` | List models available from `/v1/models`. |
+| `libertai ask <prompt>` | One-shot, non-streaming completion. |
+| `libertai chat` | Streaming chat REPL with history. `--system` for a system prompt. |
+| `libertai image <prompt>` | Generate and save images. `--n`, `--size`, `--out`, `--model`. |
+| `libertai keys list\|create\|delete` | Manage API keys (requires wallet). |
+| `libertai run -- <cmd>` | Exec any command with LibertAI env vars injected. |
+| `libertai claude [args]` | `run` preset for [Claude Code](https://docs.claude.com/en/docs/claude-code). |
+| `libertai opencode [args]` | `run` preset for OpenCode. |
+| `libertai aider [args]` | `run` preset for Aider; auto-passes `--model openai/<default>`. |
+| `libertai config show\|path\|set` | Inspect or edit `~/.config/libertai/config.toml`. |
+
+## Config
+
+`~/.config/libertai/config.toml` (permissions `0600`):
+
+```toml
+api_base           = "https://api.libertai.io"
+account_base       = "https://api.libertai.io"
+default_chat_model = "gemma-3-27b"
+default_image_model = "z-image-turbo"
+
+[launcher_defaults]
+opus_model   = "gemma-3-27b"
+sonnet_model = "gemma-3-27b"
+haiku_model  = "gemma-3-27b"
+
+[auth]
+api_key = "LTAI_..."
+# wallet_address / chain are only written when you log in via wallet.
+```
+
+Set values with:
+
+```sh
+libertai config set default_chat_model hermes-3-8b-tee
+libertai config set launcher_defaults.opus_model gemma-3-27b
+```
+
+## How the launchers work
+
+`libertai claude` is equivalent to:
+
+```sh
+env \
+  ANTHROPIC_BASE_URL=https://api.libertai.io \
+  ANTHROPIC_AUTH_TOKEN=$LTAI_API_KEY \
+  ANTHROPIC_DEFAULT_OPUS_MODEL=gemma-3-27b \
+  ANTHROPIC_DEFAULT_SONNET_MODEL=gemma-3-27b \
+  ANTHROPIC_DEFAULT_HAIKU_MODEL=gemma-3-27b \
+  CLAUDE_CODE_ATTRIBUTION_HEADER=0 \
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+  CLAUDE_CODE_DISABLE_1M_CONTEXT=1 \
+  DISABLE_TELEMETRY=1 \
+  claude
+```
+
+…without the 60 characters of typing. `--model`, `--opus`, `--sonnet`, `--haiku`
+override individual tiers.
+
+`libertai run -- <cmd>` is the generic form: it always sets
+`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_API_BASE` /
+`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` before exec'ing.
+
+## Authentication
+
+Two supported flows today:
+
+1. **API key** — create one at [console.libertai.io](https://console.libertai.io)
+   and paste it into `libertai login`.
+2. **Wallet signing on Base** — `libertai login` prompts for a hex-encoded
+   secp256k1 private key, signs an EIP-191 message against `/auth/message` +
+   `/auth/login`, then creates an inference API key via `/api_keys`.
+
+The private key is never persisted. Only the derived address and chain are
+saved, so `keys list/create/delete` can re-prompt for signing when they need a
+fresh JWT.
+
+## Development
+
+```sh
+cargo build                      # debug
+cargo build --release            # single optimized binary
+cargo test                       # config round-trip + masking
+./target/release/libertai --help
+```
+
+## Roadmap
+
+- Solana wallet signing.
+- Browser-based device pairing (console.libertai.io issues a one-time code the
+  CLI exchanges for a key — removes the private-key prompt).
+- `libertai openclaw` and `libertai hermes` launchers.
+- OS keyring storage as an alternative to the TOML file.

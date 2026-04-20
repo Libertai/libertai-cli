@@ -1,0 +1,200 @@
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+pub const DEFAULT_API_BASE: &str = "https://api.libertai.io";
+pub const DEFAULT_CHAT_MODEL: &str = "gemma-3-27b";
+pub const DEFAULT_IMAGE_MODEL: &str = "z-image-turbo";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(default = "default_api_base")]
+    pub api_base: String,
+    #[serde(default = "default_account_base")]
+    pub account_base: String,
+    #[serde(default = "default_chat_model_s")]
+    pub default_chat_model: String,
+    #[serde(default = "default_image_model_s")]
+    pub default_image_model: String,
+    #[serde(default)]
+    pub launcher_defaults: LauncherDefaults,
+    #[serde(default)]
+    pub auth: Auth,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LauncherDefaults {
+    #[serde(default = "default_chat_model_s")]
+    pub opus_model: String,
+    #[serde(default = "default_chat_model_s")]
+    pub sonnet_model: String,
+    #[serde(default = "default_chat_model_s")]
+    pub haiku_model: String,
+}
+
+impl Default for LauncherDefaults {
+    fn default() -> Self {
+        Self {
+            opus_model: DEFAULT_CHAT_MODEL.into(),
+            sonnet_model: DEFAULT_CHAT_MODEL.into(),
+            haiku_model: DEFAULT_CHAT_MODEL.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Auth {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain: Option<String>,
+}
+
+fn default_api_base() -> String {
+    DEFAULT_API_BASE.into()
+}
+fn default_account_base() -> String {
+    DEFAULT_API_BASE.into()
+}
+fn default_chat_model_s() -> String {
+    DEFAULT_CHAT_MODEL.into()
+}
+fn default_image_model_s() -> String {
+    DEFAULT_IMAGE_MODEL.into()
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            api_base: default_api_base(),
+            account_base: default_account_base(),
+            default_chat_model: default_chat_model_s(),
+            default_image_model: default_image_model_s(),
+            launcher_defaults: LauncherDefaults::default(),
+            auth: Auth::default(),
+        }
+    }
+}
+
+/// Returns `~/.config/libertai/config.toml`, respecting `$XDG_CONFIG_HOME`.
+pub fn config_path() -> Result<PathBuf> {
+    let base = dirs::config_dir().context("could not determine user config dir")?;
+    Ok(base.join("libertai").join("config.toml"))
+}
+
+pub fn load() -> Result<Config> {
+    let path = config_path()?;
+    if !path.exists() {
+        return Ok(Config::default());
+    }
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let cfg: Config = toml::from_str(&raw)
+        .with_context(|| format!("parsing {}", path.display()))?;
+    enforce_https_bases(&cfg)?;
+    Ok(cfg)
+}
+
+fn enforce_https_bases(cfg: &Config) -> Result<()> {
+    for (name, base) in [("api_base", &cfg.api_base), ("account_base", &cfg.account_base)] {
+        let trimmed = base.trim();
+        let parsed = url::Url::parse(trimmed).map_err(|_| {
+            anyhow::anyhow!("config: {name} must be a plain https://host URL — got {trimmed}")
+        })?;
+        let path_ok = parsed.path().is_empty() || parsed.path() == "/";
+        if parsed.scheme() != "https"
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || !path_ok
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || parsed.host().is_none()
+        {
+            anyhow::bail!(
+                "config: {name} must be a plain https://host URL — got {trimmed}"
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn save(cfg: &Config) -> Result<()> {
+    enforce_https_bases(cfg)?;
+    let path = config_path()?;
+    if let Some(parent) = path.parent() {
+        create_dir_secure(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let raw = toml::to_string_pretty(cfg).context("serializing config")?;
+    write_file_secure(&path, raw.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_dir_secure(parent: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    if parent.exists() {
+        return Ok(());
+    }
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_dir_secure(parent: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(parent)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_file_secure(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(data)?;
+    // Re-apply mode in case the file already existed with different perms.
+    set_file_mode_600(path)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_file_secure(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    std::fs::write(path, data)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+pub fn set_file_mode_600(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perm = std::fs::metadata(path)?.permissions();
+    perm.set_mode(0o600);
+    std::fs::set_permissions(path, perm)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn set_file_mode_600(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
+/// `LTAI_****abcd` — first 4 + last 4 of a key.
+pub fn mask_key(key: &str) -> String {
+    let len = key.chars().count();
+    if len <= 8 {
+        return "*".repeat(len);
+    }
+    let prefix: String = key.chars().take(4).collect();
+    let suffix: String = key.chars().skip(len - 4).collect();
+    format!("{prefix}****{suffix}")
+}

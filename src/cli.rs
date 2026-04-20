@@ -1,0 +1,172 @@
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "libertai",
+    version,
+    about = "LibertAI CLI — inference, images, and agent-tool launchers.",
+    propagate_version = true
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Log in (paste API key or sign with wallet).
+    Login,
+    /// Clear saved credentials (keeps a .bak of the previous config).
+    Logout,
+    /// Show current auth state and defaults.
+    Status,
+
+    /// Manage API keys.
+    Keys {
+        #[command(subcommand)]
+        action: KeysAction,
+    },
+
+    /// List available models.
+    Models {
+        /// Bypass cache (not yet used; placeholder for future caching).
+        #[arg(long)]
+        refresh: bool,
+    },
+
+    /// One-shot prompt, non-streaming.
+    Ask {
+        /// The prompt (rest of the args are joined with spaces).
+        #[arg(required = true)]
+        prompt: Vec<String>,
+        #[arg(long)]
+        model: Option<String>,
+    },
+
+    /// Streaming chat REPL (Ctrl-D to exit).
+    Chat {
+        #[arg(long)]
+        model: Option<String>,
+        /// Optional system prompt.
+        #[arg(long)]
+        system: Option<String>,
+    },
+
+    /// Generate an image.
+    Image {
+        #[arg(required = true)]
+        prompt: Vec<String>,
+        #[arg(long)]
+        model: Option<String>,
+        /// WIDTHxHEIGHT, e.g. 1024x1024
+        #[arg(long, default_value = "1024x1024")]
+        size: String,
+        #[arg(long, short = 'n', default_value_t = 1)]
+        n: u32,
+        /// Output file (single image) or prefix (multi, e.g. `out` → out-0.png, out-1.png).
+        #[arg(long, short = 'o', default_value = "libertai-image.png")]
+        out: String,
+    },
+
+    /// Launch an arbitrary command with LibertAI env vars injected.
+    Run {
+        #[arg(long)]
+        model: Option<String>,
+        /// Command and its arguments after `--`.
+        #[arg(trailing_var_arg = true, required = true, allow_hyphen_values = true)]
+        argv: Vec<String>,
+    },
+
+    /// Launch Claude Code against LibertAI.
+    Claude {
+        /// Override all three model tiers at once.
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        opus: Option<String>,
+        #[arg(long)]
+        sonnet: Option<String>,
+        #[arg(long)]
+        haiku: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Launch OpenCode against LibertAI.
+    Opencode {
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Launch Aider against LibertAI.
+    Aider {
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Config file operations.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KeysAction {
+    /// List all API keys for the current account.
+    List,
+    /// Create a new API key.
+    Create {
+        name: String,
+        /// Monthly spending limit in USD.
+        #[arg(long)]
+        limit: Option<f64>,
+    },
+    /// Delete an API key by id.
+    Delete { id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+    /// Print current config.
+    Show,
+    /// Print config file path.
+    Path,
+    /// Set a single dotted key, e.g. `default_chat_model gemma-3-27b`.
+    Set { key: String, value: String },
+}
+
+pub fn dispatch(cli: Cli) -> Result<()> {
+    match cli.command {
+        Command::Login => crate::commands::login::run(),
+        Command::Logout => crate::commands::logout::run(),
+        Command::Status => crate::commands::status::run(),
+        Command::Keys { action } => crate::commands::keys::run(action),
+        Command::Models { refresh } => crate::commands::models::run(refresh),
+        Command::Ask { prompt, model } => crate::commands::ask::run(prompt.join(" "), model),
+        Command::Chat { model, system } => crate::commands::chat::run(model, system),
+        Command::Image {
+            prompt,
+            model,
+            size,
+            n,
+            out,
+        } => crate::commands::image::run(prompt.join(" "), model, size, n, out),
+        Command::Run { model, argv } => crate::commands::run::run(model, argv),
+        Command::Claude {
+            model,
+            opus,
+            sonnet,
+            haiku,
+            args,
+        } => crate::commands::launchers::claude(model, opus, sonnet, haiku, args),
+        Command::Opencode { model, args } => crate::commands::launchers::opencode(model, args),
+        Command::Aider { model, args } => crate::commands::launchers::aider(model, args),
+        Command::Config { action } => crate::commands::config_cmd::run(action),
+    }
+}

@@ -1,0 +1,36 @@
+[package]
+name = "libertai-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Command-line tool for LibertAI: inference, image generation, and launching agent tools (Claude Code, OpenCode, Aider) with LibertAI as the backend."
+license = "MIT"
+
+[lib]
+name = "libertai_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "libertai"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dirs = "5"
+url = "2"
+dialoguer = { version = "0.11", default-features = false, features = ["password"] }
+indicatif = "0.17"
+owo-colors = "4"
+anyhow = "1"
+base64 = "0.22"
+hex = "0.4"
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha3 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+strip = true
