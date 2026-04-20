@@ -10,15 +10,24 @@ pub const DEFAULT_FAST_MODEL: &str = "qwen3.6-35b-a3b";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default = "default_api_base")]
+    #[serde(default = "default_api_base", skip_serializing_if = "is_default_api_base")]
     pub api_base: String,
-    #[serde(default = "default_account_base")]
+    #[serde(
+        default = "default_account_base",
+        skip_serializing_if = "is_default_account_base"
+    )]
     pub account_base: String,
-    #[serde(default = "default_chat_model_s")]
+    #[serde(
+        default = "default_chat_model_s",
+        skip_serializing_if = "is_default_chat_model"
+    )]
     pub default_chat_model: String,
-    #[serde(default = "default_image_model_s")]
+    #[serde(
+        default = "default_image_model_s",
+        skip_serializing_if = "is_default_image_model"
+    )]
     pub default_image_model: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "LauncherDefaults::is_default")]
     pub launcher_defaults: LauncherDefaults,
     #[serde(default)]
     pub auth: Auth,
@@ -26,12 +35,51 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherDefaults {
-    #[serde(default = "default_opus_model_s")]
+    #[serde(
+        default = "default_opus_model_s",
+        skip_serializing_if = "is_default_opus_model"
+    )]
     pub opus_model: String,
-    #[serde(default = "default_fast_model_s")]
+    #[serde(
+        default = "default_fast_model_s",
+        skip_serializing_if = "is_default_sonnet_model"
+    )]
     pub sonnet_model: String,
-    #[serde(default = "default_fast_model_s")]
+    #[serde(
+        default = "default_fast_model_s",
+        skip_serializing_if = "is_default_haiku_model"
+    )]
     pub haiku_model: String,
+}
+
+impl LauncherDefaults {
+    fn is_default(&self) -> bool {
+        is_default_opus_model(&self.opus_model)
+            && is_default_sonnet_model(&self.sonnet_model)
+            && is_default_haiku_model(&self.haiku_model)
+    }
+}
+
+fn is_default_api_base(s: &str) -> bool {
+    s == DEFAULT_API_BASE
+}
+fn is_default_account_base(s: &str) -> bool {
+    s == DEFAULT_API_BASE
+}
+fn is_default_chat_model(s: &str) -> bool {
+    s == DEFAULT_CHAT_MODEL
+}
+fn is_default_image_model(s: &str) -> bool {
+    s == DEFAULT_IMAGE_MODEL
+}
+fn is_default_opus_model(s: &str) -> bool {
+    s == DEFAULT_OPUS_MODEL
+}
+fn is_default_sonnet_model(s: &str) -> bool {
+    s == DEFAULT_FAST_MODEL
+}
+fn is_default_haiku_model(s: &str) -> bool {
+    s == DEFAULT_FAST_MODEL
 }
 
 impl Default for LauncherDefaults {

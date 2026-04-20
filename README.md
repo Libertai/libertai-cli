@@ -42,7 +42,7 @@ libertai claude         # launch Claude Code against LibertAI
 | `libertai claude [args]` | `run` preset for [Claude Code](https://docs.claude.com/en/docs/claude-code). |
 | `libertai opencode [args]` | `run` preset for OpenCode. |
 | `libertai aider [args]` | `run` preset for Aider; auto-passes `--model openai/<default>`. |
-| `libertai config show\|path\|set` | Inspect or edit `~/.config/libertai/config.toml`. |
+| `libertai config show\|path\|set\|unset` | Inspect or edit `~/.config/libertai/config.toml`. |
 
 ## Config
 
@@ -68,8 +68,20 @@ Set values with:
 
 ```sh
 libertai config set default_chat_model hermes-3-8b-tee
-libertai config set launcher_defaults.opus_model gemma-3-27b
+libertai config set launcher_defaults.opus_model gemma-4-31b-it
 ```
+
+Reset a key (or everything) back to the built-in default so future default
+changes in the CLI propagate to you automatically:
+
+```sh
+libertai config unset default_chat_model
+libertai config unset launcher_defaults          # all three launcher tiers
+libertai config unset all                        # every non-auth field
+```
+
+Fields that match the built-in default are omitted from the saved file, so
+once reset they track future upgrades.
 
 ## How the launchers work
 

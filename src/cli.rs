@@ -142,6 +142,9 @@ pub enum ConfigAction {
     Path,
     /// Set a single dotted key, e.g. `default_chat_model gemma-3-27b`.
     Set { key: String, value: String },
+    /// Reset a key to its current built-in default so future bumps propagate.
+    /// Use `all` to reset every non-auth field.
+    Unset { key: String },
 }
 
 pub fn dispatch(cli: Cli) -> Result<()> {
