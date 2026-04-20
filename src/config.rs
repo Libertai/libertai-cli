@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub const DEFAULT_API_BASE: &str = "https://api.libertai.io";
+pub const DEFAULT_SEARCH_BASE: &str = "https://search.libertai.io";
 pub const DEFAULT_CHAT_MODEL: &str = "qwen3.5-122b-a10b";
 pub const DEFAULT_IMAGE_MODEL: &str = "z-image-turbo";
 pub const DEFAULT_OPUS_MODEL: &str = "gemma-4-31b-it";
@@ -17,6 +18,11 @@ pub struct Config {
         skip_serializing_if = "is_default_account_base"
     )]
     pub account_base: String,
+    #[serde(
+        default = "default_search_base_s",
+        skip_serializing_if = "is_default_search_base"
+    )]
+    pub search_base: String,
     #[serde(
         default = "default_chat_model_s",
         skip_serializing_if = "is_default_chat_model"
@@ -66,6 +72,9 @@ fn is_default_api_base(s: &str) -> bool {
 fn is_default_account_base(s: &str) -> bool {
     s == DEFAULT_API_BASE
 }
+fn is_default_search_base(s: &str) -> bool {
+    s == DEFAULT_SEARCH_BASE
+}
 fn is_default_chat_model(s: &str) -> bool {
     s == DEFAULT_CHAT_MODEL
 }
@@ -108,6 +117,9 @@ fn default_api_base() -> String {
 fn default_account_base() -> String {
     DEFAULT_API_BASE.into()
 }
+fn default_search_base_s() -> String {
+    DEFAULT_SEARCH_BASE.into()
+}
 fn default_chat_model_s() -> String {
     DEFAULT_CHAT_MODEL.into()
 }
@@ -126,6 +138,7 @@ impl Default for Config {
         Self {
             api_base: default_api_base(),
             account_base: default_account_base(),
+            search_base: default_search_base_s(),
             default_chat_model: default_chat_model_s(),
             default_image_model: default_image_model_s(),
             launcher_defaults: LauncherDefaults::default(),
@@ -154,7 +167,11 @@ pub fn load() -> Result<Config> {
 }
 
 fn enforce_https_bases(cfg: &Config) -> Result<()> {
-    for (name, base) in [("api_base", &cfg.api_base), ("account_base", &cfg.account_base)] {
+    for (name, base) in [
+        ("api_base", &cfg.api_base),
+        ("account_base", &cfg.account_base),
+        ("search_base", &cfg.search_base),
+    ] {
         let trimmed = base.trim();
         let parsed = url::Url::parse(trimmed).map_err(|_| {
             anyhow::anyhow!("config: {name} must be a plain https://host URL — got {trimmed}")

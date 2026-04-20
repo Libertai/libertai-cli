@@ -135,6 +135,73 @@ pub fn post_image(cfg: &Config, req: &ImageRequest) -> Result<ImageResponse> {
         .context("parsing /v1/images/generations response")
 }
 
+// ── Search (search.libertai.io) ─────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct SearchRequest<'a> {
+    pub query: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engines: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_results: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SearchResult {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub snippet: Option<String>,
+    #[serde(default)]
+    pub engine: Option<String>,
+    #[serde(default)]
+    pub rank: Option<u32>,
+    #[serde(default)]
+    pub found_in: Vec<String>,
+    #[serde(default)]
+    pub search_type: Option<String>,
+    // News
+    #[serde(default)]
+    pub published_at: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    // Images
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
+    #[serde(default)]
+    pub image_url: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SearchResponse {
+    pub results: Vec<SearchResult>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub meta: Option<serde_json::Value>,
+}
+
+pub fn post_search(cfg: &Config, req: &SearchRequest<'_>) -> Result<SearchResponse> {
+    let key = require_api_key(cfg)?;
+    let url = format!("{}/search", cfg.search_base.trim_end_matches('/'));
+    let resp = http()?
+        .post(&url)
+        .bearer_auth(key)
+        .json(req)
+        .send()
+        .with_context(|| format!("POST {url}"))?;
+    let resp = check_status(resp, &url)?;
+    resp.json::<SearchResponse>()
+        .context("parsing /search response")
+}
+
 // ── Account (/auth, /api-keys) ──────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]

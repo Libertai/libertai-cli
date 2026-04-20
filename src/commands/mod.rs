@@ -8,5 +8,6 @@ pub mod login;
 pub mod logout;
 pub mod models;
 pub mod run;
+pub mod search;
 pub mod skills;
 pub mod status;

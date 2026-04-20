@@ -11,10 +11,16 @@ struct BundledSkill {
     body: &'static str,
 }
 
-const BUNDLED: &[BundledSkill] = &[BundledSkill {
-    name: "libertai-image",
-    body: include_str!("../skills_content/libertai-image.md"),
-}];
+const BUNDLED: &[BundledSkill] = &[
+    BundledSkill {
+        name: "libertai-image",
+        body: include_str!("../skills_content/libertai-image.md"),
+    },
+    BundledSkill {
+        name: "libertai-search",
+        body: include_str!("../skills_content/libertai-search.md"),
+    },
+];
 
 /// Host — used by both `libertai skills` and launchers.
 #[derive(Clone, Copy)]

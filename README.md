@@ -36,6 +36,7 @@ libertai claude         # launch Claude Code against LibertAI
 | `libertai models` | List models available from `/v1/models`. |
 | `libertai ask <prompt>` | One-shot, non-streaming completion. |
 | `libertai chat` | Streaming chat REPL with history. `--system` for a system prompt. |
+| `libertai search <query>` | Web search via `search.libertai.io`. `--max-results`, `--type web\|news\|images`, `--json`. |
 | `libertai image <prompt>` | Generate and save images. `--n`, `--size`, `--out`, `--model`, `--force`. |
 | `libertai keys list\|create\|delete` | Manage API keys (requires wallet). |
 | `libertai run -- <cmd>` | Exec any command with LibertAI env vars injected. |
@@ -123,15 +124,25 @@ launch. If you don't pass `--model`, the CLI appends
 
 ## Agent skills
 
-Claude Code natively knows how to ask a model questions but has no built-in
-image-generation tool. The CLI bundles a `libertai-image` [Claude Code
-skill](https://code.claude.com/docs/en/skills) that teaches Claude to call
-`libertai image "<prompt>" --out <path>` whenever the user asks for a
-picture / logo / mockup.
+Out of the box, agent CLIs pointed at LibertAI have no image-generation or
+web-search tool. The CLI bundles two Claude Code
+[skills](https://code.claude.com/docs/en/skills) that teach the agent how
+to call `libertai` for these capabilities:
 
-`libertai claude` auto-installs the bundled skills on first run
-(non-destructive — if `~/.claude/skills/libertai-image/SKILL.md` exists, it
-is left alone). Manual control:
+- **`libertai-image`** — teaches the agent to run `libertai image "<prompt>"
+  --out <path>` when the user asks for a picture, logo, mockup, etc.
+- **`libertai-search`** — teaches the agent to run `libertai search "<query>"
+  [--type news|images]` for fact-checks, current events, and research.
+
+Because both Claude Code and OpenCode read skills from
+`~/.claude/skills/<name>/SKILL.md`, the same bundle works for both. Aider
+has no skill system, so `libertai aider` instead generates an
+instructions file at `~/.config/libertai/aider-instructions.md` and passes
+`--read <that file>` when it exec's `aider`.
+
+`libertai claude` and `libertai opencode` auto-install the bundled skills
+non-destructively (existing files are left alone so customisations
+survive). Manual control:
 
 ```sh
 libertai skills list                 # show what's bundled
@@ -140,7 +151,14 @@ libertai skills install --project    # into ./.claude/skills/ for this repo
 libertai skills uninstall            # remove
 ```
 
-More skills (web search / fetch, OpenCode MCP bridge) are on the roadmap.
+| Tool | How libertai capabilities reach it |
+| --- | --- |
+| Claude Code (`libertai claude`) | `~/.claude/skills/libertai-*` (native) |
+| OpenCode (`libertai opencode`) | `~/.claude/skills/libertai-*` (opencode reads Claude's skill format) + `provider.libertai` in `opencode.json` |
+| Aider (`libertai aider`) | `~/.config/libertai/aider-instructions.md` loaded via `--read` |
+
+Future: OpenCode MCP bridge (exposes image/search as MCP tools so they
+appear in opencode's tool list alongside native ones).
 
 ## Authentication
 

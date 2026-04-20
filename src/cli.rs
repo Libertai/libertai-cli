@@ -53,6 +53,24 @@ pub enum Command {
         system: Option<String>,
     },
 
+    /// Web search via LibertAI's search API (search.libertai.io).
+    Search {
+        /// The search query.
+        #[arg(required = true)]
+        query: Vec<String>,
+        /// Engines to query (comma-separated). Defaults to google,bing,duckduckgo.
+        #[arg(long, value_delimiter = ',')]
+        engines: Option<Vec<String>>,
+        #[arg(long)]
+        max_results: Option<u32>,
+        /// web | news | images (defaults to web).
+        #[arg(long = "type", alias = "search-type")]
+        search_type: Option<String>,
+        /// Dump the raw JSON response instead of a pretty list.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Generate an image.
     Image {
         #[arg(required = true)]
@@ -179,6 +197,13 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Keys { action } => crate::commands::keys::run(action),
         Command::Models { refresh } => crate::commands::models::run(refresh),
         Command::Ask { prompt, model } => crate::commands::ask::run(prompt.join(" "), model),
+        Command::Search {
+            query,
+            engines,
+            max_results,
+            search_type,
+            json,
+        } => crate::commands::search::run(query.join(" "), engines, max_results, search_type, json),
         Command::Chat { model, system } => crate::commands::chat::run(model, system),
         Command::Image {
             prompt,

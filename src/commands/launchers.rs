@@ -63,6 +63,14 @@ pub fn opencode(model: Option<String>, mut args: Vec<String>) -> Result<()> {
         path.display()
     );
 
+    // opencode reads Claude-format skills from ~/.claude/skills/, so the same
+    // bundled skills (image, search, …) are picked up automatically.
+    match crate::commands::skills::install_if_missing(crate::commands::skills::Host::Claude) {
+        Ok(n) if n > 0 => eprintln!("opencode: installed {n} bundled skill(s)"),
+        Ok(_) => {}
+        Err(e) => eprintln!("opencode: could not install bundled skills: {e:#}"),
+    }
+
     // Forward the model selection as `libertai/<model>` unless the user
     // already passed --model / -m themselves.
     let has_model_flag = args.iter().any(|a| a == "--model" || a == "-m");
@@ -196,6 +204,23 @@ pub fn aider(model: Option<String>, mut args: Vec<String>) -> Result<()> {
     let cfg = config::load()?;
     let env = base_env(&cfg, model.as_deref())?;
 
+    // Aider has no skills/MCP system — it just reads files passed via --read
+    // into context. Synthesize an instructions file with the same guidance
+    // the Claude/OpenCode skills provide, and auto-add --read.
+    match sync_aider_instructions() {
+        Ok(path) => {
+            let already_read = args
+                .iter()
+                .any(|a| a.as_str() == path.to_string_lossy().as_ref());
+            if !already_read {
+                args.insert(0, "--read".into());
+                args.insert(1, path.to_string_lossy().into_owned());
+            }
+            eprintln!("aider: reading libertai tool docs from {}", path.display());
+        }
+        Err(e) => eprintln!("aider: could not write libertai instructions: {e:#}"),
+    }
+
     let has_model_flag = args.iter().any(|a| a == "--model");
     match (model.as_deref(), has_model_flag) {
         (Some(m), _) => {
@@ -211,6 +236,23 @@ pub fn aider(model: Option<String>, mut args: Vec<String>) -> Result<()> {
 
     exec_with_env("aider", &args, env)
 }
+
+/// Write `~/.config/libertai/aider-instructions.md` with the same CLI guidance
+/// that the Claude/OpenCode skills carry. Overwritten every launch so changes
+/// to the bundled skill content propagate.
+fn sync_aider_instructions() -> Result<PathBuf> {
+    let base = dirs::config_dir().ok_or_else(|| anyhow!("could not determine user config dir"))?;
+    let path = base.join("libertai").join("aider-instructions.md");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(&path, AIDER_INSTRUCTIONS)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
+const AIDER_INSTRUCTIONS: &str = include_str!("../skills_content/aider-instructions.md");
 
 #[cfg(test)]
 mod tests {
