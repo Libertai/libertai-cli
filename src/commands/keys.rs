@@ -57,9 +57,34 @@ fn acquire_jwt(cfg: &Config) -> Result<String> {
         );
     }
     let message = auth_message(cfg, chain, address)?;
+    confirm_signing(&cfg.account_base, &message)?;
     let signature = personal_sign(&sk, &message)?;
     let jwt = auth_login(cfg, chain, address, &signature)?;
     Ok(jwt)
+}
+
+fn confirm_signing(account_base: &str, message: &str) -> Result<()> {
+    let host = url::Url::parse(account_base)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| account_base.to_string());
+    eprintln!();
+    eprintln!(
+        "{}",
+        "The server is asking you to sign this message:".yellow().bold()
+    );
+    eprintln!("  host:    {host}");
+    eprintln!("  message: {message}");
+    eprintln!();
+    let ok = Confirm::new()
+        .with_prompt("Sign this message with your private key?")
+        .default(false)
+        .interact()
+        .context("reading signing confirmation")?;
+    if !ok {
+        bail!("signing cancelled");
+    }
+    Ok(())
 }
 
 fn list(cfg: &Config) -> Result<()> {
@@ -116,6 +141,11 @@ fn list(cfg: &Config) -> Result<()> {
 }
 
 fn create(cfg: &Config, name: String, limit: Option<f64>) -> Result<()> {
+    if let Some(v) = limit {
+        if !v.is_finite() || v < 0.0 {
+            bail!("--limit must be a finite non-negative number (got {v})");
+        }
+    }
     let jwt = acquire_jwt(cfg)?;
     let created = create_api_key(
         cfg,

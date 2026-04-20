@@ -31,12 +31,12 @@ libertai claude         # launch Claude Code against LibertAI
 | Command | Description |
 | --- | --- |
 | `libertai login` | Interactive login: API key, wallet signing (Base), or browser fallback. |
-| `libertai logout` | Back up the current config to `config.toml.bak`. |
+| `libertai logout` | Back up the current config to `config.toml.bak.<epoch>`. |
 | `libertai status` | Show current auth state and default models. |
 | `libertai models` | List models available from `/v1/models`. |
 | `libertai ask <prompt>` | One-shot, non-streaming completion. |
 | `libertai chat` | Streaming chat REPL with history. `--system` for a system prompt. |
-| `libertai image <prompt>` | Generate and save images. `--n`, `--size`, `--out`, `--model`. |
+| `libertai image <prompt>` | Generate and save images. `--n`, `--size`, `--out`, `--model`, `--force`. |
 | `libertai keys list\|create\|delete` | Manage API keys (requires wallet). |
 | `libertai run -- <cmd>` | Exec any command with LibertAI env vars injected. |
 | `libertai claude [args]` | `run` preset for [Claude Code](https://docs.claude.com/en/docs/claude-code). |
@@ -103,12 +103,30 @@ Two supported flows today:
 1. **API key** — create one at [console.libertai.io](https://console.libertai.io)
    and paste it into `libertai login`.
 2. **Wallet signing on Base** — `libertai login` prompts for a hex-encoded
-   secp256k1 private key, signs an EIP-191 message against `/auth/message` +
-   `/auth/login`, then creates an inference API key via `/api_keys`.
+   secp256k1 private key, fetches an auth message from `/auth/message`,
+   **shows you the message and host and asks for confirmation before
+   signing**, then submits the EIP-191 signature to `/auth/login` and
+   creates an inference API key via `/api-keys`.
 
 The private key is never persisted. Only the derived address and chain are
 saved, so `keys list/create/delete` can re-prompt for signing when they need a
 fresh JWT.
+
+## Security notes
+
+- Credentials live on disk at `~/.config/libertai/config.toml` in plaintext
+  (file mode `0600`, parent dir `0700`). OS keyring storage is on the roadmap.
+- `libertai run` / `claude` / `opencode` / `aider` **inject the API key into
+  the child process's environment**. Any subprocess that reads env vars — and
+  any diagnostic tool that can enumerate this process — can see the key. This
+  is the only way these third-party tools can authenticate today; if you do
+  not want this tradeoff, use `libertai ask` / `chat` / `image` directly.
+- The wallet-signing flow shows you the exact message and host before signing
+  and requires explicit confirmation. Still: the `account_base` it talks to is
+  user-configurable — if you change it, you are trusting that host to issue
+  benign signing requests.
+- HTTPS is enforced for `api_base` and `account_base`; `http://` URLs are
+  rejected at config load.
 
 ## Development
 

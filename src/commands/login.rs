@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use dialoguer::console::Term;
-use dialoguer::{Input, Select};
+use dialoguer::{Confirm, Input, Select};
+use owo_colors::OwoColorize;
 
 use crate::auth::wallet::{address_from_signing_key, personal_sign, signing_key_from_hex};
 use crate::client::{auth_login, auth_message, create_api_key, list_models, ApiKeyCreate};
@@ -21,7 +22,9 @@ pub fn run() -> Result<()> {
         .interact_on(&term)
         .context("reading login choice")?;
 
-    let mut cfg = config::load().unwrap_or_default();
+    let mut cfg = config::load().context(
+        "refusing to overwrite an unreadable config — fix or delete ~/.config/libertai/config.toml first",
+    )?;
 
     match choice {
         0 => login_with_api_key(&mut cfg, &term)?,
@@ -79,6 +82,7 @@ fn login_with_wallet(cfg: &mut Config, term: &Term) -> Result<()> {
     eprintln!("Address: {address}");
 
     let message = auth_message(cfg, "base", &address).context("fetching auth message")?;
+    confirm_signing(term, &cfg.account_base, &message)?;
     let signature = personal_sign(&sk, &message)?;
     let jwt = auth_login(cfg, "base", &address, &signature)
         .context("logging in with signature")?;
@@ -102,12 +106,12 @@ fn login_with_wallet(cfg: &mut Config, term: &Term) -> Result<()> {
     let monthly_limit = if limit_str.trim().is_empty() {
         None
     } else {
-        Some(
-            limit_str
-                .trim()
-                .parse::<f64>()
-                .context("monthly limit must be a number")?,
-        )
+        let v: f64 = limit_str
+            .trim()
+            .parse()
+            .context("monthly limit must be a number")?;
+        validate_limit(v)?;
+        Some(v)
     };
 
     let created = create_api_key(
@@ -126,24 +130,90 @@ fn login_with_wallet(cfg: &mut Config, term: &Term) -> Result<()> {
     Ok(())
 }
 
-fn open_url(url: &str) -> Result<()> {
-    let candidates = if cfg!(target_os = "macos") {
-        &["open"][..]
-    } else if cfg!(target_os = "windows") {
-        &["start"][..]
-    } else {
-        &["xdg-open"][..]
-    };
-    for cmd in candidates {
-        if std::process::Command::new(cmd)
-            .arg(url)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .is_ok()
-        {
-            return Ok(());
-        }
+pub(crate) fn validate_limit(v: f64) -> Result<()> {
+    if !v.is_finite() || v < 0.0 {
+        anyhow::bail!("monthly limit must be a finite non-negative number (got {v})");
     }
     Ok(())
+}
+
+fn confirm_signing(term: &Term, account_base: &str, message: &str) -> Result<()> {
+    let host = url::Url::parse(account_base)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| account_base.to_string());
+    eprintln!();
+    eprintln!(
+        "{}",
+        "The server is asking you to sign this message:".yellow().bold()
+    );
+    eprintln!("  host:    {host}");
+    eprintln!("  message: {message}");
+    eprintln!();
+    let ok = Confirm::new()
+        .with_prompt("Sign this message with your private key?")
+        .default(false)
+        .interact_on(term)
+        .context("reading signing confirmation")?;
+    if !ok {
+        anyhow::bail!("signing cancelled");
+    }
+    Ok(())
+}
+
+fn open_url(url: &str) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let candidates: &[&str] = if cfg!(target_os = "macos") {
+            &["open"]
+        } else {
+            &["xdg-open"]
+        };
+        for cmd in candidates {
+            if std::process::Command::new(cmd)
+                .arg(url)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_limit;
+
+    #[test]
+    fn accepts_zero_and_positive() {
+        assert!(validate_limit(0.0).is_ok());
+        assert!(validate_limit(5.0).is_ok());
+        assert!(validate_limit(1_000_000.0).is_ok());
+    }
+
+    #[test]
+    fn rejects_negative() {
+        assert!(validate_limit(-0.01).is_err());
+        assert!(validate_limit(-1.0).is_err());
+    }
+
+    #[test]
+    fn rejects_non_finite() {
+        assert!(validate_limit(f64::NAN).is_err());
+        assert!(validate_limit(f64::INFINITY).is_err());
+        assert!(validate_limit(f64::NEG_INFINITY).is_err());
+    }
 }

@@ -67,6 +67,9 @@ pub enum Command {
         /// Output file (single image) or prefix (multi, e.g. `out` → out-0.png, out-1.png).
         #[arg(long, short = 'o', default_value = "libertai-image.png")]
         out: String,
+        /// Overwrite `--out` if it already exists.
+        #[arg(long, short = 'f')]
+        force: bool,
     },
 
     /// Launch an arbitrary command with LibertAI env vars injected.
@@ -156,7 +159,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             size,
             n,
             out,
-        } => crate::commands::image::run(prompt.join(" "), model, size, n, out),
+            force,
+        } => crate::commands::image::run(prompt.join(" "), model, size, n, out, force),
         Command::Run { model, argv } => crate::commands::run::run(model, argv),
         Command::Claude {
             model,
