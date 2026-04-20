@@ -49,9 +49,9 @@ pub fn opencode(model: Option<String>, mut args: Vec<String>) -> Result<()> {
     // opencode's openai-compatible adapter reads `apiKey` via {env:LIBERTAI_API_KEY}
     env.push(("LIBERTAI_API_KEY".into(), api_key));
 
-    let path = sync_opencode_config(&cfg)?;
+    let (path, model_count) = sync_opencode_config(&cfg)?;
     eprintln!(
-        "opencode: wrote provider \"libertai\" to {}",
+        "opencode: wrote provider \"libertai\" ({model_count} models) to {}",
         path.display()
     );
 
@@ -67,6 +67,30 @@ pub fn opencode(model: Option<String>, mut args: Vec<String>) -> Result<()> {
     exec_with_env("opencode", &args, env)
 }
 
+/// Heuristic filter for models that are plausibly usable as chat models in
+/// opencode. The `/v1/models` endpoint returns image and embedding models
+/// alongside chat ones, and opencode would happily try to send chat requests
+/// at them and fail confusingly. This filter errs on the side of including
+/// unknown models (chat is the majority case).
+fn is_chat_model(id: &str) -> bool {
+    let lower = id.to_ascii_lowercase();
+    const EXCLUDES: &[&str] = &[
+        "image",
+        "diffusion",
+        "sdxl",
+        "flux",
+        "dall-e",
+        "dalle",
+        "embed",
+        "embedding",
+        "whisper",
+        "tts",
+        "audio",
+        "rerank",
+    ];
+    !EXCLUDES.iter().any(|needle| lower.contains(needle))
+}
+
 fn opencode_config_path() -> Result<PathBuf> {
     let base = dirs::config_dir().ok_or_else(|| anyhow!("could not determine user config dir"))?;
     Ok(base.join("opencode").join("opencode.json"))
@@ -74,7 +98,7 @@ fn opencode_config_path() -> Result<PathBuf> {
 
 /// Idempotently write a `libertai` provider into the user's opencode config.
 /// Existing providers and other top-level keys are preserved.
-fn sync_opencode_config(cfg: &Config) -> Result<PathBuf> {
+fn sync_opencode_config(cfg: &Config) -> Result<(PathBuf, usize)> {
     let path = opencode_config_path()?;
 
     let mut root: Value = if path.exists() {
@@ -90,13 +114,33 @@ fn sync_opencode_config(cfg: &Config) -> Result<PathBuf> {
         json!({ "$schema": "https://opencode.ai/config.json" })
     };
 
-    // Deduplicate known model IDs across chat + launcher tiers.
-    let mut ids = vec![
+    // Fetch available models from the server. Fall back to the tier defaults
+    // if the call fails (offline, stale key, transient 5xx) so `opencode`
+    // still launches with *something* that works.
+    let tier_defaults = [
         cfg.default_chat_model.clone(),
         cfg.launcher_defaults.opus_model.clone(),
         cfg.launcher_defaults.sonnet_model.clone(),
         cfg.launcher_defaults.haiku_model.clone(),
     ];
+    let mut ids: Vec<String> = match crate::client::list_models(cfg) {
+        Ok(list) => list
+            .data
+            .into_iter()
+            .map(|m| m.id)
+            .filter(|id| is_chat_model(id))
+            .collect(),
+        Err(e) => {
+            eprintln!(
+                "opencode: could not list models from {} ({e}); using tier defaults only",
+                cfg.api_base
+            );
+            Vec::new()
+        }
+    };
+    // Always include the tier defaults so `--model libertai/<tier>` resolves
+    // even if the server list omits one.
+    ids.extend(tier_defaults.iter().cloned());
     ids.sort();
     ids.dedup();
 
@@ -137,7 +181,7 @@ fn sync_opencode_config(cfg: &Config) -> Result<PathBuf> {
     }
     let pretty = serde_json::to_string_pretty(&root).context("rendering opencode.json")?;
     std::fs::write(&path, pretty).with_context(|| format!("writing {}", path.display()))?;
-    Ok(path)
+    Ok((path, ids.len()))
 }
 
 pub fn aider(model: Option<String>, mut args: Vec<String>) -> Result<()> {
@@ -158,4 +202,30 @@ pub fn aider(model: Option<String>, mut args: Vec<String>) -> Result<()> {
     }
 
     exec_with_env("aider", &args, env)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_chat_model;
+
+    #[test]
+    fn filters_image_models() {
+        assert!(!is_chat_model("z-image-turbo"));
+        assert!(!is_chat_model("stable-diffusion-xl"));
+        assert!(!is_chat_model("flux-schnell"));
+    }
+
+    #[test]
+    fn filters_embedding_and_audio() {
+        assert!(!is_chat_model("text-embedding-3-small"));
+        assert!(!is_chat_model("whisper-large-v3"));
+        assert!(!is_chat_model("tts-1"));
+    }
+
+    #[test]
+    fn keeps_chat_models() {
+        assert!(is_chat_model("qwen3.5-122b-a10b"));
+        assert!(is_chat_model("gemma-4-31b-it"));
+        assert!(is_chat_model("hermes-3-8b-tee"));
+    }
 }
