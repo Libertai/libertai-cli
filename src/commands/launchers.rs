@@ -15,6 +15,14 @@ pub fn claude(
     let cfg = config::load()?;
     let mut env = base_env(&cfg, model.as_deref())?;
 
+    // Drop bundled skills (image gen, …) into ~/.claude/skills/ on first run.
+    // Safe to call every launch: install_if_missing() leaves existing files alone.
+    match crate::commands::skills::install_if_missing(crate::commands::skills::Host::Claude) {
+        Ok(n) if n > 0 => eprintln!("claude: installed {n} bundled skill(s)"),
+        Ok(_) => {}
+        Err(e) => eprintln!("claude: could not install bundled skills: {e:#}"),
+    }
+
     let opus_model = opus
         .or_else(|| model.clone())
         .unwrap_or_else(|| cfg.launcher_defaults.opus_model.clone());

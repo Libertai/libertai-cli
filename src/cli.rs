@@ -117,6 +117,12 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+
+    /// Install/list/uninstall the bundled agent skills (image gen etc).
+    Skills {
+        #[command(subcommand)]
+        action: SkillsAction,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -132,6 +138,24 @@ pub enum KeysAction {
     },
     /// Delete an API key by id.
     Delete { id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillsAction {
+    /// List the bundled skills this CLI knows how to install.
+    List,
+    /// Install (or refresh) the bundled skills into Claude Code's skill dir.
+    /// Defaults to the user-wide location (`~/.claude/skills/`); pass
+    /// `--project` to install into `.claude/skills/` in the current directory.
+    Install {
+        #[arg(long)]
+        project: bool,
+    },
+    /// Remove the bundled skills installed by this CLI.
+    Uninstall {
+        #[arg(long)]
+        project: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -175,5 +199,6 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Opencode { model, args } => crate::commands::launchers::opencode(model, args),
         Command::Aider { model, args } => crate::commands::launchers::aider(model, args),
         Command::Config { action } => crate::commands::config_cmd::run(action),
+        Command::Skills { action } => crate::commands::skills::run(action),
     }
 }

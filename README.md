@@ -43,6 +43,7 @@ libertai claude         # launch Claude Code against LibertAI
 | `libertai opencode [args]` | Writes a `libertai` provider into `~/.config/opencode/opencode.json`, sets `LIBERTAI_API_KEY`, then launches OpenCode. |
 | `libertai aider [args]` | `run` preset for Aider; auto-passes `--model openai/<default>`. |
 | `libertai config show\|path\|set\|unset` | Inspect or edit `~/.config/libertai/config.toml`. |
+| `libertai skills install\|list\|uninstall` | Manage bundled Claude Code skills (image gen etc). |
 
 ## Config
 
@@ -119,6 +120,27 @@ launcher tiers. Other top-level keys and providers in `opencode.json` are
 preserved. `LIBERTAI_API_KEY` is exported from the CLI's config on each
 launch. If you don't pass `--model`, the CLI appends
 `--model libertai/<default_chat_model>`.
+
+## Agent skills
+
+Claude Code natively knows how to ask a model questions but has no built-in
+image-generation tool. The CLI bundles a `libertai-image` [Claude Code
+skill](https://code.claude.com/docs/en/skills) that teaches Claude to call
+`libertai image "<prompt>" --out <path>` whenever the user asks for a
+picture / logo / mockup.
+
+`libertai claude` auto-installs the bundled skills on first run
+(non-destructive — if `~/.claude/skills/libertai-image/SKILL.md` exists, it
+is left alone). Manual control:
+
+```sh
+libertai skills list                 # show what's bundled
+libertai skills install              # force-refresh into ~/.claude/skills/
+libertai skills install --project    # into ./.claude/skills/ for this repo
+libertai skills uninstall            # remove
+```
+
+More skills (web search / fetch, OpenCode MCP bridge) are on the roadmap.
 
 ## Authentication
 
