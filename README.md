@@ -40,7 +40,7 @@ libertai claude         # launch Claude Code against LibertAI
 | `libertai keys list\|create\|delete` | Manage API keys (requires wallet). |
 | `libertai run -- <cmd>` | Exec any command with LibertAI env vars injected. |
 | `libertai claude [args]` | `run` preset for [Claude Code](https://docs.claude.com/en/docs/claude-code). |
-| `libertai opencode [args]` | `run` preset for OpenCode. |
+| `libertai opencode [args]` | Writes a `libertai` provider into `~/.config/opencode/opencode.json`, sets `LIBERTAI_API_KEY`, then launches OpenCode. |
 | `libertai aider [args]` | `run` preset for Aider; auto-passes `--model openai/<default>`. |
 | `libertai config show\|path\|set\|unset` | Inspect or edit `~/.config/libertai/config.toml`. |
 
@@ -107,6 +107,18 @@ override individual tiers.
 `libertai run -- <cmd>` is the generic form: it always sets
 `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_API_BASE` /
 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` before exec'ing.
+
+### OpenCode specifics
+
+OpenCode ignores `OPENAI_*` env vars for custom providers and instead
+requires a provider entry in `~/.config/opencode/opencode.json`.
+`libertai opencode` synthesizes one idempotently — a `provider.libertai`
+block pointing at `<api_base>/v1` with `apiKey: "{env:LIBERTAI_API_KEY}"`
+and a models map built from your `default_chat_model` plus the three
+launcher tiers. Other top-level keys and providers in `opencode.json` are
+preserved. `LIBERTAI_API_KEY` is exported from the CLI's config on each
+launch. If you don't pass `--model`, the CLI appends
+`--model libertai/<default_chat_model>`.
 
 ## Authentication
 
