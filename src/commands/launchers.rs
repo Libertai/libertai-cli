@@ -75,7 +75,7 @@ pub fn opencode(model: Option<String>, mut args: Vec<String>) -> Result<()> {
     // already passed --model / -m themselves.
     let has_model_flag = args.iter().any(|a| a == "--model" || a == "-m");
     if !has_model_flag {
-        let chosen = model.unwrap_or_else(|| cfg.default_chat_model.clone());
+        let chosen = model.unwrap_or_else(|| cfg.default_code_model.clone());
         args.push("--model".into());
         args.push(format!("libertai/{chosen}"));
     }
@@ -135,6 +135,7 @@ fn sync_opencode_config(cfg: &Config) -> Result<(PathBuf, usize)> {
     // still launches with *something* that works.
     let tier_defaults = [
         cfg.default_chat_model.clone(),
+        cfg.default_code_model.clone(),
         cfg.launcher_defaults.opus_model.clone(),
         cfg.launcher_defaults.sonnet_model.clone(),
         cfg.launcher_defaults.haiku_model.clone(),
@@ -200,6 +201,28 @@ fn sync_opencode_config(cfg: &Config) -> Result<(PathBuf, usize)> {
     Ok((path, ids.len()))
 }
 
+/// Launch Claw Code (ultraworkers/claw-code) pointed at LibertAI.
+///
+/// Claw rejects bare model names with `invalid_model_syntax` and only routes
+/// via `ANTHROPIC_BASE_URL` for names starting with `claude`/`anthropic/`
+/// (without stripping the prefix). The working path is its OpenAI-compatible
+/// route, reached by prefixing the model with `openai/`. When/if upstream
+/// accepts arbitrary model names under `ANTHROPIC_BASE_URL`, this prefix and
+/// the whole OpenAI detour can be dropped.
+pub fn claw(model: Option<String>, mut args: Vec<String>) -> Result<()> {
+    let cfg = config::load()?;
+    let env = base_env(&cfg, model.as_deref())?;
+
+    let has_model_flag = args.iter().any(|a| a == "--model");
+    if !has_model_flag {
+        let chosen = model.unwrap_or_else(|| cfg.default_code_model.clone());
+        args.push("--model".into());
+        args.push(format!("openai/{chosen}"));
+    }
+
+    exec_with_env("claw", &args, env)
+}
+
 pub fn aider(model: Option<String>, mut args: Vec<String>) -> Result<()> {
     let cfg = config::load()?;
     let env = base_env(&cfg, model.as_deref())?;
@@ -229,7 +252,7 @@ pub fn aider(model: Option<String>, mut args: Vec<String>) -> Result<()> {
         }
         (None, false) => {
             args.push("--model".into());
-            args.push(format!("openai/{}", cfg.default_chat_model));
+            args.push(format!("openai/{}", cfg.default_code_model));
         }
         (None, true) => {}
     }

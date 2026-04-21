@@ -130,6 +130,14 @@ pub enum Command {
         args: Vec<String>,
     },
 
+    /// Launch Claw Code (ultraworkers/claw-code) against LibertAI.
+    Claw {
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Config file operations.
     Config {
         #[command(subcommand)]
@@ -223,6 +231,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         } => crate::commands::launchers::claude(model, opus, sonnet, haiku, args),
         Command::Opencode { model, args } => crate::commands::launchers::opencode(model, args),
         Command::Aider { model, args } => crate::commands::launchers::aider(model, args),
+        Command::Claw { model, args } => crate::commands::launchers::claw(model, args),
         Command::Config { action } => crate::commands::config_cmd::run(action),
         Command::Skills { action } => crate::commands::skills::run(action),
     }

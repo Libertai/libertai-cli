@@ -42,7 +42,8 @@ libertai claude         # launch Claude Code against LibertAI
 | `libertai run -- <cmd>` | Exec any command with LibertAI env vars injected. |
 | `libertai claude [args]` | `run` preset for [Claude Code](https://docs.claude.com/en/docs/claude-code). |
 | `libertai opencode [args]` | Writes a `libertai` provider into `~/.config/opencode/opencode.json`, sets `LIBERTAI_API_KEY`, then launches OpenCode. |
-| `libertai aider [args]` | `run` preset for Aider; auto-passes `--model openai/<default>`. |
+| `libertai aider [args]` | `run` preset for Aider; auto-passes `--model openai/<default_code_model>`. |
+| `libertai claw [args]` | `run` preset for [Claw Code](https://github.com/ultraworkers/claw-code); auto-passes `--model openai/<default_code_model>`. |
 | `libertai config show\|path\|set\|unset` | Inspect or edit `~/.config/libertai/config.toml`. |
 | `libertai skills install\|list\|uninstall` | Manage bundled Claude Code skills (image gen etc). |
 
@@ -54,6 +55,7 @@ libertai claude         # launch Claude Code against LibertAI
 api_base           = "https://api.libertai.io"
 account_base       = "https://api.libertai.io"
 default_chat_model  = "qwen3.5-122b-a10b"
+default_code_model  = "qwen3.6-35b-a3b"
 default_image_model = "z-image-turbo"
 
 [launcher_defaults]
@@ -116,11 +118,26 @@ OpenCode ignores `OPENAI_*` env vars for custom providers and instead
 requires a provider entry in `~/.config/opencode/opencode.json`.
 `libertai opencode` synthesizes one idempotently — a `provider.libertai`
 block pointing at `<api_base>/v1` with `apiKey: "{env:LIBERTAI_API_KEY}"`
-and a models map built from your `default_chat_model` plus the three
-launcher tiers. Other top-level keys and providers in `opencode.json` are
-preserved. `LIBERTAI_API_KEY` is exported from the CLI's config on each
-launch. If you don't pass `--model`, the CLI appends
-`--model libertai/<default_chat_model>`.
+and a models map built from your `default_chat_model` / `default_code_model`
+plus the three launcher tiers. Other top-level keys and providers in
+`opencode.json` are preserved. `LIBERTAI_API_KEY` is exported from the CLI's
+config on each launch. If you don't pass `--model`, the CLI appends
+`--model libertai/<default_code_model>`.
+
+### Claw specifics
+
+[Claw Code](https://github.com/ultraworkers/claw-code) reads
+`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` like Claude Code, but its
+CLI rejects model names that don't match a known provider prefix with
+`invalid_model_syntax`, and the Anthropic path does not strip a routing
+prefix before sending the request — so `--model qwen3.5-122b-a10b` and
+`--model anthropic/qwen3.5-122b-a10b` both fail against a LibertAI
+backend. `libertai claw` works around this by routing via claw's
+OpenAI-compatible path: it appends `--model openai/<default_code_model>`
+(the `openai/` prefix *is* stripped before the request is sent) and
+relies on `OPENAI_BASE_URL` / `OPENAI_API_KEY` from the base env. Claw
+doesn't ship with a `~/.claude/skills/` reader today, so the image /
+search skills aren't automatically available inside a claw session yet.
 
 ## Agent skills
 

@@ -77,6 +77,10 @@ fn install_hint(program: &str) -> Option<&'static str> {
         "claude" => Some("npm i -g @anthropic-ai/claude-code"),
         "opencode" => Some("npm i -g opencode-ai"),
         "aider" => Some("pipx install aider-install && aider-install"),
+        "claw" => Some(
+            "build from source: git clone https://github.com/ultraworkers/claw-code \
+             && cd claw-code/rust && cargo install --path crates/rusty-claude-cli --force",
+        ),
         _ => None,
     }
 }
