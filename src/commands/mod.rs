@@ -1,4 +1,5 @@
 pub mod ask;
+pub mod auth_ui;
 pub mod chat;
 pub mod config_cmd;
 pub mod image;
