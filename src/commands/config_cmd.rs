@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use crate::cli::ConfigAction;
 use crate::config::{
     self, config_path, mask_key, DEFAULT_API_BASE, DEFAULT_CHAT_MODEL, DEFAULT_FAST_MODEL,
-    DEFAULT_IMAGE_MODEL, DEFAULT_OPUS_MODEL,
+    DEFAULT_HTTP_TIMEOUT_SECS, DEFAULT_IMAGE_MODEL, DEFAULT_OPUS_MODEL,
 };
 
 pub fn run(action: ConfigAction) -> Result<()> {
@@ -44,6 +44,15 @@ fn set(key: &str, value: &str) -> Result<()> {
         "launcher_defaults.haiku_model" => {
             cfg.launcher_defaults.haiku_model = value.to_string()
         }
+        "http_timeout_secs" => {
+            let secs: u64 = value
+                .parse()
+                .with_context(|| format!("http_timeout_secs must be a positive integer, got {value}"))?;
+            if secs == 0 {
+                bail!("http_timeout_secs must be >= 1");
+            }
+            cfg.http_timeout_secs = secs;
+        }
         k if k.starts_with("auth.") => bail!(
             "'{k}' is managed by `libertai login`; edit manually at {} if you know what you're doing",
             config_path()?.display()
@@ -66,6 +75,7 @@ fn unset(key: &str) -> Result<()> {
             cfg.launcher_defaults.opus_model = DEFAULT_OPUS_MODEL.into();
             cfg.launcher_defaults.sonnet_model = DEFAULT_FAST_MODEL.into();
             cfg.launcher_defaults.haiku_model = DEFAULT_FAST_MODEL.into();
+            cfg.http_timeout_secs = DEFAULT_HTTP_TIMEOUT_SECS;
         }
         "api_base" => cfg.api_base = DEFAULT_API_BASE.into(),
         "account_base" => cfg.account_base = DEFAULT_API_BASE.into(),
@@ -79,6 +89,7 @@ fn unset(key: &str) -> Result<()> {
         "launcher_defaults.opus_model" => cfg.launcher_defaults.opus_model = DEFAULT_OPUS_MODEL.into(),
         "launcher_defaults.sonnet_model" => cfg.launcher_defaults.sonnet_model = DEFAULT_FAST_MODEL.into(),
         "launcher_defaults.haiku_model" => cfg.launcher_defaults.haiku_model = DEFAULT_FAST_MODEL.into(),
+        "http_timeout_secs" => cfg.http_timeout_secs = DEFAULT_HTTP_TIMEOUT_SECS,
         k if k.starts_with("auth.") => bail!(
             "'{k}' is managed by `libertai login`/`libertai logout`; unset is not supported"
         ),

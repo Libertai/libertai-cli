@@ -166,7 +166,7 @@ fn sync_opencode_config(cfg: &Config) -> Result<(PathBuf, usize)> {
             id.clone(),
             json!({
                 "name": id,
-                "limit": { "context": 32768, "output": 8192 }
+                "limit": { "context": 200_000, "output": 16_384 }
             }),
         );
     }

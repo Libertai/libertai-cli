@@ -8,6 +8,7 @@ pub const DEFAULT_CHAT_MODEL: &str = "qwen3.5-122b-a10b";
 pub const DEFAULT_IMAGE_MODEL: &str = "z-image-turbo";
 pub const DEFAULT_OPUS_MODEL: &str = "gemma-4-31b-it";
 pub const DEFAULT_FAST_MODEL: &str = "qwen3.6-35b-a3b";
+pub const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -35,6 +36,11 @@ pub struct Config {
     pub default_image_model: String,
     #[serde(default, skip_serializing_if = "LauncherDefaults::is_default")]
     pub launcher_defaults: LauncherDefaults,
+    #[serde(
+        default = "default_http_timeout_secs",
+        skip_serializing_if = "is_default_http_timeout_secs"
+    )]
+    pub http_timeout_secs: u64,
     #[serde(default)]
     pub auth: Auth,
 }
@@ -90,6 +96,9 @@ fn is_default_sonnet_model(s: &str) -> bool {
 fn is_default_haiku_model(s: &str) -> bool {
     s == DEFAULT_FAST_MODEL
 }
+fn is_default_http_timeout_secs(v: &u64) -> bool {
+    *v == DEFAULT_HTTP_TIMEOUT_SECS
+}
 
 impl Default for LauncherDefaults {
     fn default() -> Self {
@@ -132,6 +141,9 @@ fn default_opus_model_s() -> String {
 fn default_fast_model_s() -> String {
     DEFAULT_FAST_MODEL.into()
 }
+fn default_http_timeout_secs() -> u64 {
+    DEFAULT_HTTP_TIMEOUT_SECS
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -142,6 +154,7 @@ impl Default for Config {
             default_chat_model: default_chat_model_s(),
             default_image_model: default_image_model_s(),
             launcher_defaults: LauncherDefaults::default(),
+            http_timeout_secs: DEFAULT_HTTP_TIMEOUT_SECS,
             auth: Auth::default(),
         }
     }

@@ -10,12 +10,36 @@ use std::time::Duration;
 
 use crate::config::Config;
 
-pub fn http() -> Result<Client> {
+pub fn http(cfg: &Config) -> Result<Client> {
     Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(cfg.http_timeout_secs))
         .user_agent(concat!("libertai-cli/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("building http client")
+}
+
+/// Rewrite a reqwest `send()` error into an anyhow error, adding a
+/// remediation hint when the failure is a timeout so the user knows which
+/// knob to turn (either the config key or a cheaper model).
+fn annotate_send_err(
+    e: reqwest::Error,
+    ctx: impl std::fmt::Display,
+    timeout_secs: Option<u64>,
+) -> anyhow::Error {
+    if e.is_timeout() {
+        let after = timeout_secs
+            .map(|s| format!(" after {s}s"))
+            .unwrap_or_default();
+        let bump = timeout_secs
+            .map(|s| s.saturating_mul(2).max(300))
+            .unwrap_or(300);
+        return anyhow!(
+            "{ctx}: request timed out{after} — the model may still be generating. \
+             Raise the timeout with `libertai config set http_timeout_secs {bump}`, \
+             or try a faster/smaller model."
+        );
+    }
+    anyhow::Error::new(e).context(format!("{ctx}"))
 }
 
 /// Client for long-lived streaming responses (e.g. SSE chat completions).
@@ -58,11 +82,11 @@ pub struct ModelList {
 pub fn list_models(cfg: &Config) -> Result<ModelList> {
     let key = require_api_key(cfg)?;
     let url = format!("{}/v1/models", cfg.api_base.trim_end_matches('/'));
-    let resp = http()?
+    let resp = http(cfg)?
         .get(&url)
         .bearer_auth(key)
         .send()
-        .with_context(|| format!("GET {url}"))?;
+        .map_err(|e| annotate_send_err(e, format!("GET {url}"), Some(cfg.http_timeout_secs)))?;
     let resp = check_status(resp, &url)?;
     resp.json::<ModelList>()
         .context("parsing /v1/models response")
@@ -88,12 +112,22 @@ pub fn post_chat_blocking(cfg: &Config, req: &ChatRequest) -> Result<reqwest::bl
         "{}/v1/chat/completions",
         cfg.api_base.trim_end_matches('/')
     );
-    let resp = http_stream()?
+    // Streaming must not carry a total-request timeout — the connection lives
+    // as long as the server is emitting tokens. Non-streaming (`ask`) bounds
+    // the whole generation by `http_timeout_secs` so a slow model does not
+    // hang the terminal forever.
+    let streaming = req.stream.unwrap_or(false);
+    let (client, timeout_hint) = if streaming {
+        (http_stream()?, None)
+    } else {
+        (http(cfg)?, Some(cfg.http_timeout_secs))
+    };
+    let resp = client
         .post(&url)
         .bearer_auth(key)
         .json(req)
         .send()
-        .with_context(|| format!("POST {url}"))?;
+        .map_err(|e| annotate_send_err(e, format!("POST {url}"), timeout_hint))?;
     let resp = check_status(resp, &url)?;
     Ok(resp)
 }
@@ -124,12 +158,12 @@ pub fn post_image(cfg: &Config, req: &ImageRequest) -> Result<ImageResponse> {
         "{}/v1/images/generations",
         cfg.api_base.trim_end_matches('/')
     );
-    let resp = http()?
+    let resp = http(cfg)?
         .post(&url)
         .bearer_auth(key)
         .json(req)
         .send()
-        .with_context(|| format!("POST {url}"))?;
+        .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
     let resp = check_status(resp, &url)?;
     resp.json::<ImageResponse>()
         .context("parsing /v1/images/generations response")
@@ -191,12 +225,12 @@ pub struct SearchResponse {
 pub fn post_search(cfg: &Config, req: &SearchRequest<'_>) -> Result<SearchResponse> {
     let key = require_api_key(cfg)?;
     let url = format!("{}/search", cfg.search_base.trim_end_matches('/'));
-    let resp = http()?
+    let resp = http(cfg)?
         .post(&url)
         .bearer_auth(key)
         .json(req)
         .send()
-        .with_context(|| format!("POST {url}"))?;
+        .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
     let resp = check_status(resp, &url)?;
     resp.json::<SearchResponse>()
         .context("parsing /search response")
@@ -232,18 +266,18 @@ pub struct AuthLoginResponse {
 
 pub fn auth_message(cfg: &Config, chain: &str, address: &str) -> Result<String> {
     let url = format!("{}/auth/message", cfg.account_base.trim_end_matches('/'));
-    let resp = http()?
+    let resp = http(cfg)?
         .post(&url)
         .json(&AuthMessageRequest { chain, address })
         .send()
-        .with_context(|| format!("POST {url}"))?;
+        .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
     let resp = check_status(resp, &url)?;
     Ok(resp.json::<AuthMessageResponse>()?.message)
 }
 
 pub fn auth_login(cfg: &Config, chain: &str, address: &str, signature: &str) -> Result<String> {
     let url = format!("{}/auth/login", cfg.account_base.trim_end_matches('/'));
-    let resp = http()?
+    let resp = http(cfg)?
         .post(&url)
         .json(&AuthLoginRequest {
             chain,
@@ -251,7 +285,7 @@ pub fn auth_login(cfg: &Config, chain: &str, address: &str, signature: &str) -> 
             signature,
         })
         .send()
-        .with_context(|| format!("POST {url}"))?;
+        .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
     let resp = check_status(resp, &url)?;
     Ok(resp.json::<AuthLoginResponse>()?.access_token)
 }
@@ -295,11 +329,11 @@ pub struct ApiKeyCreate<'a> {
 
 pub fn list_api_keys(cfg: &Config, jwt: &str) -> Result<Vec<ApiKeyRow>> {
     let url = format!("{}/api-keys", cfg.account_base.trim_end_matches('/'));
-    let resp = http()?
+    let resp = http(cfg)?
         .get(&url)
         .header(reqwest::header::COOKIE, format!("libertai_auth={jwt}"))
         .send()
-        .with_context(|| format!("GET {url}"))?;
+        .map_err(|e| annotate_send_err(e, format!("GET {url}"), Some(cfg.http_timeout_secs)))?;
     let resp = check_status(resp, &url)?;
     Ok(resp
         .json::<ApiKeyListResponse>()
@@ -309,12 +343,12 @@ pub fn list_api_keys(cfg: &Config, jwt: &str) -> Result<Vec<ApiKeyRow>> {
 
 pub fn create_api_key(cfg: &Config, jwt: &str, body: &ApiKeyCreate<'_>) -> Result<FullApiKey> {
     let url = format!("{}/api-keys", cfg.account_base.trim_end_matches('/'));
-    let resp = http()?
+    let resp = http(cfg)?
         .post(&url)
         .header(reqwest::header::COOKIE, format!("libertai_auth={jwt}"))
         .json(body)
         .send()
-        .with_context(|| format!("POST {url}"))?;
+        .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
     let resp = check_status(resp, &url)?;
     resp.json::<FullApiKey>().context("parsing create-key response")
 }
@@ -324,11 +358,11 @@ pub fn delete_api_key(cfg: &Config, jwt: &str, id: &str) -> Result<()> {
         "{}/api-keys/{id}",
         cfg.account_base.trim_end_matches('/')
     );
-    let resp = http()?
+    let resp = http(cfg)?
         .delete(&url)
         .header(reqwest::header::COOKIE, format!("libertai_auth={jwt}"))
         .send()
-        .with_context(|| format!("DELETE {url}"))?;
+        .map_err(|e| annotate_send_err(e, format!("DELETE {url}"), Some(cfg.http_timeout_secs)))?;
     let _ = check_status(resp, &url)?;
     Ok(())
 }
