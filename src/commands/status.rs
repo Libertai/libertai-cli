@@ -18,6 +18,11 @@ pub fn run() -> Result<()> {
     );
     println!(
         "  {:<22} {}",
+        "Default code model:".dimmed(),
+        cfg.default_code_model
+    );
+    println!(
+        "  {:<22} {}",
         "Default image model:".dimmed(),
         cfg.default_image_model
     );

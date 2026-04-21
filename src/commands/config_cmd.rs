@@ -2,8 +2,8 @@ use anyhow::{bail, Context, Result};
 
 use crate::cli::ConfigAction;
 use crate::config::{
-    self, config_path, mask_key, DEFAULT_API_BASE, DEFAULT_CHAT_MODEL, DEFAULT_FAST_MODEL,
-    DEFAULT_HTTP_TIMEOUT_SECS, DEFAULT_IMAGE_MODEL, DEFAULT_OPUS_MODEL,
+    self, config_path, mask_key, DEFAULT_API_BASE, DEFAULT_CHAT_MODEL, DEFAULT_CODE_MODEL,
+    DEFAULT_FAST_MODEL, DEFAULT_HTTP_TIMEOUT_SECS, DEFAULT_IMAGE_MODEL, DEFAULT_OPUS_MODEL,
 };
 
 pub fn run(action: ConfigAction) -> Result<()> {
@@ -34,6 +34,7 @@ fn set(key: &str, value: &str) -> Result<()> {
         "api_base" => cfg.api_base = value.to_string(),
         "account_base" => cfg.account_base = value.to_string(),
         "default_chat_model" => cfg.default_chat_model = value.to_string(),
+        "default_code_model" => cfg.default_code_model = value.to_string(),
         "default_image_model" => cfg.default_image_model = value.to_string(),
         "launcher_defaults.opus_model" => {
             cfg.launcher_defaults.opus_model = value.to_string()
@@ -71,6 +72,7 @@ fn unset(key: &str) -> Result<()> {
             cfg.api_base = DEFAULT_API_BASE.into();
             cfg.account_base = DEFAULT_API_BASE.into();
             cfg.default_chat_model = DEFAULT_CHAT_MODEL.into();
+            cfg.default_code_model = DEFAULT_CODE_MODEL.into();
             cfg.default_image_model = DEFAULT_IMAGE_MODEL.into();
             cfg.launcher_defaults.opus_model = DEFAULT_OPUS_MODEL.into();
             cfg.launcher_defaults.sonnet_model = DEFAULT_FAST_MODEL.into();
@@ -80,6 +82,7 @@ fn unset(key: &str) -> Result<()> {
         "api_base" => cfg.api_base = DEFAULT_API_BASE.into(),
         "account_base" => cfg.account_base = DEFAULT_API_BASE.into(),
         "default_chat_model" => cfg.default_chat_model = DEFAULT_CHAT_MODEL.into(),
+        "default_code_model" => cfg.default_code_model = DEFAULT_CODE_MODEL.into(),
         "default_image_model" => cfg.default_image_model = DEFAULT_IMAGE_MODEL.into(),
         "launcher_defaults" => {
             cfg.launcher_defaults.opus_model = DEFAULT_OPUS_MODEL.into();
