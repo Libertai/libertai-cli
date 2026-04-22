@@ -10,6 +10,7 @@ pub const DEFAULT_IMAGE_MODEL: &str = "z-image-turbo";
 pub const DEFAULT_OPUS_MODEL: &str = "gemma-4-31b-it";
 pub const DEFAULT_FAST_MODEL: &str = "qwen3.6-35b-a3b";
 pub const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_CHECK_FOR_UPDATES: bool = true;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -47,6 +48,11 @@ pub struct Config {
         skip_serializing_if = "is_default_http_timeout_secs"
     )]
     pub http_timeout_secs: u64,
+    #[serde(
+        default = "default_check_for_updates",
+        skip_serializing_if = "is_default_check_for_updates"
+    )]
+    pub check_for_updates: bool,
     #[serde(default)]
     pub auth: Auth,
 }
@@ -108,6 +114,9 @@ fn is_default_haiku_model(s: &str) -> bool {
 fn is_default_http_timeout_secs(v: &u64) -> bool {
     *v == DEFAULT_HTTP_TIMEOUT_SECS
 }
+fn is_default_check_for_updates(v: &bool) -> bool {
+    *v == DEFAULT_CHECK_FOR_UPDATES
+}
 
 impl Default for LauncherDefaults {
     fn default() -> Self {
@@ -156,6 +165,9 @@ fn default_fast_model_s() -> String {
 fn default_http_timeout_secs() -> u64 {
     DEFAULT_HTTP_TIMEOUT_SECS
 }
+fn default_check_for_updates() -> bool {
+    DEFAULT_CHECK_FOR_UPDATES
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -168,6 +180,7 @@ impl Default for Config {
             default_image_model: default_image_model_s(),
             launcher_defaults: LauncherDefaults::default(),
             http_timeout_secs: DEFAULT_HTTP_TIMEOUT_SECS,
+            check_for_updates: DEFAULT_CHECK_FOR_UPDATES,
             auth: Auth::default(),
         }
     }
@@ -233,7 +246,7 @@ pub fn save(cfg: &Config) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn create_dir_secure(parent: &std::path::Path) -> Result<()> {
+pub(crate) fn create_dir_secure(parent: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     if parent.exists() {
         return Ok(());
@@ -246,13 +259,13 @@ fn create_dir_secure(parent: &std::path::Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn create_dir_secure(parent: &std::path::Path) -> Result<()> {
+pub(crate) fn create_dir_secure(parent: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(parent)?;
     Ok(())
 }
 
 #[cfg(unix)]
-fn write_file_secure(path: &std::path::Path, data: &[u8]) -> Result<()> {
+pub(crate) fn write_file_secure(path: &std::path::Path, data: &[u8]) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = std::fs::OpenOptions::new()
@@ -268,7 +281,7 @@ fn write_file_secure(path: &std::path::Path, data: &[u8]) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn write_file_secure(path: &std::path::Path, data: &[u8]) -> Result<()> {
+pub(crate) fn write_file_secure(path: &std::path::Path, data: &[u8]) -> Result<()> {
     std::fs::write(path, data)?;
     Ok(())
 }

@@ -1,0 +1,28 @@
+class Libertai < Formula
+  desc "LibertAI CLI — inference, image generation, and agent-tool launchers"
+  homepage "https://github.com/Libertai/libertai-cli"
+  version "{{version}}"
+  license "MIT"
+
+  on_arm do
+    url "https://github.com/Libertai/libertai-cli/releases/download/v{{version}}/libertai-macos-aarch64"
+    sha256 "{{sha256_arm64}}"
+  end
+
+  on_intel do
+    url "https://github.com/Libertai/libertai-cli/releases/download/v{{version}}/libertai-macos-x86_64"
+    sha256 "{{sha256_x86_64}}"
+  end
+
+  def install
+    if Hardware::CPU.arm?
+      bin.install "libertai-macos-aarch64" => "libertai"
+    else
+      bin.install "libertai-macos-x86_64" => "libertai"
+    end
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/libertai --version")
+  end
+end

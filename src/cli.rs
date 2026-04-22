@@ -208,6 +208,10 @@ pub enum ConfigAction {
 }
 
 pub fn dispatch(cli: Cli) -> Result<()> {
+    let subcommand = command_name(&cli.command);
+    if let Ok(cfg) = crate::config::load() {
+        crate::update_check::maybe_notify(&cfg, subcommand);
+    }
     match cli.command {
         Command::Login => crate::commands::login::run(),
         Command::Logout => crate::commands::logout::run(),
@@ -245,5 +249,27 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Claw { model, args } => crate::commands::launchers::claw(model, args),
         Command::Config { action } => crate::commands::config_cmd::run(action),
         Command::Skills { action } => crate::commands::skills::run(action),
+    }
+}
+
+fn command_name(cmd: &Command) -> &'static str {
+    match cmd {
+        Command::Login => "login",
+        Command::Logout => "logout",
+        Command::Status => "status",
+        Command::Keys { .. } => "keys",
+        Command::Models { .. } => "models",
+        Command::Ask { .. } => "ask",
+        Command::Chat { .. } => "chat",
+        Command::Search { .. } => "search",
+        Command::Fetch { .. } => "fetch",
+        Command::Image { .. } => "image",
+        Command::Run { .. } => "run",
+        Command::Claude { .. } => "claude",
+        Command::Opencode { .. } => "opencode",
+        Command::Aider { .. } => "aider",
+        Command::Claw { .. } => "claw",
+        Command::Config { .. } => "config",
+        Command::Skills { .. } => "skills",
     }
 }

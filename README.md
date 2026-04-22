@@ -6,15 +6,44 @@ Aider) pre-wired to talk to LibertAI.
 
 ## Install
 
-From source (requires Rust 1.80+):
+Pick the channel that fits your OS — they all land on the same released binary.
 
 ```sh
+# One-liner (Linux / macOS / WSL — no sudo, installs to ~/.local/bin)
+curl -fsSL https://raw.githubusercontent.com/Libertai/libertai-cli/main/packaging/install.sh | sh
+
+# Debian / Ubuntu (system-wide, auto-updates via apt)
+curl -fsSL https://apt.libertai.io/install.sh | sudo bash
+
+# macOS (Homebrew)
+brew install Libertai/tap/libertai
+
+# Any platform with a Rust toolchain
+cargo install libertai-cli
+
+# From source (dev)
 git clone https://github.com/Libertai/libertai-cli
-cd libertai-cli
-cargo install --path .
+cd libertai-cli && cargo install --path .
 ```
 
-The binary is named `libertai` and installs into `~/.cargo/bin`.
+Windows: grab the latest `libertai-windows-x86_64.exe` from
+[GitHub Releases](https://github.com/Libertai/libertai-cli/releases/latest).
+No native package yet.
+
+The binary is named `libertai`. The one-liner honours `LIBERTAI_VERSION` (pin
+a tag) and `LIBERTAI_INSTALL_DIR` (override the install dir).
+
+## Updates
+
+`libertai` pings GitHub once every 24h in a background thread and prints a
+one-line banner on the next startup if a newer release exists, pointing to
+the upgrade command that matches how you installed it (apt / brew / cargo
+install / re-run install.sh). No self-replacing `libertai update` subcommand
+— updates flow through your system package manager.
+
+Silence the banner with `NO_UPDATE_CHECK=1` or
+`libertai config set check_for_updates false`. The check is also skipped
+automatically in non-interactive shells and CI.
 
 ## Quick start
 

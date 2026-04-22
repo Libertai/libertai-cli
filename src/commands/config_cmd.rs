@@ -2,8 +2,9 @@ use anyhow::{bail, Context, Result};
 
 use crate::cli::ConfigAction;
 use crate::config::{
-    self, config_path, mask_key, DEFAULT_API_BASE, DEFAULT_CHAT_MODEL, DEFAULT_CODE_MODEL,
-    DEFAULT_FAST_MODEL, DEFAULT_HTTP_TIMEOUT_SECS, DEFAULT_IMAGE_MODEL, DEFAULT_OPUS_MODEL,
+    self, config_path, mask_key, DEFAULT_API_BASE, DEFAULT_CHAT_MODEL, DEFAULT_CHECK_FOR_UPDATES,
+    DEFAULT_CODE_MODEL, DEFAULT_FAST_MODEL, DEFAULT_HTTP_TIMEOUT_SECS, DEFAULT_IMAGE_MODEL,
+    DEFAULT_OPUS_MODEL,
 };
 
 pub fn run(action: ConfigAction) -> Result<()> {
@@ -54,6 +55,11 @@ fn set(key: &str, value: &str) -> Result<()> {
             }
             cfg.http_timeout_secs = secs;
         }
+        "check_for_updates" => {
+            cfg.check_for_updates = value.parse::<bool>().with_context(|| {
+                format!("check_for_updates must be true or false, got {value}")
+            })?;
+        }
         k if k.starts_with("auth.") => bail!(
             "'{k}' is managed by `libertai login`; edit manually at {} if you know what you're doing",
             config_path()?.display()
@@ -78,6 +84,7 @@ fn unset(key: &str) -> Result<()> {
             cfg.launcher_defaults.sonnet_model = DEFAULT_FAST_MODEL.into();
             cfg.launcher_defaults.haiku_model = DEFAULT_FAST_MODEL.into();
             cfg.http_timeout_secs = DEFAULT_HTTP_TIMEOUT_SECS;
+            cfg.check_for_updates = DEFAULT_CHECK_FOR_UPDATES;
         }
         "api_base" => cfg.api_base = DEFAULT_API_BASE.into(),
         "account_base" => cfg.account_base = DEFAULT_API_BASE.into(),
@@ -93,6 +100,7 @@ fn unset(key: &str) -> Result<()> {
         "launcher_defaults.sonnet_model" => cfg.launcher_defaults.sonnet_model = DEFAULT_FAST_MODEL.into(),
         "launcher_defaults.haiku_model" => cfg.launcher_defaults.haiku_model = DEFAULT_FAST_MODEL.into(),
         "http_timeout_secs" => cfg.http_timeout_secs = DEFAULT_HTTP_TIMEOUT_SECS,
+        "check_for_updates" => cfg.check_for_updates = DEFAULT_CHECK_FOR_UPDATES,
         k if k.starts_with("auth.") => bail!(
             "'{k}' is managed by `libertai login`/`libertai logout`; unset is not supported"
         ),

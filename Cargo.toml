@@ -2,8 +2,25 @@
 name = "libertai-cli"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 description = "Command-line tool for LibertAI: inference, image generation, and launching agent tools (Claude Code, OpenCode, Aider) with LibertAI as the backend."
 license = "MIT"
+repository = "https://github.com/Libertai/libertai-cli"
+homepage = "https://libertai.io"
+readme = "README.md"
+keywords = ["libertai", "llm", "cli", "ai", "inference"]
+categories = ["command-line-utilities"]
+exclude = [".claude/", "target/", "*.bak*"]
+
+[package.metadata.deb]
+maintainer = "LibertAI <contact@libertai.io>"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/libertai", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/libertai/README", "644"],
+    ["LICENSE", "usr/share/doc/libertai/LICENSE", "644"],
+]
 
 [lib]
 name = "libertai_cli"
