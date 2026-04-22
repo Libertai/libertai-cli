@@ -2,6 +2,7 @@ pub mod ask;
 pub mod auth_ui;
 pub mod chat;
 pub mod config_cmd;
+pub mod fetch;
 pub mod image;
 pub mod keys;
 pub mod launchers;

@@ -37,6 +37,7 @@ libertai claude         # launch Claude Code against LibertAI
 | `libertai ask <prompt>` | One-shot, non-streaming completion. |
 | `libertai chat` | Streaming chat REPL with history. `--system` for a system prompt. |
 | `libertai search <query>` | Web search via `search.libertai.io`. `--max-results`, `--type web\|news\|images`, `--json`. |
+| `libertai fetch <url>` | Fetch a URL and return its cleaned article text (title, content, word count). `--json` for the raw response. |
 | `libertai image <prompt>` | Generate and save images. `--n`, `--size`, `--out`, `--model`, `--force`. |
 | `libertai keys list\|create\|delete` | Manage API keys (requires wallet). |
 | `libertai run -- <cmd>` | Exec any command with LibertAI env vars injected. |
@@ -149,7 +150,8 @@ to call `libertai` for these capabilities:
 - **`libertai-image`** — teaches the agent to run `libertai image "<prompt>"
   --out <path>` when the user asks for a picture, logo, mockup, etc.
 - **`libertai-search`** — teaches the agent to run `libertai search "<query>"
-  [--type news|images]` for fact-checks, current events, and research.
+  [--type news|images]` for fact-checks, current events, and research, and
+  `libertai fetch "<url>"` to read the cleaned text of a specific page.
 
 Because both Claude Code and OpenCode read skills from
 `~/.claude/skills/<name>/SKILL.md`, the same bundle works for both. Aider

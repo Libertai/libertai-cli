@@ -71,6 +71,16 @@ pub enum Command {
         json: bool,
     },
 
+    /// Fetch a URL and return cleaned article text via search.libertai.io.
+    Fetch {
+        /// The URL to fetch.
+        #[arg(required = true)]
+        url: String,
+        /// Dump the raw JSON response instead of pretty-printed text.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Generate an image.
     Image {
         #[arg(required = true)]
@@ -212,6 +222,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             search_type,
             json,
         } => crate::commands::search::run(query.join(" "), engines, max_results, search_type, json),
+        Command::Fetch { url, json } => crate::commands::fetch::run(url, json),
         Command::Chat { model, system } => crate::commands::chat::run(model, system),
         Command::Image {
             prompt,
