@@ -12,7 +12,8 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use crossterm::{
@@ -24,7 +25,7 @@ use crossterm::{
 };
 
 use pi::model::AssistantMessageEvent;
-use pi::sdk::{create_agent_session, AgentEvent, AgentSessionHandle, SessionOptions};
+use pi::sdk::{create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle, SessionOptions};
 
 use crate::commands::code_approvals::ApprovalState;
 use crate::commands::code_factory::{LibertaiToolFactory, Mode};
@@ -33,6 +34,109 @@ use crate::commands::code_factory::{LibertaiToolFactory, Mode};
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
+
+/// Snapshot of the last completed turn's token usage. Written in
+/// `repl_loop` after each successful prompt, read in `repaint()` to
+/// render the context-usage strip on the rule line.
+#[derive(Default, Clone)]
+struct BarStatus {
+    model_label: String,
+    input_tokens: u64,
+    context_window: u32,
+}
+
+static BAR_STATUS: Mutex<Option<BarStatus>> = Mutex::new(None);
+
+/// Current in-flight abort handle, populated for the duration of each
+/// `handle.prompt_with_abort` call. The Ctrl-C handler (installed once at
+/// startup) looks at this slot to decide whether to abort or let the
+/// signal fall through to the usual process-exit behaviour.
+static CURRENT_ABORT: Mutex<Option<AbortHandle>> = Mutex::new(None);
+
+fn install_ctrlc_handler() {
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let _ = ctrlc::set_handler(|| {
+        if let Ok(guard) = CURRENT_ABORT.lock() {
+            if let Some(h) = guard.as_ref() {
+                h.abort();
+            }
+        }
+    });
+}
+
+fn set_current_abort(h: AbortHandle) {
+    if let Ok(mut g) = CURRENT_ABORT.lock() {
+        *g = Some(h);
+    }
+}
+
+fn clear_current_abort() {
+    if let Ok(mut g) = CURRENT_ABORT.lock() {
+        *g = None;
+    }
+}
+
+fn set_bar_status(status: BarStatus) {
+    if let Ok(mut g) = BAR_STATUS.lock() {
+        *g = Some(status);
+    }
+}
+
+fn rule_chip(cols: usize) -> String {
+    let status = BAR_STATUS.lock().ok().and_then(|g| g.clone());
+    let inner = match status {
+        Some(s) if s.context_window > 0 => {
+            let pct = (f64::from(s.input_tokens as u32).min(f64::from(s.context_window))
+                / f64::from(s.context_window)
+                * 100.0)
+                .round() as u32;
+            format!(
+                " {pct}% · {} / {} · {} ",
+                human_tokens(s.input_tokens),
+                human_tokens(u64::from(s.context_window)),
+                s.model_label
+            )
+        }
+        Some(s) => format!(" {} ", s.model_label),
+        None => String::new(),
+    };
+    // Pad with ─ so the whole line fills the terminal width.
+    let chip_len = inner.chars().count();
+    if chip_len + 4 >= cols || cols == 0 {
+        return "\u{2500}".repeat(cols.max(1));
+    }
+    let left = (cols - chip_len) / 2;
+    let right = cols - chip_len - left;
+    format!(
+        "{}{}{}",
+        "\u{2500}".repeat(left),
+        inner,
+        "\u{2500}".repeat(right)
+    )
+}
+
+fn human_tokens(n: u64) -> String {
+    if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Best-effort context-window lookup. LibertAI doesn't expose this on
+/// `/v1/models` today; hardcode for the models we ship defaults for and
+/// fall back to a sensible cap otherwise.
+fn context_window_for(model: &str) -> u32 {
+    match model {
+        "qwen3.6-35b-a3b" => 32_768,
+        "qwen3.5-122b-a10b" => 32_768,
+        "gemma-4-31b-it" => 32_768,
+        _ => 32_768,
+    }
+}
 
 /// Outcome of reading one input line in raw mode.
 enum LineResult {
@@ -72,6 +176,17 @@ impl Drop for RawModeGuard {
 /// drives the REPL loop against it.
 pub fn run_interactive(provider: String, model: String, mode: Mode) -> Result<()> {
     print_banner(&provider, &model, mode);
+
+    // Prime the status bar so the rule renders a useful label even
+    // before the first turn completes.
+    set_bar_status(BarStatus {
+        model_label: format!("{provider}/{model}"),
+        input_tokens: 0,
+        context_window: context_window_for(&model),
+    });
+
+    // Forward Ctrl-C during streaming to pi's AbortHandle.
+    install_ctrlc_handler();
 
     // Shared across prompts AND across mode toggles: the approvals
     // allowlist lives for the whole REPL lifetime, so "always allow bash"
@@ -173,15 +288,27 @@ async fn repl_loop(
         // Echo the submitted user line as a chip above the stream region.
         println!("{BOLD}\u{276f} {}{RESET}", trimmed);
 
-        // Hand off to pi. The callback prints plain text; we're in cooked
-        // mode here so \n and flush behave as expected.
-        let result = handle.prompt(line, render_event).await;
+        // Hand off to pi with an abort signal so the Ctrl-C handler can
+        // interrupt an in-flight turn without tearing the REPL down.
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        set_current_abort(abort_handle);
+        let result = handle
+            .prompt_with_abort(line, abort_signal, render_event)
+            .await;
+        clear_current_abort();
 
         // Always end on a newline regardless of the last event kind.
         println!();
 
         match result {
             Ok(msg) => {
+                // Update the status bar with this turn's input-token count
+                // so the next repaint reflects real context usage.
+                set_bar_status(BarStatus {
+                    model_label: format!("{}/{}", msg.provider, msg.model),
+                    input_tokens: msg.usage.input,
+                    context_window: context_window_for(&msg.model),
+                });
                 eprintln!(
                     "{DIM}  {}/{}  stop: {:?}  in={} out={}{RESET}",
                     msg.provider,
@@ -192,7 +319,14 @@ async fn repl_loop(
                 );
             }
             Err(e) => {
-                eprintln!("{DIM}  error: {e}{RESET}");
+                // Distinguish user-aborts from real errors so the UI
+                // stays calm on Ctrl-C.
+                let msg = format!("{e}");
+                if msg.contains("abort") || msg.contains("cancel") || msg.contains("Aborted") {
+                    eprintln!("{DIM}  (interrupted){RESET}");
+                } else {
+                    eprintln!("{DIM}  error: {msg}{RESET}");
+                }
             }
         }
         println!();
@@ -401,8 +535,12 @@ fn repaint(
     cursor_pos: usize,
     painted_before: bool,
 ) -> Result<()> {
-    let cols = terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
-    let rule: String = "\u{2500}".repeat(cols.max(1));
+    let cols = terminal::size()
+        .ok()
+        .map(|(c, _)| c as usize)
+        .filter(|c| *c > 0)
+        .unwrap_or(80);
+    let rule: String = rule_chip(cols);
     let text: String = buffer.iter().collect();
 
     if painted_before {

@@ -68,6 +68,9 @@ futures = "0.3"
 # terminal-size queries. pi_agent_rust already pulls this in transitively,
 # but we declare it explicitly so `use crossterm::...` resolves cleanly.
 crossterm = "0.29"
+# Catch Ctrl-C during an in-flight agent stream and forward it to pi's
+# AbortHandle so the REPL survives the interrupt.
+ctrlc = "3"
 
 [profile.release]
 lto = "thin"

@@ -3002,6 +3002,7 @@ dependencies = [
  "base64",
  "clap",
  "crossterm",
+ "ctrlc",
  "dialoguer",
  "dirs 5.0.1",
  "futures",
