@@ -25,7 +25,10 @@ use crossterm::{
 };
 
 use pi::model::AssistantMessageEvent;
-use pi::sdk::{create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle, SessionOptions};
+use pi::sdk::{
+    create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle, Error as PiError,
+    SessionOptions,
+};
 
 use crate::commands::code_approvals::ApprovalState;
 use crate::commands::code_factory::{LibertaiToolFactory, Mode};
@@ -313,15 +316,12 @@ async fn repl_loop(
                     msg.usage.output,
                 );
             }
+            Err(PiError::Aborted) => {
+                // User hit Ctrl-C mid-stream — keep the REPL quiet.
+                eprintln!("{DIM}  (interrupted){RESET}");
+            }
             Err(e) => {
-                // Distinguish user-aborts from real errors so the UI
-                // stays calm on Ctrl-C.
-                let msg = format!("{e}");
-                if msg.contains("abort") || msg.contains("cancel") || msg.contains("Aborted") {
-                    eprintln!("{DIM}  (interrupted){RESET}");
-                } else {
-                    eprintln!("{DIM}  error: {msg}{RESET}");
-                }
+                eprintln!("{DIM}  error: {e}{RESET}");
             }
         }
         println!();
@@ -367,7 +367,7 @@ async fn build_handle(
     };
     create_agent_session(options)
         .await
-        .map_err(|e| anyhow::anyhow!("create_agent_session: {e}"))
+        .map_err(|e| anyhow::Error::new(e).context("create_agent_session"))
 }
 
 fn print_help() {

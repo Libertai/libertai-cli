@@ -75,14 +75,13 @@ async fn run_async(
         ..SessionOptions::default()
     };
 
+    // anyhow::Error::new preserves the underlying pi::sdk::Error so
+    // downcast-based checks (e.g. Aborted detection) keep working.
     let mut handle = create_agent_session(options)
         .await
-        .map_err(|e| anyhow::anyhow!("create_agent_session: {e}"))?;
+        .map_err(|e| anyhow::Error::new(e).context("create_agent_session"))?;
 
-    let msg = handle
-        .prompt(prompt, render)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let msg = handle.prompt(prompt, render).await.map_err(anyhow::Error::new)?;
 
     // Make sure we end on a newline regardless of whether the last event
     // was a TextDelta (which never emits one) or AgentEnd (which does).
