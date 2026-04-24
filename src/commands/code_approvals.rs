@@ -18,10 +18,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal;
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolOutput, ToolUpdate};
+
+use crate::commands::code_term::RawModeGuard;
 
 /// Session-scoped approval memory. Resets on every launch.
 pub struct ApprovalState {
@@ -270,22 +271,26 @@ fn prompt(tool_name: &str, preview: &str) -> PromptChoice {
     eprint!("  \x1b[2m[a]\x1b[0m allow once  \x1b[2m[A]\x1b[0m always allow  \x1b[2m[d]\x1b[0m deny: ");
     let _ = stderr.flush();
 
-    // Brief raw-mode single-key read. If raw mode isn't available (e.g.
-    // non-TTY), fall back to reading a whole line and looking at the
-    // first char.
-    if terminal::enable_raw_mode().is_err() {
-        let mut line = String::new();
-        let _ = std::io::stdin().read_line(&mut line);
-        eprintln!();
-        return parse_cooked_choice(&line);
-    }
+    // Brief raw-mode single-key read via the shared RAII guard so a
+    // panic between enter and disable can't leak raw mode. If raw mode
+    // isn't available (e.g. non-TTY), fall back to a cooked-line read.
+    let _guard = match RawModeGuard::enter() {
+        Ok(g) => g,
+        Err(_) => {
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+            eprintln!();
+            return parse_cooked_choice(&line);
+        }
+    };
     let choice = loop {
         match event::read() {
             Ok(Event::Key(KeyEvent { code, modifiers, .. })) => match (code, modifiers) {
-                (KeyCode::Char('a'), KeyModifiers::NONE)
-                | (KeyCode::Char('a'), KeyModifiers::SHIFT) => break PromptChoice::Allow,
+                // `Char('a') + SHIFT` is unreachable on most terminals
+                // (Shift uppercases to `A`), but handle it defensively.
+                (KeyCode::Char('a'), _) => break PromptChoice::Allow,
                 (KeyCode::Char('A'), _) => break PromptChoice::AlwaysAllow,
-                (KeyCode::Char('d'), _) | (KeyCode::Char('D'), _) => break PromptChoice::Deny,
+                (KeyCode::Char('d') | KeyCode::Char('D'), _) => break PromptChoice::Deny,
                 (KeyCode::Enter, _) => break PromptChoice::Allow,
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => break PromptChoice::Deny,
                 (KeyCode::Esc, _) => break PromptChoice::Deny,
@@ -295,7 +300,7 @@ fn prompt(tool_name: &str, preview: &str) -> PromptChoice {
             Err(_) => break PromptChoice::Deny,
         }
     };
-    let _ = terminal::disable_raw_mode();
+    drop(_guard);
     // Echo the decision on its own line so subsequent streaming output
     // flows below, not on top of the prompt.
     let label = match choice {

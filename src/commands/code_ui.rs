@@ -150,25 +150,9 @@ enum LineResult {
     ToggleMode,
 }
 
-/// RAII guard that puts the terminal in raw mode for its lifetime.
-///
-/// Disables raw mode on drop even on panic / `?`-unwind, so we never
-/// leave the user with a broken terminal.
-struct RawModeGuard;
-
-impl RawModeGuard {
-    fn enter() -> Result<Self> {
-        terminal::enable_raw_mode()
-            .map_err(|e| anyhow::anyhow!("enable_raw_mode: {e}"))?;
-        Ok(Self)
-    }
-}
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        let _ = terminal::disable_raw_mode();
-    }
-}
+// RawModeGuard lives in `code_term` so both this module and
+// code_approvals can share the same panic-safe raw-mode wrapper.
+use crate::commands::code_term::RawModeGuard;
 
 /// Entry point from `code::run` when the command line has no prompt.
 ///
