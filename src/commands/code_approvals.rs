@@ -150,15 +150,30 @@ fn denial_output(reason: Option<String>) -> ToolOutput {
     }
 }
 
+/// Maximum chars to display from a single tool-argument value. A model
+/// that generates a 100 KB heredoc would otherwise bury the approval
+/// menu off-screen and the user approves by habit — an attack surface
+/// for prompt injection.
+const MAX_PREVIEW_CHARS: usize = 400;
+
 /// Render a one-line preview for the approval menu.
+///
+/// All model-controlled strings pass through `sanitize`, which:
+/// 1. Strips ANSI escape sequences (`\x1b[...m`, etc.) — a malicious
+///    payload could otherwise clear the screen and spoof a benign
+///    approval prompt.
+/// 2. Drops ASCII control bytes other than `\n` / `\t`.
+/// 3. Caps length at `MAX_PREVIEW_CHARS` with a `…` suffix.
 fn preview_call(tool: &str, input: &serde_json::Value) -> String {
     match tool {
-        "bash" => input
-            .get("command")
-            .and_then(|v| v.as_str())
-            .map_or_else(|| "<missing command>".to_string(), str::to_string),
+        "bash" => sanitize(
+            input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<missing command>"),
+        ),
         "write" => {
-            let path = field(input, "path").unwrap_or("<missing path>");
+            let path = sanitize(field(input, "path").unwrap_or("<missing path>"));
             let len = input
                 .get("content")
                 .and_then(|v| v.as_str())
@@ -166,16 +181,16 @@ fn preview_call(tool: &str, input: &serde_json::Value) -> String {
             format!("write {path} ({len} bytes)")
         }
         "edit" => {
-            let path = field(input, "path").unwrap_or("<missing path>");
+            let path = sanitize(field(input, "path").unwrap_or("<missing path>"));
             format!("edit {path}")
         }
         "hashline_edit" => {
-            let path = field(input, "path").unwrap_or("<missing path>");
+            let path = sanitize(field(input, "path").unwrap_or("<missing path>"));
             format!("hashline_edit {path}")
         }
         _ => {
             let raw = input.to_string();
-            let clipped: String = raw.chars().take(200).collect();
+            let clipped = sanitize(&raw);
             format!("{tool}: {clipped}")
         }
     }
@@ -183,6 +198,58 @@ fn preview_call(tool: &str, input: &serde_json::Value) -> String {
 
 fn field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(|v| v.as_str())
+}
+
+/// Defang a model-supplied string so it can't rewrite the terminal
+/// under the approval prompt.
+///
+/// ANSI escape handling is a three-state machine (Normal → AfterEsc →
+/// InCsi) because a CSI sequence is `\x1b [ params terminator`, and
+/// the `[` itself lives in the 0x40..=0x7E "final byte" range — so
+/// naively terminating on that range ends the sequence at `[` and
+/// leaks the payload bytes through. Other ESC variants (single-char
+/// `ESC c`, `ESC D`, etc.) are handled by the AfterEsc branch.
+///
+/// Also drops ASCII control bytes (below 0x20 and 0x7F) except `\n`
+/// and `\t`, and truncates past `MAX_PREVIEW_CHARS` with a `…`.
+fn sanitize(s: &str) -> String {
+    #[derive(Clone, Copy)]
+    enum State {
+        Normal,
+        AfterEsc,
+        InCsi,
+    }
+    let mut out = String::with_capacity(s.len().min(MAX_PREVIEW_CHARS + 1));
+    let mut state = State::Normal;
+    for c in s.chars() {
+        match state {
+            State::AfterEsc => {
+                state = if c == '[' { State::InCsi } else { State::Normal };
+                continue;
+            }
+            State::InCsi => {
+                // CSI params are in 0x20..=0x3F; terminator is 0x40..=0x7E.
+                if matches!(c, '\x40'..='\x7e') {
+                    state = State::Normal;
+                }
+                continue;
+            }
+            State::Normal => {}
+        }
+        if c == '\x1b' {
+            state = State::AfterEsc;
+            continue;
+        }
+        if c.is_control() && c != '\n' && c != '\t' {
+            continue;
+        }
+        if out.chars().count() >= MAX_PREVIEW_CHARS {
+            out.push('\u{2026}');
+            break;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Block until the user picks allow/always/deny. Uses crossterm raw mode
@@ -245,5 +312,43 @@ fn parse_cooked_choice(line: &str) -> PromptChoice {
         'a' => PromptChoice::Allow,
         'A' => PromptChoice::AlwaysAllow,
         _ => PromptChoice::Deny,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_strips_clear_screen_spoof() {
+        let evil = "\x1b[2J\x1b[H FAKE PROMPT [a]llow: echo hi\nrm -rf ~/";
+        let clean = sanitize(evil);
+        assert!(!clean.contains('\x1b'));
+        assert!(clean.contains("rm -rf"));
+    }
+
+    #[test]
+    fn sanitize_drops_cursor_up_line_kill() {
+        let evil = "../legit.py\x1b[A\x1b[K../etc/passwd";
+        assert_eq!(sanitize(evil), "../legit.py../etc/passwd");
+    }
+
+    #[test]
+    fn sanitize_caps_length() {
+        let long = "x".repeat(MAX_PREVIEW_CHARS * 2);
+        let clean = sanitize(&long);
+        assert!(clean.ends_with('\u{2026}'));
+        assert!(clean.chars().count() <= MAX_PREVIEW_CHARS + 1);
+    }
+
+    #[test]
+    fn sanitize_keeps_newlines_and_tabs() {
+        assert_eq!(sanitize("a\nb\tc"), "a\nb\tc");
+    }
+
+    #[test]
+    fn sanitize_handles_single_char_escape() {
+        // ESC c (non-CSI) is a full reset. We drop ESC + the next char.
+        assert_eq!(sanitize("before\x1bcafter"), "beforeafter");
     }
 }

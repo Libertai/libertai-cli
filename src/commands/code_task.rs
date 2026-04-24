@@ -29,9 +29,17 @@ const LABEL: &str = "Task";
 const DESCRIPTION: &str = concat!(
     "Run a focused subtask in an isolated agent session. Use when a ",
     "piece of research or a narrow lookup is well-defined and should ",
-    "not clutter the main conversation. The child has its own history ",
-    "and its own tool allowlist (defaults to read/grep/find/ls)."
+    "not clutter the main conversation. The child runs with a fixed ",
+    "read-only tool set (read, grep, find, ls) — subagents cannot ",
+    "mutate the filesystem, even if the caller names other tools."
 );
+
+/// Tools a subagent is ever allowed to run, regardless of what the
+/// caller passes in. This is a hard ceiling, not a default: even if a
+/// compromised or prompt-injected model names `bash` or `write` in the
+/// `tools` argument, those names are filtered out here and the child
+/// session gets the intersection with this list.
+const TASK_TOOL_ALLOWLIST: &[&str] = &["read", "grep", "find", "ls"];
 
 pub struct TaskTool {
     mode: Mode,
@@ -93,14 +101,33 @@ impl Tool for TaskTool {
             }
         };
 
-        let tools: Option<Vec<String>> = input
+        // Intersect the caller's tool list with our read-only allowlist.
+        // A missing or empty `tools` argument falls back to the full
+        // allowlist; an all-invalid list drops to the allowlist as well
+        // (rather than giving the child an empty tool registry and no
+        // way to research).
+        let requested: Vec<String> = input
             .get("tools")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
                     .filter_map(|v| v.as_str().map(str::to_string))
                     .collect()
-            });
+            })
+            .unwrap_or_default();
+        let filtered: Vec<String> = if requested.is_empty() {
+            TASK_TOOL_ALLOWLIST.iter().map(|&s| s.to_string()).collect()
+        } else {
+            let f: Vec<String> = requested
+                .into_iter()
+                .filter(|name| TASK_TOOL_ALLOWLIST.contains(&name.as_str()))
+                .collect();
+            if f.is_empty() {
+                TASK_TOOL_ALLOWLIST.iter().map(|&s| s.to_string()).collect()
+            } else {
+                f
+            }
+        };
 
         // Load our own Config — subtask runs against the same LibertAI
         // endpoint + model the parent is on. `code_models.rs` has
@@ -125,14 +152,7 @@ impl Tool for TaskTool {
             model: Some(cfg.default_code_model.clone()),
             no_session: true,
             max_tool_iterations: 25,
-            enabled_tools: tools.or_else(|| {
-                Some(
-                    ["read", "grep", "find", "ls"]
-                        .into_iter()
-                        .map(String::from)
-                        .collect(),
-                )
-            }),
+            enabled_tools: Some(filtered),
             tool_factory: Some(Arc::new(factory)),
             ..SessionOptions::default()
         };
