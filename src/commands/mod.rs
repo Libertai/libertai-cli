@@ -1,6 +1,9 @@
 pub mod ask;
 pub mod auth_ui;
 pub mod chat;
+pub mod code;
+pub mod code_models;
+pub mod code_ui;
 pub mod config_cmd;
 pub mod fetch;
 pub mod image;

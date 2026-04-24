@@ -148,6 +148,21 @@ pub enum Command {
         args: Vec<String>,
     },
 
+    /// LibertAI's own coding agent, powered by pi_agent_rust.
+    ///
+    /// Alias: `lcode` (as a separate binary).
+    Code {
+        /// Model override (defaults to `default_code_model` from config).
+        #[arg(long)]
+        model: Option<String>,
+        /// Provider override (defaults to `default_code_provider` from config, or "libertai").
+        #[arg(long)]
+        provider: Option<String>,
+        /// Initial prompt (non-interactive mode if `--print`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Config file operations.
     Config {
         #[command(subcommand)]
@@ -247,6 +262,11 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Opencode { model, args } => crate::commands::launchers::opencode(model, args),
         Command::Aider { model, args } => crate::commands::launchers::aider(model, args),
         Command::Claw { model, args } => crate::commands::launchers::claw(model, args),
+        Command::Code {
+            model,
+            provider,
+            args,
+        } => crate::commands::code::run(model, provider, args),
         Command::Config { action } => crate::commands::config_cmd::run(action),
         Command::Skills { action } => crate::commands::skills::run(action),
     }
@@ -269,6 +289,7 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::Opencode { .. } => "opencode",
         Command::Aider { .. } => "aider",
         Command::Claw { .. } => "claw",
+        Command::Code { .. } => "code",
         Command::Config { .. } => "config",
         Command::Skills { .. } => "skills",
     }

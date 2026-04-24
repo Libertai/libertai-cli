@@ -6,6 +6,7 @@ pub const DEFAULT_API_BASE: &str = "https://api.libertai.io";
 pub const DEFAULT_SEARCH_BASE: &str = "https://search.libertai.io";
 pub const DEFAULT_CHAT_MODEL: &str = "qwen3.5-122b-a10b";
 pub const DEFAULT_CODE_MODEL: &str = "qwen3.6-35b-a3b";
+pub const DEFAULT_CODE_PROVIDER: &str = "libertai";
 pub const DEFAULT_IMAGE_MODEL: &str = "z-image-turbo";
 pub const DEFAULT_OPUS_MODEL: &str = "gemma-4-31b-it";
 pub const DEFAULT_FAST_MODEL: &str = "qwen3.6-35b-a3b";
@@ -36,6 +37,11 @@ pub struct Config {
         skip_serializing_if = "is_default_code_model"
     )]
     pub default_code_model: String,
+    #[serde(
+        default = "default_code_provider_s",
+        skip_serializing_if = "is_default_code_provider"
+    )]
+    pub default_code_provider: String,
     #[serde(
         default = "default_image_model_s",
         skip_serializing_if = "is_default_image_model"
@@ -99,6 +105,9 @@ fn is_default_chat_model(s: &str) -> bool {
 fn is_default_code_model(s: &str) -> bool {
     s == DEFAULT_CODE_MODEL
 }
+fn is_default_code_provider(s: &str) -> bool {
+    s == DEFAULT_CODE_PROVIDER
+}
 fn is_default_image_model(s: &str) -> bool {
     s == DEFAULT_IMAGE_MODEL
 }
@@ -153,6 +162,9 @@ fn default_chat_model_s() -> String {
 fn default_code_model_s() -> String {
     DEFAULT_CODE_MODEL.into()
 }
+fn default_code_provider_s() -> String {
+    DEFAULT_CODE_PROVIDER.into()
+}
 fn default_image_model_s() -> String {
     DEFAULT_IMAGE_MODEL.into()
 }
@@ -177,6 +189,7 @@ impl Default for Config {
             search_base: default_search_base_s(),
             default_chat_model: default_chat_model_s(),
             default_code_model: default_code_model_s(),
+            default_code_provider: default_code_provider_s(),
             default_image_model: default_image_model_s(),
             launcher_defaults: LauncherDefaults::default(),
             http_timeout_secs: DEFAULT_HTTP_TIMEOUT_SECS,

@@ -30,6 +30,10 @@ path = "src/lib.rs"
 name = "libertai"
 path = "src/main.rs"
 
+[[bin]]
+name = "lcode"
+path = "src/bin/lcode.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false }
@@ -47,6 +51,19 @@ hex = "0.4"
 k256 = { version = "0.13", features = ["ecdsa"] }
 sha3 = "0.10"
 zeroize = { version = "1", features = ["derive"] }
+
+# `libertai code` — linked pi_agent_rust. MIT + OpenAI/Anthropic rider;
+# license field above stays "MIT" on the integrated-code branch pending a
+# policy call before merging to master. Pinned to a git tag since v0.1.12
+# isn't on crates.io yet (crates.io currently caps at 0.1.7).
+pi_agent_rust = { git = "https://github.com/Dicklesworthstone/pi_agent_rust", tag = "v0.1.12", default-features = false }
+asupersync = { version = "=0.3.1", default-features = false, features = ["tls-native-roots"] }
+async-trait = "0.1"
+futures = "0.3"
+# `libertai code` interactive REPL — raw-mode input bar, cursor control,
+# terminal-size queries. pi_agent_rust already pulls this in transitively,
+# but we declare it explicitly so `use crossterm::...` resolves cleanly.
+crossterm = "0.29"
 
 [profile.release]
 lto = "thin"
