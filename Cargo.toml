@@ -54,9 +54,13 @@ zeroize = { version = "1", features = ["derive"] }
 
 # `libertai code` — linked pi_agent_rust. MIT + OpenAI/Anthropic rider;
 # license field above stays "MIT" on the integrated-code branch pending a
-# policy call before merging to master. Pinned to a git tag since v0.1.12
-# isn't on crates.io yet (crates.io currently caps at 0.1.7).
-pi_agent_rust = { git = "https://github.com/Dicklesworthstone/pi_agent_rust", tag = "v0.1.12", default-features = false }
+# policy call before merging to master.
+#
+# Temporarily on a local path dep pointing at our branch that adds
+# `SessionOptions::tool_factory` (needed for approvals / plan mode /
+# subagents). Upstream PR pending at Dicklesworthstone/pi_agent_rust; once
+# it lands we switch this back to a git tag dep.
+pi_agent_rust = { path = "../pi_agent_rust", default-features = false }
 asupersync = { version = "=0.3.1", default-features = false, features = ["tls-native-roots"] }
 async-trait = "0.1"
 futures = "0.3"
