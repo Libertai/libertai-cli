@@ -269,7 +269,11 @@ async fn repl_loop(
                 let _ = std::io::stdout().write_all(b"\x1b[2J\x1b[H");
                 let _ = std::io::stdout().flush();
                 handle = build_handle(&provider, &model, mode, Arc::clone(&approvals)).await?;
+                // Wiping the screen should also drop stale input-line
+                // history — a fresh session should feel fresh.
+                history.clear();
                 println!("{DIM}  → fresh session.{RESET}");
+                println!();
                 continue;
             }
             _ => {}
@@ -295,9 +299,9 @@ async fn repl_loop(
             .await;
         clear_current_abort();
 
-        // Always end on a newline regardless of the last event kind.
-        println!();
-
+        // `render_event` already emits a trailing newline on AgentEnd,
+        // so we don't need a second one here — emitting one would
+        // leave a gap between the response and the usage/status line.
         match result {
             Ok(msg) => {
                 // Update the status bar with this turn's input-token count
@@ -317,13 +321,16 @@ async fn repl_loop(
                 );
             }
             Err(PiError::Aborted) => {
-                // User hit Ctrl-C mid-stream — keep the REPL quiet.
+                println!();
                 eprintln!("{DIM}  (interrupted){RESET}");
             }
             Err(e) => {
+                println!();
                 eprintln!("{DIM}  error: {e}{RESET}");
             }
         }
+        // One blank line between the stats/error footer and the next
+        // input bar — anything more was visually noisy.
         println!();
     }
 }
@@ -348,6 +355,9 @@ fn announce_mode_change(new_mode: Mode) {
             );
         }
     }
+    // Trailing blank line so the next read_line's first paint doesn't
+    // overwrite the status message we just emitted.
+    println!();
 }
 
 async fn build_handle(
@@ -559,7 +569,13 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
                 _ => {}
             },
             Event::Resize(_, _) => {
+                // Don't try to MoveToPreviousLine onto a row that may
+                // no longer exist after a shrink — treat as a fresh
+                // paint. The previous bar position is left as-is in
+                // scrollback rather than risk drifting into row 0.
+                painted = false;
                 repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
+                painted = true;
             }
             _ => {}
         }
@@ -592,7 +608,6 @@ fn repaint(
         .filter(|c| *c > 0)
         .unwrap_or(80);
     let rule: String = rule_chip(cols);
-    let text: String = buffer.iter().collect();
 
     // Mode chip printed in-line with the prompt, left of ❯. Dimmed so
     // it's a status cue, not a shout.
@@ -600,6 +615,15 @@ fn repaint(
         Mode::Normal => ("", Color::DarkGrey),
         Mode::Plan => ("[plan] ", Color::Yellow),
     };
+
+    // Prefix width: mode chip + `❯ ` (2 cells). Anything past
+    // `cols - prefix_cols - 1` characters of the buffer would wrap the
+    // terminal onto a third row — which breaks `clear_bar`'s two-line
+    // erase assumption. Slide a window over the buffer so the cursor is
+    // always visible and the line never wraps.
+    let prefix_cols_usize = chip_text.chars().count() + 2;
+    let avail = cols.saturating_sub(prefix_cols_usize).max(1);
+    let (display_text, display_cursor) = slide_window(buffer, cursor_pos, avail);
 
     if painted_before {
         // Jump back to the rule line so we overwrite in place.
@@ -627,15 +651,44 @@ fn repaint(
         Print("\u{276f} "),
         ResetColor,
         SetAttribute(Attribute::Reset),
-        Print(&text),
+        Print(&display_text),
     )?;
 
-    let prefix_cols = chip_text.chars().count() as u16 + 2;
-    let col = prefix_cols + (cursor_pos as u16).min(u16::MAX - prefix_cols);
+    let prefix_cols = u16::try_from(prefix_cols_usize).unwrap_or(u16::MAX);
+    let cursor_cell = u16::try_from(display_cursor).unwrap_or(u16::MAX);
+    let col = prefix_cols.saturating_add(cursor_cell);
     queue!(stdout, cursor::MoveToColumn(col))?;
 
     stdout.flush()?;
     Ok(())
+}
+
+/// Slide a visible window of `avail` cells over `buffer`. When the
+/// buffer fits, the whole thing is returned unchanged. Otherwise the
+/// window is anchored so the cursor is visible inside it; when clipped
+/// at either end a `…` marker replaces the off-screen cell. Returns
+/// `(display_text, cursor_column_within_display)`.
+fn slide_window(buffer: &[char], cursor_pos: usize, avail: usize) -> (String, usize) {
+    if buffer.len() <= avail {
+        return (buffer.iter().collect(), cursor_pos);
+    }
+    // Keep the cursor at least one cell from each edge so there's
+    // always room for a `…` indicator.
+    let start = cursor_pos.saturating_sub(avail.saturating_sub(1));
+    let end = (start + avail).min(buffer.len());
+    let mut out = String::with_capacity(avail);
+    if start > 0 {
+        out.push('\u{2026}');
+        out.extend(buffer[start + 1..end].iter());
+    } else {
+        out.extend(buffer[start..end].iter());
+    }
+    if end < buffer.len() {
+        // Replace the last visible cell with `…`.
+        out.pop();
+        out.push('\u{2026}');
+    }
+    (out, cursor_pos - start)
 }
 
 /// Wipe the two-line bar and leave the cursor at column 0 of where the
