@@ -158,6 +158,11 @@ pub enum Command {
         /// Provider override (defaults to `default_code_provider` from config, or "libertai").
         #[arg(long)]
         provider: Option<String>,
+        /// Start in plan mode: the agent can read/grep/find/ls but
+        /// cannot run bash, write, or edit files until you toggle
+        /// back to normal (Shift+Tab or /plan).
+        #[arg(long)]
+        plan: bool,
         /// Initial prompt (non-interactive mode if `--print`).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -265,8 +270,9 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Code {
             model,
             provider,
+            plan,
             args,
-        } => crate::commands::code::run(model, provider, args),
+        } => crate::commands::code::run(model, provider, plan, args),
         Command::Config { action } => crate::commands::config_cmd::run(action),
         Command::Skills { action } => crate::commands::skills::run(action),
     }

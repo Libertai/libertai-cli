@@ -21,6 +21,7 @@ use crate::config;
 pub fn run(
     model: Option<String>,
     provider: Option<String>,
+    plan: bool,
     args: Vec<String>,
 ) -> Result<()> {
     let cfg = config::load()?;
@@ -31,11 +32,12 @@ pub fn run(
 
     let model = model.unwrap_or_else(|| cfg.default_code_model.clone());
     let provider = provider.unwrap_or_else(|| cfg.default_code_provider.clone());
+    let mode = if plan { Mode::Plan } else { Mode::Normal };
 
     if args.is_empty() {
         // No prompt on the command line → interactive REPL.
         // Raw-mode UI + input bar + agent session reuse live in code_ui.
-        return code_ui::run_interactive(provider, model, Mode::Normal);
+        return code_ui::run_interactive(provider, model, mode);
     }
 
     let prompt = args.join(" ");
@@ -48,10 +50,10 @@ pub fn run(
         .build()
         .map_err(|e| anyhow::anyhow!("asupersync runtime: {e}"))?;
 
-    // Non-interactive one-shots default to Normal mode. `--plan` maps
-    // through in the interactive path.
+    // Non-interactive path honours --plan too, in case someone wants a
+    // one-shot planning run: `libertai code --plan "refactor src/foo"`.
     let approvals = Arc::new(ApprovalState::new());
-    let factory = Arc::new(LibertaiToolFactory::new(Mode::Normal, approvals));
+    let factory = Arc::new(LibertaiToolFactory::new(mode, approvals));
 
     runtime.block_on(async move { run_async(provider, model, prompt, factory).await })
 }

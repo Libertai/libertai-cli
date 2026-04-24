@@ -42,6 +42,8 @@ enum LineResult {
     Eof,
     /// User pressed Ctrl+C during input → caller should discard and loop.
     Interrupted,
+    /// User pressed Shift+Tab → toggle Normal ↔ Plan mode.
+    ToggleMode,
 }
 
 /// RAII guard that puts the terminal in raw mode for its lifetime.
@@ -71,10 +73,10 @@ impl Drop for RawModeGuard {
 pub fn run_interactive(provider: String, model: String, mode: Mode) -> Result<()> {
     print_banner(&provider, &model, mode);
 
-    // Shared across prompts: the approvals allowlist lives for the whole
-    // REPL lifetime, so "always allow bash" sticks between turns.
+    // Shared across prompts AND across mode toggles: the approvals
+    // allowlist lives for the whole REPL lifetime, so "always allow bash"
+    // sticks across a Shift+Tab trip through Plan mode.
     let approvals = Arc::new(ApprovalState::new());
-    let factory = Arc::new(LibertaiToolFactory::new(mode, approvals));
 
     // Same asupersync setup as the non-interactive path.
     let reactor = asupersync::runtime::reactor::create_reactor()
@@ -84,7 +86,7 @@ pub fn run_interactive(provider: String, model: String, mode: Mode) -> Result<()
         .build()
         .map_err(|e| anyhow::anyhow!("asupersync runtime: {e}"))?;
 
-    runtime.block_on(async move { repl_loop(provider, model, factory).await })
+    runtime.block_on(async move { repl_loop(provider, model, mode, approvals).await })
 }
 
 fn print_banner(provider: &str, model: &str, mode: Mode) {
@@ -102,21 +104,11 @@ fn print_banner(provider: &str, model: &str, mode: Mode) {
 async fn repl_loop(
     provider: String,
     model: String,
-    factory: Arc<LibertaiToolFactory>,
+    initial_mode: Mode,
+    approvals: Arc<ApprovalState>,
 ) -> Result<()> {
-    let options = SessionOptions {
-        provider: Some(provider),
-        model: Some(model),
-        // v0: ephemeral session, matches the non-interactive path.
-        no_session: true,
-        max_tool_iterations: 50,
-        tool_factory: Some(factory),
-        ..SessionOptions::default()
-    };
-
-    let mut handle: AgentSessionHandle = create_agent_session(options)
-        .await
-        .map_err(|e| anyhow::anyhow!("create_agent_session: {e}"))?;
+    let mut mode = initial_mode;
+    let mut handle = build_handle(&provider, &model, mode, Arc::clone(&approvals)).await?;
 
     // In-memory input history (no persistence in v0).
     let mut history: VecDeque<String> = VecDeque::with_capacity(64);
@@ -135,6 +127,12 @@ async fn repl_loop(
                 println!("{DIM}goodbye.{RESET}");
                 return Ok(());
             }
+            LineResult::ToggleMode => {
+                mode = flip_mode(mode);
+                announce_mode_change(mode);
+                handle = build_handle(&provider, &model, mode, Arc::clone(&approvals)).await?;
+                continue;
+            }
         };
 
         let trimmed = line.trim();
@@ -148,6 +146,17 @@ async fn repl_loop(
             }
             "/help" => {
                 print_help();
+                continue;
+            }
+            "/plan" => {
+                mode = flip_mode(mode);
+                announce_mode_change(mode);
+                handle = build_handle(&provider, &model, mode, Arc::clone(&approvals)).await?;
+                continue;
+            }
+            "/forget" => {
+                approvals.forget();
+                println!("{DIM}  cleared session-scoped \"always allow\" list.{RESET}");
                 continue;
             }
             _ => {}
@@ -190,11 +199,55 @@ async fn repl_loop(
     }
 }
 
+fn flip_mode(m: Mode) -> Mode {
+    match m {
+        Mode::Normal => Mode::Plan,
+        Mode::Plan => Mode::Normal,
+    }
+}
+
+fn announce_mode_change(new_mode: Mode) {
+    match new_mode {
+        Mode::Normal => {
+            println!(
+                "{DIM}  → normal mode. mutating tools (bash, edit, write) are back online. session history reset.{RESET}"
+            );
+        }
+        Mode::Plan => {
+            println!(
+                "{DIM}  → plan mode. only read, grep, find, ls are available — the agent can research but not modify. session history reset.{RESET}"
+            );
+        }
+    }
+}
+
+async fn build_handle(
+    provider: &str,
+    model: &str,
+    mode: Mode,
+    approvals: Arc<ApprovalState>,
+) -> Result<AgentSessionHandle> {
+    let factory = Arc::new(LibertaiToolFactory::new(mode, approvals));
+    let options = SessionOptions {
+        provider: Some(provider.to_string()),
+        model: Some(model.to_string()),
+        no_session: true,
+        max_tool_iterations: 50,
+        tool_factory: Some(factory),
+        ..SessionOptions::default()
+    };
+    create_agent_session(options)
+        .await
+        .map_err(|e| anyhow::anyhow!("create_agent_session: {e}"))
+}
+
 fn print_help() {
-    println!("{DIM}  /help   — show this message{RESET}");
-    println!("{DIM}  /exit   — quit the REPL (also /quit, Ctrl+D){RESET}");
-    println!("{DIM}  arrows  — move cursor / walk history{RESET}");
-    println!("{DIM}  Ctrl+C  — cancel the line you're typing{RESET}");
+    println!("{DIM}  /help     — show this message{RESET}");
+    println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
+    println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
+    println!("{DIM}  /forget   — clear the session \"always allow\" list{RESET}");
+    println!("{DIM}  arrows    — move cursor in the current line{RESET}");
+    println!("{DIM}  Ctrl+C    — cancel the line you're typing{RESET}");
     println!();
 }
 
@@ -279,6 +332,13 @@ fn read_line() -> Result<LineResult> {
                 (KeyCode::Char('d'), KeyModifiers::CONTROL) if buffer.is_empty() => {
                     clear_bar(&mut stdout)?;
                     return Ok(LineResult::Eof);
+                }
+                // Shift+Tab → toggle Normal ↔ Plan. crossterm surfaces it
+                // as BackTab regardless of whether Shift is in modifiers
+                // (terminfo handling varies by terminal).
+                (KeyCode::BackTab, _) => {
+                    clear_bar(&mut stdout)?;
+                    return Ok(LineResult::ToggleMode);
                 }
                 (KeyCode::Backspace, _) if cursor_pos > 0 => {
                     buffer.remove(cursor_pos - 1);

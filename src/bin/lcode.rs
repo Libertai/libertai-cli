@@ -20,6 +20,9 @@ struct LcodeCli {
     /// Provider override (defaults to `default_code_provider` from config).
     #[arg(long)]
     provider: Option<String>,
+    /// Start in plan mode (read-only tools; toggle with Shift+Tab or /plan).
+    #[arg(long)]
+    plan: bool,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -30,6 +33,7 @@ fn main() {
         command: Command::Code {
             model: parsed.model,
             provider: parsed.provider,
+            plan: parsed.plan,
             args: parsed.args,
         },
     };
