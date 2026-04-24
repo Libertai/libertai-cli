@@ -6,11 +6,15 @@
 //! raw-mode input, crossterm) lives in a separate task — this renderer
 //! stays stream-only so it composes with pipes, tests, and redirection.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 
 use pi::model::AssistantMessageEvent;
 use pi::sdk::{create_agent_session, AgentEvent, SessionOptions};
 
+use crate::commands::code_approvals::ApprovalState;
+use crate::commands::code_factory::{LibertaiToolFactory, Mode};
 use crate::commands::{code_models, code_ui};
 use crate::config;
 
@@ -31,7 +35,7 @@ pub fn run(
     if args.is_empty() {
         // No prompt on the command line → interactive REPL.
         // Raw-mode UI + input bar + agent session reuse live in code_ui.
-        return code_ui::run_interactive(provider, model);
+        return code_ui::run_interactive(provider, model, Mode::Normal);
     }
 
     let prompt = args.join(" ");
@@ -44,10 +48,20 @@ pub fn run(
         .build()
         .map_err(|e| anyhow::anyhow!("asupersync runtime: {e}"))?;
 
-    runtime.block_on(async move { run_async(provider, model, prompt).await })
+    // Non-interactive one-shots default to Normal mode. `--plan` maps
+    // through in the interactive path.
+    let approvals = Arc::new(ApprovalState::new());
+    let factory = Arc::new(LibertaiToolFactory::new(Mode::Normal, approvals));
+
+    runtime.block_on(async move { run_async(provider, model, prompt, factory).await })
 }
 
-async fn run_async(provider: String, model: String, prompt: String) -> Result<()> {
+async fn run_async(
+    provider: String,
+    model: String,
+    prompt: String,
+    factory: Arc<LibertaiToolFactory>,
+) -> Result<()> {
     let options = SessionOptions {
         provider: Some(provider),
         model: Some(model),
@@ -55,6 +69,7 @@ async fn run_async(provider: String, model: String, prompt: String) -> Result<()
         // with the interactive REPL in a follow-up.
         no_session: true,
         max_tool_iterations: 50,
+        tool_factory: Some(factory),
         ..SessionOptions::default()
     };
 

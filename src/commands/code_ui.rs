@@ -12,6 +12,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
+use std::sync::Arc;
 
 use anyhow::Result;
 use crossterm::{
@@ -24,6 +25,9 @@ use crossterm::{
 
 use pi::model::AssistantMessageEvent;
 use pi::sdk::{create_agent_session, AgentEvent, AgentSessionHandle, SessionOptions};
+
+use crate::commands::code_approvals::ApprovalState;
+use crate::commands::code_factory::{LibertaiToolFactory, Mode};
 
 /// ANSI dim/bold helpers for cooked output (agent streaming phase).
 const DIM: &str = "\x1b[2m";
@@ -64,8 +68,13 @@ impl Drop for RawModeGuard {
 ///
 /// Owns the asupersync runtime, builds one `AgentSessionHandle`, then
 /// drives the REPL loop against it.
-pub fn run_interactive(provider: String, model: String) -> Result<()> {
-    print_banner(&provider, &model);
+pub fn run_interactive(provider: String, model: String, mode: Mode) -> Result<()> {
+    print_banner(&provider, &model, mode);
+
+    // Shared across prompts: the approvals allowlist lives for the whole
+    // REPL lifetime, so "always allow bash" sticks between turns.
+    let approvals = Arc::new(ApprovalState::new());
+    let factory = Arc::new(LibertaiToolFactory::new(mode, approvals));
 
     // Same asupersync setup as the non-interactive path.
     let reactor = asupersync::runtime::reactor::create_reactor()
@@ -75,24 +84,33 @@ pub fn run_interactive(provider: String, model: String) -> Result<()> {
         .build()
         .map_err(|e| anyhow::anyhow!("asupersync runtime: {e}"))?;
 
-    runtime.block_on(async move { repl_loop(provider, model).await })
+    runtime.block_on(async move { repl_loop(provider, model, factory).await })
 }
 
-fn print_banner(provider: &str, model: &str) {
+fn print_banner(provider: &str, model: &str, mode: Mode) {
+    let mode_tag = match mode {
+        Mode::Normal => String::new(),
+        Mode::Plan => format!(" {DIM}[plan]{RESET}"),
+    };
     println!(
-        "{BOLD}libertai code{RESET} {DIM}— interactive ({provider}/{model}){RESET}"
+        "{BOLD}libertai code{RESET} {DIM}— interactive ({provider}/{model}){RESET}{mode_tag}"
     );
     println!("{DIM}  type /help for commands, /exit or Ctrl+D to quit{RESET}");
     println!();
 }
 
-async fn repl_loop(provider: String, model: String) -> Result<()> {
+async fn repl_loop(
+    provider: String,
+    model: String,
+    factory: Arc<LibertaiToolFactory>,
+) -> Result<()> {
     let options = SessionOptions {
         provider: Some(provider),
         model: Some(model),
         // v0: ephemeral session, matches the non-interactive path.
         no_session: true,
         max_tool_iterations: 50,
+        tool_factory: Some(factory),
         ..SessionOptions::default()
     };
 
