@@ -415,7 +415,11 @@ fn render_event(event: AgentEvent) {
             println!("\n{DIM}  [turn {turn_index}]{RESET}");
         }
         AgentEvent::ToolExecutionStart { tool_name, .. } => {
-            println!("\n{DIM}  [tool] {tool_name}{RESET}");
+            // The todo tool renders its own nicely-formatted output;
+            // adding "[tool] todo" above it is just noise.
+            if tool_name != "todo" {
+                println!("\n{DIM}  [tool] {tool_name}{RESET}");
+            }
         }
         AgentEvent::AgentEnd { .. } => {
             // Pi doesn't emit a trailing newline after the last text delta;

@@ -18,6 +18,7 @@ use pi::sdk::{default_tool_registry, Config as PiConfig, Tool, ToolFactory, Tool
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalTool};
 use crate::commands::code_task::TaskTool;
+use crate::commands::code_todo::TodoTool;
 
 /// Recursion cap for the `task` subagent. A parent session creates a
 /// factory with `depth = 0`; each nested Task increments it before
@@ -87,6 +88,10 @@ impl ToolFactory for LibertaiToolFactory {
         }
 
         // 3. Add our own tools.
+        //    - `todo`: task-list overlay. Read-only side effects (prints
+        //      to stderr), so we register it unwrapped.
+        wrapped.push(Box::new(TodoTool::new()));
+
         //    - `task` (subagent): only if we still have depth headroom.
         if self.depth < MAX_TASK_DEPTH {
             wrapped.push(Box::new(TaskTool::new(
