@@ -144,8 +144,16 @@ impl Tool for TaskTool {
 
         // Child factory: same mode + shared approval state, but with
         // parent_depth + 1 so deeper nesting hits the recursion cap.
-        let mut factory = LibertaiToolFactory::new(self.mode, Arc::clone(&self.approvals));
-        factory.depth = self.parent_depth.saturating_add(1);
+        // `LibertaiToolFactory::child` is the one place that increments
+        // depth; TaskTool stores the parent's fields separately for
+        // clone-avoidance, so reconstruct a parent-equivalent factory
+        // first and then take its child.
+        let factory = LibertaiToolFactory {
+            mode: self.mode,
+            approvals: Arc::clone(&self.approvals),
+            depth: self.parent_depth,
+        }
+        .child();
 
         let options = SessionOptions {
             provider: Some(cfg.default_code_provider.clone()),

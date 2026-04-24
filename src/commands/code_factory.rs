@@ -38,10 +38,16 @@ pub enum Mode {
 impl Mode {
     /// Whether a tool-name is admissible in this mode. Called on the
     /// built-ins pi hands us; our own tools decide per-mode separately.
-    pub fn allows(self, tool_name: &str, is_read_only: bool) -> bool {
+    ///
+    /// The `tool_name` parameter is intentionally kept in the signature
+    /// (even though the current implementation ignores it) so we can
+    /// carve out per-name exceptions without reshuffling callers — e.g.
+    /// if we add a non-read-only meta tool that's still safe under
+    /// Plan mode, this is where it goes.
+    pub fn allows(self, _tool_name: &str, is_read_only: bool) -> bool {
         match self {
             Mode::Normal => true,
-            Mode::Plan => is_read_only || matches!(tool_name, "read" | "grep" | "find" | "ls"),
+            Mode::Plan => is_read_only,
         }
     }
 }

@@ -48,6 +48,17 @@ struct BarStatus {
     context_window: u32,
 }
 
+/// Process-global because the Ctrl-C handler (spawned by the `ctrlc`
+/// crate on a separate thread) needs to reach both pieces of state
+/// without a reference chain.
+///
+/// **Caveat for tests / library reuse:** `run_interactive` assumes it
+/// is the sole owner of this process's terminal for its lifetime.
+/// Calling it twice in the same process (e.g. from an integration
+/// test) would share these slots across invocations, and the `ctrlc`
+/// handler installed by the first call outlives the function. If we
+/// ever need that, add a per-invocation reset step and document the
+/// invariant more loudly.
 static BAR_STATUS: Mutex<Option<BarStatus>> = Mutex::new(None);
 
 /// Current in-flight abort handle, populated for the duration of each
@@ -129,16 +140,12 @@ fn human_tokens(n: u64) -> String {
     }
 }
 
-/// Best-effort context-window lookup. LibertAI doesn't expose this on
-/// `/v1/models` today; hardcode for the models we ship defaults for and
-/// fall back to a sensible cap otherwise.
-fn context_window_for(model: &str) -> u32 {
-    match model {
-        "qwen3.6-35b-a3b" => 32_768,
-        "qwen3.5-122b-a10b" => 32_768,
-        "gemma-4-31b-it" => 32_768,
-        _ => 32_768,
-    }
+/// Default context-window used by the status chip. LibertAI's
+/// `/v1/models` doesn't expose this today, so every model we ship
+/// defaults for shares the same cap. Kept as a function rather than a
+/// constant so we can spec per-model once the endpoint grows a field.
+fn context_window_for(_model: &str) -> u32 {
+    32_768
 }
 
 /// Outcome of reading one input line in raw mode.

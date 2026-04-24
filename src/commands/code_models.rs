@@ -18,6 +18,16 @@
 //! no-op in terms of observable state (the libertai entry is overwritten
 //! with fresh values from the current config, but surrounding providers are
 //! preserved byte-for-byte via `serde_json::Value` round-tripping).
+//!
+//! **Security note:** The file itself is written with mode `0o600` via
+//! `config::write_file_secure`, so only the owner can read it. The *parent
+//! directory* (`~/.pi/agent`) is created by pi itself with whatever default
+//! perms pi uses (typically `0o755`) — if we created it we'd set `0o700`,
+//! but if pi pre-created it `create_dir_secure` early-returns without
+//! tightening. On shared multi-user machines this means the file path is
+//! discoverable even though the file contents are not. Tightening pi's
+//! global_dir perms would require an upstream change; flagged here so we
+//! remember the limitation.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Map, Value};
