@@ -229,7 +229,7 @@ async fn repl_loop(
     let mut history: VecDeque<String> = VecDeque::with_capacity(64);
 
     loop {
-        let line = match read_line()? {
+        let line = match read_line(mode, &history)? {
             LineResult::Submit(s) => s,
             LineResult::Interrupted => {
                 // Ctrl+C in the input bar: discard this line, keep looping.
@@ -272,6 +272,17 @@ async fn repl_loop(
             "/forget" => {
                 approvals.forget();
                 println!("{DIM}  cleared session-scoped \"always allow\" list.{RESET}");
+                continue;
+            }
+            "/clear" => {
+                // Scroll the screen and rebuild the session — agent
+                // history was already lost by pi's ephemeral-Session
+                // policy, but wiping the terminal is still useful when
+                // output has accumulated.
+                let _ = std::io::stdout().write_all(b"\x1b[2J\x1b[H");
+                let _ = std::io::stdout().flush();
+                handle = build_handle(&provider, &model, mode, Arc::clone(&approvals)).await?;
+                println!("{DIM}  → fresh session.{RESET}");
                 continue;
             }
             _ => {}
@@ -379,9 +390,11 @@ fn print_help() {
     println!("{DIM}  /help     — show this message{RESET}");
     println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
+    println!("{DIM}  /clear    — wipe the screen and start a fresh session{RESET}");
     println!("{DIM}  /forget   — clear the session \"always allow\" list{RESET}");
-    println!("{DIM}  arrows    — move cursor in the current line{RESET}");
-    println!("{DIM}  Ctrl+C    — cancel the line you're typing{RESET}");
+    println!("{DIM}  ↑ / ↓     — walk through previously submitted prompts{RESET}");
+    println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
+    println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");
     println!();
 }
 
@@ -428,7 +441,7 @@ fn render_event(event: AgentEvent) {
 /// on `Resize`. Returns `LineResult::Submit` on Enter,
 /// `LineResult::Interrupted` on Ctrl+C, `LineResult::Eof` on Ctrl+D of an
 /// empty buffer.
-fn read_line() -> Result<LineResult> {
+fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
     let _guard = RawModeGuard::enter()?;
 
     let mut stdout = io::stdout();
@@ -436,11 +449,18 @@ fn read_line() -> Result<LineResult> {
 
     let mut buffer: Vec<char> = Vec::new();
     let mut cursor_pos: usize = 0; // index within `buffer`
+    // History cursor. `None` means "live buffer" (not walking history).
+    // A `Some(i)` points at `history[history.len() - 1 - i]` — Up
+    // increments, Down decrements, Enter/edit commits the recalled line
+    // back to the live buffer.
+    let mut hist_idx: Option<usize> = None;
+    let mut stashed_live: Option<Vec<char>> = None;
+
     // First paint lays down two fresh lines; every subsequent paint moves
     // back up to the rule line and overwrites in place so the bar stays
     // anchored to its starting position instead of marching down.
     let mut painted = false;
-    repaint(&mut stdout, &buffer, cursor_pos, painted)?;
+    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
     painted = true;
 
     loop {
@@ -477,39 +497,83 @@ fn read_line() -> Result<LineResult> {
                 (KeyCode::Backspace, _) if cursor_pos > 0 => {
                     buffer.remove(cursor_pos - 1);
                     cursor_pos -= 1;
-                    repaint(&mut stdout, &buffer, cursor_pos, painted)?;
+                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
                 }
                 (KeyCode::Delete, _) if cursor_pos < buffer.len() => {
                     buffer.remove(cursor_pos);
-                    repaint(&mut stdout, &buffer, cursor_pos, painted)?;
+                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
                 }
                 (KeyCode::Left, _) if cursor_pos > 0 => {
                     cursor_pos -= 1;
-                    repaint(&mut stdout, &buffer, cursor_pos, painted)?;
+                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
                 }
                 (KeyCode::Right, _) if cursor_pos < buffer.len() => {
                     cursor_pos += 1;
-                    repaint(&mut stdout, &buffer, cursor_pos, painted)?;
+                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
                 }
                 (KeyCode::Home, _) => {
                     cursor_pos = 0;
-                    repaint(&mut stdout, &buffer, cursor_pos, painted)?;
+                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
                 }
                 (KeyCode::End, _) => {
                     cursor_pos = buffer.len();
-                    repaint(&mut stdout, &buffer, cursor_pos, painted)?;
+                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
                 }
                 (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                    // Any edit to the buffer ends history navigation —
+                    // we're back to a live line.
+                    if hist_idx.is_some() {
+                        hist_idx = None;
+                        stashed_live = None;
+                    }
                     buffer.insert(cursor_pos, c);
                     cursor_pos += 1;
-                    repaint(&mut stdout, &buffer, cursor_pos, painted)?;
+                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
                 }
-                // Up/Down history is a v0 nice-to-have; skipped for now so
-                // we don't have to thread history state into the editor.
+                (KeyCode::Up, _) => {
+                    if history.is_empty() {
+                        continue;
+                    }
+                    let next = hist_idx.map_or(0, |i| (i + 1).min(history.len() - 1));
+                    if hist_idx.is_none() {
+                        stashed_live = Some(std::mem::take(&mut buffer));
+                    }
+                    hist_idx = Some(next);
+                    let recalled = history
+                        .get(history.len() - 1 - next)
+                        .cloned()
+                        .unwrap_or_default();
+                    buffer = recalled.chars().collect();
+                    cursor_pos = buffer.len();
+                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
+                }
+                (KeyCode::Down, _) => {
+                    match hist_idx {
+                        None => continue,
+                        Some(0) => {
+                            // Back to live buffer.
+                            buffer = stashed_live.take().unwrap_or_default();
+                            cursor_pos = buffer.len();
+                            hist_idx = None;
+                        }
+                        Some(i) => {
+                            let next = i - 1;
+                            hist_idx = Some(next);
+                            let recalled = history
+                                .get(history.len() - 1 - next)
+                                .cloned()
+                                .unwrap_or_default();
+                            buffer = recalled.chars().collect();
+                            cursor_pos = buffer.len();
+                        }
+                    }
+                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
+                }
+                // Old TODO retired: history nav is wired above.
                 _ => {}
             },
             Event::Resize(_, _) => {
-                repaint(&mut stdout, &buffer, cursor_pos, painted)?;
+                repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
             }
             _ => {}
         }
@@ -533,6 +597,7 @@ fn repaint(
     stdout: &mut io::Stdout,
     buffer: &[char],
     cursor_pos: usize,
+    mode: Mode,
     painted_before: bool,
 ) -> Result<()> {
     let cols = terminal::size()
@@ -542,6 +607,13 @@ fn repaint(
         .unwrap_or(80);
     let rule: String = rule_chip(cols);
     let text: String = buffer.iter().collect();
+
+    // Mode chip printed in-line with the prompt, left of ❯. Dimmed so
+    // it's a status cue, not a shout.
+    let (chip_text, chip_colour) = match mode {
+        Mode::Normal => ("", Color::DarkGrey),
+        Mode::Plan => ("[plan] ", Color::Yellow),
+    };
 
     if painted_before {
         // Jump back to the rule line so we overwrite in place.
@@ -559,6 +631,11 @@ fn repaint(
         SetAttribute(Attribute::Reset),
         Print("\r\n"),
         Clear(ClearType::CurrentLine),
+        SetForegroundColor(chip_colour),
+        SetAttribute(Attribute::Dim),
+        Print(chip_text),
+        ResetColor,
+        SetAttribute(Attribute::Reset),
         SetForegroundColor(Color::Cyan),
         SetAttribute(Attribute::Bold),
         Print("\u{276f} "),
@@ -567,7 +644,8 @@ fn repaint(
         Print(&text),
     )?;
 
-    let col = 2u16 + (cursor_pos as u16).min(u16::MAX - 2);
+    let prefix_cols = chip_text.chars().count() as u16 + 2;
+    let col = prefix_cols + (cursor_pos as u16).min(u16::MAX - prefix_cols);
     queue!(stdout, cursor::MoveToColumn(col))?;
 
     stdout.flush()?;
