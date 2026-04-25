@@ -3,15 +3,22 @@
 //! Hands pi a `SessionOptions::tool_factory` that:
 //!
 //! 1. Asks pi for its default built-in tool set (read/bash/edit/write/…).
-//! 2. Filters out mutating tools when in [`Mode::Plan`].
-//! 3. Wraps every survivor in an [`ApprovalTool`] so `bash`/`edit`/
-//!    `write`/`hashline_edit` prompt before execution — the shared
+//! 2. Wraps every tool in an [`ApprovalTool`] so `bash`/`edit`/`write`/
+//!    `hashline_edit` prompt before execution — the shared
 //!    [`ApprovalState`] keeps "always allow" memory scoped to this
-//!    session.
-//! 4. Appends our own tools: the `task` subagent, and (later) the
-//!    `todo` task-list tool that the UI subscribes to.
+//!    session, and the shared [`ModeFlag`] lets the wrapper short-
+//!    circuit mutating calls when the session is in [`Mode::Plan`].
+//! 3. Appends our own tools: `todo` (task-list overlay) and `task`
+//!    (subagent), unless we've hit the recursion cap.
+//!
+//! The factory itself doesn't filter by mode any more — every tool is
+//! always registered. The mode flag is consulted at *call time* by
+//! `ApprovalTool::execute`, which means toggling Normal ↔ Plan does
+//! not require rebuilding the session and so message history is
+//! preserved across `Shift+Tab` / `/plan`.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use pi::sdk::{default_tool_registry, Config as PiConfig, Tool, ToolFactory, ToolRegistry};
@@ -31,35 +38,59 @@ pub const MAX_TASK_DEPTH: u8 = 3;
 pub enum Mode {
     /// Full tool set. Mutating tools gated by [`ApprovalTool`].
     Normal,
-    /// Read-only tools only; mutating ones are absent from the registry.
+    /// Mutating tools (`bash`, `edit`, `write`, `hashline_edit`) are
+    /// auto-denied without prompting; read-only tools still run.
     Plan,
 }
 
 impl Mode {
-    /// Whether a tool-name is admissible in this mode. Called on the
-    /// built-ins pi hands us; our own tools decide per-mode separately.
-    ///
-    /// The `tool_name` parameter is intentionally kept in the signature
-    /// (even though the current implementation ignores it) so we can
-    /// carve out per-name exceptions without reshuffling callers — e.g.
-    /// if we add a non-read-only meta tool that's still safe under
-    /// Plan mode, this is where it goes.
-    pub fn allows(self, _tool_name: &str, is_read_only: bool) -> bool {
+    fn as_u8(self) -> u8 {
         match self {
-            Mode::Normal => true,
-            Mode::Plan => is_read_only,
+            Mode::Normal => 0,
+            Mode::Plan => 1,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Mode::Normal,
+            _ => Mode::Plan,
         }
     }
 }
 
+/// Shared, atomically-toggleable mode for an interactive session.
+///
+/// Cloneable (the `Arc` underneath shares state). The REPL holds one,
+/// hands clones to every `ApprovalTool` and to `TaskTool`, and flips
+/// it via [`ModeFlag::set`] when the user types `/plan` or hits
+/// Shift+Tab. Tool wrappers read the current value at the moment of
+/// execution.
+#[derive(Clone)]
+pub struct ModeFlag(Arc<AtomicU8>);
+
+impl ModeFlag {
+    pub fn new(initial: Mode) -> Self {
+        Self(Arc::new(AtomicU8::new(initial.as_u8())))
+    }
+
+    pub fn get(&self) -> Mode {
+        Mode::from_u8(self.0.load(Ordering::Relaxed))
+    }
+
+    pub fn set(&self, m: Mode) {
+        self.0.store(m.as_u8(), Ordering::Relaxed);
+    }
+}
+
 pub struct LibertaiToolFactory {
-    pub mode: Mode,
+    pub mode: ModeFlag,
     pub approvals: Arc<ApprovalState>,
     pub depth: u8,
 }
 
 impl LibertaiToolFactory {
-    pub fn new(mode: Mode, approvals: Arc<ApprovalState>) -> Self {
+    pub fn new(mode: ModeFlag, approvals: Arc<ApprovalState>) -> Self {
         Self {
             mode,
             approvals,
@@ -67,10 +98,12 @@ impl LibertaiToolFactory {
         }
     }
 
-    /// Factory for a child session spawned by the Task tool.
+    /// Factory for a child session spawned by the Task tool. Inherits
+    /// the parent's mode flag (so a Shift+Tab in the parent REPL
+    /// affects in-flight subagents too — desired) and approval state.
     pub fn child(&self) -> Self {
         Self {
-            mode: self.mode,
+            mode: self.mode.clone(),
             approvals: Arc::clone(&self.approvals),
             depth: self.depth.saturating_add(1),
         }
@@ -79,29 +112,33 @@ impl LibertaiToolFactory {
 
 impl ToolFactory for LibertaiToolFactory {
     fn build(&self, enabled: &[&str], cwd: &Path, config: &PiConfig) -> ToolRegistry {
-        // 1. Snapshot pi's default tools for the enabled set.
+        // 1. Snapshot pi's default tools for the enabled set. We don't
+        //    filter by mode here — the registry stays stable for the
+        //    whole session and the mode flag is checked at call time
+        //    in `ApprovalTool::execute`.
         let defaults = default_tool_registry(enabled, cwd, config).into_tools();
 
-        // 2. Filter + wrap.
-        let mut wrapped: Vec<Box<dyn Tool>> = Vec::with_capacity(defaults.len() + 1);
+        // 2. Wrap each in ApprovalTool, sharing the mode flag and
+        //    approval allowlist.
+        let mut wrapped: Vec<Box<dyn Tool>> = Vec::with_capacity(defaults.len() + 2);
         for tool in defaults {
-            let name = tool.name().to_string();
-            let ro = tool.is_read_only();
-            if !self.mode.allows(&name, ro) {
-                continue;
-            }
-            wrapped.push(Box::new(ApprovalTool::new(tool, Arc::clone(&self.approvals))));
+            wrapped.push(Box::new(ApprovalTool::new(
+                tool,
+                Arc::clone(&self.approvals),
+                self.mode.clone(),
+            )));
         }
 
         // 3. Add our own tools.
         //    - `todo`: task-list overlay. Read-only side effects (prints
-        //      to stderr), so we register it unwrapped.
+        //      to stderr), so we register it unwrapped — it's safe in
+        //      both modes.
         wrapped.push(Box::new(TodoTool::new()));
 
         //    - `task` (subagent): only if we still have depth headroom.
         if self.depth < MAX_TASK_DEPTH {
             wrapped.push(Box::new(TaskTool::new(
-                self.mode,
+                self.mode.clone(),
                 Arc::clone(&self.approvals),
                 self.depth,
             )));

@@ -21,7 +21,7 @@ use pi::sdk::{
 };
 
 use crate::commands::code_approvals::ApprovalState;
-use crate::commands::code_factory::{LibertaiToolFactory, Mode};
+use crate::commands::code_factory::{LibertaiToolFactory, ModeFlag};
 use crate::config;
 
 const NAME: &str = "task";
@@ -42,13 +42,13 @@ const DESCRIPTION: &str = concat!(
 const TASK_TOOL_ALLOWLIST: &[&str] = &["read", "grep", "find", "ls"];
 
 pub struct TaskTool {
-    mode: Mode,
+    mode: ModeFlag,
     approvals: Arc<ApprovalState>,
     parent_depth: u8,
 }
 
 impl TaskTool {
-    pub fn new(mode: Mode, approvals: Arc<ApprovalState>, parent_depth: u8) -> Self {
+    pub fn new(mode: ModeFlag, approvals: Arc<ApprovalState>, parent_depth: u8) -> Self {
         Self {
             mode,
             approvals,
@@ -142,14 +142,12 @@ impl Tool for TaskTool {
             }
         };
 
-        // Child factory: same mode + shared approval state, but with
-        // parent_depth + 1 so deeper nesting hits the recursion cap.
-        // `LibertaiToolFactory::child` is the one place that increments
-        // depth; TaskTool stores the parent's fields separately for
-        // clone-avoidance, so reconstruct a parent-equivalent factory
-        // first and then take its child.
+        // Child factory: shared mode flag + shared approval state, but
+        // with parent_depth + 1 so deeper nesting hits the recursion
+        // cap. `LibertaiToolFactory::child` is the one place that
+        // increments depth.
         let factory = LibertaiToolFactory {
-            mode: self.mode,
+            mode: self.mode.clone(),
             approvals: Arc::clone(&self.approvals),
             depth: self.parent_depth,
         }

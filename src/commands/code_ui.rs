@@ -31,7 +31,7 @@ use pi::sdk::{
 };
 
 use crate::commands::code_approvals::ApprovalState;
-use crate::commands::code_factory::{LibertaiToolFactory, Mode};
+use crate::commands::code_factory::{LibertaiToolFactory, Mode, ModeFlag};
 
 /// ANSI dim/bold helpers for cooked output (agent streaming phase).
 const DIM: &str = "\x1b[2m";
@@ -216,14 +216,19 @@ async fn repl_loop(
     initial_mode: Mode,
     approvals: Arc<ApprovalState>,
 ) -> Result<()> {
-    let mut mode = initial_mode;
-    let mut handle = build_handle(&provider, &model, mode, Arc::clone(&approvals)).await?;
+    // Shared mode flag — flipped by Shift+Tab and `/plan`. The same
+    // Arc is held by every ApprovalTool inside the session's
+    // ToolRegistry, so toggling here changes behaviour at the next
+    // tool call without rebuilding the session (and so without losing
+    // message history).
+    let mode = ModeFlag::new(initial_mode);
+    let mut handle = build_handle(&provider, &model, mode.clone(), Arc::clone(&approvals)).await?;
 
     // In-memory input history (no persistence in v0).
     let mut history: VecDeque<String> = VecDeque::with_capacity(64);
 
     loop {
-        let line = match read_line(mode, &history)? {
+        let line = match read_line(mode.get(), &history)? {
             LineResult::Submit(s) => s,
             LineResult::Interrupted => {
                 // Ctrl+C in the input bar: discard this line, keep looping.
@@ -237,9 +242,9 @@ async fn repl_loop(
                 return Ok(());
             }
             LineResult::ToggleMode => {
-                mode = flip_mode(mode);
-                announce_mode_change(mode);
-                handle = build_handle(&provider, &model, mode, Arc::clone(&approvals)).await?;
+                let new_mode = flip(mode.get());
+                mode.set(new_mode);
+                announce_mode_change(new_mode);
                 continue;
             }
         };
@@ -258,9 +263,9 @@ async fn repl_loop(
                 continue;
             }
             "/plan" => {
-                mode = flip_mode(mode);
-                announce_mode_change(mode);
-                handle = build_handle(&provider, &model, mode, Arc::clone(&approvals)).await?;
+                let new_mode = flip(mode.get());
+                mode.set(new_mode);
+                announce_mode_change(new_mode);
                 continue;
             }
             "/forget" => {
@@ -269,15 +274,14 @@ async fn repl_loop(
                 continue;
             }
             "/clear" => {
-                // Scroll the screen and rebuild the session — agent
-                // history was already lost by pi's ephemeral-Session
-                // policy, but wiping the terminal is still useful when
-                // output has accumulated.
+                // Wipe the screen *and* rebuild the session so the
+                // agent's message history starts fresh too. (Mode
+                // toggles no longer rebuild — they preserve history —
+                // so /clear is now the explicit "start over" verb.)
                 let _ = std::io::stdout().write_all(b"\x1b[2J\x1b[H");
                 let _ = std::io::stdout().flush();
-                handle = build_handle(&provider, &model, mode, Arc::clone(&approvals)).await?;
-                // Wiping the screen should also drop stale input-line
-                // history — a fresh session should feel fresh.
+                handle = build_handle(&provider, &model, mode.clone(), Arc::clone(&approvals))
+                    .await?;
                 history.clear();
                 println!("{DIM}  → fresh session.{RESET}");
                 println!();
@@ -342,7 +346,7 @@ async fn repl_loop(
     }
 }
 
-fn flip_mode(m: Mode) -> Mode {
+fn flip(m: Mode) -> Mode {
     match m {
         Mode::Normal => Mode::Plan,
         Mode::Plan => Mode::Normal,
@@ -353,12 +357,12 @@ fn announce_mode_change(new_mode: Mode) {
     match new_mode {
         Mode::Normal => {
             println!(
-                "{DIM}  → normal mode. mutating tools (bash, edit, write) are back online. session history reset.{RESET}"
+                "{DIM}  → normal mode. mutating tools (bash, edit, write) are back online.{RESET}"
             );
         }
         Mode::Plan => {
             println!(
-                "{DIM}  → plan mode. only read, grep, find, ls are available — the agent can research but not modify. session history reset.{RESET}"
+                "{DIM}  → plan mode. mutating tools auto-deny until you toggle back. session history is preserved.{RESET}"
             );
         }
     }
@@ -370,7 +374,7 @@ fn announce_mode_change(new_mode: Mode) {
 async fn build_handle(
     provider: &str,
     model: &str,
-    mode: Mode,
+    mode: ModeFlag,
     approvals: Arc<ApprovalState>,
 ) -> Result<AgentSessionHandle> {
     let factory = Arc::new(LibertaiToolFactory::new(mode, approvals));

@@ -22,6 +22,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolOutput, ToolUpdate};
 
+use crate::commands::code_factory::{Mode, ModeFlag};
 use crate::commands::code_term::RawModeGuard;
 
 /// Session-scoped approval memory. Resets on every launch.
@@ -96,15 +97,25 @@ enum PromptChoice {
     Deny,
 }
 
-/// Wraps any `pi::sdk::Tool` with the approval gate defined above.
+/// Wraps any `pi::sdk::Tool` with two gates:
+///
+/// 1. The approval menu (allow / always / deny) for mutating tools.
+/// 2. A short-circuit denial when the shared `ModeFlag` says we're
+///    in Plan mode and this tool isn't read-only — the tool registry
+///    stays stable across mode toggles so message history survives.
 pub struct ApprovalTool {
     inner: Box<dyn Tool>,
     state: Arc<ApprovalState>,
+    mode: ModeFlag,
 }
 
 impl ApprovalTool {
-    pub fn new(inner: Box<dyn Tool>, state: Arc<ApprovalState>) -> Self {
-        Self { inner, state }
+    pub fn new(inner: Box<dyn Tool>, state: Arc<ApprovalState>, mode: ModeFlag) -> Self {
+        Self {
+            inner,
+            state,
+            mode,
+        }
     }
 }
 
@@ -132,6 +143,14 @@ impl Tool for ApprovalTool {
         input: serde_json::Value,
         on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> PiResult<ToolOutput> {
+        // Plan mode short-circuit: mutating tools are auto-denied
+        // without a prompt. The agent sees a tool error, learns the
+        // tool isn't available right now, and adapts. Read-only tools
+        // pass straight through.
+        if matches!(self.mode.get(), Mode::Plan) && !self.inner.is_read_only() {
+            return Ok(plan_denial_output(self.inner.name()));
+        }
+
         let preview = preview_call(self.inner.name(), &input);
         match self.state.decide(self.inner.name(), &preview) {
             Decision::Allow => self.inner.execute(tool_call_id, input, on_update).await,
@@ -144,6 +163,20 @@ fn denial_output(reason: Option<String>) -> ToolOutput {
     let text = reason.unwrap_or_else(|| {
         "user denied execution of this tool call; ask them for alternative approaches or a different strategy".into()
     });
+    ToolOutput {
+        content: vec![ContentBlock::Text(TextContent::new(text))],
+        details: None,
+        is_error: true,
+    }
+}
+
+fn plan_denial_output(tool_name: &str) -> ToolOutput {
+    let text = format!(
+        "session is in plan mode: `{tool_name}` is unavailable. \
+         You can read, search, and reason — describe the changes you'd \
+         make and ask the user to switch to normal mode (Shift+Tab or \
+         /plan) when they're ready to apply them."
+    );
     ToolOutput {
         content: vec![ContentBlock::Text(TextContent::new(text))],
         details: None,
