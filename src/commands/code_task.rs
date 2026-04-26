@@ -20,7 +20,7 @@ use pi::sdk::{
     ToolUpdate,
 };
 
-use crate::commands::code_approvals::ApprovalState;
+use crate::commands::code_approvals::{ApprovalState, ApprovalUi};
 use crate::commands::code_factory::{LibertaiToolFactory, ModeFlag};
 use crate::config;
 
@@ -44,14 +44,21 @@ const TASK_TOOL_ALLOWLIST: &[&str] = &["read", "grep", "find", "ls"];
 pub struct TaskTool {
     mode: ModeFlag,
     approvals: Arc<ApprovalState>,
+    ui: Arc<dyn ApprovalUi>,
     parent_depth: u8,
 }
 
 impl TaskTool {
-    pub fn new(mode: ModeFlag, approvals: Arc<ApprovalState>, parent_depth: u8) -> Self {
+    pub fn new(
+        mode: ModeFlag,
+        approvals: Arc<ApprovalState>,
+        ui: Arc<dyn ApprovalUi>,
+        parent_depth: u8,
+    ) -> Self {
         Self {
             mode,
             approvals,
+            ui,
             parent_depth,
         }
     }
@@ -149,6 +156,7 @@ impl Tool for TaskTool {
         let factory = LibertaiToolFactory {
             mode: self.mode.clone(),
             approvals: Arc::clone(&self.approvals),
+            ui: Arc::clone(&self.ui),
             depth: self.parent_depth,
         }
         .child();

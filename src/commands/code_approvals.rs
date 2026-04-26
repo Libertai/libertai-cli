@@ -2,34 +2,62 @@
 //!
 //! Wraps every mutating built-in tool (`bash`, `edit`, `write`,
 //! `hashline_edit`) in an [`ApprovalTool`] that pauses the agent stream,
-//! renders a preview of what's about to run, and waits for a single-key
-//! decision: allow once, always allow (session-scoped), or deny (with
-//! optional reason fed back to the agent so it can course-correct).
+//! renders a preview of what's about to run, and waits for a decision via
+//! a pluggable [`ApprovalUi`]: allow once, always allow (session-scoped),
+//! or deny (with optional reason fed back to the agent so it can
+//! course-correct).
 //!
 //! Read-only tools (`read`, `grep`, `find`, `ls`) are auto-allowed — the
 //! approval UI for them would be pure noise.
 //!
-//! `ApprovalState` is session-scoped: no on-disk persistence. A new
-//! `libertai code` launch starts with an empty allowlist.
+//! [`ApprovalState`] is session-scoped: no on-disk persistence. A new
+//! session starts with an empty allowlist. The UI is supplied separately
+//! (see [`ApprovalUi`]) so the same approval-gating logic powers the
+//! terminal CLI ([`TerminalApprovalUi`] in `code_term`) and the desktop
+//! app (a callback-based UI implemented in the Tauri crate).
 
 use std::collections::HashSet;
-use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolOutput, ToolUpdate};
 
 use crate::commands::code_factory::{Mode, ModeFlag};
-use crate::commands::code_term::RawModeGuard;
+
+/// User decision for a single approval prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptChoice {
+    /// Run this tool call once.
+    Allow,
+    /// Run this tool call and remember "always allow this tool" for the session.
+    AlwaysAllow,
+    /// Reject this tool call. The agent receives a denial output.
+    Deny,
+}
+
+/// Renders an approval prompt and returns the user's choice.
+///
+/// The trait is async because the desktop implementation awaits a
+/// `tokio::sync::oneshot::Receiver` while a frontend modal collects the
+/// user's response. The terminal implementation does its work
+/// synchronously inside the async body — that's fine because pi awaits
+/// `Tool::execute` sequentially, so blocking the executor briefly
+/// doesn't starve other in-flight work on the same session.
+#[async_trait]
+pub trait ApprovalUi: Send + Sync {
+    async fn decide(&self, tool_name: &str, preview: &str) -> PromptChoice;
+}
 
 /// Session-scoped approval memory. Resets on every launch.
+///
+/// Holds two allowlists:
+/// - `auto_allow` (hardcoded, read-only built-ins): never prompt.
+/// - `always_allow` (user-promoted via `AlwaysAllow`): never prompt for
+///   the rest of the session.
 pub struct ApprovalState {
-    /// Tool names promoted to "always allow" via the micro-menu.
     always_allow: Mutex<HashSet<String>>,
-    /// Tool names that never need to prompt (read-only built-ins).
     auto_allow: HashSet<String>,
 }
 
@@ -50,6 +78,25 @@ impl ApprovalState {
         }
     }
 
+    /// True when the tool is on either allowlist and should run without prompting.
+    pub fn is_pre_allowed(&self, tool_name: &str) -> bool {
+        if self.auto_allow.contains(tool_name) {
+            return true;
+        }
+        self.always_allow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(tool_name)
+    }
+
+    /// Record that the user picked "always allow" for this tool name.
+    pub fn record_always(&self, tool_name: String) {
+        self.always_allow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(tool_name);
+    }
+
     /// Drop every "always allow" entry collected this session.
     /// Invoked by the `/forget` slash command in the REPL.
     pub fn forget(&self) {
@@ -58,63 +105,33 @@ impl ApprovalState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
     }
-
-    fn decide(&self, tool_name: &str, preview: &str) -> Decision {
-        if self.auto_allow.contains(tool_name) {
-            return Decision::Allow;
-        }
-        {
-            let guard = self
-                .always_allow
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if guard.contains(tool_name) {
-                return Decision::Allow;
-            }
-        }
-        match prompt(tool_name, preview) {
-            PromptChoice::Allow => Decision::Allow,
-            PromptChoice::AlwaysAllow => {
-                self.always_allow
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(tool_name.to_string());
-                Decision::Allow
-            }
-            PromptChoice::Deny => Decision::Deny(None),
-        }
-    }
-}
-
-enum Decision {
-    Allow,
-    Deny(Option<String>),
-}
-
-enum PromptChoice {
-    Allow,
-    AlwaysAllow,
-    Deny,
 }
 
 /// Wraps any `pi::sdk::Tool` with two gates:
 ///
-/// 1. The approval menu (allow / always / deny) for mutating tools.
-/// 2. A short-circuit denial when the shared `ModeFlag` says we're
-///    in Plan mode and this tool isn't read-only — the tool registry
+/// 1. The approval UI (allow / always / deny) for mutating tools.
+/// 2. A short-circuit denial when the shared [`ModeFlag`] says we're in
+///    [`Mode::Plan`] and this tool isn't read-only — the tool registry
 ///    stays stable across mode toggles so message history survives.
 pub struct ApprovalTool {
     inner: Box<dyn Tool>,
     state: Arc<ApprovalState>,
     mode: ModeFlag,
+    ui: Arc<dyn ApprovalUi>,
 }
 
 impl ApprovalTool {
-    pub fn new(inner: Box<dyn Tool>, state: Arc<ApprovalState>, mode: ModeFlag) -> Self {
+    pub fn new(
+        inner: Box<dyn Tool>,
+        state: Arc<ApprovalState>,
+        mode: ModeFlag,
+        ui: Arc<dyn ApprovalUi>,
+    ) -> Self {
         Self {
             inner,
             state,
             mode,
+            ui,
         }
     }
 }
@@ -151,15 +168,25 @@ impl Tool for ApprovalTool {
             return Ok(plan_denial_output(self.inner.name()));
         }
 
-        let preview = preview_call(self.inner.name(), &input);
-        match self.state.decide(self.inner.name(), &preview) {
-            Decision::Allow => self.inner.execute(tool_call_id, input, on_update).await,
-            Decision::Deny(reason) => Ok(denial_output(reason)),
+        let name = self.inner.name();
+        if self.state.is_pre_allowed(name) {
+            return self.inner.execute(tool_call_id, input, on_update).await;
+        }
+
+        let preview = preview_call(name, &input);
+        match self.ui.decide(name, &preview).await {
+            PromptChoice::Allow => self.inner.execute(tool_call_id, input, on_update).await,
+            PromptChoice::AlwaysAllow => {
+                self.state.record_always(name.to_string());
+                self.inner.execute(tool_call_id, input, on_update).await
+            }
+            PromptChoice::Deny => Ok(denial_output(None)),
         }
     }
 }
 
-fn denial_output(reason: Option<String>) -> ToolOutput {
+/// Tool output for an explicit user denial.
+pub fn denial_output(reason: Option<String>) -> ToolOutput {
     let text = reason.unwrap_or_else(|| {
         "user denied execution of this tool call; ask them for alternative approaches or a different strategy".into()
     });
@@ -188,9 +215,9 @@ fn plan_denial_output(tool_name: &str) -> ToolOutput {
 /// that generates a 100 KB heredoc would otherwise bury the approval
 /// menu off-screen and the user approves by habit — an attack surface
 /// for prompt injection.
-const MAX_PREVIEW_CHARS: usize = 400;
+pub const MAX_PREVIEW_CHARS: usize = 400;
 
-/// Render a one-line preview for the approval menu.
+/// Render a one-line preview for the approval UI.
 ///
 /// All model-controlled strings pass through `sanitize`, which:
 /// 1. Strips ANSI escape sequences (`\x1b[...m`, etc.) — a malicious
@@ -198,7 +225,7 @@ const MAX_PREVIEW_CHARS: usize = 400;
 ///    approval prompt.
 /// 2. Drops ASCII control bytes other than `\n` / `\t`.
 /// 3. Caps length at `MAX_PREVIEW_CHARS` with a `…` suffix.
-fn preview_call(tool: &str, input: &serde_json::Value) -> String {
+pub fn preview_call(tool: &str, input: &serde_json::Value) -> String {
     match tool {
         "bash" => sanitize(
             input
@@ -246,7 +273,7 @@ fn field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
 ///
 /// Also drops ASCII control bytes (below 0x20 and 0x7F) except `\n`
 /// and `\t`, and truncates past `MAX_PREVIEW_CHARS` with a `…`.
-fn sanitize(s: &str) -> String {
+pub fn sanitize(s: &str) -> String {
     #[derive(Clone, Copy)]
     enum State {
         Normal,
@@ -286,73 +313,6 @@ fn sanitize(s: &str) -> String {
     out
 }
 
-/// Block until the user picks allow/always/deny. Uses crossterm raw mode
-/// to read a single keystroke without requiring Enter.
-///
-/// This is called from inside an asupersync task (pi's Agent awaits
-/// `execute` sequentially), so blocking on stdin is acceptable — nothing
-/// else on the runtime is making progress while a tool call is in flight.
-fn prompt(tool_name: &str, preview: &str) -> PromptChoice {
-    let mut stderr = std::io::stderr();
-
-    eprintln!();
-    eprintln!("  \x1b[33;1m⎯ tool approval ⎯\x1b[0m");
-    eprintln!("  \x1b[1m{tool_name}\x1b[0m");
-    for line in preview.lines() {
-        eprintln!("  \x1b[2m│\x1b[0m {line}");
-    }
-    eprint!("  \x1b[2m[a]\x1b[0m allow once  \x1b[2m[A]\x1b[0m always allow  \x1b[2m[d]\x1b[0m deny: ");
-    let _ = stderr.flush();
-
-    // Brief raw-mode single-key read via the shared RAII guard so a
-    // panic between enter and disable can't leak raw mode. If raw mode
-    // isn't available (e.g. non-TTY), fall back to a cooked-line read.
-    let _guard = match RawModeGuard::enter() {
-        Ok(g) => g,
-        Err(_) => {
-            let mut line = String::new();
-            let _ = std::io::stdin().read_line(&mut line);
-            eprintln!();
-            return parse_cooked_choice(&line);
-        }
-    };
-    let choice = loop {
-        match event::read() {
-            Ok(Event::Key(KeyEvent { code, modifiers, .. })) => match (code, modifiers) {
-                // `Char('a') + SHIFT` is unreachable on most terminals
-                // (Shift uppercases to `A`), but handle it defensively.
-                (KeyCode::Char('a'), _) => break PromptChoice::Allow,
-                (KeyCode::Char('A'), _) => break PromptChoice::AlwaysAllow,
-                (KeyCode::Char('d') | KeyCode::Char('D'), _) => break PromptChoice::Deny,
-                (KeyCode::Enter, _) => break PromptChoice::Allow,
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) => break PromptChoice::Deny,
-                (KeyCode::Esc, _) => break PromptChoice::Deny,
-                _ => continue,
-            },
-            Ok(_) => continue,
-            Err(_) => break PromptChoice::Deny,
-        }
-    };
-    drop(_guard);
-    // Echo the decision on its own line so subsequent streaming output
-    // flows below, not on top of the prompt.
-    let label = match choice {
-        PromptChoice::Allow => "allowed",
-        PromptChoice::AlwaysAllow => "always allowed",
-        PromptChoice::Deny => "denied",
-    };
-    eprintln!("\x1b[2m{label}\x1b[0m");
-    choice
-}
-
-fn parse_cooked_choice(line: &str) -> PromptChoice {
-    match line.trim().chars().next().unwrap_or('d') {
-        'a' => PromptChoice::Allow,
-        'A' => PromptChoice::AlwaysAllow,
-        _ => PromptChoice::Deny,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +348,60 @@ mod tests {
     fn sanitize_handles_single_char_escape() {
         // ESC c (non-CSI) is a full reset. We drop ESC + the next char.
         assert_eq!(sanitize("before\x1bcafter"), "beforeafter");
+    }
+
+    /// `MockApprovalUi` replays a fixed script of choices, then panics if
+    /// the agent asks for more — handy for asserting that an "always
+    /// allow" decision actually short-circuits subsequent calls.
+    struct MockApprovalUi {
+        script: Mutex<std::collections::VecDeque<PromptChoice>>,
+    }
+    impl MockApprovalUi {
+        fn new(script: Vec<PromptChoice>) -> Self {
+            Self {
+                script: Mutex::new(script.into()),
+            }
+        }
+    }
+    #[async_trait]
+    impl ApprovalUi for MockApprovalUi {
+        async fn decide(&self, _tool_name: &str, _preview: &str) -> PromptChoice {
+            self.script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("MockApprovalUi script exhausted")
+        }
+    }
+
+    #[test]
+    fn pre_allowed_skips_ui() {
+        let state = ApprovalState::new();
+        // `read` is in auto_allow.
+        assert!(state.is_pre_allowed("read"));
+        // `bash` is not — until promoted.
+        assert!(!state.is_pre_allowed("bash"));
+        state.record_always("bash".to_string());
+        assert!(state.is_pre_allowed("bash"));
+        state.forget();
+        assert!(!state.is_pre_allowed("bash"));
+    }
+
+    #[tokio::test]
+    async fn always_allow_persists_for_session() {
+        // Asserts that the second `bash` invocation does not consult
+        // the UI — the script only has one entry and the test would
+        // panic on a second decide() call.
+        let state = Arc::new(ApprovalState::new());
+        let ui: Arc<dyn ApprovalUi> = Arc::new(MockApprovalUi::new(vec![PromptChoice::AlwaysAllow]));
+
+        // First call: ui returns AlwaysAllow → recorded.
+        let preview = "echo hi";
+        let choice = ui.decide("bash", preview).await;
+        assert_eq!(choice, PromptChoice::AlwaysAllow);
+        state.record_always("bash".to_string());
+
+        // Second call: pre-allowed, no ui consult.
+        assert!(state.is_pre_allowed("bash"));
     }
 }

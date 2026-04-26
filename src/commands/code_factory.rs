@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use pi::sdk::{default_tool_registry, Config as PiConfig, Tool, ToolFactory, ToolRegistry};
 
-use crate::commands::code_approvals::{ApprovalState, ApprovalTool};
+use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi};
 use crate::commands::code_task::TaskTool;
 use crate::commands::code_todo::TodoTool;
 
@@ -86,46 +86,52 @@ impl ModeFlag {
 pub struct LibertaiToolFactory {
     pub mode: ModeFlag,
     pub approvals: Arc<ApprovalState>,
+    pub ui: Arc<dyn ApprovalUi>,
     pub depth: u8,
 }
 
 impl LibertaiToolFactory {
-    pub fn new(mode: ModeFlag, approvals: Arc<ApprovalState>) -> Self {
+    pub fn new(mode: ModeFlag, approvals: Arc<ApprovalState>, ui: Arc<dyn ApprovalUi>) -> Self {
         Self {
             mode,
             approvals,
+            ui,
             depth: 0,
         }
     }
 
     /// Factory for a child session spawned by the Task tool. Inherits
     /// the parent's mode flag (so a Shift+Tab in the parent REPL
-    /// affects in-flight subagents too — desired) and approval state.
+    /// affects in-flight subagents too — desired), approval state,
+    /// and approval UI (subagent prompts surface in the same place as
+    /// parent prompts).
     pub fn child(&self) -> Self {
         Self {
             mode: self.mode.clone(),
             approvals: Arc::clone(&self.approvals),
+            ui: Arc::clone(&self.ui),
             depth: self.depth.saturating_add(1),
         }
     }
 }
 
 impl ToolFactory for LibertaiToolFactory {
-    fn build(&self, enabled: &[&str], cwd: &Path, config: &PiConfig) -> ToolRegistry {
+    fn create_tool_registry(&self, enabled: &[&str], cwd: &Path, config: &PiConfig) -> ToolRegistry {
         // 1. Snapshot pi's default tools for the enabled set. We don't
         //    filter by mode here — the registry stays stable for the
         //    whole session and the mode flag is checked at call time
         //    in `ApprovalTool::execute`.
         let defaults = default_tool_registry(enabled, cwd, config).into_tools();
 
-        // 2. Wrap each in ApprovalTool, sharing the mode flag and
-        //    approval allowlist.
+        // 2. Wrap each in ApprovalTool, sharing the mode flag, approval
+        //    allowlist, and approval UI.
         let mut wrapped: Vec<Box<dyn Tool>> = Vec::with_capacity(defaults.len() + 2);
         for tool in defaults {
             wrapped.push(Box::new(ApprovalTool::new(
                 tool,
                 Arc::clone(&self.approvals),
                 self.mode.clone(),
+                Arc::clone(&self.ui),
             )));
         }
 
@@ -140,6 +146,7 @@ impl ToolFactory for LibertaiToolFactory {
             wrapped.push(Box::new(TaskTool::new(
                 self.mode.clone(),
                 Arc::clone(&self.approvals),
+                Arc::clone(&self.ui),
                 self.depth,
             )));
         }

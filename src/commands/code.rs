@@ -15,6 +15,7 @@ use pi::sdk::{create_agent_session, AgentEvent, SessionOptions};
 
 use crate::commands::code_approvals::ApprovalState;
 use crate::commands::code_factory::{LibertaiToolFactory, Mode, ModeFlag};
+use crate::commands::code_term::TerminalApprovalUi;
 use crate::commands::{code_models, code_ui};
 use crate::config;
 
@@ -55,7 +56,8 @@ pub fn run(
     // The flag is created here even though it can't be toggled from a
     // one-shot — it's part of the factory's contract now.
     let approvals = Arc::new(ApprovalState::new());
-    let factory = Arc::new(LibertaiToolFactory::new(ModeFlag::new(mode), approvals));
+    let ui = Arc::new(TerminalApprovalUi);
+    let factory = Arc::new(LibertaiToolFactory::new(ModeFlag::new(mode), approvals, ui));
 
     runtime.block_on(async move { run_async(provider, model, prompt, factory).await })
 }

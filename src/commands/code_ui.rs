@@ -32,6 +32,7 @@ use pi::sdk::{
 
 use crate::commands::code_approvals::ApprovalState;
 use crate::commands::code_factory::{LibertaiToolFactory, Mode, ModeFlag};
+use crate::commands::code_term::TerminalApprovalUi;
 
 /// ANSI dim/bold helpers for cooked output (agent streaming phase).
 const DIM: &str = "\x1b[2m";
@@ -377,7 +378,8 @@ async fn build_handle(
     mode: ModeFlag,
     approvals: Arc<ApprovalState>,
 ) -> Result<AgentSessionHandle> {
-    let factory = Arc::new(LibertaiToolFactory::new(mode, approvals));
+    let ui = Arc::new(TerminalApprovalUi);
+    let factory = Arc::new(LibertaiToolFactory::new(mode, approvals, ui));
     let options = SessionOptions {
         provider: Some(provider.to_string()),
         model: Some(model.to_string()),
