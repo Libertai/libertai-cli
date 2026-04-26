@@ -23,6 +23,18 @@ struct LcodeCli {
     /// Start in plan mode (read-only tools; toggle with Shift+Tab or /plan).
     #[arg(long)]
     plan: bool,
+    /// Resume a saved session by JSONL path.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["continue_recent", "list_sessions"])]
+    resume: Option<std::path::PathBuf>,
+    /// Resume the most recent session for the current cwd.
+    #[arg(long = "continue", conflicts_with_all = ["resume", "list_sessions"])]
+    continue_recent: bool,
+    /// Print recent sessions and exit.
+    #[arg(long, conflicts_with_all = ["resume", "continue_recent"])]
+    list_sessions: bool,
+    /// With `--list-sessions`, list every project (not just cwd).
+    #[arg(long, requires = "list_sessions")]
+    all: bool,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -34,6 +46,10 @@ fn main() {
             model: parsed.model,
             provider: parsed.provider,
             plan: parsed.plan,
+            resume: parsed.resume,
+            continue_recent: parsed.continue_recent,
+            list_sessions: parsed.list_sessions,
+            all: parsed.all,
             args: parsed.args,
         },
     };

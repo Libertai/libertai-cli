@@ -163,6 +163,21 @@ pub enum Command {
         /// back to normal (Shift+Tab or /plan).
         #[arg(long)]
         plan: bool,
+        /// Resume a specific saved session by JSONL path
+        /// (see `--list-sessions` to find one).
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["continue_recent", "list_sessions"])]
+        resume: Option<std::path::PathBuf>,
+        /// Resume the most recent session for the current working directory.
+        #[arg(long = "continue", conflicts_with_all = ["resume", "list_sessions"])]
+        continue_recent: bool,
+        /// Print recent sessions (most recent first) and exit, without
+        /// starting the agent. Filters to the current cwd by default;
+        /// pass `--all` to list every project.
+        #[arg(long, conflicts_with_all = ["resume", "continue_recent"])]
+        list_sessions: bool,
+        /// With `--list-sessions`, show sessions across every project.
+        #[arg(long, requires = "list_sessions")]
+        all: bool,
         /// Initial prompt (non-interactive mode if `--print`).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -271,8 +286,21 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             model,
             provider,
             plan,
+            resume,
+            continue_recent,
+            list_sessions,
+            all,
             args,
-        } => crate::commands::code::run(model, provider, plan, args),
+        } => crate::commands::code::run(
+            model,
+            provider,
+            plan,
+            resume,
+            continue_recent,
+            list_sessions,
+            all,
+            args,
+        ),
         Command::Config { action } => crate::commands::config_cmd::run(action),
         Command::Skills { action } => crate::commands::skills::run(action),
     }

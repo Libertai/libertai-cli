@@ -16,12 +16,14 @@ use async_trait::async_trait;
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{
-    create_agent_session, AgentEvent, Result as PiResult, SessionOptions, Tool, ToolOutput,
-    ToolUpdate,
+    create_agent_session, AgentEvent, Result as PiResult, Tool, ToolOutput, ToolUpdate,
 };
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi};
 use crate::commands::code_factory::{LibertaiToolFactory, ModeFlag};
+use crate::commands::code_session::{
+    build_session_options, CodeSessionConfig, SessionPersistence,
+};
 use crate::config;
 
 const NAME: &str = "task";
@@ -161,15 +163,18 @@ impl Tool for TaskTool {
         }
         .child();
 
-        let options = SessionOptions {
-            provider: Some(cfg.default_code_provider.clone()),
-            model: Some(cfg.default_code_model.clone()),
-            no_session: true,
+        let options = build_session_options(CodeSessionConfig {
+            provider: cfg.default_code_provider.clone(),
+            model: cfg.default_code_model.clone(),
+            working_directory: None,
+            include_cwd_in_prompt: true,
             max_tool_iterations: 25,
+            tool_factory: Arc::new(factory),
+            // Subagents are nested scratch sessions — their JSONL would
+            // pollute the user-facing session list with noise.
+            persistence: SessionPersistence::Ephemeral,
             enabled_tools: Some(filtered),
-            tool_factory: Some(Arc::new(factory)),
-            ..SessionOptions::default()
-        };
+        });
 
         eprintln!("\n  \x1b[2m[subagent] running: {prompt}\x1b[0m");
 

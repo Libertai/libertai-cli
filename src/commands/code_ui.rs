@@ -12,6 +12,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -24,14 +25,16 @@ use crossterm::{
     terminal::{self, Clear, ClearType},
 };
 
-use pi::model::AssistantMessageEvent;
+use pi::model::{AssistantMessageEvent, ContentBlock, Message, UserContent};
 use pi::sdk::{
     create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle, Error as PiError,
-    SessionOptions,
 };
 
 use crate::commands::code_approvals::ApprovalState;
 use crate::commands::code_factory::{LibertaiToolFactory, Mode, ModeFlag};
+use crate::commands::code_session::{
+    build_session_options, CodeSessionConfig, SessionPersistence,
+};
 use crate::commands::code_term::TerminalApprovalUi;
 
 /// ANSI dim/bold helpers for cooked output (agent streaming phase).
@@ -169,7 +172,12 @@ use crate::commands::code_term::RawModeGuard;
 ///
 /// Owns the asupersync runtime, builds one `AgentSessionHandle`, then
 /// drives the REPL loop against it.
-pub fn run_interactive(provider: String, model: String, mode: Mode) -> Result<()> {
+pub fn run_interactive(
+    provider: String,
+    model: String,
+    mode: Mode,
+    resume_path: Option<PathBuf>,
+) -> Result<()> {
     print_banner(&provider, &model, mode);
 
     // Prime the status bar so the rule renders a useful label even
@@ -196,7 +204,8 @@ pub fn run_interactive(provider: String, model: String, mode: Mode) -> Result<()
         .build()
         .map_err(|e| anyhow::anyhow!("asupersync runtime: {e}"))?;
 
-    runtime.block_on(async move { repl_loop(provider, model, mode, approvals).await })
+    runtime
+        .block_on(async move { repl_loop(provider, model, mode, approvals, resume_path).await })
 }
 
 fn print_banner(provider: &str, model: &str, mode: Mode) {
@@ -216,6 +225,7 @@ async fn repl_loop(
     model: String,
     initial_mode: Mode,
     approvals: Arc<ApprovalState>,
+    resume_path: Option<PathBuf>,
 ) -> Result<()> {
     // Shared mode flag — flipped by Shift+Tab and `/plan`. The same
     // Arc is held by every ApprovalTool inside the session's
@@ -223,7 +233,23 @@ async fn repl_loop(
     // tool call without rebuilding the session (and so without losing
     // message history).
     let mode = ModeFlag::new(initial_mode);
-    let mut handle = build_handle(&provider, &model, mode.clone(), Arc::clone(&approvals)).await?;
+    let mut handle = build_handle(
+        &provider,
+        &model,
+        mode.clone(),
+        Arc::clone(&approvals),
+        resume_path,
+    )
+    .await?;
+
+    // If we resumed, print the rehydrated transcript so the user has
+    // visual context before the input bar takes over. Skipped for fresh
+    // sessions — there's nothing to show.
+    if let Ok(messages) = handle.messages().await {
+        if !messages.is_empty() {
+            print_rehydrated_transcript(&messages);
+        }
+    }
 
     // In-memory input history (no persistence in v0).
     let mut history: VecDeque<String> = VecDeque::with_capacity(64);
@@ -281,8 +307,14 @@ async fn repl_loop(
                 // so /clear is now the explicit "start over" verb.)
                 let _ = std::io::stdout().write_all(b"\x1b[2J\x1b[H");
                 let _ = std::io::stdout().flush();
-                handle = build_handle(&provider, &model, mode.clone(), Arc::clone(&approvals))
-                    .await?;
+                handle = build_handle(
+                    &provider,
+                    &model,
+                    mode.clone(),
+                    Arc::clone(&approvals),
+                    None,
+                )
+                .await?;
                 history.clear();
                 println!("{DIM}  → fresh session.{RESET}");
                 println!();
@@ -377,20 +409,78 @@ async fn build_handle(
     model: &str,
     mode: ModeFlag,
     approvals: Arc<ApprovalState>,
+    resume_path: Option<PathBuf>,
 ) -> Result<AgentSessionHandle> {
     let ui = Arc::new(TerminalApprovalUi);
     let factory = Arc::new(LibertaiToolFactory::new(mode, approvals, ui));
-    let options = SessionOptions {
-        provider: Some(provider.to_string()),
-        model: Some(model.to_string()),
-        no_session: true,
-        max_tool_iterations: 50,
-        tool_factory: Some(factory),
-        ..SessionOptions::default()
+    let persistence = match resume_path {
+        Some(p) => SessionPersistence::Resume(p),
+        None => SessionPersistence::Fresh,
     };
+    let options = build_session_options(CodeSessionConfig {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        working_directory: None,
+        include_cwd_in_prompt: true,
+        max_tool_iterations: 50,
+        tool_factory: factory,
+        persistence,
+        enabled_tools: None,
+    });
     create_agent_session(options)
         .await
         .map_err(|e| anyhow::Error::new(e).context("create_agent_session"))
+}
+
+/// Render a previously-saved conversation in the same shape the live REPL
+/// uses, so a `--resume` user sees their context as static history before
+/// the input bar appears. Streamed output during normal operation comes
+/// out via the same `print!` path; here we just paint each prior turn at
+/// once, with no animation.
+fn print_rehydrated_transcript(messages: &[Message]) {
+    println!("{DIM}  ── resuming session ──{RESET}");
+    for msg in messages {
+        match msg {
+            Message::User(u) => match &u.content {
+                UserContent::Text(t) => println!("{BOLD}you{RESET}  {t}"),
+                UserContent::Blocks(blocks) => {
+                    let mut buf = String::new();
+                    for b in blocks {
+                        if let ContentBlock::Text(tc) = b {
+                            buf.push_str(&tc.text);
+                        }
+                    }
+                    if !buf.is_empty() {
+                        println!("{BOLD}you{RESET}  {buf}");
+                    }
+                }
+            },
+            Message::Assistant(a) => {
+                let mut text = String::new();
+                let mut tool_calls = Vec::new();
+                for b in &a.content {
+                    match b {
+                        ContentBlock::Text(tc) => text.push_str(&tc.text),
+                        ContentBlock::ToolCall(tc) => tool_calls.push(tc.name.clone()),
+                        _ => {}
+                    }
+                }
+                if !text.is_empty() {
+                    println!("{text}");
+                }
+                for name in tool_calls {
+                    if name != "todo" {
+                        println!("  {DIM}[tool] {name}{RESET}");
+                    }
+                }
+            }
+            // Tool results were already shown inline last time; replaying
+            // them verbatim would be noisy. Skip.
+            Message::ToolResult(_) | Message::Custom(_) => {}
+        }
+    }
+    println!("{DIM}  ── end of saved transcript ──{RESET}");
+    println!();
 }
 
 fn print_help() {

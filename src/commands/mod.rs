@@ -5,6 +5,7 @@ pub mod code;
 pub mod code_approvals;
 pub mod code_factory;
 pub mod code_models;
+pub mod code_session;
 pub mod code_task;
 pub mod code_term;
 pub mod code_todo;
