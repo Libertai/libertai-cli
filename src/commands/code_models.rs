@@ -83,27 +83,63 @@ pub fn ensure_libertai_registered(cfg: &Config) -> Result<()> {
     let base_url = format!("{}/v1", cfg.api_base.trim_end_matches('/'));
     let default_model = cfg.default_code_model.clone();
 
-    // `openai-completions` routes through pi's OpenAI Chat Completions
-    // client (POST /v1/chat/completions), which is what LibertAI exposes.
-    // The bare value "openai" is only valid when the provider *name* is
-    // also "openai" (canonical provider); for custom names like "libertai"
-    // pi needs the fully-qualified api identifier.
-    let libertai_entry = json!({
-        "baseUrl": base_url,
-        "api": "openai-completions",
-        "apiKey": api_key,
-        "authHeader": true,
-        "models": [
-            {
-                "id": default_model,
-                "name": default_model,
-                "api": "openai-completions",
-                "contextWindow": 32768u32,
-            }
-        ],
-    });
+    // Merge into the existing libertai entry rather than replacing it.
+    // pi's `apply_custom_models` treats a non-empty `models` array as a
+    // complete override and wipes pi's built-in catalog before pushing
+    // only what's in the JSON. So if a previous run (or another tool
+    // — e.g. the liberclaw-code desktop app fetching /v1/models) has
+    // already populated `models` with the full catalog, clobbering it
+    // with a single-element default-only array reduces the available
+    // models to just `default_code_model` and breaks model swaps.
+    //
+    // Strategy:
+    //   - update baseUrl / apiKey on every call so credential rotation
+    //     and config edits are honoured;
+    //   - leave a non-empty `models` array alone, only ensuring the
+    //     current `default_code_model` is present;
+    //   - seed an empty/missing array with the single default entry so
+    //     fresh installs still get a usable libertai out of the box.
+    let entry = providers
+        .entry("libertai".to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "providers.libertai in {} is not a JSON object",
+                models_path.display()
+            )
+        })?;
 
-    providers.insert("libertai".to_string(), libertai_entry);
+    entry.insert("baseUrl".to_string(), Value::String(base_url));
+    entry.entry("api".to_string())
+        .or_insert_with(|| Value::String("openai-completions".into()));
+    entry.insert("apiKey".to_string(), Value::String(api_key));
+    entry.entry("authHeader".to_string())
+        .or_insert_with(|| Value::Bool(true));
+
+    // `contextWindow` defaults to a generous 32k. The libertai endpoint
+    // doesn't surface real per-model context windows in /v1/models
+    // today, so the placeholder libertai-cli has used since v0.1 is
+    // good enough; if the array already has richer entries (e.g. from
+    // a future server-side catalog ingest), we leave them untouched.
+    let existing = entry
+        .get("models")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let already_present = existing.iter().any(|m| {
+        m.get("id").and_then(|id| id.as_str()) == Some(default_model.as_str())
+    });
+    let mut models_array = existing;
+    if models_array.is_empty() || !already_present {
+        models_array.push(json!({
+            "id": default_model,
+            "name": default_model,
+            "api": "openai-completions",
+            "contextWindow": 32768u32,
+        }));
+    }
+    entry.insert("models".to_string(), Value::Array(models_array));
 
     // Pretty-print for human readability — the file is occasionally edited
     // by hand (pi docs recommend it) and diffs are easier this way.
