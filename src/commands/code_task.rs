@@ -160,6 +160,12 @@ impl Tool for TaskTool {
             approvals: Arc::clone(&self.approvals),
             ui: Arc::clone(&self.ui),
             depth: self.parent_depth,
+            // Subagents inherit CLI defaults (task on, todo on, search/fetch off)
+            // so a parent code session can recursively spawn coding subagents
+            // exactly as it does today. The desktop's chat pillar opts out of
+            // task entirely so this branch never spawns from chat.
+            features: crate::commands::code_factory::FactoryFeatures::cli_defaults(),
+            libertai_cfg: None,
         }
         .child();
 
