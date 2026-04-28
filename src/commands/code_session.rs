@@ -74,6 +74,19 @@ pub struct CodeSessionConfig {
 /// `create_agent_session`.
 pub const DEFAULT_MAX_TOKENS: u32 = 32_768;
 
+/// Set `PI_HTTP_REQUEST_TIMEOUT_SECS` so pi's HTTP client uses our
+/// configured idle timeout instead of its 60s baked-in default.
+/// Idempotent: pi reads the env var once via `OnceLock`, so the first
+/// caller wins. Call this before any session creates a request.
+///
+/// `secs == 0` disables the timeout entirely (pi treats 0 as `None`).
+pub fn ensure_pi_http_timeout(secs: u64) {
+    const ENV: &str = "PI_HTTP_REQUEST_TIMEOUT_SECS";
+    if std::env::var(ENV).is_err() {
+        std::env::set_var(ENV, secs.to_string());
+    }
+}
+
 /// Map a [`CodeSessionConfig`] to a fully-populated `SessionOptions`.
 pub fn build_session_options(cfg: CodeSessionConfig) -> SessionOptions {
     let (no_session, session_path) = match cfg.persistence {

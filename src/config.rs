@@ -10,7 +10,14 @@ pub const DEFAULT_CODE_PROVIDER: &str = "libertai";
 pub const DEFAULT_IMAGE_MODEL: &str = "z-image-turbo";
 pub const DEFAULT_OPUS_MODEL: &str = "gemma-4-31b-it";
 pub const DEFAULT_FAST_MODEL: &str = "qwen3.6-35b-a3b";
-pub const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 120;
+/// Idle timeout (seconds) for HTTP requests, including SSE token streams.
+/// Pi's http client uses this as a per-chunk idle deadline — a brief
+/// pause from the model (or a tool-execution gap) of more than this
+/// many seconds will fail the request with "Request timed out". The 60s
+/// pi default was triggering on long generations; 600s is generous
+/// enough to ride out most provider hiccups while still bounding truly
+/// stuck connections.
+pub const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 600;
 pub const DEFAULT_CHECK_FOR_UPDATES: bool = true;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

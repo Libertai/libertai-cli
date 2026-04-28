@@ -35,6 +35,11 @@ pub fn run(
     args: Vec<String>,
 ) -> Result<()> {
     let cfg = config::load()?;
+    // Pi's HTTP client reads PI_HTTP_REQUEST_TIMEOUT_SECS once via
+    // OnceLock — set it before any pi-side request fires so the
+    // configured idle timeout (cfg.http_timeout_secs, default 600s)
+    // wins over pi's baked-in 60s.
+    crate::commands::code_session::ensure_pi_http_timeout(cfg.http_timeout_secs);
     // Make sure pi's models.json knows about libertai before any pi-side
     // code looks it up. Runs first so auth / FS errors surface before we
     // spin up the async runtime.
