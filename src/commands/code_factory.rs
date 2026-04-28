@@ -27,6 +27,7 @@ use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi};
 use crate::commands::code_task::TaskTool;
 use crate::commands::code_todo::TodoTool;
 use crate::commands::fetch_tool::FetchTool;
+use crate::commands::image_tool::ImageGenTool;
 use crate::commands::search_tool::SearchTool;
 use crate::config::Config as LibertaiConfig;
 
@@ -87,9 +88,10 @@ impl ModeFlag {
 }
 
 /// Per-feature toggles for the factory. Lets the desktop's chat
-/// pillar opt out of the `task` subagent and into web search /
-/// fetch tools without forking the factory. Defaults are tuned for
-/// the existing CLI: search/fetch off, task on, todo on.
+/// pillar opt out of the `task` subagent and tune which web/image tools
+/// register without forking the factory. Default tuning ships
+/// search/fetch/`generate_image` ON across both desktop and CLI now —
+/// terminal users get the same upgrade desktop pillars get.
 #[derive(Debug, Clone, Default)]
 pub struct FactoryFeatures {
     /// Enable the `task` subagent. Off for chat-pillar so a chat
@@ -101,15 +103,27 @@ pub struct FactoryFeatures {
     /// Enable the LibertAI `/search` tool. Requires a libertai-cli
     /// `Config` with a valid api_key + search_base.
     pub search: bool,
-    /// Enable the LibertAI `/fetch` tool.
+    /// Enable the local `fetch` tool (raw HTTP via reqwest, no
+    /// LibertAI dependency).
     pub fetch: bool,
+    /// Enable the LibertAI `generate_image` tool. Requires a libertai-cli
+    /// `Config` with a valid api_key.
+    pub image: bool,
 }
 
 impl FactoryFeatures {
-    /// Defaults that match the pre-feature behavior — task + todo on,
-    /// search + fetch off. Used by `LibertaiToolFactory::new`.
+    /// Defaults for libertai-cli's own CLI/REPL: full tool surface
+    /// turned on. Search and `generate_image` silently no-op when
+    /// `libertai_cfg` is None at registry build time (no api_key →
+    /// no LibertAI calls); local `fetch` registers regardless.
     pub fn cli_defaults() -> Self {
-        Self { task: true, todo: true, search: false, fetch: false }
+        Self {
+            task: true,
+            todo: true,
+            search: true,
+            fetch: true,
+            image: true,
+        }
     }
 }
 
@@ -215,17 +229,26 @@ impl ToolFactory for LibertaiToolFactory {
             )));
         }
 
-        //    - `search` / `fetch`: chat-pillar tools. Need a libertai
-        //      Config carrier for the api_key / search_base. If the
-        //      caller turned the feature on without supplying a Config
-        //      we silently skip — failing here would surface as an
-        //      opaque session-create error.
+        //    - `fetch`: local reqwest, no libertai dependency. Registers
+        //      whenever the feature is on, regardless of cfg presence.
+        if self.features.fetch {
+            wrapped.push(Box::new(FetchTool::new()));
+        }
+
+        //    - `search` / `generate_image`: LibertAI-endpoint tools that
+        //      need a libertai-cli `Config` carrier for the api_key /
+        //      search_base. If the caller turned the feature on without
+        //      supplying a Config we silently skip — failing here would
+        //      surface as an opaque session-create error.
         if let Some(cfg) = self.libertai_cfg.as_ref() {
             if self.features.search {
                 wrapped.push(Box::new(SearchTool::new(Arc::clone(cfg))));
             }
-            if self.features.fetch {
-                wrapped.push(Box::new(FetchTool::new(Arc::clone(cfg))));
+            if self.features.image {
+                wrapped.push(Box::new(ImageGenTool::new(
+                    Arc::clone(cfg),
+                    Arc::new(cwd.to_path_buf()),
+                )));
             }
         }
 

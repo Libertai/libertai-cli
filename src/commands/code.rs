@@ -15,7 +15,7 @@ use pi::model::AssistantMessageEvent;
 use pi::sdk::{create_agent_session, AgentEvent};
 
 use crate::commands::code_approvals::ApprovalState;
-use crate::commands::code_factory::{LibertaiToolFactory, Mode, ModeFlag};
+use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
 use crate::commands::code_session::{
     build_session_options, list_past_sessions, most_recent_session, CodeSessionConfig,
     SessionPersistence,
@@ -61,7 +61,7 @@ pub fn run(
     if args.is_empty() {
         // No prompt on the command line → interactive REPL.
         // Raw-mode UI + input bar + agent session reuse live in code_ui.
-        return code_ui::run_interactive(provider, model, mode, resume_path);
+        return code_ui::run_interactive(provider, model, mode, resume_path, Arc::new(cfg));
     }
 
     let prompt = args.join(" ");
@@ -80,7 +80,13 @@ pub fn run(
     // one-shot — it's part of the factory's contract now.
     let approvals = Arc::new(ApprovalState::new());
     let ui = Arc::new(TerminalApprovalUi);
-    let factory = Arc::new(LibertaiToolFactory::new(ModeFlag::new(mode), approvals, ui));
+    let factory = Arc::new(LibertaiToolFactory::new_with_features(
+        ModeFlag::new(mode),
+        approvals,
+        ui,
+        FactoryFeatures::cli_defaults(),
+        Some(Arc::new(cfg)),
+    ));
 
     runtime
         .block_on(async move { run_async(provider, model, prompt, factory, resume_path).await })

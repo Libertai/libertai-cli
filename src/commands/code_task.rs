@@ -156,17 +156,20 @@ impl Tool for TaskTool {
         // with parent_depth + 1 so deeper nesting hits the recursion
         // cap. `LibertaiToolFactory::child` is the one place that
         // increments depth.
+        //
+        // Subagents are research helpers (read-only TASK_TOOL_ALLOWLIST
+        // above), so we turn `image` off — image generation is mutating
+        // and out of scope for a research subagent. Search and local
+        // fetch stay on; both are read-only and useful for lookup.
+        let mut features = crate::commands::code_factory::FactoryFeatures::cli_defaults();
+        features.image = false;
         let factory = LibertaiToolFactory {
             mode: self.mode.clone(),
             approvals: Arc::clone(&self.approvals),
             ui: Arc::clone(&self.ui),
             depth: self.parent_depth,
-            // Subagents inherit CLI defaults (task on, todo on, search/fetch off)
-            // so a parent code session can recursively spawn coding subagents
-            // exactly as it does today. The desktop's chat pillar opts out of
-            // task entirely so this branch never spawns from chat.
-            features: crate::commands::code_factory::FactoryFeatures::cli_defaults(),
-            libertai_cfg: None,
+            features,
+            libertai_cfg: Some(Arc::new(cfg.clone())),
         }
         .child();
 

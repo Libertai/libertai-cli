@@ -15,6 +15,7 @@ pub mod config_cmd;
 pub mod fetch;
 pub mod fetch_tool;
 pub mod image;
+pub mod image_tool;
 pub mod keys;
 pub mod launchers;
 pub mod login;

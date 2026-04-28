@@ -31,12 +31,13 @@ use pi::sdk::{
 };
 
 use crate::commands::code_approvals::ApprovalState;
-use crate::commands::code_factory::{LibertaiToolFactory, Mode, ModeFlag};
+use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
 use crate::commands::code_session::{
     build_session_options, CodeSessionConfig, SessionPersistence,
 };
 use crate::commands::code_skills::{self, SkillPillar};
 use crate::commands::code_term::TerminalApprovalUi;
+use crate::config::Config as LibertaiConfig;
 
 /// ANSI dim/bold helpers for cooked output (agent streaming phase).
 const DIM: &str = "\x1b[2m";
@@ -178,6 +179,7 @@ pub fn run_interactive(
     model: String,
     mode: Mode,
     resume_path: Option<PathBuf>,
+    cfg: Arc<LibertaiConfig>,
 ) -> Result<()> {
     print_banner(&provider, &model, mode);
 
@@ -205,8 +207,9 @@ pub fn run_interactive(
         .build()
         .map_err(|e| anyhow::anyhow!("asupersync runtime: {e}"))?;
 
-    runtime
-        .block_on(async move { repl_loop(provider, model, mode, approvals, resume_path).await })
+    runtime.block_on(async move {
+        repl_loop(provider, model, mode, approvals, resume_path, cfg).await
+    })
 }
 
 fn print_banner(provider: &str, model: &str, mode: Mode) {
@@ -227,6 +230,7 @@ async fn repl_loop(
     initial_mode: Mode,
     approvals: Arc<ApprovalState>,
     resume_path: Option<PathBuf>,
+    cfg: Arc<LibertaiConfig>,
 ) -> Result<()> {
     // Shared mode flag — flipped by Shift+Tab and `/plan`. The same
     // Arc is held by every ApprovalTool inside the session's
@@ -240,6 +244,7 @@ async fn repl_loop(
         mode.clone(),
         Arc::clone(&approvals),
         resume_path,
+        Arc::clone(&cfg),
     )
     .await?;
 
@@ -314,6 +319,7 @@ async fn repl_loop(
                     mode.clone(),
                     Arc::clone(&approvals),
                     None,
+                    Arc::clone(&cfg),
                 )
                 .await?;
                 history.clear();
@@ -411,9 +417,16 @@ async fn build_handle(
     mode: ModeFlag,
     approvals: Arc<ApprovalState>,
     resume_path: Option<PathBuf>,
+    cfg: Arc<LibertaiConfig>,
 ) -> Result<AgentSessionHandle> {
     let ui = Arc::new(TerminalApprovalUi);
-    let factory = Arc::new(LibertaiToolFactory::new(mode, approvals, ui));
+    let factory = Arc::new(LibertaiToolFactory::new_with_features(
+        mode,
+        approvals,
+        ui,
+        FactoryFeatures::cli_defaults(),
+        Some(cfg),
+    ));
     let persistence = match resume_path {
         Some(p) => SessionPersistence::Resume(p),
         None => SessionPersistence::Fresh,
