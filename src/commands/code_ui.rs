@@ -417,6 +417,7 @@ async fn build_handle(
         Some(p) => SessionPersistence::Resume(p),
         None => SessionPersistence::Fresh,
     };
+    let max_tokens = Some(crate::commands::code_session::DEFAULT_MAX_TOKENS);
     let options = build_session_options(CodeSessionConfig {
         provider: provider.to_string(),
         model: model.to_string(),
@@ -426,10 +427,13 @@ async fn build_handle(
         tool_factory: factory,
         persistence,
         enabled_tools: None,
+        max_tokens,
     });
-    create_agent_session(options)
+    let mut handle = create_agent_session(options)
         .await
-        .map_err(|e| anyhow::Error::new(e).context("create_agent_session"))
+        .map_err(|e| anyhow::Error::new(e).context("create_agent_session"))?;
+    handle.set_max_tokens(max_tokens);
+    Ok(handle)
 }
 
 /// Render a previously-saved conversation in the same shape the live REPL

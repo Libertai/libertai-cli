@@ -57,7 +57,22 @@ pub struct CodeSessionConfig {
     /// uses pi's full enabled tool set; only the Task subagent path
     /// currently filters this down.
     pub enabled_tools: Option<Vec<String>>,
+    /// Per-prompt `max_tokens` cap. `None` lets pi fall through to its
+    /// provider default (4096 for openai-compat as of 0.1.13), which
+    /// truncates large tool-call args mid-stream — set this to a higher
+    /// value (e.g. `DEFAULT_MAX_TOKENS`) for code agents that emit big
+    /// `write` calls. Applied via `handle.set_max_tokens` after
+    /// `create_agent_session`.
+    pub max_tokens: Option<u32>,
 }
+
+/// Sensible per-prompt token cap for code-style agents. 32k is enough
+/// for a multi-thousand-line `write` tool call without truncation,
+/// while still leaving enough headroom on the default 128k context
+/// window for the rest of the conversation. Apply with
+/// `handle.set_max_tokens(Some(DEFAULT_MAX_TOKENS))` right after
+/// `create_agent_session`.
+pub const DEFAULT_MAX_TOKENS: u32 = 32_768;
 
 /// Map a [`CodeSessionConfig`] to a fully-populated `SessionOptions`.
 pub fn build_session_options(cfg: CodeSessionConfig) -> SessionOptions {

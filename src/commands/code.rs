@@ -95,6 +95,7 @@ async fn run_async(
         Some(p) => SessionPersistence::Resume(p),
         None => SessionPersistence::Fresh,
     };
+    let max_tokens = Some(crate::commands::code_session::DEFAULT_MAX_TOKENS);
     let options = build_session_options(CodeSessionConfig {
         provider,
         model,
@@ -104,6 +105,7 @@ async fn run_async(
         tool_factory: factory,
         persistence,
         enabled_tools: None,
+        max_tokens,
     });
 
     // anyhow::Error::new preserves the underlying pi::sdk::Error so
@@ -111,6 +113,7 @@ async fn run_async(
     let mut handle = create_agent_session(options)
         .await
         .map_err(|e| anyhow::Error::new(e).context("create_agent_session"))?;
+    handle.set_max_tokens(max_tokens);
 
     let msg = handle.prompt(prompt, render).await.map_err(anyhow::Error::new)?;
 

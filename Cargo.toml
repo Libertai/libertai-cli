@@ -59,7 +59,7 @@ zeroize = { version = "1", features = ["derive"] }
 # Pinned to our fork at Libertai/pi-agent-rust which carries
 # `SessionOptions::tool_factory` (approvals / plan mode / subagents) and
 # `AgentSessionHandle::set_session_name` (in-process rename).
-pi_agent_rust = { git = "https://github.com/Libertai/pi-agent-rust", rev = "da865bef42514dd2409626537659acc46a54734a", default-features = false }
+pi_agent_rust = { git = "https://github.com/Libertai/pi-agent-rust", rev = "885f2b2652077c147f6ebe16daaf1d4e3749e474", default-features = false }
 asupersync = { version = "=0.3.1", default-features = false, features = ["tls-native-roots"] }
 async-trait = "0.1"
 futures = "0.3"

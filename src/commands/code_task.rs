@@ -169,6 +169,7 @@ impl Tool for TaskTool {
         }
         .child();
 
+        let max_tokens = Some(crate::commands::code_session::DEFAULT_MAX_TOKENS);
         let options = build_session_options(CodeSessionConfig {
             provider: cfg.default_code_provider.clone(),
             model: cfg.default_code_model.clone(),
@@ -180,6 +181,7 @@ impl Tool for TaskTool {
             // pollute the user-facing session list with noise.
             persistence: SessionPersistence::Ephemeral,
             enabled_tools: Some(filtered),
+            max_tokens,
         });
 
         eprintln!("\n  \x1b[2m[subagent] running: {prompt}\x1b[0m");
@@ -188,6 +190,7 @@ impl Tool for TaskTool {
             Ok(h) => h,
             Err(e) => return Ok(err_output(&format!("task: session init failed: {e}"))),
         };
+        handle.set_max_tokens(max_tokens);
 
         let assistant = match handle.prompt(prompt, render_child).await {
             Ok(msg) => msg,
