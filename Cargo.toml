@@ -56,12 +56,13 @@ zeroize = { version = "1", features = ["derive"] }
 # license field above stays "MIT" on the integrated-code branch pending a
 # policy call before merging to master.
 #
-# Pinned to our fork at Libertai/pi_agent_rust which carries three
+# Pinned to our fork at Libertai/pi_agent_rust which carries four
 # patches on top of upstream main:
 # - `AgentSessionHandle::set_session_name` (in-process rename, upstream issue #62)
 # - `AgentSessionHandle::set_max_tokens` (per-prompt cap override, upstream issue #63)
 # - `hashline_edit` op defaulting to "replace" when omitted by the model
-pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "5e980cad796ea748562db632abe0ed020fc0ea63", default-features = false }
+# - `AgentSessionHandle::prompt_with_content[_with_abort]` (multimodal SDK)
+pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "789fb433c3c785f953c26c4c5980e1aefa17bf56", default-features = false }
 asupersync = { version = "=0.3.1", default-features = false, features = ["tls-native-roots"] }
 async-trait = "0.1"
 futures = "0.3"
@@ -76,13 +77,3 @@ ctrlc = "3"
 [profile.release]
 lto = "thin"
 strip = true
-
-# In-progress local development. The pinned git rev above doesn't yet
-# carry the multimodal `prompt_with_content` SDK wrappers needed by the
-# desktop's image-attach UX; redirect the dependency to the local
-# checkout so both libertai-cli and liberclaw-code (which inherits this
-# patch through Cargo's workspace resolver chain when it path-deps us)
-# build against one pi tree. Drop this section once the pi changes ship
-# to a tagged rev and the `rev = "..."` above is bumped.
-[patch."https://github.com/Libertai/pi_agent_rust"]
-pi_agent_rust = { path = "../pi_agent_rust" }
