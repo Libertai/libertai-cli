@@ -56,11 +56,10 @@ zeroize = { version = "1", features = ["derive"] }
 # license field above stays "MIT" on the integrated-code branch pending a
 # policy call before merging to master.
 #
-# Temporarily on a local path dep pointing at our branch that adds
-# `SessionOptions::tool_factory` (needed for approvals / plan mode /
-# subagents). Upstream PR pending at Dicklesworthstone/pi_agent_rust; once
-# it lands we switch this back to a git tag dep.
-pi_agent_rust = { path = "../pi_agent_rust", default-features = false }
+# Pinned to our fork at Libertai/pi-agent-rust which carries
+# `SessionOptions::tool_factory` (approvals / plan mode / subagents) and
+# `AgentSessionHandle::set_session_name` (in-process rename).
+pi_agent_rust = { git = "https://github.com/Libertai/pi-agent-rust", rev = "da865bef42514dd2409626537659acc46a54734a", default-features = false }
 asupersync = { version = "=0.3.1", default-features = false, features = ["tls-native-roots"] }
 async-trait = "0.1"
 futures = "0.3"
