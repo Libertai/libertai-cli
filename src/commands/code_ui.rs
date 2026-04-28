@@ -35,6 +35,7 @@ use crate::commands::code_factory::{LibertaiToolFactory, Mode, ModeFlag};
 use crate::commands::code_session::{
     build_session_options, CodeSessionConfig, SessionPersistence,
 };
+use crate::commands::code_skills::{self, SkillPillar};
 use crate::commands::code_term::TerminalApprovalUi;
 
 /// ANSI dim/bold helpers for cooked output (agent streaming phase).
@@ -418,6 +419,9 @@ async fn build_handle(
         None => SessionPersistence::Fresh,
     };
     let max_tokens = Some(crate::commands::code_session::DEFAULT_MAX_TOKENS);
+    let skill_cwd = std::env::current_dir().ok();
+    let append_system_prompt =
+        code_skills::prompt_for_pillar(SkillPillar::Code, skill_cwd.as_deref())?;
     let options = build_session_options(CodeSessionConfig {
         provider: provider.to_string(),
         model: model.to_string(),
@@ -427,6 +431,7 @@ async fn build_handle(
         tool_factory: factory,
         persistence,
         enabled_tools: None,
+        append_system_prompt,
         max_tokens,
     });
     let mut handle = create_agent_session(options)

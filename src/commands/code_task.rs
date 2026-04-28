@@ -24,6 +24,7 @@ use crate::commands::code_factory::{LibertaiToolFactory, ModeFlag};
 use crate::commands::code_session::{
     build_session_options, CodeSessionConfig, SessionPersistence,
 };
+use crate::commands::code_skills::{self, SkillPillar};
 use crate::config;
 
 const NAME: &str = "task";
@@ -170,6 +171,11 @@ impl Tool for TaskTool {
         .child();
 
         let max_tokens = Some(crate::commands::code_session::DEFAULT_MAX_TOKENS);
+        let skill_cwd = std::env::current_dir().ok();
+        let append_system_prompt =
+            code_skills::prompt_for_pillar(SkillPillar::Code, skill_cwd.as_deref())
+                .ok()
+                .flatten();
         let options = build_session_options(CodeSessionConfig {
             provider: cfg.default_code_provider.clone(),
             model: cfg.default_code_model.clone(),
@@ -181,6 +187,7 @@ impl Tool for TaskTool {
             // pollute the user-facing session list with noise.
             persistence: SessionPersistence::Ephemeral,
             enabled_tools: Some(filtered),
+            append_system_prompt,
             max_tokens,
         });
 

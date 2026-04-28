@@ -57,6 +57,9 @@ pub struct CodeSessionConfig {
     /// uses pi's full enabled tool set; only the Task subagent path
     /// currently filters this down.
     pub enabled_tools: Option<Vec<String>>,
+    /// Extra system prompt content appended after pi's default prompt.
+    /// Used for Agent Skills selected by CLI/desktop pillar.
+    pub append_system_prompt: Option<String>,
     /// Per-prompt `max_tokens` cap. `None` lets pi fall through to its
     /// provider default (4096 for openai-compat as of 0.1.13), which
     /// truncates large tool-call args mid-stream — set this to a higher
@@ -108,6 +111,7 @@ pub fn build_session_options(cfg: CodeSessionConfig) -> SessionOptions {
         working_directory: cfg.working_directory,
         include_cwd_in_prompt: cfg.include_cwd_in_prompt,
         enabled_tools: cfg.enabled_tools,
+        append_system_prompt: cfg.append_system_prompt,
         ..SessionOptions::default()
     }
 }

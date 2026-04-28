@@ -20,6 +20,7 @@ use crate::commands::code_session::{
     build_session_options, list_past_sessions, most_recent_session, CodeSessionConfig,
     SessionPersistence,
 };
+use crate::commands::code_skills::{self, SkillPillar};
 use crate::commands::code_term::TerminalApprovalUi;
 use crate::commands::{code_models, code_ui};
 use crate::config;
@@ -101,6 +102,9 @@ async fn run_async(
         None => SessionPersistence::Fresh,
     };
     let max_tokens = Some(crate::commands::code_session::DEFAULT_MAX_TOKENS);
+    let skill_cwd = std::env::current_dir().ok();
+    let append_system_prompt =
+        code_skills::prompt_for_pillar(SkillPillar::Code, skill_cwd.as_deref())?;
     let options = build_session_options(CodeSessionConfig {
         provider,
         model,
@@ -110,6 +114,7 @@ async fn run_async(
         tool_factory: factory,
         persistence,
         enabled_tools: None,
+        append_system_prompt,
         max_tokens,
     });
 
