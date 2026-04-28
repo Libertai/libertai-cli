@@ -56,10 +56,12 @@ zeroize = { version = "1", features = ["derive"] }
 # license field above stays "MIT" on the integrated-code branch pending a
 # policy call before merging to master.
 #
-# Pinned to our fork at Libertai/pi-agent-rust which carries
-# `SessionOptions::tool_factory` (approvals / plan mode / subagents) and
-# `AgentSessionHandle::set_session_name` (in-process rename).
-pi_agent_rust = { git = "https://github.com/Libertai/pi-agent-rust", rev = "885f2b2652077c147f6ebe16daaf1d4e3749e474", default-features = false }
+# Pinned to our fork at Libertai/pi-agent-rust which carries three
+# patches on top of upstream main:
+# - `AgentSessionHandle::set_session_name` (in-process rename, upstream issue #62)
+# - `AgentSessionHandle::set_max_tokens` (per-prompt cap override, upstream issue #63)
+# - `hashline_edit` op defaulting to "replace" when omitted by the model
+pi_agent_rust = { git = "https://github.com/Libertai/pi-agent-rust", rev = "5e980cad796ea748562db632abe0ed020fc0ea63", default-features = false }
 asupersync = { version = "=0.3.1", default-features = false, features = ["tls-native-roots"] }
 async-trait = "0.1"
 futures = "0.3"
