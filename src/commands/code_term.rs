@@ -47,13 +47,13 @@ pub struct TerminalApprovalUi;
 
 #[async_trait]
 impl ApprovalUi for TerminalApprovalUi {
-    async fn decide(&self, tool_name: &str, preview: &str) -> PromptChoice {
-        prompt(tool_name, preview)
+    async fn decide(&self, tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
+        prompt(tool_name, preview, always_rule)
     }
 }
 
 /// Block until the user picks allow/always/deny.
-fn prompt(tool_name: &str, preview: &str) -> PromptChoice {
+fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
     let mut stderr = std::io::stderr();
 
     eprintln!();
@@ -62,7 +62,7 @@ fn prompt(tool_name: &str, preview: &str) -> PromptChoice {
     for line in preview.lines() {
         eprintln!("  \x1b[2m│\x1b[0m {line}");
     }
-    eprint!("  \x1b[2m[a]\x1b[0m allow once  \x1b[2m[A]\x1b[0m always allow  \x1b[2m[d]\x1b[0m deny: ");
+    eprint!("  \x1b[2m[a]\x1b[0m allow once  \x1b[2m[A]\x1b[0m always allow ({always_rule})  \x1b[2m[d]\x1b[0m deny: ");
     let _ = stderr.flush();
 
     // Brief raw-mode single-key read via the shared RAII guard so a

@@ -195,8 +195,8 @@ pub fn run_interactive(
     install_ctrlc_handler();
 
     // Shared across prompts AND across mode toggles: the approvals
-    // allowlist lives for the whole REPL lifetime, so "always allow bash"
-    // sticks across a Shift+Tab trip through Plan mode.
+    // allowlist lives for the whole REPL lifetime, so always-allowed rules
+    // for specific commands/paths stick across a Shift+Tab trip through Plan mode.
     let approvals = Arc::new(ApprovalState::new());
 
     // Same asupersync setup as the non-interactive path.
@@ -510,7 +510,7 @@ fn print_help() {
     println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
     println!("{DIM}  /clear    — wipe the screen and start a fresh session{RESET}");
-    println!("{DIM}  /forget   — clear the session \"always allow\" list{RESET}");
+    println!("{DIM}  /forget   — clear session-scoped allow rules{RESET}");
     println!("{DIM}  ↑ / ↓     — walk through previously submitted prompts{RESET}");
     println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
     println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");

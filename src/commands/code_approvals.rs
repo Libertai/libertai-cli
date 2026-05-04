@@ -37,6 +37,136 @@ pub enum PromptChoice {
     Deny,
 }
 
+/// A single allow rule binding a tool to a command/path pattern.
+///
+/// `pattern` can contain `*` wildcards (glob-style, any sequence of chars),
+/// or be empty to mean "all uses of this tool". When `pattern` contains no
+/// `*` the rule is an exact match.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AllowRule {
+    /// Lowercase canonical tool name: `"bash"`, `"edit"`, `"write"`, etc.
+    pub tool: String,
+    /// Command/path/value pattern. Empty = matches all uses of the tool.
+    /// `*` matches any sequence of characters. No `*` = exact match.
+    pub pattern: String,
+}
+
+impl AllowRule {
+    /// Returns true when this rule applies to `(tool_name, value)`.
+    pub fn matches(&self, tool_name: &str, value: &str) -> bool {
+        if self.tool != tool_name {
+            return false;
+        }
+        if self.pattern.is_empty() {
+            return true;
+        }
+        wildcard_match(&self.pattern, value)
+    }
+}
+
+/// Raw, unsanitized data extracted from a tool call before any display
+/// processing. Used for matching and rule construction — never drawn from
+/// sanitized/truncated preview text.
+pub struct ApprovalSubject {
+    /// The raw command string, file path, or URL for pattern matching.
+    pub value: String,
+    /// The rule to record if the user presses "always allow".
+    pub suggested_rule: AllowRule,
+    /// Human-readable label shown in the UI, e.g. `"bash(npm run build)"`.
+    pub suggested_label: String,
+}
+
+/// Extract an [`ApprovalSubject`] from the raw JSON input of a tool call.
+///
+/// Reads raw JSON fields without sanitization or truncation so the
+/// resulting rule matches exactly what the model produced. The caller
+/// should sanitize separately for UI display (see [`preview_call`]).
+pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubject {
+    let (value, rule, label) = match tool {
+        "bash" => {
+            let cmd = input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<missing command>");
+            let s = cmd.to_string();
+            (s.clone(), AllowRule { tool: tool.to_string(), pattern: s.clone() }, format!("bash({s})"))
+        }
+        "write" => {
+            let path = input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<missing path>");
+            let s = path.to_string();
+            (s.clone(), AllowRule { tool: tool.to_string(), pattern: s.clone() }, format!("write({s})"))
+        }
+        "edit" => {
+            let path = input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<missing path>");
+            let s = path.to_string();
+            (s.clone(), AllowRule { tool: tool.to_string(), pattern: s.clone() }, format!("edit({s})"))
+        }
+        "hashline_edit" => {
+            let path = input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<missing path>");
+            let s = path.to_string();
+            (s.clone(), AllowRule { tool: tool.to_string(), pattern: s.clone() }, format!("hashline_edit({s})"))
+        }
+        // Other tools (WebFetch, etc.) — match by tool name only.
+        other => {
+            let s = String::new();
+            (s.clone(), AllowRule { tool: other.to_string(), pattern: s }, format!("{other}(*)"))
+        }
+    };
+    ApprovalSubject { value, suggested_rule: rule, suggested_label: label }
+}
+
+/// Match `text` against a `*`-wildcard pattern.
+///
+/// - Empty pattern → always matches (the "whole tool" rule).
+/// - No `*` in pattern → exact match (`text == pattern`).
+/// - Single or multiple `*` → split on `*` and verify each segment appears
+///   in order (standard glob-lite semantics).
+///
+/// The function is public so tests and future static rule parsers can use
+/// it without going through `AllowRule`.
+pub fn wildcard_match(pattern: &str, text: &str) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return text == pattern;
+    }
+
+    let parts: Vec<&str> = pattern.split('*').collect();
+
+    // The first segment must be a prefix.
+    if !parts.is_empty() && !parts[0].is_empty() && !text.starts_with(parts[0]) {
+        return false;
+    }
+    // The last segment must be a suffix.
+    let last = parts.len() - 1;
+    if last > 0 && !parts[last].is_empty() && !text.ends_with(parts[last]) {
+        return false;
+    }
+    // Interior segments must appear in order at non-overlapping positions.
+    let mut pos = if parts[0].is_empty() { 0 } else { parts[0].len() };
+    for i in 1..last {
+        let seg = parts[i];
+        if seg.is_empty() {
+            continue;
+        }
+        match text[pos..].find(seg) {
+            Some(idx) => pos += idx + seg.len(),
+            None => return false,
+        }
+    }
+    true
+}
+
 /// Renders an approval prompt and returns the user's choice.
 ///
 /// The trait is async because the desktop implementation awaits a
@@ -52,9 +182,15 @@ pub enum PromptChoice {
 /// response so existing UI implementations (e.g. the terminal) keep
 /// compiling without behavior changes; only UIs that want to surface
 /// the ask flow override it.
+///
+/// `decide` receives three arguments:
+/// - `tool_name` — the tool name (e.g. `"bash"`).
+/// - `preview` — sanitized display text (safe to print).
+/// - `always_rule` — the rule label for the "always allow" option
+///   (e.g. `"bash(npm run build)"`), already sanitized/defanged.
 #[async_trait]
 pub trait ApprovalUi: Send + Sync {
-    async fn decide(&self, tool_name: &str, preview: &str) -> PromptChoice;
+    async fn decide(&self, tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice;
     async fn ask(&self, _payload: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
             "cancelled": true,
@@ -68,9 +204,9 @@ pub trait ApprovalUi: Send + Sync {
 /// Holds two allowlists:
 /// - `auto_allow` (hardcoded, read-only built-ins): never prompt.
 /// - `always_allow` (user-promoted via `AlwaysAllow`): never prompt for
-///   the rest of the session.
+///   the rest of the session, keyed by tool+pattern [`AllowRule`].
 pub struct ApprovalState {
-    always_allow: Mutex<HashSet<String>>,
+    always_allow: Mutex<Vec<AllowRule>>,
     auto_allow: HashSet<String>,
 }
 
@@ -83,7 +219,7 @@ impl Default for ApprovalState {
 impl ApprovalState {
     pub fn new() -> Self {
         Self {
-            always_allow: Mutex::new(HashSet::new()),
+            always_allow: Mutex::new(Vec::new()),
             auto_allow: ["read", "grep", "find", "ls"]
                 .into_iter()
                 .map(String::from)
@@ -91,23 +227,30 @@ impl ApprovalState {
         }
     }
 
-    /// True when the tool is on either allowlist and should run without prompting.
-    pub fn is_pre_allowed(&self, tool_name: &str) -> bool {
+    /// True when the tool+value pair is on either allowlist.
+    ///
+    /// `auto_allow` matches by tool name alone (read-only tools).
+    /// `always_allow` checks each [`AllowRule`] against `(tool_name, value)`.
+    pub fn is_pre_allowed(&self, tool_name: &str, value: &str) -> bool {
         if self.auto_allow.contains(tool_name) {
             return true;
         }
         self.always_allow
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(tool_name)
+            .iter()
+            .any(|rule| rule.matches(tool_name, value))
     }
 
-    /// Record that the user picked "always allow" for this tool name.
-    pub fn record_always(&self, tool_name: String) {
-        self.always_allow
+    /// Record a rule for the session. Deduplicates identical rules.
+    pub fn record_always(&self, rule: AllowRule) {
+        let mut list = self
+            .always_allow
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(tool_name);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !list.contains(&rule) {
+            list.push(rule);
+        }
     }
 
     /// Drop every "always allow" entry collected this session.
@@ -182,15 +325,20 @@ impl Tool for ApprovalTool {
         }
 
         let name = self.inner.name();
-        if self.state.is_pre_allowed(name) {
+        let subject = approval_subject(name, &input);
+        if self.state.is_pre_allowed(name, &subject.value) {
             return self.inner.execute(tool_call_id, input, on_update).await;
         }
 
+        // Build sanitized display text from the *raw* input (not from
+        // subject.value, which is unsanitized). preview_call handles
+        // all sanitization and formatting.
         let preview = preview_call(name, &input);
-        match self.ui.decide(name, &preview).await {
+        let always_label = sanitize(&subject.suggested_label);
+        match self.ui.decide(name, &preview, &always_label).await {
             PromptChoice::Allow => self.inner.execute(tool_call_id, input, on_update).await,
             PromptChoice::AlwaysAllow => {
-                self.state.record_always(name.to_string());
+                self.state.record_always(subject.suggested_rule);
                 self.inner.execute(tool_call_id, input, on_update).await
             }
             PromptChoice::Deny => Ok(denial_output(None)),
@@ -378,7 +526,7 @@ mod tests {
     }
     #[async_trait]
     impl ApprovalUi for MockApprovalUi {
-        async fn decide(&self, _tool_name: &str, _preview: &str) -> PromptChoice {
+        async fn decide(&self, _tool_name: &str, _preview: &str, _always_rule: &str) -> PromptChoice {
             self.script
                 .lock()
                 .unwrap()
@@ -387,34 +535,177 @@ mod tests {
         }
     }
 
+    // ── wildcard_match ──────────────────────────────────────────────
+
     #[test]
-    fn pre_allowed_skips_ui() {
-        let state = ApprovalState::new();
-        // `read` is in auto_allow.
-        assert!(state.is_pre_allowed("read"));
-        // `bash` is not — until promoted.
-        assert!(!state.is_pre_allowed("bash"));
-        state.record_always("bash".to_string());
-        assert!(state.is_pre_allowed("bash"));
-        state.forget();
-        assert!(!state.is_pre_allowed("bash"));
+    fn wildcard_empty_matches_anything() {
+        assert!(wildcard_match("", "anything goes"));
     }
 
-    #[tokio::test]
-    async fn always_allow_persists_for_session() {
-        // Asserts that the second `bash` invocation does not consult
-        // the UI — the script only has one entry and the test would
-        // panic on a second decide() call.
-        let state = Arc::new(ApprovalState::new());
-        let ui: Arc<dyn ApprovalUi> = Arc::new(MockApprovalUi::new(vec![PromptChoice::AlwaysAllow]));
+    #[test]
+    fn wildcard_exact() {
+        assert!(wildcard_match("npm run build", "npm run build"));
+        assert!(!wildcard_match("npm run build", "npm run test"));
+    }
 
-        // First call: ui returns AlwaysAllow → recorded.
-        let preview = "echo hi";
-        let choice = ui.decide("bash", preview).await;
-        assert_eq!(choice, PromptChoice::AlwaysAllow);
-        state.record_always("bash".to_string());
+    #[test]
+    fn wildcard_prefix() {
+        assert!(wildcard_match("npm run *", "npm run build"));
+        assert!(wildcard_match("npm run *", "npm run test"));
+        assert!(!wildcard_match("npm run *", "npm-run-script"));
+    }
 
-        // Second call: pre-allowed, no ui consult.
-        assert!(state.is_pre_allowed("bash"));
+    #[test]
+    fn wildcard_suffix() {
+        assert!(wildcard_match("* install", "npm install"));
+        assert!(wildcard_match("* install", "cargo install"));
+        assert!(!wildcard_match("* install", "installing"));
+    }
+
+    #[test]
+    fn wildcard_middle() {
+        assert!(wildcard_match("git * main", "git checkout main"));
+        assert!(wildcard_match("git * main", "git log --oneline main"));
+    }
+
+    #[test]
+    fn wildcard_multiple_stars() {
+        assert!(wildcard_match("a*b*c", "aXbYc"));
+        assert!(wildcard_match("a*b*c", "abc"));
+        assert!(!wildcard_match("a*b*c", "acXb"));
+    }
+
+    #[test]
+    fn exact_does_not_match_compound() {
+        // Security property: an exact rule for a simple command must not
+        // match a compound command that starts the same way.
+        assert!(!wildcard_match("npm run build", "npm run build && rm -rf /"));
+    }
+
+    #[test]
+    fn wildcard_just_star() {
+        assert!(wildcard_match("*", "anything"));
+        assert!(wildcard_match("*", ""));
+    }
+
+    // ── AllowRule ───────────────────────────────────────────────────
+
+    #[test]
+    fn rule_empty_pattern_matches_all() {
+        let rule = AllowRule { tool: "bash".into(), pattern: "".into() };
+        assert!(rule.matches("bash", "anything"));
+        assert!(!rule.matches("edit", "anything"));
+    }
+
+    #[test]
+    fn rule_exact_command() {
+        let rule = AllowRule { tool: "bash".into(), pattern: "npm run build".into() };
+        assert!(rule.matches("bash", "npm run build"));
+        assert!(!rule.matches("bash", "npm run test"));
+    }
+
+    #[test]
+    fn rule_exact_path_does_not_overmatch_prefix() {
+        let rule = AllowRule { tool: "edit".into(), pattern: "src/foo".into() };
+        assert!(rule.matches("edit", "src/foo"));
+        assert!(!rule.matches("edit", "src/foobar"));
+    }
+
+    // ── approval_subject ────────────────────────────────────────────
+
+    #[test]
+    fn subject_bash_extracts_command() {
+        let input = serde_json::json!({"command": "npm run build"});
+        let subj = approval_subject("bash", &input);
+        assert_eq!(subj.value, "npm run build");
+        assert_eq!(subj.suggested_rule.pattern, "npm run build");
+        assert_eq!(subj.suggested_rule.tool, "bash");
+        assert_eq!(subj.suggested_label, "bash(npm run build)");
+    }
+
+    #[test]
+    fn subject_write_extracts_path() {
+        let input = serde_json::json!({"path": "src/main.rs", "content": "..."});
+        let subj = approval_subject("write", &input);
+        assert_eq!(subj.value, "src/main.rs");
+        assert_eq!(subj.suggested_rule.tool, "write");
+        assert_eq!(subj.suggested_label, "write(src/main.rs)");
+    }
+
+    #[test]
+    fn subject_edit_extracts_path() {
+        let input = serde_json::json!({"path": "src/lib.rs", "old_string": "foo", "new_string": "bar"});
+        let subj = approval_subject("edit", &input);
+        assert_eq!(subj.value, "src/lib.rs");
+        assert_eq!(subj.suggested_rule.tool, "edit");
+    }
+
+    #[test]
+    fn subject_missing_command_uses_placeholder() {
+        let input = serde_json::json!({});
+        let subj = approval_subject("bash", &input);
+        assert_eq!(subj.value, "<missing command>");
+        assert_eq!(subj.suggested_label, "bash(<missing command>)");
+    }
+
+    #[test]
+    fn subject_unknown_tool_uses_tool_name() {
+        let input = serde_json::json!({"url": "https://example.com"});
+        let subj = approval_subject("WebFetch", &input);
+        assert_eq!(subj.value, "");
+        assert_eq!(subj.suggested_rule.pattern, "");
+        assert_eq!(subj.suggested_label, "WebFetch(*)");
+    }
+
+    // ── ApprovalState ───────────────────────────────────────────────
+
+    #[test]
+    fn auto_allow_read_only_tools() {
+        let state = ApprovalState::new();
+        assert!(state.is_pre_allowed("read", ""));
+        assert!(state.is_pre_allowed("grep", ""));
+        assert!(state.is_pre_allowed("find", ""));
+        assert!(state.is_pre_allowed("ls", ""));
+        assert!(!state.is_pre_allowed("bash", "anything"));
+    }
+
+    #[test]
+    fn record_always_bash_exact() {
+        let state = ApprovalState::new();
+        let rule = AllowRule { tool: "bash".into(), pattern: "npm run build".into() };
+        state.record_always(rule);
+        assert!(state.is_pre_allowed("bash", "npm run build"));
+        assert!(!state.is_pre_allowed("bash", "npm run test"));
+    }
+
+    #[test]
+    fn forget_clears_rules() {
+        let state = ApprovalState::new();
+        let rule = AllowRule { tool: "bash".into(), pattern: "echo hi".into() };
+        state.record_always(rule);
+        assert!(state.is_pre_allowed("bash", "echo hi"));
+        state.forget();
+        assert!(!state.is_pre_allowed("bash", "echo hi"));
+    }
+
+    #[test]
+    fn record_whole_tool_rule() {
+        let state = ApprovalState::new();
+        let rule = AllowRule { tool: "edit".into(), pattern: "".into() };
+        state.record_always(rule);
+        assert!(state.is_pre_allowed("edit", "anything"));
+        assert!(!state.is_pre_allowed("write", "anything"));
+    }
+
+    #[test]
+    fn always_allow_persists_for_session() {
+        // Verifies that recording a rule means subsequent is_pre_allowed
+        // checks pass without consulting the UI.
+        let state = ApprovalState::new();
+        let rule = AllowRule { tool: "bash".into(), pattern: "echo hi".into() };
+        state.record_always(rule);
+
+        assert!(state.is_pre_allowed("bash", "echo hi"));
+        assert!(!state.is_pre_allowed("bash", "echo bye"));
     }
 }
