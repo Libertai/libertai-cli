@@ -42,12 +42,25 @@ pub enum PromptChoice {
 /// The trait is async because the desktop implementation awaits a
 /// `tokio::sync::oneshot::Receiver` while a frontend modal collects the
 /// user's response. The terminal implementation does its work
-/// synchronously inside the async body — that's fine because pi awaits
+/// synchronously inside the async body, that's fine because pi awaits
 /// `Tool::execute` sequentially, so blocking the executor briefly
 /// doesn't starve other in-flight work on the same session.
+///
+/// `ask` is the parallel back-channel for the `ask_user` tool: the
+/// agent calls it with a structured questions payload and the UI
+/// returns the user's answers. The default impl returns a `cancelled`
+/// response so existing UI implementations (e.g. the terminal) keep
+/// compiling without behavior changes; only UIs that want to surface
+/// the ask flow override it.
 #[async_trait]
 pub trait ApprovalUi: Send + Sync {
     async fn decide(&self, tool_name: &str, preview: &str) -> PromptChoice;
+    async fn ask(&self, _payload: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "cancelled": true,
+            "reason": "ASK_NOT_SUPPORTED",
+        })
+    }
 }
 
 /// Session-scoped approval memory. Resets on every launch.

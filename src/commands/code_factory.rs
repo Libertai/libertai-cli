@@ -25,6 +25,7 @@ use pi::sdk::{default_tool_registry, Config as PiConfig, Tool, ToolFactory, Tool
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi};
 use crate::commands::code_task::TaskTool;
+use crate::commands::code_ask_user::AskUserTool;
 use crate::commands::code_todo::TodoTool;
 use crate::commands::fetch_tool::FetchTool;
 use crate::commands::image_tool::ImageGenTool;
@@ -211,11 +212,19 @@ impl ToolFactory for LibertaiToolFactory {
 
         // 3. Add our own tools, gated by FactoryFeatures.
         //    - `todo`: task-list overlay. Read-only side effects (prints
-        //      to stderr), so we register it unwrapped — it's safe in
+        //      to stderr), so we register it unwrapped, it's safe in
         //      both modes.
         if self.features.todo {
             wrapped.push(Box::new(TodoTool::new()));
         }
+
+        //    - `ask_user`: Claude-Code-style structured questions.
+        //      Always-on across pillars: any agent can pause and ask
+        //      the user a clarifying question. The default
+        //      ApprovalUi::ask impl returns "cancelled" for UIs that
+        //      don't surface this, so the LLM degrades gracefully on
+        //      the terminal CLI.
+        wrapped.push(Box::new(AskUserTool::new(Arc::clone(&self.ui))));
 
         //    - `task` (subagent): only when feature-on AND we still
         //      have depth headroom. Chat pillar opts out so a chat
