@@ -39,19 +39,43 @@ pub enum PromptChoice {
 
 /// A single allow rule binding a tool to a command/path pattern.
 ///
-/// `pattern` can contain `*` wildcards (glob-style, any sequence of chars),
-/// or be empty to mean "all uses of this tool". When `pattern` contains no
-/// `*` the rule is an exact match.
+/// Prompt-created rules are exact, even when the command/path contains `*`.
+/// Explicit wildcard rules can opt into glob-lite `*` matching.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AllowRule {
     /// Lowercase canonical tool name: `"bash"`, `"edit"`, `"write"`, etc.
     pub tool: String,
     /// Command/path/value pattern. Empty = matches all uses of the tool.
-    /// `*` matches any sequence of characters. No `*` = exact match.
     pub pattern: String,
+    /// Whether `pattern` should be interpreted with `*` wildcard semantics.
+    pub wildcard: bool,
 }
 
 impl AllowRule {
+    pub fn exact(tool: impl Into<String>, pattern: impl Into<String>) -> Self {
+        Self {
+            tool: tool.into(),
+            pattern: pattern.into(),
+            wildcard: false,
+        }
+    }
+
+    pub fn wildcard(tool: impl Into<String>, pattern: impl Into<String>) -> Self {
+        Self {
+            tool: tool.into(),
+            pattern: pattern.into(),
+            wildcard: true,
+        }
+    }
+
+    pub fn tool_all(tool: impl Into<String>) -> Self {
+        Self {
+            tool: tool.into(),
+            pattern: String::new(),
+            wildcard: false,
+        }
+    }
+
     /// Returns true when this rule applies to `(tool_name, value)`.
     pub fn matches(&self, tool_name: &str, value: &str) -> bool {
         if self.tool != tool_name {
@@ -60,7 +84,11 @@ impl AllowRule {
         if self.pattern.is_empty() {
             return true;
         }
-        wildcard_match(&self.pattern, value)
+        if self.wildcard {
+            wildcard_match(&self.pattern, value)
+        } else {
+            self.pattern == value
+        }
     }
 }
 
@@ -89,7 +117,11 @@ pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubjec
                 .and_then(|v| v.as_str())
                 .unwrap_or("<missing command>");
             let s = cmd.to_string();
-            (s.clone(), AllowRule { tool: tool.to_string(), pattern: s.clone() }, format!("bash({s})"))
+            (
+                s.clone(),
+                AllowRule::exact(tool, s.clone()),
+                format!("bash({s})"),
+            )
         }
         "write" => {
             let path = input
@@ -97,7 +129,11 @@ pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubjec
                 .and_then(|v| v.as_str())
                 .unwrap_or("<missing path>");
             let s = path.to_string();
-            (s.clone(), AllowRule { tool: tool.to_string(), pattern: s.clone() }, format!("write({s})"))
+            (
+                s.clone(),
+                AllowRule::exact(tool, s.clone()),
+                format!("write({s})"),
+            )
         }
         "edit" => {
             let path = input
@@ -105,7 +141,11 @@ pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubjec
                 .and_then(|v| v.as_str())
                 .unwrap_or("<missing path>");
             let s = path.to_string();
-            (s.clone(), AllowRule { tool: tool.to_string(), pattern: s.clone() }, format!("edit({s})"))
+            (
+                s.clone(),
+                AllowRule::exact(tool, s.clone()),
+                format!("edit({s})"),
+            )
         }
         "hashline_edit" => {
             let path = input
@@ -113,15 +153,28 @@ pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubjec
                 .and_then(|v| v.as_str())
                 .unwrap_or("<missing path>");
             let s = path.to_string();
-            (s.clone(), AllowRule { tool: tool.to_string(), pattern: s.clone() }, format!("hashline_edit({s})"))
+            (
+                s.clone(),
+                AllowRule::exact(tool, s.clone()),
+                format!("hashline_edit({s})"),
+            )
         }
-        // Other tools (WebFetch, etc.) — match by tool name only.
+        // Unknown/future wrapped tools fall back to exact raw-JSON matching
+        // instead of whole-tool approval.
         other => {
-            let s = String::new();
-            (s.clone(), AllowRule { tool: other.to_string(), pattern: s }, format!("{other}(*)"))
+            let s = input.to_string();
+            (
+                s.clone(),
+                AllowRule::exact(other, s.clone()),
+                format!("{other}({s})"),
+            )
         }
     };
-    ApprovalSubject { value, suggested_rule: rule, suggested_label: label }
+    ApprovalSubject {
+        value,
+        suggested_rule: rule,
+        suggested_label: label,
+    }
 }
 
 /// Match `text` against a `*`-wildcard pattern.
@@ -334,7 +387,7 @@ impl Tool for ApprovalTool {
         // subject.value, which is unsanitized). preview_call handles
         // all sanitization and formatting.
         let preview = preview_call(name, &input);
-        let always_label = sanitize(&subject.suggested_label);
+        let always_label = sanitize_inline(&subject.suggested_label);
         match self.ui.decide(name, &preview, &always_label).await {
             PromptChoice::Allow => self.inner.execute(tool_call_id, input, on_update).await,
             PromptChoice::AlwaysAllow => {
@@ -474,6 +527,17 @@ pub fn sanitize(s: &str) -> String {
     out
 }
 
+/// Defang a short string intended to stay on one prompt line.
+///
+/// Unlike [`sanitize`], this replaces newlines and tabs with spaces so a
+/// model-controlled command/path cannot visually split the approval menu.
+pub fn sanitize_inline(s: &str) -> String {
+    sanitize(s)
+        .chars()
+        .map(|c| if matches!(c, '\n' | '\t') { ' ' } else { c })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,33 +570,17 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_inline_flattens_newlines_and_tabs() {
+        assert_eq!(
+            sanitize_inline("bash(echo a\n[A] fake\tmenu)"),
+            "bash(echo a [A] fake menu)"
+        );
+    }
+
+    #[test]
     fn sanitize_handles_single_char_escape() {
         // ESC c (non-CSI) is a full reset. We drop ESC + the next char.
         assert_eq!(sanitize("before\x1bcafter"), "beforeafter");
-    }
-
-    /// `MockApprovalUi` replays a fixed script of choices, then panics if
-    /// the agent asks for more — handy for asserting that an "always
-    /// allow" decision actually short-circuits subsequent calls.
-    struct MockApprovalUi {
-        script: Mutex<std::collections::VecDeque<PromptChoice>>,
-    }
-    impl MockApprovalUi {
-        fn new(script: Vec<PromptChoice>) -> Self {
-            Self {
-                script: Mutex::new(script.into()),
-            }
-        }
-    }
-    #[async_trait]
-    impl ApprovalUi for MockApprovalUi {
-        async fn decide(&self, _tool_name: &str, _preview: &str, _always_rule: &str) -> PromptChoice {
-            self.script
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("MockApprovalUi script exhausted")
-        }
     }
 
     // ── wildcard_match ──────────────────────────────────────────────
@@ -592,21 +640,35 @@ mod tests {
 
     #[test]
     fn rule_empty_pattern_matches_all() {
-        let rule = AllowRule { tool: "bash".into(), pattern: "".into() };
+        let rule = AllowRule::tool_all("bash");
         assert!(rule.matches("bash", "anything"));
         assert!(!rule.matches("edit", "anything"));
     }
 
     #[test]
     fn rule_exact_command() {
-        let rule = AllowRule { tool: "bash".into(), pattern: "npm run build".into() };
+        let rule = AllowRule::exact("bash", "npm run build");
         assert!(rule.matches("bash", "npm run build"));
         assert!(!rule.matches("bash", "npm run test"));
     }
 
     #[test]
+    fn rule_exact_treats_star_literally() {
+        let rule = AllowRule::exact("bash", "echo *");
+        assert!(rule.matches("bash", "echo *"));
+        assert!(!rule.matches("bash", "echo hello"));
+        assert!(!rule.matches("bash", "echo hello && rm -rf /"));
+    }
+
+    #[test]
+    fn rule_wildcard_opt_in_matches_star() {
+        let rule = AllowRule::wildcard("bash", "echo *");
+        assert!(rule.matches("bash", "echo hello"));
+    }
+
+    #[test]
     fn rule_exact_path_does_not_overmatch_prefix() {
-        let rule = AllowRule { tool: "edit".into(), pattern: "src/foo".into() };
+        let rule = AllowRule::exact("edit", "src/foo");
         assert!(rule.matches("edit", "src/foo"));
         assert!(!rule.matches("edit", "src/foobar"));
     }
@@ -634,7 +696,8 @@ mod tests {
 
     #[test]
     fn subject_edit_extracts_path() {
-        let input = serde_json::json!({"path": "src/lib.rs", "old_string": "foo", "new_string": "bar"});
+        let input =
+            serde_json::json!({"path": "src/lib.rs", "old_string": "foo", "new_string": "bar"});
         let subj = approval_subject("edit", &input);
         assert_eq!(subj.value, "src/lib.rs");
         assert_eq!(subj.suggested_rule.tool, "edit");
@@ -652,9 +715,10 @@ mod tests {
     fn subject_unknown_tool_uses_tool_name() {
         let input = serde_json::json!({"url": "https://example.com"});
         let subj = approval_subject("WebFetch", &input);
-        assert_eq!(subj.value, "");
-        assert_eq!(subj.suggested_rule.pattern, "");
-        assert_eq!(subj.suggested_label, "WebFetch(*)");
+        let raw = input.to_string();
+        assert_eq!(subj.value, raw);
+        assert_eq!(subj.suggested_rule.pattern, raw);
+        assert_eq!(subj.suggested_label, format!("WebFetch({})", input));
     }
 
     // ── ApprovalState ───────────────────────────────────────────────
@@ -672,7 +736,7 @@ mod tests {
     #[test]
     fn record_always_bash_exact() {
         let state = ApprovalState::new();
-        let rule = AllowRule { tool: "bash".into(), pattern: "npm run build".into() };
+        let rule = AllowRule::exact("bash", "npm run build");
         state.record_always(rule);
         assert!(state.is_pre_allowed("bash", "npm run build"));
         assert!(!state.is_pre_allowed("bash", "npm run test"));
@@ -681,7 +745,7 @@ mod tests {
     #[test]
     fn forget_clears_rules() {
         let state = ApprovalState::new();
-        let rule = AllowRule { tool: "bash".into(), pattern: "echo hi".into() };
+        let rule = AllowRule::exact("bash", "echo hi");
         state.record_always(rule);
         assert!(state.is_pre_allowed("bash", "echo hi"));
         state.forget();
@@ -691,7 +755,7 @@ mod tests {
     #[test]
     fn record_whole_tool_rule() {
         let state = ApprovalState::new();
-        let rule = AllowRule { tool: "edit".into(), pattern: "".into() };
+        let rule = AllowRule::tool_all("edit");
         state.record_always(rule);
         assert!(state.is_pre_allowed("edit", "anything"));
         assert!(!state.is_pre_allowed("write", "anything"));
@@ -702,7 +766,7 @@ mod tests {
         // Verifies that recording a rule means subsequent is_pre_allowed
         // checks pass without consulting the UI.
         let state = ApprovalState::new();
-        let rule = AllowRule { tool: "bash".into(), pattern: "echo hi".into() };
+        let rule = AllowRule::exact("bash", "echo hi");
         state.record_always(rule);
 
         assert!(state.is_pre_allowed("bash", "echo hi"));
