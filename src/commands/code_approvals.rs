@@ -22,12 +22,12 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use pi::model::{ContentBlock, TextContent};
-use pi::sdk::{Result as PiResult, Tool, ToolOutput, ToolUpdate};
+use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
 
 use crate::commands::code_factory::{Mode, ModeFlag};
 
 /// User decision for a single approval prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptChoice {
     /// Run this tool call once.
     Allow,
@@ -35,6 +35,32 @@ pub enum PromptChoice {
     AlwaysAllow,
     /// Reject this tool call. The agent receives a denial output.
     Deny,
+    /// The UI cannot get an answer right now (e.g. desktop app closed
+    /// while the modal was open). The tool wrapper translates this
+    /// into [`ToolExecution::Paused`] so the agent loop suspends and
+    /// the request resumes on the next session start.
+    Paused {
+        request_id: String,
+        payload: serde_json::Value,
+    },
+}
+
+/// Result of an [`ApprovalUi::ask`] call. Mirrors [`PromptChoice`]'s
+/// pause story: a UI that can't currently surface the questions
+/// returns `Paused`, and [`AskUserTool`] turns that into
+/// [`ToolExecution::Paused`].
+#[derive(Debug, Clone)]
+pub enum AskOutcome {
+    /// The user answered. The opaque JSON payload is what the LLM
+    /// receives as the tool result content.
+    Answer(serde_json::Value),
+    /// The UI is unavailable (process exit / app close); the agent
+    /// loop should suspend until [`ApprovalUi::ask`] is re-invoked
+    /// with this `payload` via the tool's resume hook.
+    Paused {
+        request_id: String,
+        payload: serde_json::Value,
+    },
 }
 
 /// A single allow rule binding a tool to a command/path pattern.
@@ -244,11 +270,36 @@ pub fn wildcard_match(pattern: &str, text: &str) -> bool {
 #[async_trait]
 pub trait ApprovalUi: Send + Sync {
     async fn decide(&self, tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice;
-    async fn ask(&self, _payload: serde_json::Value) -> serde_json::Value {
-        serde_json::json!({
+    async fn ask(&self, _payload: serde_json::Value) -> AskOutcome {
+        AskOutcome::Answer(serde_json::json!({
             "cancelled": true,
             "reason": "ASK_NOT_SUPPORTED",
-        })
+        }))
+    }
+    /// Re-fire a previously paused approval request. Default impl
+    /// errors; UIs that ever return [`PromptChoice::Paused`] from
+    /// [`Self::decide`] must override this to pick the request back up
+    /// using `payload` (which carries the original tool name, preview,
+    /// always_rule, etc. as serialised by the tool wrapper).
+    async fn resume_decide(
+        &self,
+        _request_id: &str,
+        _payload: serde_json::Value,
+    ) -> PromptChoice {
+        PromptChoice::Deny
+    }
+    /// Re-fire a previously paused ask_user request. Same contract as
+    /// [`Self::resume_decide`] but for ask_user. Default impl mirrors
+    /// the legacy "cancelled" envelope.
+    async fn resume_ask(
+        &self,
+        _request_id: &str,
+        _payload: serde_json::Value,
+    ) -> AskOutcome {
+        AskOutcome::Answer(serde_json::json!({
+            "cancelled": true,
+            "reason": "RESUME_NOT_SUPPORTED",
+        }))
     }
 }
 
@@ -368,13 +419,13 @@ impl Tool for ApprovalTool {
         tool_call_id: &str,
         input: serde_json::Value,
         on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
-    ) -> PiResult<ToolOutput> {
+    ) -> PiResult<ToolExecution> {
         // Plan mode short-circuit: mutating tools are auto-denied
         // without a prompt. The agent sees a tool error, learns the
         // tool isn't available right now, and adapts. Read-only tools
         // pass straight through.
         if matches!(self.mode.get(), Mode::Plan) && !self.inner.is_read_only() {
-            return Ok(plan_denial_output(self.inner.name()));
+            return Ok(plan_denial_output(self.inner.name()).into());
         }
 
         let name = self.inner.name();
@@ -394,8 +445,64 @@ impl Tool for ApprovalTool {
                 self.state.record_always(subject.suggested_rule);
                 self.inner.execute(tool_call_id, input, on_update).await
             }
-            PromptChoice::Deny => Ok(denial_output(None)),
+            PromptChoice::Deny => Ok(denial_output(None).into()),
+            PromptChoice::Paused {
+                request_id,
+                payload,
+            } => Ok(wrap_paused_approval(request_id, payload, &input)),
         }
+    }
+
+    async fn resume(
+        &self,
+        tool_call_id: &str,
+        request_id: &str,
+        payload: serde_json::Value,
+    ) -> PiResult<ToolExecution> {
+        // Unwrap our own pause envelope: { ui_payload, tool_input }.
+        // We need tool_input to re-run the inner tool on Allow.
+        let (ui_payload, tool_input) = unwrap_paused_approval(payload);
+        match self.ui.resume_decide(request_id, ui_payload).await {
+            PromptChoice::Allow => self.inner.execute(tool_call_id, tool_input, None).await,
+            PromptChoice::AlwaysAllow => {
+                let subject = approval_subject(self.inner.name(), &tool_input);
+                self.state.record_always(subject.suggested_rule);
+                self.inner.execute(tool_call_id, tool_input, None).await
+            }
+            PromptChoice::Deny => Ok(denial_output(None).into()),
+            PromptChoice::Paused {
+                request_id,
+                payload,
+            } => Ok(wrap_paused_approval(request_id, payload, &tool_input)),
+        }
+    }
+}
+
+/// Wrap the UI's pause payload alongside the original tool input so
+/// the resume hook has everything it needs to re-run the inner tool
+/// on Allow without consulting the agent loop.
+fn wrap_paused_approval(
+    request_id: String,
+    ui_payload: serde_json::Value,
+    tool_input: &serde_json::Value,
+) -> ToolExecution {
+    ToolExecution::Paused {
+        request_id,
+        kind: "approval".to_string(),
+        payload: serde_json::json!({
+            "ui_payload": ui_payload,
+            "tool_input": tool_input,
+        }),
+    }
+}
+
+fn unwrap_paused_approval(payload: serde_json::Value) -> (serde_json::Value, serde_json::Value) {
+    if let serde_json::Value::Object(mut obj) = payload {
+        let ui_payload = obj.remove("ui_payload").unwrap_or(serde_json::Value::Null);
+        let tool_input = obj.remove("tool_input").unwrap_or(serde_json::Value::Null);
+        (ui_payload, tool_input)
+    } else {
+        (serde_json::Value::Null, serde_json::Value::Null)
     }
 }
 

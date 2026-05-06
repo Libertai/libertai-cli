@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use pi::model::{ContentBlock, TextContent};
-use pi::sdk::{Result as PiResult, Tool, ToolOutput, ToolUpdate};
+use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
 
 const NAME: &str = "todo";
 const LABEL: &str = "Todo";
@@ -95,7 +95,7 @@ impl Tool for TodoTool {
         _tool_call_id: &str,
         input: serde_json::Value,
         _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
-    ) -> PiResult<ToolOutput> {
+    ) -> PiResult<ToolExecution> {
         let parsed: TodoInput = match serde_json::from_value(input) {
             Ok(v) => v,
             Err(e) => {
@@ -112,7 +112,8 @@ impl Tool for TodoTool {
             content: vec![ContentBlock::Text(TextContent::new(summary))],
             details: None,
             is_error: false,
-        })
+        }
+        .into())
     }
 
     fn is_read_only(&self) -> bool {
@@ -122,12 +123,13 @@ impl Tool for TodoTool {
     }
 }
 
-fn err_output(msg: &str) -> ToolOutput {
+fn err_output(msg: &str) -> ToolExecution {
     ToolOutput {
         content: vec![ContentBlock::Text(TextContent::new(msg))],
         details: None,
         is_error: true,
     }
+    .into()
 }
 
 fn summarize(items: &[TodoItem]) -> String {

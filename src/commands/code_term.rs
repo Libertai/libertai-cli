@@ -95,10 +95,13 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
         }
     };
     drop(_guard);
-    let label = match choice {
+    let label = match &choice {
         PromptChoice::Allow => "allowed",
         PromptChoice::AlwaysAllow => "always allowed",
         PromptChoice::Deny => "denied",
+        // Terminal UI never returns Paused (it blocks until the user
+        // answers); guard the match for completeness.
+        PromptChoice::Paused { .. } => "paused",
     };
     eprintln!("\x1b[2m{label}\x1b[0m");
     choice

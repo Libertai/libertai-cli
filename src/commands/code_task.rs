@@ -16,7 +16,8 @@ use async_trait::async_trait;
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{
-    create_agent_session, AgentEvent, Result as PiResult, Tool, ToolOutput, ToolUpdate,
+    create_agent_session, AgentEvent, Result as PiResult, Tool, ToolExecution, ToolOutput,
+    ToolUpdate,
 };
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi};
@@ -101,7 +102,7 @@ impl Tool for TaskTool {
         _tool_call_id: &str,
         input: serde_json::Value,
         _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
-    ) -> PiResult<ToolOutput> {
+    ) -> PiResult<ToolExecution> {
         let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
             Some(p) => p.to_string(),
             None => {
@@ -224,7 +225,8 @@ impl Tool for TaskTool {
             content: vec![ContentBlock::Text(TextContent::new(text))],
             details: None,
             is_error: false,
-        })
+        }
+        .into())
     }
 
     fn is_read_only(&self) -> bool {
@@ -256,10 +258,11 @@ fn render_child(event: AgentEvent) {
     }
 }
 
-fn err_output(text: &str) -> ToolOutput {
+fn err_output(text: &str) -> ToolExecution {
     ToolOutput {
         content: vec![ContentBlock::Text(TextContent::new(text))],
         details: None,
         is_error: true,
     }
+    .into()
 }

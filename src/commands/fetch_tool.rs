@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use pi::model::{ContentBlock, TextContent};
-use pi::sdk::{Result as PiResult, Tool, ToolOutput, ToolUpdate};
+use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
 
 const NAME: &str = "fetch";
 const LABEL: &str = "Fetch URL contents";
@@ -75,7 +75,7 @@ impl Tool for FetchTool {
         _tool_call_id: &str,
         input: serde_json::Value,
         _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
-    ) -> PiResult<ToolOutput> {
+    ) -> PiResult<ToolExecution> {
         let parsed: FetchInput = match serde_json::from_value(input) {
             Ok(v) => v,
             Err(e) => return Ok(err_output(&format!("invalid `fetch` payload: {e}"))),
@@ -96,7 +96,8 @@ impl Tool for FetchTool {
             content: vec![ContentBlock::Text(TextContent::new(envelope.to_string()))],
             details: None,
             is_error: false,
-        })
+        }
+        .into())
     }
 
     fn is_read_only(&self) -> bool {
@@ -104,12 +105,13 @@ impl Tool for FetchTool {
     }
 }
 
-fn err_output(msg: &str) -> ToolOutput {
+fn err_output(msg: &str) -> ToolExecution {
     ToolOutput {
         content: vec![ContentBlock::Text(TextContent::new(msg))],
         details: None,
         is_error: true,
     }
+    .into()
 }
 
 /// Result of a one-shot HTTP GET + body text extraction.

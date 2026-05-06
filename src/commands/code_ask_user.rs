@@ -51,7 +51,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use pi::model::{ContentBlock, TextContent};
-use pi::sdk::{Result as PiResult, Tool, ToolOutput, ToolUpdate};
+use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+
+use crate::commands::code_approvals::AskOutcome;
 
 use crate::commands::code_approvals::ApprovalUi;
 
@@ -146,7 +148,7 @@ impl Tool for AskUserTool {
         _tool_call_id: &str,
         input: serde_json::Value,
         _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
-    ) -> PiResult<ToolOutput> {
+    ) -> PiResult<ToolExecution> {
         // Validate the input shape before suspending the agent on the
         // UI: a malformed payload should fail fast as a tool error so
         // the LLM can self-correct, not block the user with a broken
@@ -154,29 +156,87 @@ impl Tool for AskUserTool {
         if !input.is_object() || !input.get("questions").map_or(false, |q| q.is_array()) {
             return Ok(err_output(
                 "ask_user: input must be { questions: [{ header, question, options[, multiSelect] }, ...] }",
-            ));
+            )
+            .into());
         }
 
-        let response = self.ui.ask(input).await;
+        // We pass the same `input` to the UI so it has the questions
+        // payload to render. On Paused we wrap the UI's payload with
+        // the original questions so the resume hook re-emits the same
+        // card stack.
+        match self.ui.ask(input.clone()).await {
+            AskOutcome::Answer(response) => Ok(answer_output(response).into()),
+            AskOutcome::Paused {
+                request_id,
+                payload,
+            } => Ok(wrap_paused_ask(request_id, payload, &input)),
+        }
+    }
 
-        // Render the answer back to the LLM as a single JSON text
-        // block. The agent loop treats this as the tool result, the
-        // LLM keeps the structured form for downstream reasoning.
-        let body = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
-        Ok(ToolOutput {
-            content: vec![ContentBlock::Text(TextContent::new(body))],
-            details: None,
-            is_error: response
-                .get("cancelled")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-        })
+    async fn resume(
+        &self,
+        _tool_call_id: &str,
+        request_id: &str,
+        payload: serde_json::Value,
+    ) -> PiResult<ToolExecution> {
+        let (ui_payload, questions) = unwrap_paused_ask(payload);
+        // Prefer the persisted questions when re-firing so the user
+        // sees the original cards even if the UI's payload didn't
+        // round-trip them. UIs can ignore `ui_payload` and just use
+        // questions, or use ui_payload to recover any in-flight state
+        // (e.g. partial answers).
+        let _ = ui_payload; // currently UIs re-render from questions only
+        match self.ui.resume_ask(request_id, questions.clone()).await {
+            AskOutcome::Answer(response) => Ok(answer_output(response).into()),
+            AskOutcome::Paused {
+                request_id,
+                payload,
+            } => Ok(wrap_paused_ask(request_id, payload, &questions)),
+        }
     }
 
     fn is_read_only(&self) -> bool {
         // No filesystem or network writes; preserves pi's parallelism
         // allowances. The "side effect" is purely user-interactive.
         true
+    }
+}
+
+/// Build the LLM-facing tool result content from an answer envelope.
+fn answer_output(response: serde_json::Value) -> ToolOutput {
+    let body = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+    ToolOutput {
+        content: vec![ContentBlock::Text(TextContent::new(body))],
+        details: None,
+        is_error: response
+            .get("cancelled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    }
+}
+
+fn wrap_paused_ask(
+    request_id: String,
+    ui_payload: serde_json::Value,
+    questions: &serde_json::Value,
+) -> ToolExecution {
+    ToolExecution::Paused {
+        request_id,
+        kind: "ask_user".to_string(),
+        payload: serde_json::json!({
+            "ui_payload": ui_payload,
+            "questions": questions,
+        }),
+    }
+}
+
+fn unwrap_paused_ask(payload: serde_json::Value) -> (serde_json::Value, serde_json::Value) {
+    if let serde_json::Value::Object(mut obj) = payload {
+        let ui_payload = obj.remove("ui_payload").unwrap_or(serde_json::Value::Null);
+        let questions = obj.remove("questions").unwrap_or(serde_json::Value::Null);
+        (ui_payload, questions)
+    } else {
+        (serde_json::Value::Null, serde_json::Value::Null)
     }
 }
 
