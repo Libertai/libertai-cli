@@ -62,7 +62,7 @@ zeroize = { version = "1", features = ["derive"] }
 # - `AgentSessionHandle::set_max_tokens` (per-prompt cap override, upstream issue #63)
 # - `hashline_edit` op defaulting to "replace" when omitted by the model
 # - `AgentSessionHandle::prompt_with_content[_with_abort]` (multimodal SDK)
-pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "b4cbe82e40f74dee87e81c9726b66ae492610345", default-features = false }
+pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "522d04746f4e3fa0d7ad279fe5bdd1c07820cfb8", default-features = false }
 asupersync = { version = "=0.3.1", default-features = false, features = ["tls-native-roots"] }
 async-trait = "0.1"
 futures = "0.3"
