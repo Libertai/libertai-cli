@@ -58,6 +58,15 @@ struct BuiltinSkill {
 }
 
 const BUILTINS: &[BuiltinSkill] = &[
+    // Harness applies to every pillar (libertai.pillars: any) —
+    // behavioral guidance + per-tool usage notes that shape tone,
+    // tool selection, and execution caution. Alphabetical sort in
+    // active_skills puts code-workflow before harness in the final
+    // prompt; both still reach the model.
+    BuiltinSkill {
+        dir_name: "libertai-harness",
+        body: include_str!("../agent_skills/libertai-harness/SKILL.md"),
+    },
     BuiltinSkill {
         dir_name: "libertai-chat-research",
         body: include_str!("../agent_skills/libertai-chat-research/SKILL.md"),
@@ -348,7 +357,10 @@ mod tests {
 
     #[test]
     fn selects_builtin_pillar_skills() {
+        // libertai-harness ships with `libertai.pillars: any` so it
+        // joins every pillar; active_skills sorts the merged set
+        // alphabetically.
         let names = active_skill_names(SkillPillar::Code, None).expect("names");
-        assert_eq!(names, vec!["libertai-code-workflow"]);
+        assert_eq!(names, vec!["libertai-code-workflow", "libertai-harness"]);
     }
 }
