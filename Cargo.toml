@@ -62,7 +62,7 @@ zeroize = { version = "1", features = ["derive"] }
 # - `AgentSessionHandle::set_max_tokens` (per-prompt cap override, upstream issue #63)
 # - `hashline_edit` op defaulting to "replace" when omitted by the model
 # - `AgentSessionHandle::prompt_with_content[_with_abort]` (multimodal SDK)
-pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "522d04746f4e3fa0d7ad279fe5bdd1c07820cfb8", default-features = false }
+pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "a7d06d5dfc81af81cd2eb177734b8dec82ae122a", default-features = false }
 asupersync = { version = "=0.3.1", default-features = false, features = ["tls-native-roots"] }
 async-trait = "0.1"
 futures = "0.3"
@@ -73,6 +73,24 @@ crossterm = "0.29"
 # Catch Ctrl-C during an in-flight agent stream and forward it to pi's
 # AbortHandle so the REPL survives the interrupt.
 ctrlc = "3"
+# Date formatting for /remember bullets. Pi pulls chrono in transitively
+# but we declare it explicitly so `use chrono::Local` resolves cleanly.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+# Black-box probes that spawn the `libertai` binary and assert on its
+# stdout/stderr — see `tests/probes_*.rs` and `docs/parity-roadmap.md`.
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[features]
+default = []
+# Enables tier-2 LLM-judge probes that call LibertAI's free chat model
+# to evaluate model-output-shape properties. Off by default so the
+# default `cargo test` run stays offline + deterministic. Run with
+# `cargo test --features tier2-probes -- --include-ignored`.
+tier2-probes = []
 
 [profile.release]
 lto = "thin"
