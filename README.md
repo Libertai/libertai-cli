@@ -74,6 +74,7 @@ libertai claude         # launch Claude Code against LibertAI
 | `libertai opencode [args]` | Writes a `libertai` provider into `~/.config/opencode/opencode.json`, sets `LIBERTAI_API_KEY`, then launches OpenCode. |
 | `libertai aider [args]` | `run` preset for Aider; auto-passes `--model openai/<default_code_model>`. |
 | `libertai claw [args]` | `run` preset for [Claw Code](https://github.com/ultraworkers/claw-code); auto-passes `--model openai/<default_code_model>`. |
+| `libertai hermes [args]` | Launch [Hermes Agent](https://hermes-agent.nousresearch.com) with LibertAI credentials injected (env vars). |
 | `libertai config show\|path\|set\|unset` | Inspect or edit `~/.config/libertai/config.toml`. |
 | `libertai skills install\|list\|uninstall` | Manage bundled Claude Code skills (image gen etc). |
 
@@ -254,5 +255,5 @@ cargo test                       # config round-trip + masking
 - Solana wallet signing.
 - Browser-based device pairing (console.libertai.io issues a one-time code the
   CLI exchanges for a key — removes the private-key prompt).
-- `libertai openclaw` and `libertai hermes` launchers.
+- `libertai openclaw` launcher.
 - OS keyring storage as an alternative to the TOML file.

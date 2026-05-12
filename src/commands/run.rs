@@ -81,6 +81,9 @@ fn install_hint(program: &str) -> Option<&'static str> {
             "build from source: git clone https://github.com/ultraworkers/claw-code \
              && cd claw-code/rust && cargo install --path crates/rusty-claude-cli --force",
         ),
+        "hermes" => Some(
+            "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
+        ),
         _ => None,
     }
 }

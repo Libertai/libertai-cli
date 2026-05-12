@@ -148,6 +148,18 @@ pub enum Command {
         args: Vec<String>,
     },
 
+    /// Launch Hermes Agent against LibertAI.
+    ///
+    /// Sets up LibertAI credentials (OPENAI_API_KEY, ANTHROPIC_AUTH_TOKEN, etc.)
+    /// in the environment before exec'ing `hermes`.
+    Hermes {
+        /// Override the default model.
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// LibertAI's own coding agent, powered by pi_agent_rust.
     ///
     /// Alias: `lcode` (as a separate binary).
@@ -282,6 +294,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Opencode { model, args } => crate::commands::launchers::opencode(model, args),
         Command::Aider { model, args } => crate::commands::launchers::aider(model, args),
         Command::Claw { model, args } => crate::commands::launchers::claw(model, args),
+        Command::Hermes { model, args } => crate::commands::launchers::hermes(model, args),
         Command::Code {
             model,
             provider,
@@ -323,6 +336,7 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::Opencode { .. } => "opencode",
         Command::Aider { .. } => "aider",
         Command::Claw { .. } => "claw",
+        Command::Hermes { .. } => "hermes",
         Command::Code { .. } => "code",
         Command::Config { .. } => "config",
         Command::Skills { .. } => "skills",
