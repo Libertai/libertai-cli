@@ -215,6 +215,7 @@ pub fn run_interactive(
 fn print_banner(provider: &str, model: &str, mode: Mode) {
     let mode_tag = match mode {
         Mode::Normal => String::new(),
+        Mode::AcceptEdits => format!(" {DIM}[accept-edits]{RESET}"),
         Mode::Plan => format!(" {DIM}[plan]{RESET}"),
     };
     println!(
@@ -387,8 +388,12 @@ async fn repl_loop(
 }
 
 fn flip(m: Mode) -> Mode {
+    // Shift+Tab cycles Normal → AcceptEdits → Plan → Normal. Most
+    // users only toggle Normal ↔ Plan; the middle stop is opt-in
+    // via /mode in the REPL or the slash picker in the desktop.
     match m {
-        Mode::Normal => Mode::Plan,
+        Mode::Normal => Mode::AcceptEdits,
+        Mode::AcceptEdits => Mode::Plan,
         Mode::Plan => Mode::Normal,
     }
 }
@@ -398,6 +403,11 @@ fn announce_mode_change(new_mode: Mode) {
         Mode::Normal => {
             println!(
                 "{DIM}  → normal mode. mutating tools (bash, edit, write) are back online.{RESET}"
+            );
+        }
+        Mode::AcceptEdits => {
+            println!(
+                "{DIM}  → accept-edits mode. write/edit/hashline_edit auto-allow; bash still prompts.{RESET}"
             );
         }
         Mode::Plan => {
@@ -738,6 +748,7 @@ fn repaint(
     // it's a status cue, not a shout.
     let (chip_text, chip_colour) = match mode {
         Mode::Normal => ("", Color::DarkGrey),
+        Mode::AcceptEdits => ("[accept-edits] ", Color::Cyan),
         Mode::Plan => ("[plan] ", Color::Yellow),
     };
 

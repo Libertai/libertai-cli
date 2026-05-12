@@ -43,6 +43,13 @@ pub const MAX_TASK_DEPTH: u8 = 3;
 pub enum Mode {
     /// Full tool set. Mutating tools gated by [`ApprovalTool`].
     Normal,
+    /// Path-editing tools (`write`, `edit`, `hashline_edit`) auto-
+    /// allow without prompting; `bash` and other mutating tools
+    /// still go through the approval flow. The middle tier
+    /// between Normal (prompt for everything mutating) and Plan
+    /// (deny everything mutating). Mirrors Claude Code's
+    /// `acceptEdits` permission mode.
+    AcceptEdits,
     /// Mutating tools (`bash`, `edit`, `write`, `hashline_edit`) are
     /// auto-denied without prompting; read-only tools still run.
     Plan,
@@ -52,16 +59,27 @@ impl Mode {
     fn as_u8(self) -> u8 {
         match self {
             Mode::Normal => 0,
-            Mode::Plan => 1,
+            Mode::AcceptEdits => 1,
+            Mode::Plan => 2,
         }
     }
 
     fn from_u8(v: u8) -> Self {
         match v {
             0 => Mode::Normal,
+            1 => Mode::AcceptEdits,
             _ => Mode::Plan,
         }
     }
+}
+
+/// True for tools that mutate a single file path supplied by the
+/// model — these are the "edits" `Mode::AcceptEdits` auto-allows.
+/// `bash` is excluded: its mutation surface is open-ended, so it
+/// stays gated by the regular approval flow. Add new entries as
+/// pi grows other path-edit tools.
+pub(crate) fn is_path_edit_tool(name: &str) -> bool {
+    matches!(name, "write" | "edit" | "hashline_edit")
 }
 
 /// Shared, atomically-toggleable mode for an interactive session.

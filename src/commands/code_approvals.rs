@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
 
-use crate::commands::code_factory::{Mode, ModeFlag};
+use crate::commands::code_factory::{is_path_edit_tool, Mode, ModeFlag};
 
 /// User decision for a single approval prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -429,6 +429,15 @@ impl Tool for ApprovalTool {
         }
 
         let name = self.inner.name();
+        // AcceptEdits short-circuit: path-edit tools (write / edit /
+        // hashline_edit) auto-allow without a modal. bash and any
+        // other mutating tools still go through the regular
+        // approval flow below, so the user retains a gate on
+        // shell exec while drafting code. Mirrors Claude Code's
+        // `acceptEdits` permission tier.
+        if matches!(self.mode.get(), Mode::AcceptEdits) && is_path_edit_tool(name) {
+            return self.inner.execute(tool_call_id, input, on_update).await;
+        }
         let subject = approval_subject(name, &input);
         if self.state.is_pre_allowed(name, &subject.value) {
             return self.inner.execute(tool_call_id, input, on_update).await;
