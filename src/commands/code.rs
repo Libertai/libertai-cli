@@ -45,6 +45,9 @@ pub fn run(
     // code looks it up. Runs first so auth / FS errors surface before we
     // spin up the async runtime.
     code_models::ensure_libertai_registered(&cfg)?;
+    // Point pi's MEMORY.md loader at our per-project memory root so
+    // /remember-stored notes reach the system prompt.
+    crate::commands::code_memory::ensure_memory_env()?;
 
     let model = model.unwrap_or_else(|| cfg.default_code_model.clone());
     let provider = provider.unwrap_or_else(|| cfg.default_code_provider.clone());
@@ -88,8 +91,9 @@ pub fn run(
         Some(Arc::new(cfg)),
     ));
 
-    runtime
-        .block_on(async move { run_async(provider, model, prompt, factory, resume_path).await })
+    runtime.block_on(async move {
+        run_async(provider, model, prompt, factory, resume_path, mode).await
+    })
 }
 
 async fn run_async(
@@ -98,6 +102,7 @@ async fn run_async(
     prompt: String,
     factory: Arc<LibertaiToolFactory>,
     resume_path: Option<PathBuf>,
+    mode: Mode,
 ) -> Result<()> {
     // One-shots are typically piped — print only the agent's response,
     // never replay prior history (it would corrupt downstream output).
@@ -111,6 +116,8 @@ async fn run_async(
     let skill_cwd = std::env::current_dir().ok();
     let append_system_prompt =
         code_skills::prompt_for_pillar(SkillPillar::Code, skill_cwd.as_deref())?;
+    let append_system_prompt =
+        crate::commands::code_mode_prompt::apply(append_system_prompt, mode);
     let options = build_session_options(CodeSessionConfig {
         provider,
         model,
