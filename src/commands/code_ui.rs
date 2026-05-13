@@ -330,6 +330,36 @@ async fn repl_loop(
             }
             _ => {}
         }
+        // Slash commands that take an argument (handled here, not in
+        // the match above, since `match` doesn't pattern-match prefixes).
+        if let Some(rest) = trimmed.strip_prefix("/remember") {
+            let text = rest.trim();
+            if text.is_empty() {
+                println!(
+                    "{DIM}  usage: /remember <text> — appends a dated bullet to this project's MEMORY.md{RESET}"
+                );
+                continue;
+            }
+            let cwd = match std::env::current_dir() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("{DIM}  /remember: could not resolve cwd: {e}{RESET}");
+                    continue;
+                }
+            };
+            match crate::commands::code_memory::append_memory(&cwd, text) {
+                Ok(path) => {
+                    println!(
+                        "{DIM}  → remembered in {} (takes effect next session){RESET}",
+                        path.display()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("{DIM}  /remember: failed: {e:#}{RESET}");
+                }
+            }
+            continue;
+        }
 
         // Remember the submitted line.
         if history.back().is_none_or(|last| last != trimmed) {
@@ -429,6 +459,11 @@ async fn build_handle(
     resume_path: Option<PathBuf>,
     cfg: Arc<LibertaiConfig>,
 ) -> Result<AgentSessionHandle> {
+    // Snapshot the mode value before the factory consumes the flag so
+    // the prompt addendum (S1-B) can be conditional on the *initial*
+    // mode. The flag itself remains Arc-shared with the factory and
+    // tracks runtime toggles via Shift+Tab.
+    let initial_mode = mode.get();
     let ui = Arc::new(TerminalApprovalUi);
     let factory = Arc::new(LibertaiToolFactory::new_with_features(
         mode,
@@ -445,6 +480,8 @@ async fn build_handle(
     let skill_cwd = std::env::current_dir().ok();
     let append_system_prompt =
         code_skills::prompt_for_pillar(SkillPillar::Code, skill_cwd.as_deref())?;
+    let append_system_prompt =
+        crate::commands::code_mode_prompt::apply(append_system_prompt, initial_mode);
     let options = build_session_options(CodeSessionConfig {
         provider: provider.to_string(),
         model: model.to_string(),
@@ -521,6 +558,7 @@ fn print_help() {
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
     println!("{DIM}  /clear    — wipe the screen and start a fresh session{RESET}");
     println!("{DIM}  /forget   — clear session-scoped allow rules{RESET}");
+    println!("{DIM}  /remember <text> — append a dated note to this project's MEMORY.md{RESET}");
     println!("{DIM}  ↑ / ↓     — walk through previously submitted prompts{RESET}");
     println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
     println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");

@@ -20,14 +20,40 @@ SDK; those are flagged **(upstream)**.
 - **AcceptEdits middle permission tier** (`2a86a37`) — `ModeFlag::AcceptEdits`,
   toggled via `Shift+Tab` cycle and `/plan` etc. (`src/commands/code_factory.rs`).
 - **`libertai-harness` behavioral skill** (`a13cddf`) — first cut of the
-  Claude-Code-style guidance block (`src/skills_content/libertai-harness/SKILL.md`).
+  Claude-Code-style guidance block
+  (`src/agent_skills/libertai-harness/SKILL.md`); covers parity-doc Section A
+  (terse responses, exploratory framing, `file_path:line`, parallel tool
+  use, end-of-turn brevity), Section C (tool posture), Section D (per-tool
+  notes).
 - **`libertai hermes` launcher** (`eeb433f`) — Hermes Agent (Nous Research)
   launched against LibertAI credentials. Not part of `libertai code`, listed
   here so the next refresh of the parity doc doesn't list it as "missing."
 
-These mean two items in `../libertai-code-desktop/docs/claude-code-parity.md`
-(rows 13/36/91-92 on AcceptEdits, lines 241-244 on `libertai-harness`) are
-already stale and should be removed from "missing" lists.
+**Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
+- **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
+  `LIBERTAI_DUMP_AND_EXIT` env-var dump in pi
+  (`pi/src/sdk.rs`); tier-1/tier-2 probe scaffolding under `tests/probes_*.rs`.
+- **Phase 1C / parity E** (env block): `## Git context` injected by
+  `pi::app::build_system_prompt` when cwd is a git work tree.
+- **Phase 1D / parity G** (plan-mode prompt swap):
+  `src/commands/code_mode_prompt.rs` prepends `## Plan mode` guidance to
+  `append_system_prompt` when sessions start under `Mode::Plan`.
+- **Parity B expansion** (executing-actions-with-care): skill section
+  expanded to parity-doc target depth with reversibility, blast-radius,
+  risky-op categories, scope-of-authorization, investigate-before-bypass.
+- **Phase 4E / parity F** (memory v1, pulled forward):
+  `pi::app::load_project_memory` reads `<PI_PROJECT_MEMORY_DIR>/<encoded-cwd>/MEMORY.md`;
+  libertai-cli sets the env to `~/.config/libertai/projects` (overridable
+  via `LIBERTAI_HOME`) and ships a `/remember <text>` REPL command in
+  `src/commands/code_memory.rs`.
+
+After this sprint, parity-doc Sections A–G are all shipped. Section H
+(per-subagent prompts) remains gated on Phase 4D named-agent registry.
+
+The two items in `../libertai-code-desktop/docs/claude-code-parity.md`
+already noted as stale (AcceptEdits rows; `libertai-harness` "Suggested
+shape") still need to be moved to the "shipped" side on the next
+refresh of that doc.
 
 ---
 
