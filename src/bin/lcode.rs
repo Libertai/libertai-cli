@@ -35,6 +35,10 @@ struct LcodeCli {
     /// With `--list-sessions`, list every project (not just cwd).
     #[arg(long, requires = "list_sessions")]
     all: bool,
+    /// Sandbox the bash tool (`off` / `strict` / `auto`). See
+    /// `libertai code --help` for full details. Default: `off`.
+    #[arg(long, value_enum, env = "LIBERTAI_SANDBOX", default_value_t = libertai_cli::commands::code_sandbox::SandboxMode::Off)]
+    sandbox: libertai_cli::commands::code_sandbox::SandboxMode,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -50,6 +54,7 @@ fn main() {
             continue_recent: parsed.continue_recent,
             list_sessions: parsed.list_sessions,
             all: parsed.all,
+            sandbox: parsed.sandbox,
             args: parsed.args,
         },
     };

@@ -16,6 +16,9 @@ use pi::sdk::{create_agent_session, AgentEvent};
 
 use crate::commands::code_approvals::ApprovalState;
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
+use crate::commands::code_sandbox::{
+    build_command_wrapper, is_strict_supported, SandboxMode,
+};
 use crate::commands::code_session::{
     build_session_options, list_past_sessions, most_recent_session, CodeSessionConfig,
     SessionPersistence,
@@ -25,6 +28,7 @@ use crate::commands::code_term::TerminalApprovalUi;
 use crate::commands::{code_models, code_ui};
 use crate::config;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     model: Option<String>,
     provider: Option<String>,
@@ -33,6 +37,7 @@ pub fn run(
     continue_recent: bool,
     list_sessions: bool,
     all: bool,
+    sandbox: SandboxMode,
     args: Vec<String>,
 ) -> Result<()> {
     let cfg = config::load()?;
@@ -58,10 +63,54 @@ pub fn run(
     // Resolve --resume / --continue into an explicit session path, if any.
     let resume_path = resolve_resume_path(resume, continue_recent)?;
 
+    // Resolve `--sandbox=auto` to a concrete mode. The CLI only runs
+    // the code pillar today, which we treat as "trusted" (user runs
+    // `libertai code` against their own machine, expects bash to touch
+    // the host), so auto → off. The desktop applies its own per-pillar
+    // remap on the worker thread.
+    let sandbox = sandbox.resolve(/* is_untrusted = */ false);
+    // When the user explicitly asked for strict, bail loudly if the
+    // platform/distro can't deliver it — silently running unsandboxed
+    // when the user opted in is worse than refusing to start.
+    if matches!(sandbox, SandboxMode::Strict) && !is_strict_supported() {
+        if cfg!(target_os = "linux") {
+            anyhow::bail!(
+                "--sandbox=strict requires `bwrap` on PATH but it wasn't found. \
+                 Install it (Debian/Ubuntu: `apt install bubblewrap`; \
+                 Fedora/RHEL: `dnf install bubblewrap`; \
+                 Arch: `pacman -S bubblewrap`; \
+                 NixOS: add `bubblewrap` to your shell or system packages) \
+                 and re-run, or drop `--sandbox=strict`.",
+            );
+        } else {
+            anyhow::bail!(
+                "--sandbox=strict is Linux-only today (macOS and Windows \
+                 backends are tracked as follow-ups). Re-run without \
+                 `--sandbox=strict` to use the default unsandboxed bash.",
+            );
+        }
+    }
+    let bash_command_wrapper = build_command_wrapper(
+        sandbox,
+        &std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("cwd lookup failed: {e}"))?,
+        // CLI doesn't carry a persisted SandboxPolicy override today;
+        // host-detected defaults apply verbatim. The desktop passes
+        // `Some(&policy)` to let users uncheck binds in settings.
+        None,
+    );
+
     if args.is_empty() {
         // No prompt on the command line → interactive REPL.
         // Raw-mode UI + input bar + agent session reuse live in code_ui.
-        return code_ui::run_interactive(provider, model, mode, resume_path, Arc::new(cfg));
+        return code_ui::run_interactive(
+            provider,
+            model,
+            mode,
+            resume_path,
+            bash_command_wrapper,
+            Arc::new(cfg),
+        );
     }
 
     let prompt = args.join(" ");
@@ -88,8 +137,17 @@ pub fn run(
         Some(Arc::new(cfg)),
     ));
 
-    runtime
-        .block_on(async move { run_async(provider, model, prompt, factory, resume_path).await })
+    runtime.block_on(async move {
+        run_async(
+            provider,
+            model,
+            prompt,
+            factory,
+            resume_path,
+            bash_command_wrapper,
+        )
+        .await
+    })
 }
 
 async fn run_async(
@@ -98,6 +156,7 @@ async fn run_async(
     prompt: String,
     factory: Arc<LibertaiToolFactory>,
     resume_path: Option<PathBuf>,
+    bash_command_wrapper: Option<Vec<String>>,
 ) -> Result<()> {
     // One-shots are typically piped — print only the agent's response,
     // never replay prior history (it would corrupt downstream output).
@@ -122,6 +181,7 @@ async fn run_async(
         enabled_tools: None,
         append_system_prompt,
         max_tokens,
+        bash_command_wrapper,
     });
 
     // anyhow::Error::new preserves the underlying pi::sdk::Error so

@@ -179,6 +179,7 @@ pub fn run_interactive(
     model: String,
     mode: Mode,
     resume_path: Option<PathBuf>,
+    bash_command_wrapper: Option<Vec<String>>,
     cfg: Arc<LibertaiConfig>,
 ) -> Result<()> {
     print_banner(&provider, &model, mode);
@@ -208,7 +209,16 @@ pub fn run_interactive(
         .map_err(|e| anyhow::anyhow!("asupersync runtime: {e}"))?;
 
     runtime.block_on(async move {
-        repl_loop(provider, model, mode, approvals, resume_path, cfg).await
+        repl_loop(
+            provider,
+            model,
+            mode,
+            approvals,
+            resume_path,
+            bash_command_wrapper,
+            cfg,
+        )
+        .await
     })
 }
 
@@ -231,6 +241,7 @@ async fn repl_loop(
     initial_mode: Mode,
     approvals: Arc<ApprovalState>,
     resume_path: Option<PathBuf>,
+    bash_command_wrapper: Option<Vec<String>>,
     cfg: Arc<LibertaiConfig>,
 ) -> Result<()> {
     // Shared mode flag — flipped by Shift+Tab and `/plan`. The same
@@ -245,6 +256,7 @@ async fn repl_loop(
         mode.clone(),
         Arc::clone(&approvals),
         resume_path,
+        bash_command_wrapper.clone(),
         Arc::clone(&cfg),
     )
     .await?;
@@ -320,6 +332,7 @@ async fn repl_loop(
                     mode.clone(),
                     Arc::clone(&approvals),
                     None,
+                    bash_command_wrapper.clone(),
                     Arc::clone(&cfg),
                 )
                 .await?;
@@ -427,6 +440,7 @@ async fn build_handle(
     mode: ModeFlag,
     approvals: Arc<ApprovalState>,
     resume_path: Option<PathBuf>,
+    bash_command_wrapper: Option<Vec<String>>,
     cfg: Arc<LibertaiConfig>,
 ) -> Result<AgentSessionHandle> {
     let ui = Arc::new(TerminalApprovalUi);
@@ -456,6 +470,7 @@ async fn build_handle(
         enabled_tools: None,
         append_system_prompt,
         max_tokens,
+        bash_command_wrapper,
     });
     let mut handle = create_agent_session(options)
         .await

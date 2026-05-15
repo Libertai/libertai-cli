@@ -67,6 +67,15 @@ pub struct CodeSessionConfig {
     /// `write` calls. Applied via `handle.set_max_tokens` after
     /// `create_agent_session`.
     pub max_tokens: Option<u32>,
+    /// Argv prefix to wrap the bash tool's shell invocation. `None`
+    /// (default) means bash runs unsandboxed. `Some(argv)` is plumbed
+    /// through `SessionOptions::bash_command_wrapper` into pi's
+    /// `Config::bash_command_wrapper` so `default_tool_registry` builds
+    /// the `BashTool` with the wrapper attached. The argv is
+    /// fully-resolved (e.g. `["bwrap", "--ro-bind", "/usr", "/usr", …,
+    /// "--"]`) — `code_sandbox::build_command_wrapper` is the canonical
+    /// builder for CLI/desktop callers.
+    pub bash_command_wrapper: Option<Vec<String>>,
 }
 
 /// Sensible per-prompt token cap for code-style agents. 32k is enough
@@ -112,6 +121,7 @@ pub fn build_session_options(cfg: CodeSessionConfig) -> SessionOptions {
         include_cwd_in_prompt: cfg.include_cwd_in_prompt,
         enabled_tools: cfg.enabled_tools,
         append_system_prompt: cfg.append_system_prompt,
+        bash_command_wrapper: cfg.bash_command_wrapper,
         ..SessionOptions::default()
     }
 }

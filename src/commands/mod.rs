@@ -6,6 +6,8 @@ pub mod code_approvals;
 pub mod code_ask_user;
 pub mod code_factory;
 pub mod code_models;
+pub mod code_sandbox;
+pub mod code_sandbox_cli;
 pub mod code_session;
 pub mod code_skills;
 pub mod code_task;

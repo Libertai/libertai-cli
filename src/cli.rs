@@ -190,6 +190,15 @@ pub enum Command {
         /// With `--list-sessions`, show sessions across every project.
         #[arg(long, requires = "list_sessions")]
         all: bool,
+        /// Sandbox the bash tool. `off` (default) runs bash with the
+        /// user's full host privileges. `strict` wraps it in `bwrap`
+        /// (Linux only today) with no network, read-only system dirs,
+        /// and a tmpfs `/tmp` — useful for untrusted models or
+        /// reviewing third-party agent scripts. `auto` resolves per
+        /// pillar; on the CLI that's currently the same as `off`.
+        /// Also honours the `LIBERTAI_SANDBOX` env var.
+        #[arg(long, value_enum, env = "LIBERTAI_SANDBOX", default_value_t = crate::commands::code_sandbox::SandboxMode::Off)]
+        sandbox: crate::commands::code_sandbox::SandboxMode,
         /// Initial prompt (non-interactive mode if `--print`).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -205,6 +214,27 @@ pub enum Command {
     Skills {
         #[command(subcommand)]
         action: SkillsAction,
+    },
+
+    /// Inspect the bash-sandbox configuration.
+    Sandbox {
+        #[command(subcommand)]
+        action: SandboxAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SandboxAction {
+    /// Print the resolved strict profile for this host: which bin /
+    /// lib / config paths would be exposed, which are present vs
+    /// missing, plus the bwrap location and the inside-sandbox PATH.
+    /// Useful for debugging when something the model wants to run
+    /// isn't reachable inside `--sandbox=strict`.
+    Info {
+        /// Emit JSON instead of the human summary. Suitable for piping
+        /// into other tools or consuming from a wrapper script.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -303,6 +333,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             continue_recent,
             list_sessions,
             all,
+            sandbox,
             args,
         } => crate::commands::code::run(
             model,
@@ -312,10 +343,12 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             continue_recent,
             list_sessions,
             all,
+            sandbox,
             args,
         ),
         Command::Config { action } => crate::commands::config_cmd::run(action),
         Command::Skills { action } => crate::commands::skills::run(action),
+        Command::Sandbox { action } => crate::commands::code_sandbox_cli::run(action),
     }
 }
 
@@ -340,5 +373,6 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::Code { .. } => "code",
         Command::Config { .. } => "config",
         Command::Skills { .. } => "skills",
+        Command::Sandbox { .. } => "sandbox",
     }
 }

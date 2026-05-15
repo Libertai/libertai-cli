@@ -193,6 +193,11 @@ impl Tool for TaskTool {
             enabled_tools: Some(filtered),
             append_system_prompt,
             max_tokens,
+            // Subagent bash inherits the parent's sandbox indirectly:
+            // it runs through the same process, so any bwrap wrapping
+            // the outer agent already wraps the nested calls too. No
+            // need to plumb the argv a second time.
+            bash_command_wrapper: None,
         });
 
         eprintln!("\n  \x1b[2m[subagent] running: {prompt}\x1b[0m");

@@ -77,3 +77,11 @@ ctrlc = "3"
 [profile.release]
 lto = "thin"
 strip = true
+
+# Local dev override: while iterating on a pi_agent_rust API change
+# (the bash command_wrapper hook for `--sandbox`), point at the on-disk
+# checkout so cargo picks up the unpublished changes. Bump the `rev` in
+# [dependencies] once the upstream commit is pushed and remove this
+# block.
+[patch."https://github.com/Libertai/pi_agent_rust"]
+pi_agent_rust = { path = "../pi_agent_rust" }
