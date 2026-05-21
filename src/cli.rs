@@ -221,6 +221,93 @@ pub enum Command {
         #[command(subcommand)]
         action: SandboxAction,
     },
+
+    /// Import data from other coding agents into a LibertAI session.
+    Import {
+        #[command(subcommand)]
+        action: ImportAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ImportAction {
+    /// Claude Code transcripts (`~/.claude/projects/...`).
+    #[command(name = "claude-code")]
+    ClaudeCode {
+        #[command(subcommand)]
+        action: ClaudeCodeImportAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ClaudeCodeImportAction {
+    /// List Claude Code sessions discovered for the current project.
+    /// Use `--all` to scan every project Claude Code has on disk.
+    List {
+        /// Scan every project under `~/.claude/projects/`, not just
+        /// the encoded directory for the current cwd.
+        #[arg(long)]
+        all: bool,
+        /// Emit JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Render the live branch of a Claude Code session as a plain-text
+    /// transcript. Same source that the (still-WIP) summary import
+    /// will feed to the model; use this to preview the input.
+    Show {
+        /// Session UUID (resolved against the current cwd's encoded
+        /// project dir) or an absolute path to a `.jsonl` file.
+        id_or_path: String,
+        /// Look across every project under `~/.claude/projects/`
+        /// when resolving a bare UUID.
+        #[arg(long)]
+        all: bool,
+        /// Emit a JSON `LinearizedSession` instead of the human transcript.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Build a `/compact`-style summary of a Claude Code session by
+    /// calling the configured LibertAI chat model. Prints the summary
+    /// to stdout. The next slice wires this into a real pi session as
+    /// a `Compaction` checkpoint; for now this lets you eyeball quality.
+    Summarize {
+        /// Session UUID or absolute path (same resolver as `show`).
+        id_or_path: String,
+        /// Look across every project when resolving a bare UUID.
+        #[arg(long)]
+        all: bool,
+        /// Override the chat model (defaults to `default_chat_model`).
+        #[arg(long)]
+        model: Option<String>,
+        /// Print the constructed prompt and exit without calling the
+        /// backend — useful for inspecting what the model would see.
+        #[arg(long = "print-prompt")]
+        print_prompt: bool,
+    },
+    /// Summarise the Claude Code session and write a new pi session
+    /// file whose first entry is the resulting `/compact`-style
+    /// checkpoint. Prints the new session path on success — open it
+    /// with `libertai code --resume <path>` or pick it from the
+    /// session picker.
+    Import {
+        /// Session UUID or absolute path (same resolver as `show`).
+        id_or_path: String,
+        /// Look across every project when resolving a bare UUID.
+        #[arg(long)]
+        all: bool,
+        /// Override the chat model used for the summary call.
+        #[arg(long)]
+        model: Option<String>,
+        /// Provider written into the pi session header (defaults to
+        /// `default_code_provider` from config).
+        #[arg(long)]
+        provider: Option<String>,
+        /// Render the pi session JSONL to stdout instead of writing
+        /// it. Useful for inspecting the output shape.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -349,6 +436,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Config { action } => crate::commands::config_cmd::run(action),
         Command::Skills { action } => crate::commands::skills::run(action),
         Command::Sandbox { action } => crate::commands::code_sandbox_cli::run(action),
+        Command::Import { action } => crate::commands::claude_code_import_cli::run(action),
     }
 }
 
@@ -374,5 +462,6 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::Config { .. } => "config",
         Command::Skills { .. } => "skills",
         Command::Sandbox { .. } => "sandbox",
+        Command::Import { .. } => "import",
     }
 }

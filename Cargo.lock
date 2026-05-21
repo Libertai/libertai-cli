@@ -3051,6 +3051,7 @@ dependencies = [
  "tempfile",
  "toml",
  "url",
+ "uuid",
  "zeroize",
 ]
 
@@ -3569,7 +3570,6 @@ dependencies = [
 [[package]]
 name = "pi_agent_rust"
 version = "0.1.14"
-source = "git+https://github.com/Libertai/pi_agent_rust?rev=4a50cc2dc7ae3a0d08e9d77d97f449a1221c843c#4a50cc2dc7ae3a0d08e9d77d97f449a1221c843c"
 dependencies = [
  "anyhow",
  "ast-grep-core",

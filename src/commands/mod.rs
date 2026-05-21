@@ -1,6 +1,8 @@
 pub mod ask;
 pub mod auth_ui;
 pub mod chat;
+pub mod claude_code_import;
+pub mod claude_code_import_cli;
 pub mod code;
 pub mod code_approvals;
 pub mod code_ask_user;

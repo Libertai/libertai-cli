@@ -76,6 +76,10 @@ ctrlc = "3"
 # Date formatting for /remember bullets. Pi pulls chrono in transitively
 # but we declare it explicitly so `use chrono::Local` resolves cleanly.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Session/entry id generation for the Claude Code → pi import path.
+# Pi pulls uuid transitively; we declare it so `use uuid::Uuid` resolves
+# without depending on transitive feature flags.
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 # Black-box probes that spawn the `libertai` binary and assert on its
@@ -95,3 +99,9 @@ tier2-probes = []
 [profile.release]
 lto = "thin"
 strip = true
+
+# Local dev override: iterating on pi's compact_force hook. Bump the
+# `rev` in [dependencies] once the pi commit is pushed and remove this
+# block.
+[patch."https://github.com/Libertai/pi_agent_rust"]
+pi_agent_rust = { path = "../pi_agent_rust" }
