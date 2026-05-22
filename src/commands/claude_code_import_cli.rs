@@ -194,9 +194,12 @@ fn import_session(
 
     let written = write_pi_session_file(inputs)?;
     eprintln!(
-        "Imported Claude Code session {} → pi session {}.\nOpen it with:\n  libertai code --resume {}",
+        "Imported Claude Code session {} → pi session {}.\nOpen it with:\n  \
+         libertai code --continue        (from {})\n  \
+         libertai code --resume {}",
         lin.session_uuid,
         written.session_id,
+        target_cwd.display(),
         written.jsonl_path.display(),
     );
     Ok(())
