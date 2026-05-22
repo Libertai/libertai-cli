@@ -49,7 +49,17 @@ pub fn encode_project_dir(cwd: &Path) -> String {
     cwd.to_string_lossy().replace('/', "-")
 }
 
+/// Where Claude Code keeps its per-project session JSONLs.
+/// Honours `CLAUDE_CONFIG_DIR` (Claude Code's own override) so users
+/// with a non-default install path get discovery for free; falls back
+/// to `~/.claude/` otherwise. The `/projects` suffix is Claude Code's
+/// own convention and stays the same in both cases.
 pub fn claude_code_projects_root() -> Option<PathBuf> {
+    if let Ok(custom) = std::env::var("CLAUDE_CONFIG_DIR") {
+        if !custom.is_empty() {
+            return Some(PathBuf::from(custom).join("projects"));
+        }
+    }
     dirs::home_dir().map(|h| h.join(".claude").join("projects"))
 }
 
