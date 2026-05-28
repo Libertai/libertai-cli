@@ -781,40 +781,50 @@ async fn repl_loop(
             share_transcript(&handle, Some(rest.trim())).await;
             continue;
         }
-        if trimmed == "/agent" {
-            println!("{DIM}  usage: /agent <name> <task>{RESET}");
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("/agent ") {
-            match build_agent_slash_prompt(rest.trim()) {
-                Ok(prompt) => {
-                    line = prompt;
-                }
+        if let Some((command, scope)) = review_command_parts(trimmed) {
+            match build_review_slash_prompt(command, scope) {
+                Ok(prompt) => line = prompt,
                 Err(e) => {
-                    eprintln!("{DIM}  /agent: {e:#}{RESET}");
+                    eprintln!("{DIM}  {command}: {e:#}{RESET}");
                     continue;
                 }
             }
-        }
-        if let Some(rest) = trimmed.strip_prefix("/template ") {
-            match build_template_slash_prompt(rest.trim()) {
-                Ok(prompt) => {
-                    line = prompt;
-                }
-                Err(e) => {
-                    eprintln!("{DIM}  /template: {e:#}{RESET}");
-                    continue;
+        } else {
+            if trimmed == "/agent" {
+                println!("{DIM}  usage: /agent <name> <task>{RESET}");
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("/agent ") {
+                match build_agent_slash_prompt(rest.trim()) {
+                    Ok(prompt) => {
+                        line = prompt;
+                    }
+                    Err(e) => {
+                        eprintln!("{DIM}  /agent: {e:#}{RESET}");
+                        continue;
+                    }
                 }
             }
-        } else if let Some((name, args)) = parse_direct_custom_slash(trimmed) {
-            match build_custom_slash_prompt(name, args) {
-                Ok(Some(prompt)) => {
-                    line = prompt;
+            if let Some(rest) = trimmed.strip_prefix("/template ") {
+                match build_template_slash_prompt(rest.trim()) {
+                    Ok(prompt) => {
+                        line = prompt;
+                    }
+                    Err(e) => {
+                        eprintln!("{DIM}  /template: {e:#}{RESET}");
+                        continue;
+                    }
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    eprintln!("{DIM}  /{name}: {e:#}{RESET}");
-                    continue;
+            } else if let Some((name, args)) = parse_direct_custom_slash(trimmed) {
+                match build_custom_slash_prompt(name, args) {
+                    Ok(Some(prompt)) => {
+                        line = prompt;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("{DIM}  /{name}: {e:#}{RESET}");
+                        continue;
+                    }
                 }
             }
         }
@@ -1294,6 +1304,9 @@ fn print_help() {
     println!("{DIM}  /name <name> — set this session's display name{RESET}");
     println!("{DIM}  /status   — show current REPL session status{RESET}");
     println!("{DIM}  /doctor   — run a local session/config diagnostic report{RESET}");
+    println!("{DIM}  /review [scope] — ask the agent to review current code changes{RESET}");
+    println!("{DIM}  /security-review [scope] — ask for a focused security review{RESET}");
+    println!("{DIM}  /pr_comments [scope] — ask the agent to inspect PR review comments{RESET}");
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
@@ -2153,6 +2166,99 @@ fn parse_template_query(query: &str) -> Result<(&str, &str)> {
         .split_once(char::is_whitespace)
         .map_or((raw, ""), |(name, args)| (name, args.trim()));
     Ok((name, args))
+}
+
+fn review_command_parts(trimmed: &str) -> Option<(&str, &str)> {
+    let (command, scope) = trimmed
+        .split_once(char::is_whitespace)
+        .map_or((trimmed, ""), |(command, scope)| (command, scope.trim()));
+    match command {
+        "/review" | "/security-review" | "/pr_comments" | "/pr-comments" => {
+            Some((command, scope))
+        }
+        _ => None,
+    }
+}
+
+fn build_review_slash_prompt(command: &str, scope: &str) -> Result<String> {
+    match command {
+        "/review" => Ok(review_prompt(false, scope)),
+        "/security-review" => Ok(review_prompt(true, scope)),
+        "/pr_comments" | "/pr-comments" => Ok(pr_comments_prompt(scope)),
+        _ => anyhow::bail!("unknown review command: {command}"),
+    }
+}
+
+fn review_prompt(security: bool, scope: &str) -> String {
+    let scope = scope.trim();
+    let scope_line = if scope.is_empty() {
+        "User-requested scope: current repository changes.".to_string()
+    } else {
+        format!("User-requested scope: {scope}")
+    };
+    let title = if security {
+        "Run a focused security review"
+    } else {
+        "Review the current code changes"
+    };
+    let focus = if security {
+        r#"Security focus:
+- Injection, command execution, path traversal, filesystem escape, auth
+  and secret handling, SSRF/network trust, sandbox bypass, unsafe
+  deserialization, dependency or configuration exposure.
+- Treat user-controlled input and model/tool output as hostile until
+  proven otherwise."#
+    } else {
+        r#"Review focus:
+- Bugs, behavioral regressions, race conditions, missing error handling,
+  integration mismatches, data loss, and missing tests.
+- Keep style-only comments out unless they hide a real correctness or
+  maintenance risk."#
+    };
+    format!(
+        r#"{title} for this repository.
+
+{scope_line}
+
+Rules:
+- Do not modify files or make commits.
+- Start by inspecting git state: git status --short, git diff --stat,
+  git diff, and git diff --staged when relevant.
+- If the scope names files, PR notes, or a topic, prioritize that scope
+  but still call out high-impact adjacent issues visible in the diff.
+- Report findings first, ordered by severity.
+- For each finding include a concrete file:line reference when available,
+  the risk, and the minimal fix.
+- If you find no issues, say that clearly and mention any residual
+  test or review gap.
+
+{focus}"#
+    )
+}
+
+fn pr_comments_prompt(scope: &str) -> String {
+    let scope = scope.trim();
+    let scope_line = if scope.is_empty() {
+        "User-requested PR scope: infer the current branch's pull request.".to_string()
+    } else {
+        format!("User-requested PR scope: {scope}")
+    };
+    format!(
+        r#"Inspect pull request review comments for this repository and turn them into an actionable response plan.
+
+{scope_line}
+
+Rules:
+- Do not modify files or make commits.
+- First inspect git state: git status --short, git branch --show-current,
+  git remote -v, and git diff --stat.
+- Prefer GitHub CLI when available: use gh pr view --json number,url,headRefName,baseRefName,reviewDecision,comments,reviews,files and gh pr checks.
+- If the user supplied a PR number or URL, use that exact PR. Otherwise infer the PR for the current branch.
+- Summarize unresolved review comments first, grouped by file and reviewer when possible.
+- For each actionable comment, cite file:line when available, explain the requested change, and propose the minimal fix.
+- Call out comments that appear already addressed by the current diff.
+- If PR data cannot be loaded, report the exact command/error and suggest the next concrete command the user can run."#
+    )
 }
 
 fn parse_direct_custom_slash(trimmed: &str) -> Option<(&str, &str)> {
@@ -3569,6 +3675,37 @@ mod tests {
         assert_eq!(parse_template_query("review src/lib.rs").unwrap(), ("review", "src/lib.rs"));
         assert_eq!(parse_template_query("review").unwrap(), ("review", ""));
         assert!(parse_template_query("").is_err());
+    }
+
+    #[test]
+    fn review_command_parts_accepts_review_aliases() {
+        assert_eq!(review_command_parts("/review src"), Some(("/review", "src")));
+        assert_eq!(
+            review_command_parts("/security-review auth"),
+            Some(("/security-review", "auth"))
+        );
+        assert_eq!(
+            review_command_parts("/pr-comments 123"),
+            Some(("/pr-comments", "123"))
+        );
+        assert_eq!(review_command_parts("/pr_comments"), Some(("/pr_comments", "")));
+        assert_eq!(review_command_parts("/reviewer src"), None);
+    }
+
+    #[test]
+    fn build_review_slash_prompt_includes_scope_and_rules() {
+        let prompt = build_review_slash_prompt("/review", "src/lib.rs").unwrap();
+        assert!(prompt.contains("Review the current code changes"));
+        assert!(prompt.contains("User-requested scope: src/lib.rs"));
+        assert!(prompt.contains("Do not modify files or make commits"));
+
+        let security = build_review_slash_prompt("/security-review", "").unwrap();
+        assert!(security.contains("Run a focused security review"));
+        assert!(security.contains("Security focus:"));
+
+        let pr = build_review_slash_prompt("/pr_comments", "42").unwrap();
+        assert!(pr.contains("pull request review comments"));
+        assert!(pr.contains("User-requested PR scope: 42"));
     }
 
     #[test]
