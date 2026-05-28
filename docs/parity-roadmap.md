@@ -197,11 +197,12 @@ on-disk `~/.config/libertai/allow-rules.toml`: array of
 ### 2D. Surface pi's slash commands in REPL
 
 The libertai-cli REPL handles `/help`, `/plan`, `/clear`, `/exit`,
-`/forget`, `/remember`, `/status`, `/config`, `/output-style`, `/vim`,
-`/ide`, and `/bug`. Pi defines ~24 (`/compact`, `/resume`, `/fork`,
-`/export`, `/thinking`, `/theme`, `/scoped-models`, `/template`,
-`/share`, `/login`, `/logout`, `/history`, `/copy`, `/name`, `/hotkeys`,
-`/changelog`, `/tree`, `/reload`, `/settings`, `/model`, `/new`, etc.).
+`/forget`, `/remember`, `/status`, `/usage`/`/cost`, `/config`,
+`/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
+(`/compact`, `/resume`, `/fork`, `/export`, `/thinking`, `/theme`,
+`/scoped-models`, `/template`, `/share`, `/login`, `/logout`,
+`/history`, `/copy`, `/name`, `/hotkeys`, `/changelog`, `/tree`,
+`/reload`, `/settings`, `/model`, `/new`, etc.).
 
 Route typed `/foo` through pi's slash dispatcher when not in our
 local-command set. Add help routing so `/help` includes pi's commands.

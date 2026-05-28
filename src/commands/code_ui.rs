@@ -72,6 +72,27 @@ struct BarStatus {
     context_window: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UsageRecord {
+    provider: String,
+    model: String,
+    input: u64,
+    output: u64,
+    context_window: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UsageSummary {
+    turns: usize,
+    last_input: u64,
+    last_output: u64,
+    output_total: u64,
+    context_high_water: u64,
+    context_window: u32,
+    provider: String,
+    model: String,
+}
+
 /// Process-global because the Ctrl-C handler (spawned by the `ctrlc`
 /// crate on a separate thread) needs to reach both pieces of state
 /// without a reference chain.
@@ -291,6 +312,7 @@ async fn repl_loop(
     // In-memory input history (no persistence in v0).
     let mut history: VecDeque<String> = VecDeque::with_capacity(64);
     let mut output_style: Option<&'static str> = None;
+    let mut usage_history: Vec<UsageRecord> = Vec::new();
 
     loop {
         let line = match read_line(mode.get(), &history)? {
@@ -339,7 +361,18 @@ async fn repl_loop(
                 continue;
             }
             "/status" => {
-                print_session_status(&provider, &model, mode.get(), output_style, &cfg);
+                print_session_status(
+                    &provider,
+                    &model,
+                    mode.get(),
+                    output_style,
+                    &cfg,
+                    usage_summary(&usage_history),
+                );
+                continue;
+            }
+            "/usage" | "/cost" => {
+                print_usage_summary(usage_summary(&usage_history));
                 continue;
             }
             "/config" => {
@@ -380,6 +413,7 @@ async fn repl_loop(
                 )
                 .await?;
                 history.clear();
+                usage_history.clear();
                 println!("{DIM}  → fresh session.{RESET}");
                 println!();
                 continue;
@@ -472,12 +506,20 @@ async fn repl_loop(
         // leave a gap between the response and the usage/status line.
         match result {
             Ok(msg) => {
+                let context_window = context_window_for(&msg.model);
+                usage_history.push(UsageRecord {
+                    provider: msg.provider.clone(),
+                    model: msg.model.clone(),
+                    input: msg.usage.input,
+                    output: msg.usage.output,
+                    context_window,
+                });
                 // Update the status bar with this turn's input-token count
                 // so the next repaint reflects real context usage.
                 set_bar_status(BarStatus {
                     model_label: format!("{}/{}", msg.provider, msg.model),
                     input_tokens: msg.usage.input,
-                    context_window: context_window_for(&msg.model),
+                    context_window,
                 });
                 eprintln!(
                     "{DIM}  {}/{}  stop: {:?}  in={} out={}{RESET}",
@@ -645,6 +687,7 @@ fn print_help() {
     println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
     println!("{DIM}  /status   — show current REPL session status{RESET}");
+    println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
     println!("{DIM}  /config   — show active configuration summary (/config path for file path){RESET}");
     println!("{DIM}  /output-style <default|concise|explanatory|review|status>{RESET}");
     println!("{DIM}  /vim      — show Vim-input status{RESET}");
@@ -763,6 +806,7 @@ fn print_session_status(
     mode: Mode,
     output_style: Option<&str>,
     cfg: &LibertaiConfig,
+    usage: Option<UsageSummary>,
 ) {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -775,6 +819,73 @@ fn print_session_status(
     println!("{DIM}  cwd:{RESET} {cwd}");
     println!("{DIM}  default provider:{RESET} {}", cfg.default_code_provider);
     println!("{DIM}  default code model:{RESET} {}", cfg.default_code_model);
+    if let Some(summary) = usage {
+        println!(
+            "{DIM}  usage:{RESET} {} turn(s), {} ctx high-water, {} output total",
+            summary.turns,
+            human_tokens(summary.context_high_water),
+            human_tokens(summary.output_total)
+        );
+    } else {
+        println!("{DIM}  usage:{RESET} no turns recorded");
+    }
+    println!();
+}
+
+fn usage_summary(records: &[UsageRecord]) -> Option<UsageSummary> {
+    let last = records.last()?;
+    Some(UsageSummary {
+        turns: records.len(),
+        last_input: last.input,
+        last_output: last.output,
+        output_total: records.iter().map(|r| r.output).sum(),
+        context_high_water: records.iter().map(|r| r.input).max().unwrap_or(0),
+        context_window: last.context_window,
+        provider: last.provider.clone(),
+        model: last.model.clone(),
+    })
+}
+
+fn print_usage_summary(summary: Option<UsageSummary>) {
+    println!("{BOLD}usage{RESET}");
+    match summary {
+        Some(summary) => {
+            println!("{DIM}  provider/model:{RESET} {}/{}", summary.provider, summary.model);
+            println!("{DIM}  turns:{RESET} {}", summary.turns);
+            println!(
+                "{DIM}  last turn:{RESET} {} in · {} out",
+                human_tokens(summary.last_input),
+                human_tokens(summary.last_output)
+            );
+            println!(
+                "{DIM}  session output total:{RESET} {}",
+                human_tokens(summary.output_total)
+            );
+            if summary.context_window > 0 {
+                let pct = ((summary.context_high_water as f64
+                    / f64::from(summary.context_window))
+                    * 100.0)
+                    .round()
+                    .min(100.0) as u32;
+                println!(
+                    "{DIM}  context high-water:{RESET} {pct}% · {} / {}",
+                    human_tokens(summary.context_high_water),
+                    human_tokens(u64::from(summary.context_window))
+                );
+            } else {
+                println!(
+                    "{DIM}  context high-water:{RESET} {}",
+                    human_tokens(summary.context_high_water)
+                );
+            }
+            println!(
+                "{DIM}  note:{RESET} input is cumulative context; output is summed across completed turns."
+            );
+        }
+        None => {
+            println!("{DIM}  no usage recorded yet — send a prompt first.{RESET}");
+        }
+    }
     println!();
 }
 
@@ -1239,5 +1350,37 @@ mod tests {
         let result = execute_shell_escape(temp.path(), "pwd", None).unwrap();
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stdout.trim(), temp.path().display().to_string());
+    }
+
+    #[test]
+    fn usage_summary_tracks_context_high_water_and_output_total() {
+        let records = vec![
+            UsageRecord {
+                provider: "libertai".to_string(),
+                model: "fast".to_string(),
+                input: 100,
+                output: 25,
+                context_window: 1_000,
+            },
+            UsageRecord {
+                provider: "libertai".to_string(),
+                model: "fast".to_string(),
+                input: 180,
+                output: 40,
+                context_window: 1_000,
+            },
+        ];
+        let summary = usage_summary(&records).unwrap();
+        assert_eq!(summary.turns, 2);
+        assert_eq!(summary.last_input, 180);
+        assert_eq!(summary.last_output, 40);
+        assert_eq!(summary.output_total, 65);
+        assert_eq!(summary.context_high_water, 180);
+        assert_eq!(summary.context_window, 1_000);
+    }
+
+    #[test]
+    fn usage_summary_empty_when_no_turns() {
+        assert!(usage_summary(&[]).is_none());
     }
 }
