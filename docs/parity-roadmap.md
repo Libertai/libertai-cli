@@ -50,10 +50,10 @@ SDK; those are flagged **(upstream)**.
 After this sprint, parity-doc Sections A–G are all shipped. Section H
 (per-subagent prompts) remains gated on Phase 4D named-agent registry.
 
-The two items in `../libertai-code-desktop/docs/claude-code-parity.md`
-already noted as stale (AcceptEdits rows; `libertai-harness` "Suggested
-shape") still need to be moved to the "shipped" side on the next
-refresh of that doc.
+`../libertai-code-desktop/docs/claude-code-parity.md` has been refreshed
+to move AcceptEdits, `libertai-harness`, desktop `!cmd`, custom slash
+commands, and the first slash-routing batch to their current shipped or
+partial states.
 
 ---
 
