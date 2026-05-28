@@ -285,8 +285,8 @@ fn print_banner(provider: &str, model: &str, mode: Mode) {
 }
 
 async fn repl_loop(
-    provider: String,
-    model: String,
+    mut provider: String,
+    mut model: String,
     initial_mode: Mode,
     approvals: Arc<ApprovalState>,
     resume_path: Option<PathBuf>,
@@ -373,6 +373,10 @@ async fn repl_loop(
             }
             "/permissions" => {
                 print_permissions_status(mode.get());
+                continue;
+            }
+            "/model" => {
+                print_model_status(&handle, &cfg);
                 continue;
             }
             "/status" => {
@@ -485,6 +489,27 @@ async fn repl_loop(
                         "{DIM}  native bypassPermissions is intentionally unavailable. Use default, acceptEdits, or plan.{RESET}"
                     );
                 }
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/model ") {
+            match parse_model_spec(&provider, rest) {
+                Ok((next_provider, next_model)) => {
+                    match handle.set_model(&next_provider, &next_model).await {
+                        Ok(()) => {
+                            provider = next_provider;
+                            model = next_model;
+                            set_bar_status(BarStatus {
+                                model_label: format!("{provider}/{model}"),
+                                input_tokens: 0,
+                                context_window: context_window_for(&model),
+                            });
+                            println!("{DIM}  → model set to {provider}/{model}{RESET}");
+                        }
+                        Err(e) => eprintln!("{DIM}  /model: {e:#}{RESET}"),
+                    }
+                }
+                Err(e) => eprintln!("{DIM}  /model: {e:#}{RESET}"),
             }
             continue;
         }
@@ -778,6 +803,7 @@ fn print_help() {
     println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
     println!("{DIM}  /permissions [default|acceptEdits|plan|forget]{RESET}");
+    println!("{DIM}  /model [model|provider/model]{RESET}");
     println!("{DIM}  /status   — show current REPL session status{RESET}");
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
     println!("{DIM}  /config   — show active configuration summary (/config path for file path){RESET}");
@@ -821,6 +847,32 @@ fn print_permissions_status(mode: Mode) {
     println!("{DIM}  supported: default, acceptEdits, plan{RESET}");
     println!("{DIM}  native bypassPermissions is intentionally unavailable.{RESET}");
     println!("{DIM}  use /permissions forget to clear saved allow rules.{RESET}");
+}
+
+fn parse_model_spec(current_provider: &str, input: &str) -> Result<(String, String)> {
+    let spec = input.trim();
+    if spec.is_empty() {
+        anyhow::bail!("usage: /model <model|provider/model>");
+    }
+    let (provider, model) = match spec.split_once('/') {
+        Some((provider, model)) => (provider.trim(), model.trim()),
+        None => (current_provider.trim(), spec),
+    };
+    if provider.is_empty() || model.is_empty() {
+        anyhow::bail!("usage: /model <model|provider/model>");
+    }
+    Ok((provider.to_string(), model.to_string()))
+}
+
+fn print_model_status(handle: &AgentSessionHandle, cfg: &LibertaiConfig) {
+    let (provider, model) = handle.model();
+    println!("{BOLD}model{RESET}");
+    println!("{DIM}  current:{RESET} {provider}/{model}");
+    println!(
+        "{DIM}  default:{RESET} {}/{}",
+        cfg.default_code_provider, cfg.default_code_model
+    );
+    println!("{DIM}  usage:{RESET} /model <model|provider/model>");
 }
 
 fn print_init_project() {
@@ -1835,6 +1887,29 @@ mod tests {
             PermissionsCommand::UnsupportedBypass
         );
         assert_eq!(parse_permissions_command("wat"), PermissionsCommand::Show);
+    }
+
+    #[test]
+    fn parse_model_spec_uses_current_provider_for_bare_model() {
+        assert_eq!(
+            parse_model_spec("libertai", "qwen3").unwrap(),
+            ("libertai".to_string(), "qwen3".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_model_spec_accepts_provider_model_pair() {
+        assert_eq!(
+            parse_model_spec("libertai", "openai/gpt-5").unwrap(),
+            ("openai".to_string(), "gpt-5".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_model_spec_rejects_empty_parts() {
+        assert!(parse_model_spec("libertai", "").is_err());
+        assert!(parse_model_spec("libertai", "/model").is_err());
+        assert!(parse_model_spec("libertai", "provider/").is_err());
     }
 
     #[test]

@@ -38,6 +38,9 @@ SDK; those are flagged **(upstream)**.
 - **CLI approval diff previews** — file-mutation approval prompts now
   compare proposed `write`/`edit` changes against current files when
   available and show structured `hashline_edit` operation summaries.
+- **CLI `/model` command** — REPL users can inspect the active
+  provider/model and switch with `/model <model|provider/model>` without
+  rebuilding the session.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
@@ -206,7 +209,7 @@ the saved rules.
 The libertai-cli REPL handles `/help`, `/plan`, `/clear`, `/exit`,
 `/forget`, `/permissions`, `/remember`, `/memory`, `/init`, `/agents`, `/agent`,
 `/template`, custom `/<name>` templates, `/status`, `/usage`/`/cost`,
-`/config`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
+`/config`, `/model`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
 (`/compact`, `/resume`, `/fork`, `/export`, `/thinking`, `/theme`,
 `/scoped-models`, `/template`, `/share`, `/login`, `/logout`,
 `/history`, `/copy`, `/name`, `/hotkeys`, `/changelog`, `/tree`,
