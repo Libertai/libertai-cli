@@ -1515,7 +1515,7 @@ fn print_help() {
     println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
     println!("{DIM}  /login    — run libertai login, then reload this REPL session{RESET}");
     println!("{DIM}  /logout   — run libertai logout, then reload this REPL session{RESET}");
-    println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
+    println!("{DIM}  /memory   — show project memory (/memory edit|clear|files|references|path){RESET}");
     println!("{DIM}  /init     — create AGENTS.md for this project if missing{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
     println!("{DIM}  /agent [--worktree] <name> <task> — run a named sub-agent task{RESET}");
@@ -2574,6 +2574,13 @@ fn print_memory(action: &str) {
         }
         return;
     }
+    if matches!(action.to_ascii_lowercase().as_str(), "files" | "list") {
+        match crate::commands::code_memory::list_memory_files(&cwd) {
+            Ok(files) => print_memory_files(&files),
+            Err(e) => eprintln!("{DIM}  /memory files: failed: {e:#}{RESET}"),
+        }
+        return;
+    }
     let doc = match crate::commands::code_memory::read_memory(&cwd) {
         Ok(doc) => doc,
         Err(e) => {
@@ -2616,6 +2623,25 @@ fn print_memory_references(refs: &[crate::commands::code_memory::MemoryReference
             reference.status.label(),
             target,
             reference.detail
+        );
+    }
+    println!();
+}
+
+fn print_memory_files(files: &[crate::commands::code_memory::MemoryFileEntry]) {
+    println!("{BOLD}memory files{RESET}");
+    if files.is_empty() {
+        println!("{DIM}  no per-entry memory files found yet{RESET}");
+        println!("{DIM}  use /remember [kind:] <text> to create one{RESET}");
+        println!();
+        return;
+    }
+    for file in files {
+        println!(
+            "{DIM}  [{}]{RESET} {} - {}",
+            file.kind.label(),
+            file.path.display(),
+            file.title
         );
     }
     println!();

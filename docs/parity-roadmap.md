@@ -77,7 +77,9 @@ SDK; those are flagged **(upstream)**.
   and usage.
 - **Typed project memory** — `/remember` accepts `user:`, `feedback:`,
   `project:`, `reference:`, or `--type <kind>` prefixes and stores
-  categorized bullets in the shared `MEMORY.md`.
+  categorized bullets in the shared `MEMORY.md` index, with per-entry
+  sidecar Markdown files under `memory/<kind>/`; `/memory files` lists
+  those sidecars and `/memory clear` backs them up with the index.
 - **CLI `/review`, `/security-review`, and `/pr_comments` commands** —
   REPL users can dispatch the same structured review and PR-comment
   prompts already used by the desktop slash palette.

@@ -56,12 +56,20 @@ pub struct MemoryDocument {
 pub struct MemoryClearResult {
     pub path: PathBuf,
     pub backup_path: Option<PathBuf>,
+    pub backup_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedMemoryNote {
     pub kind: MemoryKind,
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryFileEntry {
+    pub kind: MemoryKind,
+    pub path: PathBuf,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +119,14 @@ pub fn memory_file_for(cwd: &Path) -> Result<PathBuf> {
     Ok(root.join(encoded).join("MEMORY.md"))
 }
 
+pub fn memory_entries_dir_for(cwd: &Path) -> Result<PathBuf> {
+    let index = memory_file_for(cwd)?;
+    let parent = index
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("memory path has no parent: {}", index.display()))?;
+    Ok(parent.join("memory"))
+}
+
 /// Make sure `PI_PROJECT_MEMORY_DIR` is set so pi's loader picks up
 /// our memory files. Call once at session startup. Honors any value
 /// the user has already set in the environment (e.g. probes).
@@ -151,7 +167,14 @@ pub fn append_memory_with_kind(cwd: &Path, kind: MemoryKind, text: &str) -> Resu
             .with_context(|| format!("creating {}", parent.display()))?;
     }
     let stamp = Local::now().format("%Y-%m-%d %H:%M");
-    let line = format!("- {stamp} [{}] {}\n", kind.label(), text.trim());
+    let sidecar = write_memory_entry_file(cwd, kind, text.trim(), &stamp.to_string())?;
+    let relative = sidecar_path_for_index(&path, &sidecar);
+    let line = format!(
+        "- {stamp} ([entry]({})) [{}] {}\n",
+        relative.display(),
+        kind.label(),
+        text.trim()
+    );
 
     use std::io::Write as _;
     let mut f = std::fs::OpenOptions::new()
@@ -162,6 +185,76 @@ pub fn append_memory_with_kind(cwd: &Path, kind: MemoryKind, text: &str) -> Resu
     f.write_all(line.as_bytes())
         .with_context(|| format!("writing to {}", path.display()))?;
     Ok(path)
+}
+
+fn write_memory_entry_file(
+    cwd: &Path,
+    kind: MemoryKind,
+    text: &str,
+    stamp: &str,
+) -> Result<PathBuf> {
+    let entries = memory_entries_dir_for(cwd)?;
+    let dir = entries.join(kind.label());
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = unique_memory_entry_path(&dir, stamp, text);
+    let content = format!(
+        "# {} memory\n\n- created: {stamp}\n- kind: {}\n- project: {}\n\n{}\n",
+        kind.label(),
+        kind.label(),
+        cwd.display(),
+        text
+    );
+    std::fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
+fn unique_memory_entry_path(dir: &Path, stamp: &str, text: &str) -> PathBuf {
+    let base = format!(
+        "{}-{}",
+        stamp.replace(['-', ':', ' '], ""),
+        slugify_memory_text(text)
+    );
+    let mut path = dir.join(format!("{base}.md"));
+    for suffix in 2.. {
+        if !path.exists() {
+            return path;
+        }
+        path = dir.join(format!("{base}-{suffix}.md"));
+    }
+    unreachable!("unbounded suffix search should always return");
+}
+
+fn slugify_memory_text(text: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for ch in text.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_dash = false;
+        } else if !last_dash && !slug.is_empty() {
+            slug.push('-');
+            last_dash = true;
+        }
+        if slug.len() >= 48 {
+            break;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "note".to_string()
+    } else {
+        slug
+    }
+}
+
+fn sidecar_path_for_index(index_path: &Path, sidecar_path: &Path) -> PathBuf {
+    index_path
+        .parent()
+        .and_then(|parent| sidecar_path.strip_prefix(parent).ok())
+        .unwrap_or(sidecar_path)
+        .to_path_buf()
 }
 
 pub fn parse_memory_note(input: &str) -> ParsedMemoryNote {
@@ -345,14 +438,25 @@ fn resolve_reference_path(cwd: &Path, target: &str) -> PathBuf {
 /// Clear MEMORY.md, preserving existing content in a numbered backup.
 pub fn clear_memory(cwd: &Path) -> Result<MemoryClearResult> {
     let path = memory_file_for(cwd)?;
-    clear_memory_path(path)
+    let entries_dir = memory_entries_dir_for(cwd)?;
+    clear_memory_path(path, entries_dir)
 }
 
-fn clear_memory_path(path: PathBuf) -> Result<MemoryClearResult> {
+fn clear_memory_path(path: PathBuf, entries_dir: PathBuf) -> Result<MemoryClearResult> {
+    let backup_dir = if entries_dir.exists() {
+        let backup = next_backup_dir(&entries_dir);
+        std::fs::rename(&entries_dir, &backup).with_context(|| {
+            format!("moving {} to {}", entries_dir.display(), backup.display())
+        })?;
+        Some(backup)
+    } else {
+        None
+    };
     if !path.exists() {
         return Ok(MemoryClearResult {
             path,
             backup_path: None,
+            backup_dir,
         });
     }
     let backup_path = next_backup_path(&path);
@@ -366,6 +470,7 @@ fn clear_memory_path(path: PathBuf) -> Result<MemoryClearResult> {
     Ok(MemoryClearResult {
         path,
         backup_path: Some(backup_path),
+        backup_dir,
     })
 }
 
@@ -381,6 +486,68 @@ fn next_backup_path(path: &Path) -> PathBuf {
         }
     }
     unreachable!("unbounded backup suffix search should always return");
+}
+
+fn next_backup_dir(path: &Path) -> PathBuf {
+    let first = path.with_file_name("memory.bak");
+    if !first.exists() {
+        return first;
+    }
+    for i in 2.. {
+        let candidate = path.with_file_name(format!("memory.bak.{i}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded backup suffix search should always return");
+}
+
+pub fn list_memory_files(cwd: &Path) -> Result<Vec<MemoryFileEntry>> {
+    let root = memory_entries_dir_for(cwd)?;
+    let mut out = Vec::new();
+    for kind in [
+        MemoryKind::User,
+        MemoryKind::Feedback,
+        MemoryKind::Project,
+        MemoryKind::Reference,
+    ] {
+        let dir = root.join(kind.label());
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+                continue;
+            }
+            out.push(MemoryFileEntry {
+                kind,
+                title: memory_file_title(&path),
+                path,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+fn memory_file_title(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| {
+            content
+                .lines()
+                .find_map(|line| line.strip_prefix("# ").map(str::trim))
+                .map(str::to_string)
+        })
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("memory")
+                .to_string()
+        })
 }
 
 #[cfg(test)]
@@ -417,9 +584,11 @@ mod tests {
         std::fs::write(&path, "- keep this\n").unwrap();
         let backup = next_backup_path(&path);
 
-        let result = clear_memory_path(path.clone()).unwrap();
+        let entries = temp.path().join("memory");
+        let result = clear_memory_path(path.clone(), entries).unwrap();
 
         assert_eq!(result.backup_path.as_ref(), Some(&backup));
+        assert!(result.backup_dir.is_none());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         assert_eq!(std::fs::read_to_string(backup).unwrap(), "- keep this\n");
     }
@@ -478,6 +647,36 @@ mod tests {
         let path = append_memory_with_kind(temp.path(), MemoryKind::Reference, "docs url").unwrap();
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("[reference] docs url"));
+        assert!(content.contains("([entry](memory/reference/"));
+    }
+
+    #[test]
+    fn append_memory_with_kind_writes_sidecar_file() {
+        let temp = tempfile::tempdir().unwrap();
+        append_memory_with_kind(temp.path(), MemoryKind::User, "prefers terse answers").unwrap();
+
+        let files = list_memory_files(temp.path()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].kind, MemoryKind::User);
+        assert!(files[0].path.parent().is_some_and(|path| path.ends_with("user")));
+        let content = std::fs::read_to_string(&files[0].path).unwrap();
+        assert!(content.contains("- kind: user"));
+        assert!(content.contains("prefers terse answers"));
+    }
+
+    #[test]
+    fn clear_memory_path_moves_sidecar_dir_to_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("MEMORY.md");
+        let entries = temp.path().join("memory");
+        std::fs::create_dir_all(entries.join("project")).unwrap();
+        std::fs::write(entries.join("project").join("note.md"), "note").unwrap();
+
+        let result = clear_memory_path(path, entries.clone()).unwrap();
+
+        let backup = result.backup_dir.unwrap();
+        assert!(!entries.exists());
+        assert_eq!(std::fs::read_to_string(backup.join("project").join("note.md")).unwrap(), "note");
     }
 
     #[test]
