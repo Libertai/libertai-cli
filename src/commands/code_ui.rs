@@ -36,7 +36,7 @@ use pi::sdk::{
 use crate::commands::code_approvals::ApprovalState;
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
 use crate::commands::code_session::{
-    build_session_options, CodeSessionConfig, SessionPersistence,
+    build_session_options, most_recent_session, CodeSessionConfig, SessionPersistence,
 };
 use crate::commands::code_skills::{self, SkillPillar};
 use crate::commands::code_term::TerminalApprovalUi;
@@ -501,6 +501,31 @@ async fn repl_loop(
                 }
                 continue;
             }
+            "/resume" => {
+                match resolve_repl_resume_path("") {
+                    Ok(path) => {
+                        match resume_repl_session(
+                            &path,
+                            &provider,
+                            &model,
+                            mode.clone(),
+                            Arc::clone(&approvals),
+                            bash_command_wrapper.clone(),
+                            Arc::clone(&cfg),
+                        )
+                        .await
+                        {
+                            Ok(next) => {
+                                handle = next;
+                                usage_history.clear();
+                            }
+                            Err(e) => eprintln!("{DIM}  /resume: {e:#}{RESET}"),
+                        }
+                    }
+                    Err(e) => eprintln!("{DIM}  /resume: {e:#}{RESET}"),
+                }
+                continue;
+            }
             "/memory" => {
                 print_memory("show");
                 continue;
@@ -603,6 +628,31 @@ async fn repl_loop(
             match parse_changelog_limit(rest) {
                 Ok(limit) => print_changelog(limit),
                 Err(e) => eprintln!("{DIM}  /changelog: {e:#}{RESET}"),
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/resume ") {
+            match resolve_repl_resume_path(rest) {
+                Ok(path) => {
+                    match resume_repl_session(
+                        &path,
+                        &provider,
+                        &model,
+                        mode.clone(),
+                        Arc::clone(&approvals),
+                        bash_command_wrapper.clone(),
+                        Arc::clone(&cfg),
+                    )
+                    .await
+                    {
+                        Ok(next) => {
+                            handle = next;
+                            usage_history.clear();
+                        }
+                        Err(e) => eprintln!("{DIM}  /resume: {e:#}{RESET}"),
+                    }
+                }
+                Err(e) => eprintln!("{DIM}  /resume: {e:#}{RESET}"),
             }
             continue;
         }
@@ -953,6 +1003,49 @@ fn reload_model_selection(
     }
 }
 
+async fn resume_repl_session(
+    path: &Path,
+    provider: &str,
+    model: &str,
+    mode: ModeFlag,
+    approvals: Arc<ApprovalState>,
+    bash_command_wrapper: Option<Vec<String>>,
+    cfg: Arc<LibertaiConfig>,
+) -> Result<AgentSessionHandle> {
+    let handle = build_handle(
+        provider,
+        model,
+        mode,
+        approvals,
+        Some(path.to_path_buf()),
+        bash_command_wrapper,
+        cfg,
+    )
+    .await?;
+    println!("{DIM}  → resumed session: {}{RESET}", path.display());
+    if let Ok(messages) = handle.messages().await {
+        if !messages.is_empty() {
+            print_rehydrated_transcript(&messages);
+        }
+    }
+    Ok(handle)
+}
+
+fn resolve_repl_resume_path(input: &str) -> Result<PathBuf> {
+    let raw = input.trim();
+    if raw.is_empty() {
+        let cwd = std::env::current_dir().context("resolve current directory")?;
+        let recent = most_recent_session(&cwd)?
+            .ok_or_else(|| anyhow::anyhow!("no past sessions for {}", cwd.display()))?;
+        return Ok(PathBuf::from(recent.path));
+    }
+    let path = PathBuf::from(raw);
+    if !path.exists() {
+        anyhow::bail!("session file not found: {}", path.display());
+    }
+    Ok(path)
+}
+
 /// Render a previously-saved conversation in the same shape the live REPL
 /// uses, so a `--resume` user sees their context as static history before
 /// the input bar appears. Streamed output during normal operation comes
@@ -1020,6 +1113,7 @@ fn print_help() {
     println!("{DIM}  /tree [path] — show a bounded project tree{RESET}");
     println!("{DIM}  /changelog [count] — show recent git commits{RESET}");
     println!("{DIM}  /reload   — reload config and start a fresh agent session{RESET}");
+    println!("{DIM}  /resume [path] — resume the latest or specified saved session{RESET}");
     println!("{DIM}  /login    — run libertai login, then reload this REPL session{RESET}");
     println!("{DIM}  /logout   — run libertai logout, then reload this REPL session{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
@@ -2565,6 +2659,21 @@ mod tests {
             reload_model_selection(&old_cfg, &next_cfg, "libertai", "custom-model"),
             ("libertai".to_string(), "custom-model".to_string())
         );
+    }
+
+    #[test]
+    fn resolve_repl_resume_path_accepts_existing_explicit_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        assert_eq!(resolve_repl_resume_path(path.to_str().unwrap()).unwrap(), path);
+    }
+
+    #[test]
+    fn resolve_repl_resume_path_rejects_missing_explicit_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing.jsonl");
+        assert!(resolve_repl_resume_path(path.to_str().unwrap()).is_err());
     }
 
     #[test]
