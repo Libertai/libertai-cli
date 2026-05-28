@@ -197,8 +197,9 @@ on-disk `~/.config/libertai/allow-rules.toml`: array of
 ### 2D. Surface pi's slash commands in REPL
 
 The libertai-cli REPL handles `/help`, `/plan`, `/clear`, `/exit`,
-`/forget`, `/remember`, `/memory`, `/init`, `/agents`, `/agent`, `/status`,
-`/usage`/`/cost`, `/config`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
+`/forget`, `/remember`, `/memory`, `/init`, `/agents`, `/agent`,
+`/template`, custom `/<name>` templates, `/status`, `/usage`/`/cost`,
+`/config`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
 (`/compact`, `/resume`, `/fork`, `/export`, `/thinking`, `/theme`,
 `/scoped-models`, `/template`, `/share`, `/login`, `/logout`,
 `/history`, `/copy`, `/name`, `/hotkeys`, `/changelog`, `/tree`,
@@ -377,18 +378,14 @@ covers 80% of value per parity doc section F.
 
 ### 4F. Custom slash commands
 
-`.libertai/commands/<name>.md` (project) and
-`~/.config/libertai/commands/<name>.md` (user). Each file's frontmatter
-defines `description:`, `args:`; body is a prompt template substituted
-with args. Matches Claude Code's `.claude/commands/`.
+Shipped: CLI and desktop discover project `.claude/commands`,
+`.libertai/commands`, and legacy `.liberclaw/commands`, plus user
+`~/.claude/commands` and `~/.config/libertai/commands`. Each Markdown
+file becomes a prompt template; frontmatter may define `description:`
+and `argHint:`. CLI supports `/template <name> [args]` and direct
+`/<name> [args]` dispatch with `{{args}}` substitution.
 
-**Files**: new `src/commands/code_slash_registry.rs`,
-`src/commands/code_ui.rs` (dispatcher).
-**Effort**: M (1.5 days).
-**Desktop note**: shipped on desktop (commit `ee861ec`) but using
-`.liberclaw/commands/` rather than `.libertai/commands/`. **Decision
-required** before the CLI side lands: unify on one path, or support
-both as fallbacks.
+**Files**: `src/commands/code_slash_registry.rs`, `src/commands/code_ui.rs`.
 
 ---
 

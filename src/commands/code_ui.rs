@@ -392,6 +392,10 @@ async fn repl_loop(
                 print_agents();
                 continue;
             }
+            "/template" => {
+                print_templates();
+                continue;
+            }
             "/vim" => {
                 println!(
                     "{DIM}  Vim bindings are not implemented in the CLI REPL yet. The input bar uses native line-editing keys.{RESET}"
@@ -462,6 +466,28 @@ async fn repl_loop(
                 }
                 Err(e) => {
                     eprintln!("{DIM}  /agent: {e:#}{RESET}");
+                    continue;
+                }
+            }
+        }
+        if let Some(rest) = trimmed.strip_prefix("/template ") {
+            match build_template_slash_prompt(rest.trim()) {
+                Ok(prompt) => {
+                    line = prompt;
+                }
+                Err(e) => {
+                    eprintln!("{DIM}  /template: {e:#}{RESET}");
+                    continue;
+                }
+            }
+        } else if let Some((name, args)) = parse_direct_custom_slash(trimmed) {
+            match build_custom_slash_prompt(name, args) {
+                Ok(Some(prompt)) => {
+                    line = prompt;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("{DIM}  /{name}: {e:#}{RESET}");
                     continue;
                 }
             }
@@ -725,6 +751,7 @@ fn print_help() {
     println!("{DIM}  /init     — create AGENTS.md for this project if missing{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
     println!("{DIM}  /agent <name> <task> — run a named sub-agent task{RESET}");
+    println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
     println!("{DIM}  /output-style <default|concise|explanatory|review|status>{RESET}");
     println!("{DIM}  /vim      — show Vim-input status{RESET}");
     println!("{DIM}  /ide      — show IDE integration status{RESET}");
@@ -870,6 +897,85 @@ fn print_agents() {
         println!("{DIM}  run /agent <name> <task> to dispatch a focused task.{RESET}");
     }
     println!();
+}
+
+fn print_templates() {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /template: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let templates = crate::commands::code_slash_registry::discover(&cwd);
+    println!("{BOLD}templates{RESET}");
+    if templates.is_empty() {
+        println!("{DIM}  no prompt templates found.{RESET}");
+        println!("{DIM}  create .claude/commands/<name>.md or .libertai/commands/<name>.md.{RESET}");
+    } else {
+        for t in templates {
+            let desc = t.description.as_deref().unwrap_or(match t.source {
+                crate::commands::code_slash_registry::CommandSource::Project => "project template",
+                crate::commands::code_slash_registry::CommandSource::User => "user template",
+            });
+            let hint = t
+                .arg_hint
+                .as_ref()
+                .map(|h| format!(" · args: {h}"))
+                .unwrap_or_default();
+            println!("- /{}: {}{}", t.name, desc, hint);
+        }
+        println!("{DIM}  run /template <name> [args], or /<name> [args].{RESET}");
+    }
+    println!();
+}
+
+fn build_template_slash_prompt(query: &str) -> Result<String> {
+    let (name, args) = parse_template_query(query)?;
+    let Some(prompt) = build_custom_slash_prompt(name, args)? else {
+        anyhow::bail!("template not found: {name}");
+    };
+    Ok(prompt)
+}
+
+fn parse_template_query(query: &str) -> Result<(&str, &str)> {
+    let raw = query.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("list") {
+        anyhow::bail!("usage: /template <name> [args]");
+    }
+    let (name, args) = raw
+        .split_once(char::is_whitespace)
+        .map_or((raw, ""), |(name, args)| (name, args.trim()));
+    Ok((name, args))
+}
+
+fn parse_direct_custom_slash(trimmed: &str) -> Option<(&str, &str)> {
+    let raw = trimmed.strip_prefix('/')?;
+    if raw.is_empty() {
+        return None;
+    }
+    let (name, args) = raw
+        .split_once(char::is_whitespace)
+        .map_or((raw, ""), |(name, args)| (name, args.trim()));
+    if name.is_empty() || name.contains('/') {
+        None
+    } else {
+        Some((name, args))
+    }
+}
+
+fn build_custom_slash_prompt(name: &str, args: &str) -> Result<Option<String>> {
+    let cwd = std::env::current_dir().context("resolving cwd")?;
+    let templates = crate::commands::code_slash_registry::discover(&cwd);
+    let needle = name.trim().to_lowercase();
+    let Some(hit) = templates
+        .iter()
+        .find(|cmd| cmd.name == needle)
+        .or_else(|| templates.iter().find(|cmd| cmd.name.starts_with(&needle)))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(crate::commands::code_slash_registry::expand(hit, args)))
 }
 
 fn build_agent_slash_prompt(query: &str) -> Result<String> {
@@ -1672,5 +1778,19 @@ mod tests {
         let prompt = build_agent_prompt_from_defs("rev", "check the diff", &agents).unwrap();
         assert!(prompt.contains("subagent_type \"reviewer\""));
         assert!(prompt.contains("check the diff"));
+    }
+
+    #[test]
+    fn parse_template_query_splits_name_and_args() {
+        assert_eq!(parse_template_query("review src/lib.rs").unwrap(), ("review", "src/lib.rs"));
+        assert_eq!(parse_template_query("review").unwrap(), ("review", ""));
+        assert!(parse_template_query("").is_err());
+    }
+
+    #[test]
+    fn parse_direct_custom_slash_parses_name_and_args() {
+        assert_eq!(parse_direct_custom_slash("/review src"), Some(("review", "src")));
+        assert_eq!(parse_direct_custom_slash("/review"), Some(("review", "")));
+        assert_eq!(parse_direct_custom_slash("review"), None);
     }
 }
