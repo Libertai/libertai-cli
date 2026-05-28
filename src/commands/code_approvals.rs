@@ -672,21 +672,28 @@ pub fn preview_call(tool: &str, input: &serde_json::Value) -> String {
                 .get("content")
                 .and_then(|v| v.as_str())
                 .map_or(0, str::len);
-            format!("write {path} ({len} bytes)")
+            with_diff(format!("write {path} ({len} bytes)"), tool, input)
         }
         "edit" => {
             let path = sanitize(field(input, "path").unwrap_or("<missing path>"));
-            format!("edit {path}")
+            with_diff(format!("edit {path}"), tool, input)
         }
         "hashline_edit" => {
             let path = sanitize(field(input, "path").unwrap_or("<missing path>"));
-            format!("hashline_edit {path}")
+            with_diff(format!("hashline_edit {path}"), tool, input)
         }
         _ => {
             let raw = input.to_string();
             let clipped = sanitize(&raw);
             format!("{tool}: {clipped}")
         }
+    }
+}
+
+fn with_diff(header: String, tool: &str, input: &serde_json::Value) -> String {
+    match crate::commands::code_diff::approval_diff_preview(tool, input) {
+        Some(diff) if !diff.is_empty() => format!("{header}\n{}", sanitize(&diff)),
+        _ => header,
     }
 }
 
@@ -890,6 +897,41 @@ mod tests {
         let rule = AllowRule::exact("edit", "src/foo");
         assert!(rule.matches("edit", "src/foo"));
         assert!(!rule.matches("edit", "src/foobar"));
+    }
+
+    // ── preview_call ────────────────────────────────────────────────
+
+    #[test]
+    fn preview_write_includes_added_content_diff() {
+        let input = serde_json::json!({"path":"src/main.rs","content":"fn main() {}\n"});
+        let preview = preview_call("write", &input);
+        assert!(preview.starts_with("write src/main.rs"));
+        assert!(preview.contains("--- /dev/null"));
+        assert!(preview.contains("+fn main() {}"));
+    }
+
+    #[test]
+    fn preview_edit_includes_old_new_diff() {
+        let input = serde_json::json!({
+            "path":"src/lib.rs",
+            "oldText":"let x = 1;",
+            "newText":"let x = 2;"
+        });
+        let preview = preview_call("edit", &input);
+        assert!(preview.starts_with("edit src/lib.rs"));
+        assert!(preview.contains("-let x = 1;"));
+        assert!(preview.contains("+let x = 2;"));
+    }
+
+    #[test]
+    fn preview_hashline_edit_summarizes_operations() {
+        let input = serde_json::json!({
+            "path":"src/lib.rs",
+            "edits":[{"op":"append","pos":"10#AA","lines":["x"]}]
+        });
+        let preview = preview_call("hashline_edit", &input);
+        assert!(preview.starts_with("hashline_edit src/lib.rs"));
+        assert!(preview.contains("1. append 10#AA with 1 line"));
     }
 
     // ── approval_subject ────────────────────────────────────────────

@@ -35,6 +35,9 @@ SDK; those are flagged **(upstream)**.
 - **CLI tool preview lines** — REPL and one-shot renderers now show the
   primary tool arguments (`read src/lib.rs:12+40`, `bash cargo test`,
   `grep pattern in src`) instead of only the tool name.
+- **CLI approval diff previews** — file-mutation approval prompts now
+  include proposed `write` content, `edit` old/new text, and structured
+  `hashline_edit` operation summaries.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
@@ -158,16 +161,15 @@ finish with a numbered plan for the user to approve."
 
 ### 2A. Inline diff renderer in approvals
 
-Today, `write`/`edit`/`hashline_edit` approvals show only path + byte
-count (`src/commands/code_approvals.rs`). Borrow Hermes's
-snapshot-then-diff pattern (`/tmp/hermes-agent/agent/display.py:90-566`):
-snapshot the file at approval-prompt time, after approval+execution
-compute a unified diff, render colored ±/context with a cap of 6 files
-and 80 lines per file. Excess summarized as "… N lines omitted".
+Shipped first pass for CLI approval prompts: `write` previews proposed
+added content, `edit` previews old/new text, and `hashline_edit`
+summarizes requested operations before the user approves. Remaining
+work is a richer current-file snapshot diff with color and post-exec
+rendering for exact file-system deltas.
 
 **Files**: `src/commands/code_approvals.rs` (snapshot trigger),
-new `src/commands/code_diff.rs` (renderer).
-**Effort**: M (2 days).
+`src/commands/code_diff.rs` (renderer).
+**Status**: partial.
 **Desktop note**: the desktop already has its own diff viewer
 (`js/editor.js` MergeView) — this is CLI-specific UX, not shared.
 
