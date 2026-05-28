@@ -37,12 +37,28 @@ use crate::commands::code_session::{
 };
 use crate::commands::code_skills::{self, SkillPillar};
 use crate::commands::code_term::TerminalApprovalUi;
-use crate::config::Config as LibertaiConfig;
+use crate::config::{mask_key, Config as LibertaiConfig};
 
 /// ANSI dim/bold helpers for cooked output (agent streaming phase).
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
+
+const OUTPUT_STYLES: &[(&str, &str)] = &[
+    ("default", "Use the normal project response style."),
+    (
+        "concise",
+        "Be concise. Prefer short, direct answers and only include detail needed to act.",
+    ),
+    (
+        "explanatory",
+        "Explain reasoning and tradeoffs clearly before giving final steps.",
+    ),
+    (
+        "review",
+        "Use code-review style: findings first, then assumptions, then a short summary.",
+    ),
+];
 
 /// Snapshot of the last completed turn's token usage. Written in
 /// `repl_loop` after each successful prompt, read in `repaint()` to
@@ -272,6 +288,7 @@ async fn repl_loop(
 
     // In-memory input history (no persistence in v0).
     let mut history: VecDeque<String> = VecDeque::with_capacity(64);
+    let mut output_style: Option<&'static str> = None;
 
     loop {
         let line = match read_line(mode.get(), &history)? {
@@ -319,6 +336,30 @@ async fn repl_loop(
                 println!("{DIM}  cleared session-scoped \"always allow\" list.{RESET}");
                 continue;
             }
+            "/status" => {
+                print_session_status(&provider, &model, mode.get(), output_style, &cfg);
+                continue;
+            }
+            "/config" => {
+                print_config_status(&cfg);
+                continue;
+            }
+            "/vim" => {
+                println!(
+                    "{DIM}  Vim bindings are not implemented in the CLI REPL yet. The input bar uses native line-editing keys.{RESET}"
+                );
+                continue;
+            }
+            "/ide" => {
+                println!(
+                    "{DIM}  Dedicated VS Code / JetBrains integrations are not part of libertai code today. Run the CLI inside your project or use the desktop app workspace.{RESET}"
+                );
+                continue;
+            }
+            "/bug" => {
+                print_bug_template(&provider, &model, mode.get(), output_style);
+                continue;
+            }
             "/clear" => {
                 // Wipe the screen *and* rebuild the session so the
                 // agent's message history starts fresh too. (Mode
@@ -345,6 +386,26 @@ async fn repl_loop(
         }
         // Slash commands that take an argument (handled here, not in
         // the match above, since `match` doesn't pattern-match prefixes).
+        if let Some(rest) = trimmed.strip_prefix("/config ") {
+            let action = rest.trim();
+            if action.eq_ignore_ascii_case("path") {
+                match crate::config::config_path() {
+                    Ok(path) => println!("{DIM}  config path: {}{RESET}", path.display()),
+                    Err(e) => eprintln!("{DIM}  /config path: {e:#}{RESET}"),
+                }
+            } else {
+                print_config_status(&cfg);
+            }
+            continue;
+        }
+        if trimmed == "/output-style" {
+            handle_output_style("", &mut output_style);
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/output-style ") {
+            handle_output_style(rest, &mut output_style);
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix("/remember") {
             let text = rest.trim();
             if text.is_empty() {
@@ -389,8 +450,9 @@ async fn repl_loop(
         // interrupt an in-flight turn without tearing the REPL down.
         let (abort_handle, abort_signal) = AbortHandle::new();
         set_current_abort(abort_handle);
+        let agent_line = apply_output_style(output_style, &line);
         let result = handle
-            .prompt_with_abort(line, abort_signal, render_event)
+            .prompt_with_abort(agent_line, abort_signal, render_event)
             .await;
         clear_current_abort();
 
@@ -571,6 +633,12 @@ fn print_help() {
     println!("{DIM}  /help     — show this message{RESET}");
     println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
+    println!("{DIM}  /status   — show current REPL session status{RESET}");
+    println!("{DIM}  /config   — show active configuration summary (/config path for file path){RESET}");
+    println!("{DIM}  /output-style <default|concise|explanatory|review|status>{RESET}");
+    println!("{DIM}  /vim      — show Vim-input status{RESET}");
+    println!("{DIM}  /ide      — show IDE integration status{RESET}");
+    println!("{DIM}  /bug      — print a bug report template{RESET}");
     println!("{DIM}  /clear    — wipe the screen and start a fresh session{RESET}");
     println!("{DIM}  /forget   — clear session-scoped allow rules{RESET}");
     println!("{DIM}  /remember <text> — append a dated note to this project's MEMORY.md{RESET}");
@@ -578,6 +646,127 @@ fn print_help() {
     println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
     println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");
     println!();
+}
+
+fn print_session_status(
+    provider: &str,
+    model: &str,
+    mode: Mode,
+    output_style: Option<&str>,
+    cfg: &LibertaiConfig,
+) {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|e| format!("unavailable: {e}"));
+    println!("{BOLD}status{RESET}");
+    println!("{DIM}  provider:{RESET} {provider}");
+    println!("{DIM}  model:{RESET} {model}");
+    println!("{DIM}  mode:{RESET} {}", mode_label(mode));
+    println!("{DIM}  output-style:{RESET} {}", output_style.unwrap_or("default"));
+    println!("{DIM}  cwd:{RESET} {cwd}");
+    println!("{DIM}  default provider:{RESET} {}", cfg.default_code_provider);
+    println!("{DIM}  default code model:{RESET} {}", cfg.default_code_model);
+    println!();
+}
+
+fn print_config_status(cfg: &LibertaiConfig) {
+    println!("{BOLD}config{RESET}");
+    println!("{DIM}  api base:{RESET} {}", cfg.api_base);
+    if cfg.account_base != cfg.api_base {
+        println!("{DIM}  account base:{RESET} {}", cfg.account_base);
+    }
+    println!("{DIM}  default chat model:{RESET} {}", cfg.default_chat_model);
+    println!("{DIM}  default code provider:{RESET} {}", cfg.default_code_provider);
+    println!("{DIM}  default code model:{RESET} {}", cfg.default_code_model);
+    println!("{DIM}  default image model:{RESET} {}", cfg.default_image_model);
+    match cfg.auth.api_key.as_deref() {
+        Some(key) => println!("{DIM}  auth:{RESET} {}", mask_key(key)),
+        None => println!("{DIM}  auth:{RESET} not logged in"),
+    }
+    println!(
+        "{DIM}  edit:{RESET} libertai config show|path|set|unset, or use the desktop settings UI"
+    );
+    println!();
+}
+
+fn handle_output_style(raw: &str, output_style: &mut Option<&'static str>) {
+    let value = raw.trim();
+    let key = if value.is_empty() {
+        "status"
+    } else {
+        value
+    };
+    if key.eq_ignore_ascii_case("status") || key.eq_ignore_ascii_case("list") {
+        print_output_style_status(*output_style, None);
+        return;
+    }
+    let Some((name, _)) = output_style_entry(key) else {
+        print_output_style_status(*output_style, Some(key));
+        return;
+    };
+    *output_style = if name == "default" { None } else { Some(name) };
+    print_output_style_status(*output_style, None);
+}
+
+fn print_output_style_status(output_style: Option<&str>, unknown: Option<&str>) {
+    println!("{BOLD}output-style{RESET}");
+    println!("{DIM}  current:{RESET} {}", output_style.unwrap_or("default"));
+    println!("{DIM}  available:{RESET}");
+    for (name, desc) in OUTPUT_STYLES {
+        println!("{DIM}    {name:<12}{RESET} {desc}");
+    }
+    if let Some(name) = unknown {
+        println!("{DIM}  unknown output style: {name}{RESET}");
+    }
+    println!();
+}
+
+fn output_style_entry(key: &str) -> Option<(&'static str, &'static str)> {
+    OUTPUT_STYLES
+        .iter()
+        .copied()
+        .find(|(name, _)| name.eq_ignore_ascii_case(key))
+}
+
+fn apply_output_style(output_style: Option<&str>, prompt: &str) -> String {
+    let Some(style) = output_style else {
+        return prompt.to_string();
+    };
+    let Some((name, instruction)) = output_style_entry(style) else {
+        return prompt.to_string();
+    };
+    format!("{prompt}\n\n[Session output style: {name}. {instruction}]")
+}
+
+fn print_bug_template(provider: &str, model: &str, mode: Mode, output_style: Option<&str>) {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|e| format!("unavailable: {e}"));
+    println!("{BOLD}bug report{RESET}");
+    println!("Include this diagnostic block with the issue:");
+    println!();
+    println!("- app: libertai-cli");
+    println!("- branch: integrated-code");
+    println!("- provider: {provider}");
+    println!("- model: {model}");
+    println!("- mode: {}", mode_label(mode));
+    println!("- output-style: {}", output_style.unwrap_or("default"));
+    println!("- cwd: {cwd}");
+    println!();
+    println!("Describe:");
+    println!("- What you expected");
+    println!("- What happened");
+    println!("- The last command or prompt you ran");
+    println!("- Whether it reproduces in a fresh `libertai code` session");
+    println!();
+}
+
+fn mode_label(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Normal => "normal",
+        Mode::AcceptEdits => "accept-edits",
+        Mode::Plan => "plan",
+    }
 }
 
 /// Event callback handed to `handle.prompt`. Must be `Fn + Send + Sync +
@@ -893,4 +1082,27 @@ fn clear_bar(stdout: &mut io::Stdout) -> Result<()> {
     )?;
     stdout.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_style_lookup_is_case_insensitive() {
+        assert_eq!(output_style_entry("REVIEW").map(|(name, _)| name), Some("review"));
+        assert!(output_style_entry("missing").is_none());
+    }
+
+    #[test]
+    fn apply_output_style_leaves_default_prompt_unchanged() {
+        assert_eq!(apply_output_style(None, "hello"), "hello");
+    }
+
+    #[test]
+    fn apply_output_style_appends_session_instruction() {
+        let prompt = apply_output_style(Some("concise"), "hello");
+        assert!(prompt.starts_with("hello\n\n[Session output style: concise."));
+        assert!(prompt.contains("Be concise."));
+    }
 }

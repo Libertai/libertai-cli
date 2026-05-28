@@ -197,7 +197,8 @@ on-disk `~/.config/libertai/allow-rules.toml`: array of
 ### 2D. Surface pi's slash commands in REPL
 
 The libertai-cli REPL handles `/help`, `/plan`, `/clear`, `/exit`,
-`/forget` only. Pi defines ~24 (`/compact`, `/resume`, `/fork`,
+`/forget`, `/remember`, `/status`, `/config`, `/output-style`, `/vim`,
+`/ide`, and `/bug`. Pi defines ~24 (`/compact`, `/resume`, `/fork`,
 `/export`, `/thinking`, `/theme`, `/scoped-models`, `/template`,
 `/share`, `/login`, `/logout`, `/history`, `/copy`, `/name`, `/hotkeys`,
 `/changelog`, `/tree`, `/reload`, `/settings`, `/model`, `/new`, etc.).
@@ -210,8 +211,9 @@ local-command set. Add help routing so `/help` includes pi's commands.
 **Effort**: M (1 day, mostly plumbing).
 **Desktop note**: partly shipped on desktop already
 (`/compact /thinking /reload /export /theme` per desktop commit
-`fcff279`); the remaining palette commands and the dispatcher
-plumbing for CLI REPL are still TODO.
+`fcff279`, later extended with `/status /config /output-style /vim
+/ide /bug`); the remaining palette commands and shared dispatcher
+plumbing are still TODO.
 
 ### 2E. `!` shell prefix in REPL
 
