@@ -71,6 +71,9 @@ SDK; those are flagged **(upstream)**.
   HTML transcript with `/share [path]` for local sharing/review.
 - **CLI `/compact` command** — REPL users can trigger pi's explicit
   compaction pass from the REPL. Optional notes are not wired yet.
+- **CLI `/doctor` command** — REPL users can print a local diagnostic
+  report for session state, auth/config, memory/templates/agents, git,
+  and usage.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
@@ -239,7 +242,7 @@ the saved rules.
 The libertai-cli REPL handles `/help`, `/plan`, `/clear`, `/exit`,
 `/forget`, `/permissions`, `/remember`, `/memory`, `/init`, `/agents`, `/agent`,
 `/template`, custom `/<name>` templates, `/status`, `/usage`/`/cost`,
-`/config`, `/settings`, `/model`, `/name`, `/new`, `/export`, `/share`, `/history`, `/copy`, `/hotkeys`, `/tree`, `/changelog`, `/reload`, `/resume`, `/fork`, `/compact`, `/thinking`, `/login`, `/logout`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
+`/config`, `/settings`, `/model`, `/name`, `/new`, `/export`, `/share`, `/history`, `/copy`, `/hotkeys`, `/tree`, `/changelog`, `/reload`, `/resume`, `/fork`, `/compact`, `/doctor`, `/thinking`, `/login`, `/logout`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
 (`/compact`, `/resume`, `/fork`, `/export`, `/thinking`, `/theme`,
 `/scoped-models`, `/template`, `/share`, `/login`, `/logout`,
 `/history`, `/copy`, `/name`, `/hotkeys`, `/changelog`, `/tree`,

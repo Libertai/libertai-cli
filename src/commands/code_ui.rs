@@ -404,6 +404,19 @@ async fn repl_loop(
                 );
                 continue;
             }
+            "/doctor" => {
+                print_doctor(
+                    &handle,
+                    &provider,
+                    &model,
+                    mode.get(),
+                    output_style,
+                    &cfg,
+                    usage_summary(&usage_history),
+                )
+                .await;
+                continue;
+            }
             "/usage" | "/cost" => {
                 print_usage_summary(usage_summary(&usage_history));
                 continue;
@@ -1280,6 +1293,7 @@ fn print_help() {
     println!("{DIM}  /model [model|provider/model]{RESET}");
     println!("{DIM}  /name <name> — set this session's display name{RESET}");
     println!("{DIM}  /status   — show current REPL session status{RESET}");
+    println!("{DIM}  /doctor   — run a local session/config diagnostic report{RESET}");
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
@@ -1502,6 +1516,31 @@ fn recent_git_commits_in(cwd: &Path, limit: usize) -> Result<Vec<String>> {
         .arg("--decorate")
         .output()
         .context("run git log")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = stderr.trim();
+        if message.is_empty() {
+            anyhow::bail!("not a git repository");
+        }
+        anyhow::bail!("{}", message);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect())
+}
+
+fn git_status_short_in(cwd: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .arg("status")
+        .arg("--short")
+        .arg("--branch")
+        .output()
+        .context("run git status")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let message = stderr.trim();
@@ -2360,6 +2399,151 @@ fn print_session_status(
     println!();
 }
 
+async fn print_doctor(
+    handle: &AgentSessionHandle,
+    provider: &str,
+    model: &str,
+    mode: Mode,
+    output_style: Option<&str>,
+    cfg: &LibertaiConfig,
+    usage: Option<UsageSummary>,
+) {
+    let cwd = std::env::current_dir();
+    let cwd_label = cwd
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|e| format!("unavailable: {e}"));
+
+    println!("{BOLD}doctor{RESET}");
+    println!("{DIM}  cwd:{RESET} {cwd_label}");
+    println!("{DIM}  provider/model:{RESET} {provider}/{model}");
+    println!("{DIM}  mode:{RESET} {}", mode_label(mode));
+    println!("{DIM}  output-style:{RESET} {}", output_style.unwrap_or("default"));
+
+    match handle.state().await {
+        Ok(state) => {
+            println!(
+                "{}",
+                doctor_line(
+                    true,
+                    "pi session",
+                    state.session_id.as_deref().unwrap_or("not persisted")
+                )
+            );
+            println!(
+                "{}",
+                doctor_line(
+                    state.save_enabled,
+                    "session persistence",
+                    if state.save_enabled { "enabled" } else { "disabled" }
+                )
+            );
+            println!(
+                "{}",
+                doctor_line(true, "transcript", format!("{} message(s)", state.message_count))
+            );
+            if let Some(level) = state.thinking_level {
+                println!("{}", doctor_line(true, "thinking", level.to_string()));
+            }
+        }
+        Err(e) => println!("{}", doctor_line(false, "pi session", e.to_string())),
+    }
+
+    println!(
+        "{}",
+        doctor_line(
+            cfg.auth.api_key.is_some(),
+            "LibertAI auth",
+            cfg.auth
+                .api_key
+                .as_deref()
+                .map(mask_key)
+                .unwrap_or_else(|| "not logged in".to_string())
+        )
+    );
+    println!(
+        "{}",
+        doctor_line(
+            true,
+            "defaults",
+            format!("{}/{}", cfg.default_code_provider, cfg.default_code_model)
+        )
+    );
+    match crate::config::config_path() {
+        Ok(path) => println!("{}", doctor_line(true, "config path", path.display().to_string())),
+        Err(e) => println!("{}", doctor_line(false, "config path", e.to_string())),
+    }
+
+    if let Ok(cwd) = cwd.as_ref() {
+        match crate::commands::code_memory::read_memory(cwd) {
+            Ok(doc) => {
+                let detail = if doc.exists {
+                    doc.path.display().to_string()
+                } else {
+                    format!("missing ({})", doc.path.display())
+                };
+                println!("{}", doctor_line(doc.exists, "project memory", detail));
+            }
+            Err(e) => println!("{}", doctor_line(false, "project memory", e.to_string())),
+        }
+        match crate::commands::code_agents::discover_agents(cwd) {
+            Ok(agents) => println!(
+                "{}",
+                doctor_line(true, "named agents", format!("{} loaded", agents.len()))
+            ),
+            Err(e) => println!("{}", doctor_line(false, "named agents", e.to_string())),
+        }
+        let templates = crate::commands::code_slash_registry::discover(cwd);
+        println!(
+            "{}",
+            doctor_line(
+                true,
+                "custom slash commands",
+                format!("{} loaded", templates.len())
+            )
+        );
+        match git_status_short_in(cwd) {
+            Ok(lines) if lines.len() <= 1 => println!("{}", doctor_line(true, "git status", "clean")),
+            Ok(lines) => println!(
+                "{}",
+                doctor_line(
+                    true,
+                    "git status",
+                    format!("{} changed/untracked line(s)", lines.len().saturating_sub(1))
+                )
+            ),
+            Err(e) => println!("{}", doctor_line(false, "git status", e.to_string())),
+        }
+    }
+
+    match usage {
+        Some(summary) => println!(
+            "{}",
+            doctor_line(
+                true,
+                "usage",
+                format!(
+                    "{} turn(s), {} ctx high-water",
+                    summary.turns,
+                    human_tokens(summary.context_high_water)
+                )
+            )
+        ),
+        None => println!("{}", doctor_line(true, "usage", "no completed turns yet")),
+    }
+    println!();
+}
+
+fn doctor_line(ok: bool, label: &str, detail: impl AsRef<str>) -> String {
+    let status = if ok { "ok" } else { "warn" };
+    let detail = detail.as_ref();
+    if detail.is_empty() {
+        format!("{DIM}  [{status}]{RESET} {label}")
+    } else {
+        format!("{DIM}  [{status}]{RESET} {label}: {detail}")
+    }
+}
+
 fn usage_summary(records: &[UsageRecord]) -> Option<UsageSummary> {
     let last = records.last()?;
     Some(UsageSummary {
@@ -2995,6 +3179,22 @@ mod tests {
                 .next()
                 .is_some_and(|hash| hash.len() >= 7)
         );
+    }
+
+    #[test]
+    fn git_status_short_reads_repo_status() {
+        let lines = git_status_short_in(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+        assert!(lines.first().is_some_and(|line| line.starts_with("## ")));
+    }
+
+    #[test]
+    fn doctor_line_formats_ok_and_warning_states() {
+        let ok = doctor_line(true, "git status", "clean");
+        assert!(ok.contains("[ok]"));
+        assert!(ok.contains("git status: clean"));
+        let warn = doctor_line(false, "auth", "");
+        assert!(warn.contains("[warn]"));
+        assert!(warn.ends_with("auth"));
     }
 
     #[test]
