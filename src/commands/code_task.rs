@@ -262,6 +262,10 @@ impl Tool for TaskTool {
         } else {
             Some(append_parts.join("\n\n"))
         };
+        let append_system_prompt = crate::commands::code_env_prompt::append_environment_prompt(
+            append_system_prompt,
+            Some(&child_cwd),
+        );
         let model = agent
             .as_ref()
             .and_then(|a| a.model.clone())

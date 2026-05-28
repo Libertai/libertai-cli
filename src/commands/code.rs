@@ -177,6 +177,10 @@ async fn run_async(
     let skill_cwd = std::env::current_dir().ok();
     let append_system_prompt =
         code_skills::prompt_for_pillar(SkillPillar::Code, skill_cwd.as_deref())?;
+    let append_system_prompt = crate::commands::code_env_prompt::append_environment_prompt(
+        append_system_prompt,
+        skill_cwd.as_deref(),
+    );
     let append_system_prompt =
         crate::commands::code_mode_prompt::apply(append_system_prompt, mode);
     let options = build_session_options(CodeSessionConfig {
