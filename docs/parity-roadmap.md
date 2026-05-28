@@ -101,6 +101,11 @@ SDK; those are flagged **(upstream)**.
   shared guardrail that warns on repeated exact calls / same-tool loops
   and returns a synthetic tool error when a loop crosses the hard-stop
   threshold.
+- **Sensitive-path write guardrail** — mutating path tools deny writes
+  to likely secret/auth files (`.env*`, `.netrc`, shell startup files,
+  SSH keys/config, cloud credential directories, system account files)
+  before approval prompts; `LIBERTAI_WRITE_SAFE_ROOT` can further limit
+  writes to a subdirectory.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
@@ -339,13 +344,14 @@ Cross-agent variant (task-tool concurrency) deferred.
 
 ### 3C. Sensitive-path write deny list + LIBERTAI_WRITE_SAFE_ROOT
 
-Static deny list: SSH keys, `.bashrc`, `.netrc`, `.env*`,
-`/etc/passwd`, AWS/GCP cred dirs (`/tmp/hermes-agent/agent/file_safety.py:19-90`).
-Plus opt-in `LIBERTAI_WRITE_SAFE_ROOT` env to sandbox writes to a workspace.
+Shipped locally: `code_path_safety::PathSafetyTool` wraps mutating path
+tools and denies SSH keys/config, `.bashrc`/profile files, `.netrc`,
+`.env*`, `/etc/passwd`/`/etc/shadow`, and AWS/GCP/Azure credential
+directories before the approval UI. `LIBERTAI_WRITE_SAFE_ROOT` further
+restricts writes to a chosen workspace subdirectory.
 
 **Files**: `src/commands/code_factory.rs` (wrap write/edit before
 registering) or `pi_agent_rust/src/tools/write.rs` (upstream, cleaner).
-**Effort**: S (half-day).
 
 ### 3D. Secret redaction on file reads (upstream)
 
@@ -509,7 +515,7 @@ demand emerges.
 | 2E `!` shell prefix | — | ✓ | REPL parser. |
 | 3A read-dedup | ✓ | — | Tool-level invariant. |
 | 3B stale-write | ✓ | — | Tool-level invariant. |
-| 3C sensitive-path deny | ✓ (preferred) | fallback | Cleaner upstream. |
+| 3C sensitive-path deny | — | ✓ | Local wrapper protects desktop/CLI; upstream still cleaner long-term. |
 | 3D secret redaction | ✓ | — | Tool-level invariant. |
 | 3E loop detector | ✓ | ✓ | Wraps tools at factory level. |
 | 4A smart-approval | — | ✓ | Reuses our provider config. |

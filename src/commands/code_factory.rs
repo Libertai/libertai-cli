@@ -26,6 +26,9 @@ use pi::sdk::{default_tool_registry, Config as PiConfig, Tool, ToolFactory, Tool
 use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi};
 use crate::commands::code_ask_user::AskUserTool;
 use crate::commands::code_guardrail::{GuardrailTool, ToolGuardrailState};
+use crate::commands::code_path_safety::{
+    is_path_mutation_tool, safe_root_from_env, PathSafetyTool,
+};
 use crate::commands::code_task::TaskTool;
 use crate::commands::code_todo::TodoTool;
 use crate::commands::fetch_tool::FetchTool;
@@ -134,6 +137,8 @@ pub struct FactoryFeatures {
     pub notebook: bool,
     /// Enable repeat-call loop guardrails around the full tool set.
     pub guardrails: bool,
+    /// Enable sensitive-path write denials for mutating path tools.
+    pub path_safety: bool,
 }
 
 impl FactoryFeatures {
@@ -150,6 +155,7 @@ impl FactoryFeatures {
             image: true,
             notebook: true,
             guardrails: true,
+            path_safety: true,
         }
     }
 }
@@ -227,7 +233,9 @@ impl ToolFactory for LibertaiToolFactory {
         // 2. Wrap each in ApprovalTool, sharing the mode flag, approval
         //    allowlist, and approval UI.
         let mut wrapped: Vec<Box<dyn Tool>> = Vec::with_capacity(defaults.len() + 2);
+        let safe_root = safe_root_from_env(cwd);
         for tool in defaults {
+            let tool = self.wrap_path_safety(tool, cwd, safe_root.as_ref());
             wrapped.push(Box::new(ApprovalTool::new(
                 tool,
                 Arc::clone(&self.approvals),
@@ -277,7 +285,7 @@ impl ToolFactory for LibertaiToolFactory {
         if self.features.notebook {
             wrapped.push(Box::new(NotebookReadTool::new()));
             wrapped.push(Box::new(ApprovalTool::new(
-                Box::new(NotebookEditTool::new()),
+                self.wrap_path_safety(Box::new(NotebookEditTool::new()), cwd, safe_root.as_ref()),
                 Arc::clone(&self.approvals),
                 self.mode.clone(),
                 Arc::clone(&self.ui),
@@ -313,5 +321,24 @@ impl ToolFactory for LibertaiToolFactory {
         }
 
         ToolRegistry::from_tools(wrapped)
+    }
+}
+
+impl LibertaiToolFactory {
+    fn wrap_path_safety(
+        &self,
+        tool: Box<dyn Tool>,
+        cwd: &Path,
+        safe_root: Option<&std::path::PathBuf>,
+    ) -> Box<dyn Tool> {
+        if self.features.path_safety && is_path_mutation_tool(tool.name()) {
+            Box::new(PathSafetyTool::new(
+                tool,
+                cwd.to_path_buf(),
+                safe_root.cloned(),
+            ))
+        } else {
+            tool
+        }
     }
 }

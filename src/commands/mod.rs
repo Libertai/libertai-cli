@@ -15,6 +15,7 @@ pub mod code_init;
 pub mod code_memory;
 pub mod code_mode_prompt;
 pub mod code_models;
+pub mod code_path_safety;
 pub mod code_sandbox;
 pub mod code_sandbox_cli;
 pub mod code_session;
