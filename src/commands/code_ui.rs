@@ -242,10 +242,12 @@ pub fn run_interactive(
     // Forward Ctrl-C during streaming to pi's AbortHandle.
     install_ctrlc_handler();
 
-    // Shared across prompts AND across mode toggles: the approvals
-    // allowlist lives for the whole REPL lifetime, so always-allowed rules
-    // for specific commands/paths stick across a Shift+Tab trip through Plan mode.
-    let approvals = Arc::new(ApprovalState::new());
+    // Shared across prompts AND across mode toggles. The CLI backs this
+    // with ~/.config/libertai/allow-rules.toml so "always allow" choices
+    // survive future code sessions until /forget clears them.
+    let approvals = Arc::new(ApprovalState::with_persistent_store(
+        crate::config::allow_rules_path()?,
+    )?);
 
     // Same asupersync setup as the non-interactive path.
     let reactor = asupersync::runtime::reactor::create_reactor()
@@ -366,7 +368,7 @@ async fn repl_loop(
             }
             "/forget" => {
                 approvals.forget();
-                println!("{DIM}  cleared session-scoped \"always allow\" list.{RESET}");
+                println!("{DIM}  cleared saved \"always allow\" rules.{RESET}");
                 continue;
             }
             "/permissions" => {
@@ -476,7 +478,7 @@ async fn repl_loop(
                 }
                 PermissionsCommand::Forget => {
                     approvals.forget();
-                    println!("{DIM}  cleared session-scoped \"always allow\" list.{RESET}");
+                    println!("{DIM}  cleared saved \"always allow\" rules.{RESET}");
                 }
                 PermissionsCommand::UnsupportedBypass => {
                     println!(
@@ -789,7 +791,7 @@ fn print_help() {
     println!("{DIM}  /ide      — show IDE integration status{RESET}");
     println!("{DIM}  /bug      — print a bug report template{RESET}");
     println!("{DIM}  /clear    — wipe the screen and start a fresh session{RESET}");
-    println!("{DIM}  /forget   — clear session-scoped allow rules{RESET}");
+    println!("{DIM}  /forget   — clear saved allow rules{RESET}");
     println!("{DIM}  /remember <text> — append a dated note to this project's MEMORY.md{RESET}");
     println!("{DIM}  !<cmd>    — run a local shell command in this cwd{RESET}");
     println!("{DIM}  ↑ / ↓     — walk through previously submitted prompts{RESET}");
@@ -818,7 +820,7 @@ fn print_permissions_status(mode: Mode) {
     println!("{DIM}  permission mode: {}{RESET}", mode_label(mode));
     println!("{DIM}  supported: default, acceptEdits, plan{RESET}");
     println!("{DIM}  native bypassPermissions is intentionally unavailable.{RESET}");
-    println!("{DIM}  use /permissions forget to clear session-scoped allow rules.{RESET}");
+    println!("{DIM}  use /permissions forget to clear saved allow rules.{RESET}");
 }
 
 fn print_init_project() {

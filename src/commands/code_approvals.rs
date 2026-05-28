@@ -3,23 +3,26 @@
 //! Wraps every mutating built-in tool (`bash`, `edit`, `write`,
 //! `hashline_edit`) in an [`ApprovalTool`] that pauses the agent stream,
 //! renders a preview of what's about to run, and waits for a decision via
-//! a pluggable [`ApprovalUi`]: allow once, always allow (session-scoped),
+//! a pluggable [`ApprovalUi`]: allow once, always allow,
 //! or deny (with optional reason fed back to the agent so it can
 //! course-correct).
 //!
 //! Read-only tools (`read`, `grep`, `find`, `ls`) are auto-allowed — the
 //! approval UI for them would be pure noise.
 //!
-//! [`ApprovalState`] is session-scoped: no on-disk persistence. A new
-//! session starts with an empty allowlist. The UI is supplied separately
-//! (see [`ApprovalUi`]) so the same approval-gating logic powers the
+//! [`ApprovalState`] can be session-scoped or backed by an on-disk
+//! allow-rule store. The UI is supplied separately (see [`ApprovalUi`])
+//! so the same approval-gating logic powers the
 //! terminal CLI ([`TerminalApprovalUi`] in `code_term`) and the desktop
 //! app (a callback-based UI implemented in the Tauri crate).
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use anyhow::{Context, Result as AnyhowResult};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
@@ -31,7 +34,7 @@ use crate::commands::code_factory::{is_path_edit_tool, Mode, ModeFlag};
 pub enum PromptChoice {
     /// Run this tool call once.
     Allow,
-    /// Run this tool call and remember "always allow this tool" for the session.
+    /// Run this tool call and remember "always allow this tool".
     AlwaysAllow,
     /// Reject this tool call. The agent receives a denial output.
     Deny,
@@ -67,7 +70,7 @@ pub enum AskOutcome {
 ///
 /// Prompt-created rules are exact, even when the command/path contains `*`.
 /// Explicit wildcard rules can opt into glob-lite `*` matching.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AllowRule {
     /// Lowercase canonical tool name: `"bash"`, `"edit"`, `"write"`, etc.
     pub tool: String,
@@ -128,6 +131,49 @@ pub struct ApprovalSubject {
     pub suggested_rule: AllowRule,
     /// Human-readable label shown in the UI, e.g. `"bash(npm run build)"`.
     pub suggested_label: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct StoredAllowRules {
+    #[serde(default)]
+    rules: Vec<StoredAllowRule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredAllowRule {
+    tool: String,
+    #[serde(default)]
+    pattern: String,
+    #[serde(default)]
+    wildcard: bool,
+    #[serde(default = "always_scope")]
+    scope: String,
+}
+
+impl StoredAllowRule {
+    fn from_rule(rule: &AllowRule) -> Self {
+        Self {
+            tool: rule.tool.clone(),
+            pattern: rule.pattern.clone(),
+            wildcard: rule.wildcard,
+            scope: always_scope(),
+        }
+    }
+
+    fn into_rule(self) -> Option<AllowRule> {
+        if self.scope != "always" {
+            return None;
+        }
+        Some(AllowRule {
+            tool: self.tool,
+            pattern: self.pattern,
+            wildcard: self.wildcard,
+        })
+    }
+}
+
+fn always_scope() -> String {
+    "always".to_string()
 }
 
 /// Extract an [`ApprovalSubject`] from the raw JSON input of a tool call.
@@ -303,15 +349,17 @@ pub trait ApprovalUi: Send + Sync {
     }
 }
 
-/// Session-scoped approval memory. Resets on every launch.
+/// Approval memory. By default it is session-scoped; CLI sessions can
+/// opt into an on-disk allow-rule store.
 ///
 /// Holds two allowlists:
 /// - `auto_allow` (hardcoded, read-only built-ins): never prompt.
-/// - `always_allow` (user-promoted via `AlwaysAllow`): never prompt for
-///   the rest of the session, keyed by tool+pattern [`AllowRule`].
+/// - `always_allow` (user-promoted via `AlwaysAllow`): never prompt,
+///   keyed by tool+pattern [`AllowRule`].
 pub struct ApprovalState {
     always_allow: Mutex<Vec<AllowRule>>,
     auto_allow: HashSet<String>,
+    persistent_path: Option<PathBuf>,
 }
 
 impl Default for ApprovalState {
@@ -328,7 +376,20 @@ impl ApprovalState {
                 .into_iter()
                 .map(String::from)
                 .collect(),
+            persistent_path: None,
         }
+    }
+
+    pub fn with_persistent_store(path: PathBuf) -> AnyhowResult<Self> {
+        let rules = load_allow_rules(&path)?;
+        Ok(Self {
+            always_allow: Mutex::new(rules),
+            auto_allow: ["read", "grep", "find", "ls"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            persistent_path: Some(path),
+        })
     }
 
     /// True when the tool+value pair is on either allowlist.
@@ -346,7 +407,8 @@ impl ApprovalState {
             .any(|rule| rule.matches(tool_name, value))
     }
 
-    /// Record a rule for the session. Deduplicates identical rules.
+    /// Record a rule. Deduplicates identical rules and persists the
+    /// updated set when this state has an on-disk store.
     pub fn record_always(&self, rule: AllowRule) {
         let mut list = self
             .always_allow
@@ -354,17 +416,58 @@ impl ApprovalState {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !list.contains(&rule) {
             list.push(rule);
+            self.persist_locked_rules(&list);
         }
     }
 
-    /// Drop every "always allow" entry collected this session.
+    /// Drop every "always allow" entry and clear the persistent store if
+    /// this state is backed by one.
     /// Invoked by the `/forget` slash command in the REPL.
     pub fn forget(&self) {
-        self.always_allow
+        let mut list = self
+            .always_allow
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        list.clear();
+        self.persist_locked_rules(&[]);
     }
+
+    fn persist_locked_rules(&self, rules: &[AllowRule]) {
+        if let Some(path) = self.persistent_path.as_ref() {
+            if let Err(err) = save_allow_rules(path, rules) {
+                eprintln!("warning: failed to persist approval rules: {err:#}");
+            }
+        }
+    }
+}
+
+fn load_allow_rules(path: &Path) -> AnyhowResult<Vec<AllowRule>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading approval rules {}", path.display()))?;
+    let stored: StoredAllowRules = toml::from_str(&raw)
+        .with_context(|| format!("parsing approval rules {}", path.display()))?;
+    Ok(stored
+        .rules
+        .into_iter()
+        .filter_map(StoredAllowRule::into_rule)
+        .collect())
+}
+
+fn save_allow_rules(path: &Path, rules: &[AllowRule]) -> AnyhowResult<()> {
+    if let Some(parent) = path.parent() {
+        crate::config::create_dir_secure(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let stored = StoredAllowRules {
+        rules: rules.iter().map(StoredAllowRule::from_rule).collect(),
+    };
+    let raw = toml::to_string_pretty(&stored).context("serializing approval rules")?;
+    crate::config::write_file_secure(path, raw.as_bytes())
+        .with_context(|| format!("writing approval rules {}", path.display()))?;
+    Ok(())
 }
 
 /// Wraps any `pi::sdk::Tool` with two gates:
@@ -866,6 +969,60 @@ mod tests {
         assert!(state.is_pre_allowed("bash", "echo hi"));
         state.forget();
         assert!(!state.is_pre_allowed("bash", "echo hi"));
+    }
+
+    #[test]
+    fn persistent_store_roundtrips_rules() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("allow-rules.toml");
+        let state = ApprovalState::with_persistent_store(path.clone()).unwrap();
+
+        state.record_always(AllowRule::exact("bash", "cargo test"));
+        state.record_always(AllowRule::wildcard("edit", "src/*.rs"));
+
+        let reloaded = ApprovalState::with_persistent_store(path).unwrap();
+        assert!(reloaded.is_pre_allowed("bash", "cargo test"));
+        assert!(reloaded.is_pre_allowed("edit", "src/lib.rs"));
+        assert!(!reloaded.is_pre_allowed("bash", "cargo check"));
+    }
+
+    #[test]
+    fn persistent_store_forget_clears_disk_rules() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("allow-rules.toml");
+        let state = ApprovalState::with_persistent_store(path.clone()).unwrap();
+
+        state.record_always(AllowRule::exact("bash", "echo hi"));
+        assert!(state.is_pre_allowed("bash", "echo hi"));
+        state.forget();
+
+        let reloaded = ApprovalState::with_persistent_store(path).unwrap();
+        assert!(!reloaded.is_pre_allowed("bash", "echo hi"));
+    }
+
+    #[test]
+    fn persistent_store_ignores_session_scoped_disk_rules() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("allow-rules.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[rules]]
+tool = "bash"
+pattern = "echo persisted"
+scope = "always"
+
+[[rules]]
+tool = "bash"
+pattern = "echo session"
+scope = "session"
+"#,
+        )
+        .unwrap();
+
+        let state = ApprovalState::with_persistent_store(path).unwrap();
+        assert!(state.is_pre_allowed("bash", "echo persisted"));
+        assert!(!state.is_pre_allowed("bash", "echo session"));
     }
 
     #[test]

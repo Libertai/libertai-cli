@@ -29,8 +29,8 @@ SDK; those are flagged **(upstream)**.
   launched against LibertAI credentials. Not part of `libertai code`, listed
   here so the next refresh of the parity doc doesn't list it as "missing."
 - **CLI `/permissions` command** — reports the current native permission
-  mode, switches among `default`, `acceptEdits`, and `plan`, clears
-  session-scoped allow rules, and documents that native `bypassPermissions`
+  mode, switches among `default`, `acceptEdits`, and `plan`, clears saved
+  allow rules, and documents that native `bypassPermissions`
   is intentionally unavailable.
 - **CLI tool preview lines** — REPL and one-shot renderers now show the
   primary tool arguments (`read src/lib.rs:12+40`, `bash cargo test`,
@@ -74,12 +74,7 @@ partial states.
    confirm whether auto-compaction is on by SDK default or requires explicit
    config. Gates **Phase 4C**.
 
-2. **Are persistent allow-rules really session-only?** Parity doc mentions
-   `/forget` wipes allow-memory. Inventory said `ApprovalState` is
-   session-scoped. Confirm whether anything persists to disk today before
-   designing storage. Gates **Phase 2C**.
-
-3. **Where to land per-tool usage notes** — patch `pi_agent_rust`'s `Tool::description`
+2. **Where to land per-tool usage notes** — patch `pi_agent_rust`'s `Tool::description`
    strings (gives the desktop the same notes for free), or append a
    "tool usage notes" appendix to `libertai-harness` (faster, no upstream
    PR). Decide before **Phase 1B**.
@@ -192,14 +187,15 @@ CLI-only.
 
 ### 2C. Persistent allow-rule storage
 
-`ApprovalState` is session-scoped (gated on open question 2). Add
-on-disk `~/.config/libertai/allow-rules.toml`: array of
-`{tool, pattern, scope: always|session}`. Load at session start, save on
-"always" choice.
+Shipped for the CLI: `ApprovalState` can now load and save
+`~/.config/libertai/allow-rules.toml` using `[[rules]]` entries with
+`{tool, pattern, wildcard, scope = "always"}`. CLI sessions opt into the
+store, "always allow" writes the deduped rule set, and `/forget` clears
+the saved rules.
 
 **Files**: `src/commands/code_approvals.rs`, `src/config.rs`
 (path resolution).
-**Effort**: S (1 day).
+**Status**: shipped for CLI.
 **Desktop note**: same storage path; desktop must surface a
 "remembered approvals" management UI (see handoff doc item D-2).
 

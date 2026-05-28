@@ -130,7 +130,9 @@ pub fn run(
     // one-shot planning run: `libertai code --plan "refactor src/foo"`.
     // The flag is created here even though it can't be toggled from a
     // one-shot — it's part of the factory's contract now.
-    let approvals = Arc::new(ApprovalState::new());
+    let approvals = Arc::new(ApprovalState::with_persistent_store(
+        crate::config::allow_rules_path()?,
+    )?);
     let ui = Arc::new(TerminalApprovalUi);
     let factory = Arc::new(LibertaiToolFactory::new_with_features(
         ModeFlag::new(mode),

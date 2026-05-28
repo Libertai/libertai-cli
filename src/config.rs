@@ -206,10 +206,20 @@ impl Default for Config {
     }
 }
 
+/// Returns `~/.config/libertai`, respecting `$XDG_CONFIG_HOME`.
+pub fn libertai_config_dir() -> Result<PathBuf> {
+    let base = dirs::config_dir().context("could not determine user config dir")?;
+    Ok(base.join("libertai"))
+}
+
 /// Returns `~/.config/libertai/config.toml`, respecting `$XDG_CONFIG_HOME`.
 pub fn config_path() -> Result<PathBuf> {
-    let base = dirs::config_dir().context("could not determine user config dir")?;
-    Ok(base.join("libertai").join("config.toml"))
+    Ok(libertai_config_dir()?.join("config.toml"))
+}
+
+/// Returns `~/.config/libertai/allow-rules.toml`, respecting `$XDG_CONFIG_HOME`.
+pub fn allow_rules_path() -> Result<PathBuf> {
+    Ok(libertai_config_dir()?.join("allow-rules.toml"))
 }
 
 pub fn load() -> Result<Config> {
