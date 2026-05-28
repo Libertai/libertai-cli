@@ -323,6 +323,7 @@ async fn repl_loop(
     let mut history: VecDeque<String> = VecDeque::with_capacity(64);
     let mut output_style: Option<&'static str> = None;
     let mut usage_history: Vec<UsageRecord> = Vec::new();
+    let mut session_name: Option<String> = None;
 
     loop {
         let mut line = match read_line(mode.get(), &history)? {
@@ -377,6 +378,10 @@ async fn repl_loop(
             }
             "/model" => {
                 print_model_status(&handle, &cfg);
+                continue;
+            }
+            "/name" => {
+                print_name_status(session_name.as_deref());
                 continue;
             }
             "/status" => {
@@ -510,6 +515,19 @@ async fn repl_loop(
                     }
                 }
                 Err(e) => eprintln!("{DIM}  /model: {e:#}{RESET}"),
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/name ") {
+            match parse_session_name(rest) {
+                Ok(name) => match handle.set_session_name(name.clone()).await {
+                    Ok(()) => {
+                        session_name = Some(name.clone());
+                        println!("{DIM}  → session name set to {name}{RESET}");
+                    }
+                    Err(e) => eprintln!("{DIM}  /name: {e:#}{RESET}"),
+                },
+                Err(e) => eprintln!("{DIM}  /name: {e:#}{RESET}"),
             }
             continue;
         }
@@ -804,6 +822,7 @@ fn print_help() {
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
     println!("{DIM}  /permissions [default|acceptEdits|plan|forget]{RESET}");
     println!("{DIM}  /model [model|provider/model]{RESET}");
+    println!("{DIM}  /name <name> — set this session's display name{RESET}");
     println!("{DIM}  /status   — show current REPL session status{RESET}");
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
     println!("{DIM}  /config   — show active configuration summary (/config path for file path){RESET}");
@@ -873,6 +892,26 @@ fn print_model_status(handle: &AgentSessionHandle, cfg: &LibertaiConfig) {
         cfg.default_code_provider, cfg.default_code_model
     );
     println!("{DIM}  usage:{RESET} /model <model|provider/model>");
+}
+
+fn parse_session_name(input: &str) -> Result<String> {
+    let name = input.trim();
+    if name.is_empty() {
+        anyhow::bail!("usage: /name <name>");
+    }
+    if name.chars().count() > 120 {
+        anyhow::bail!("session name must be 120 characters or fewer");
+    }
+    Ok(name.to_string())
+}
+
+fn print_name_status(name: Option<&str>) {
+    println!("{BOLD}name{RESET}");
+    match name {
+        Some(name) => println!("{DIM}  current:{RESET} {name}"),
+        None => println!("{DIM}  current:{RESET} unnamed or not loaded in this REPL"),
+    }
+    println!("{DIM}  usage:{RESET} /name <name>");
 }
 
 fn print_init_project() {
@@ -1910,6 +1949,17 @@ mod tests {
         assert!(parse_model_spec("libertai", "").is_err());
         assert!(parse_model_spec("libertai", "/model").is_err());
         assert!(parse_model_spec("libertai", "provider/").is_err());
+    }
+
+    #[test]
+    fn parse_session_name_trims_valid_name() {
+        assert_eq!(parse_session_name("  triage run  ").unwrap(), "triage run");
+    }
+
+    #[test]
+    fn parse_session_name_rejects_empty_or_too_long() {
+        assert!(parse_session_name("   ").is_err());
+        assert!(parse_session_name(&"x".repeat(121)).is_err());
     }
 
     #[test]
