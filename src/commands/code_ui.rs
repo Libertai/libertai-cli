@@ -51,21 +51,6 @@ const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
 
-const OUTPUT_STYLES: &[(&str, &str)] = &[
-    ("default", "Use the normal project response style."),
-    (
-        "concise",
-        "Be concise. Prefer short, direct answers and only include detail needed to act.",
-    ),
-    (
-        "explanatory",
-        "Explain reasoning and tradeoffs clearly before giving final steps.",
-    ),
-    (
-        "review",
-        "Use code-review style: findings first, then assumptions, then a short summary.",
-    ),
-];
 const SHELL_ESCAPE_MAX_DISPLAY_BYTES: usize = 256 * 1024;
 const HISTORY_DEFAULT_LIMIT: usize = 20;
 const HISTORY_MAX_LIMIT: usize = 64;
@@ -335,7 +320,7 @@ async fn repl_loop(
 
     // In-memory input history (no persistence in v0).
     let mut history: VecDeque<String> = VecDeque::with_capacity(64);
-    let mut output_style: Option<&'static str> = None;
+    let mut output_style: Option<String> = None;
     let mut usage_history: Vec<UsageRecord> = Vec::new();
     let mut session_name: Option<String> = None;
 
@@ -405,7 +390,7 @@ async fn repl_loop(
                     &provider,
                     &model,
                     mode.get(),
-                    output_style,
+                    output_style.as_deref(),
                     &cfg,
                     usage_summary(&usage_history),
                 );
@@ -417,7 +402,7 @@ async fn repl_loop(
                     &provider,
                     &model,
                     mode.get(),
-                    output_style,
+                    output_style.as_deref(),
                     &cfg,
                     usage_summary(&usage_history),
                 )
@@ -618,7 +603,7 @@ async fn repl_loop(
                 continue;
             }
             "/bug" => {
-                print_bug_template(&provider, &model, mode.get(), output_style);
+                print_bug_template(&provider, &model, mode.get(), output_style.as_deref());
                 continue;
             }
             "/clear" | "/new" => {
@@ -805,7 +790,7 @@ async fn repl_loop(
             continue;
         }
         if let Some((command, rest)) = image_command_arg(trimmed) {
-            match build_image_prompt_content(rest, output_style) {
+            match build_image_prompt_content(rest, output_style.as_deref()) {
                 Ok(content) => {
                     content_override = Some(content);
                     slash_prompt_handled = true;
@@ -817,7 +802,7 @@ async fn repl_loop(
             }
         }
         if let Some(rest) = mention_command_arg(trimmed) {
-            match build_mention_prompt(rest, output_style) {
+            match build_mention_prompt(rest, output_style.as_deref()) {
                 Ok(prompt) => {
                     line = prompt;
                     slash_prompt_handled = true;
@@ -959,7 +944,7 @@ async fn repl_loop(
                 .prompt_with_content_with_abort(content, abort_signal, render_event)
                 .await
         } else {
-            let agent_line = apply_output_style(output_style, &line);
+            let agent_line = apply_output_style(output_style.as_deref(), &line);
             handle
                 .prompt_with_abort(agent_line, abort_signal, render_event)
                 .await
@@ -1866,7 +1851,7 @@ fn mention_command_arg(trimmed: &str) -> Option<&str> {
         .map(str::trim_start)
 }
 
-fn build_mention_prompt(input: &str, output_style: Option<&'static str>) -> Result<String> {
+fn build_mention_prompt(input: &str, output_style: Option<&str>) -> Result<String> {
     let (path, prompt) = parse_mention_prompt(input)?;
     let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     if bytes.len() > MENTION_ATTACHMENT_MAX_BYTES {
@@ -1907,7 +1892,7 @@ fn parse_mention_prompt(input: &str) -> Result<(PathBuf, String)> {
 
 fn build_image_prompt_content(
     input: &str,
-    output_style: Option<&'static str>,
+    output_style: Option<&str>,
 ) -> Result<Vec<ContentBlock>> {
     let (path, prompt) = parse_image_prompt(input)?;
     let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
@@ -3152,7 +3137,7 @@ fn print_config_status(cfg: &LibertaiConfig) {
     println!();
 }
 
-fn handle_output_style(raw: &str, output_style: &mut Option<&'static str>) {
+fn handle_output_style(raw: &str, output_style: &mut Option<String>) {
     let value = raw.trim();
     let key = if value.is_empty() {
         "status"
@@ -3160,23 +3145,30 @@ fn handle_output_style(raw: &str, output_style: &mut Option<&'static str>) {
         value
     };
     if key.eq_ignore_ascii_case("status") || key.eq_ignore_ascii_case("list") {
-        print_output_style_status(*output_style, None);
+        print_output_style_status(output_style.as_deref(), None);
         return;
     }
-    let Some((name, _)) = output_style_entry(key) else {
-        print_output_style_status(*output_style, Some(key));
+    let cwd = std::env::current_dir().ok();
+    let Some(style) = crate::commands::code_output_style::find_style(key, cwd.as_deref()) else {
+        print_output_style_status(output_style.as_deref(), Some(key));
         return;
     };
-    *output_style = if name == "default" { None } else { Some(name) };
-    print_output_style_status(*output_style, None);
+    *output_style = if style.name == "default" {
+        None
+    } else {
+        Some(style.name)
+    };
+    print_output_style_status(output_style.as_deref(), None);
 }
 
 fn print_output_style_status(output_style: Option<&str>, unknown: Option<&str>) {
+    let cwd = std::env::current_dir().ok();
+    let styles = crate::commands::code_output_style::load_styles(cwd.as_deref());
     println!("{BOLD}output-style{RESET}");
     println!("{DIM}  current:{RESET} {}", output_style.unwrap_or("default"));
     println!("{DIM}  available:{RESET}");
-    for (name, desc) in OUTPUT_STYLES {
-        println!("{DIM}    {name:<12}{RESET} {desc}");
+    for style in styles {
+        println!("{DIM}    {:<12}{RESET} {}", style.name, style.description);
     }
     if let Some(name) = unknown {
         println!("{DIM}  unknown output style: {name}{RESET}");
@@ -3184,21 +3176,9 @@ fn print_output_style_status(output_style: Option<&str>, unknown: Option<&str>) 
     println!();
 }
 
-fn output_style_entry(key: &str) -> Option<(&'static str, &'static str)> {
-    OUTPUT_STYLES
-        .iter()
-        .copied()
-        .find(|(name, _)| name.eq_ignore_ascii_case(key))
-}
-
 fn apply_output_style(output_style: Option<&str>, prompt: &str) -> String {
-    let Some(style) = output_style else {
-        return prompt.to_string();
-    };
-    let Some((name, instruction)) = output_style_entry(style) else {
-        return prompt.to_string();
-    };
-    format!("{prompt}\n\n[Session output style: {name}. {instruction}]")
+    let cwd = std::env::current_dir().ok();
+    crate::commands::code_output_style::apply_output_style(output_style, prompt, cwd.as_deref())
 }
 
 fn print_bug_template(provider: &str, model: &str, mode: Mode, output_style: Option<&str>) {
@@ -3572,8 +3552,11 @@ mod tests {
 
     #[test]
     fn output_style_lookup_is_case_insensitive() {
-        assert_eq!(output_style_entry("REVIEW").map(|(name, _)| name), Some("review"));
-        assert!(output_style_entry("missing").is_none());
+        assert_eq!(
+            crate::commands::code_output_style::find_style("REVIEW", None).map(|style| style.name),
+            Some("review".to_string())
+        );
+        assert!(crate::commands::code_output_style::find_style("missing", None).is_none());
     }
 
     #[test]

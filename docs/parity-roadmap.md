@@ -118,6 +118,9 @@ SDK; those are flagged **(upstream)**.
 - **Agent-callable push notifications** — the native `push_notification`
   tool lets an agent request a short user notification through the active
   UI; non-notification clients report a skipped result instead of failing.
+- **File-backed output styles** — `/output-style` keeps built-in
+  response styles and discovers Markdown styles from project/user
+  `.claude/output-styles` and `.libertai/output-styles` roots.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
