@@ -559,6 +559,10 @@ async fn repl_loop(
                 export_transcript(&handle, None).await;
                 continue;
             }
+            "/share" => {
+                share_transcript(&handle, None).await;
+                continue;
+            }
             "/vim" => {
                 println!(
                     "{DIM}  Vim bindings are not implemented in the CLI REPL yet. The input bar uses native line-editing keys.{RESET}"
@@ -746,6 +750,10 @@ async fn repl_loop(
         }
         if let Some(rest) = trimmed.strip_prefix("/export ") {
             export_transcript(&handle, Some(rest.trim())).await;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/share ") {
+            share_transcript(&handle, Some(rest.trim())).await;
             continue;
         }
         if trimmed == "/agent" {
@@ -1279,6 +1287,7 @@ fn print_help() {
     println!("{DIM}  /agent <name> <task> — run a named sub-agent task{RESET}");
     println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
     println!("{DIM}  /export [path] — write this session transcript as Markdown{RESET}");
+    println!("{DIM}  /share [path] — write this session transcript as shareable HTML{RESET}");
     println!("{DIM}  /output-style <default|concise|explanatory|review|status>{RESET}");
     println!("{DIM}  /vim      — show Vim-input status{RESET}");
     println!("{DIM}  /ide      — show IDE integration status{RESET}");
@@ -1671,10 +1680,46 @@ async fn export_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
     }
 }
 
+async fn share_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
+    let path = match share_path(path) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("{DIM}  /share: {e:#}{RESET}");
+            return;
+        }
+    };
+    let messages = match handle.messages().await {
+        Ok(messages) => messages,
+        Err(e) => {
+            eprintln!("{DIM}  /share: could not read transcript: {e:#}{RESET}");
+            return;
+        }
+    };
+    let html = render_html_transcript(&messages);
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("{DIM}  /share: could not create {}: {e}{RESET}", parent.display());
+            return;
+        }
+    }
+    match std::fs::write(&path, html) {
+        Ok(()) => println!("{DIM}  share HTML written: {}{RESET}", path.display()),
+        Err(e) => eprintln!("{DIM}  /share: could not write {}: {e}{RESET}", path.display()),
+    }
+}
+
 fn export_path(path: Option<&str>) -> Result<PathBuf> {
     let raw = path.unwrap_or("").trim();
     if raw.is_empty() {
         return Ok(PathBuf::from("libertai-transcript.md"));
+    }
+    Ok(PathBuf::from(raw))
+}
+
+fn share_path(path: Option<&str>) -> Result<PathBuf> {
+    let raw = path.unwrap_or("").trim();
+    if raw.is_empty() {
+        return Ok(PathBuf::from("libertai-share.html"));
     }
     Ok(PathBuf::from(raw))
 }
@@ -1708,6 +1753,49 @@ fn render_markdown_transcript(messages: &[Message]) -> String {
             }
         }
     }
+    out
+}
+
+fn render_html_transcript(messages: &[Message]) -> String {
+    let mut out = String::from(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>LibertAI Code Transcript</title><style>\
+body{font-family:system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;line-height:1.5;margin:2rem auto;max-width:920px;padding:0 1rem;background:#fafafa;color:#161616}\
+h1{font-size:1.6rem;margin-bottom:1.5rem}.turn{border:1px solid #ddd;background:white;border-radius:8px;margin:1rem 0;padding:1rem}\
+.role{font-weight:700;margin-bottom:.5rem}.user .role{color:#064f8f}.assistant .role{color:#166534}.tool .role{color:#7c2d12}.custom .role{color:#581c87}\
+pre{background:#111827;color:#f9fafb;border-radius:6px;overflow:auto;padding:.75rem}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.error{color:#b91c1c;font-weight:700}</style></head><body><h1>LibertAI Code Transcript</h1>\n",
+    );
+    for message in messages {
+        match message {
+            Message::User(user) => {
+                out.push_str("<section class=\"turn user\"><div class=\"role\">User</div>");
+                out.push_str(&html_paragraphs(&content_text(&user.content)));
+                out.push_str("</section>\n");
+            }
+            Message::Assistant(assistant) => {
+                out.push_str("<section class=\"turn assistant\"><div class=\"role\">Assistant</div>");
+                render_blocks_html(&mut out, &assistant.content);
+                out.push_str("</section>\n");
+            }
+            Message::ToolResult(result) => {
+                out.push_str("<section class=\"turn tool\"><div class=\"role\">Tool Result: ");
+                out.push_str(&escape_html(&result.tool_name));
+                out.push_str("</div>");
+                if result.is_error {
+                    out.push_str("<p class=\"error\">Error</p>");
+                }
+                render_blocks_html(&mut out, &result.content);
+                out.push_str("</section>\n");
+            }
+            Message::Custom(custom) => {
+                out.push_str("<section class=\"turn custom\"><div class=\"role\">");
+                out.push_str(&escape_html(&custom.custom_type));
+                out.push_str("</div>");
+                out.push_str(&html_paragraphs(&custom.content));
+                out.push_str("</section>\n");
+            }
+        }
+    }
+    out.push_str("</body></html>\n");
     out
 }
 
@@ -1750,6 +1838,62 @@ fn render_blocks_markdown(out: &mut String, blocks: &[ContentBlock]) {
             }
         }
     }
+}
+
+fn render_blocks_html(out: &mut String, blocks: &[ContentBlock]) {
+    for block in blocks {
+        match block {
+            ContentBlock::Text(text) => out.push_str(&html_paragraphs(&text.text)),
+            ContentBlock::Thinking(thinking) => {
+                out.push_str("<details><summary>Thinking</summary>");
+                out.push_str(&html_paragraphs(&thinking.thinking));
+                out.push_str("</details>");
+            }
+            ContentBlock::Image(image) => {
+                out.push_str("<p><em>Image: ");
+                out.push_str(&escape_html(&image.mime_type));
+                out.push_str("</em></p>");
+            }
+            ContentBlock::ToolCall(tool) => {
+                out.push_str("<h3>Tool Call: ");
+                out.push_str(&escape_html(&tool.name));
+                out.push_str("</h3><pre><code>");
+                let json = serde_json::to_string_pretty(&tool.arguments)
+                    .unwrap_or_else(|_| tool.arguments.to_string());
+                out.push_str(&escape_html(&json));
+                out.push_str("</code></pre>");
+            }
+        }
+    }
+}
+
+fn html_paragraphs(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::from("<p><em>(empty)</em></p>");
+    }
+    let mut out = String::new();
+    for chunk in trimmed.split("\n\n") {
+        out.push_str("<p>");
+        out.push_str(&escape_html(chunk).replace('\n', "<br>"));
+        out.push_str("</p>");
+    }
+    out
+}
+
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn print_init_project() {
@@ -2989,6 +3133,18 @@ mod tests {
     }
 
     #[test]
+    fn share_path_uses_default_or_custom_path() {
+        assert_eq!(
+            share_path(None).unwrap(),
+            PathBuf::from("libertai-share.html")
+        );
+        assert_eq!(
+            share_path(Some("out/session.html")).unwrap(),
+            PathBuf::from("out/session.html")
+        );
+    }
+
+    #[test]
     fn render_markdown_transcript_includes_roles_and_tools() {
         let messages = vec![
             Message::User(pi::model::UserMessage {
@@ -3030,6 +3186,41 @@ mod tests {
         assert!(rendered.contains("\"path\": \"src/lib.rs\""));
         assert!(rendered.contains("## Tool Result: read"));
         assert!(rendered.contains("contents"));
+    }
+
+    #[test]
+    fn render_html_transcript_escapes_roles_text_and_tool_json() {
+        let messages = vec![
+            Message::User(pi::model::UserMessage {
+                content: UserContent::Text("hello <world>".to_string()),
+                timestamp: 1,
+            }),
+            Message::assistant(pi::model::AssistantMessage {
+                content: vec![
+                    ContentBlock::Text(pi::model::TextContent::new("hi & bye")),
+                    ContentBlock::ToolCall(pi::model::ToolCall {
+                        id: "tool-1".to_string(),
+                        name: "read".to_string(),
+                        arguments: serde_json::json!({"path":"src/<lib>.rs"}),
+                        thought_signature: None,
+                    }),
+                ],
+                api: "openai".to_string(),
+                provider: "libertai".to_string(),
+                model: "fast".to_string(),
+                usage: pi::model::Usage::default(),
+                stop_reason: pi::model::StopReason::Stop,
+                error_message: None,
+                timestamp: 2,
+            }),
+        ];
+        let rendered = render_html_transcript(&messages);
+        assert!(rendered.contains("<!doctype html>"));
+        assert!(rendered.contains("User"));
+        assert!(rendered.contains("hello &lt;world&gt;"));
+        assert!(rendered.contains("hi &amp; bye"));
+        assert!(rendered.contains("Tool Call: read"));
+        assert!(rendered.contains("src/&lt;lib&gt;.rs"));
     }
 
     #[test]
