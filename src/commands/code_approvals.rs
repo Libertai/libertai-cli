@@ -691,7 +691,13 @@ pub fn preview_call(tool: &str, input: &serde_json::Value) -> String {
 }
 
 fn with_diff(header: String, tool: &str, input: &serde_json::Value) -> String {
-    match crate::commands::code_diff::approval_diff_preview(tool, input) {
+    let diff = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            crate::commands::code_diff::approval_diff_preview_with_cwd(tool, input, &cwd)
+        })
+        .or_else(|| crate::commands::code_diff::approval_diff_preview(tool, input));
+    match diff {
         Some(diff) if !diff.is_empty() => format!("{header}\n{}", sanitize(&diff)),
         _ => header,
     }
@@ -903,9 +909,10 @@ mod tests {
 
     #[test]
     fn preview_write_includes_added_content_diff() {
-        let input = serde_json::json!({"path":"src/main.rs","content":"fn main() {}\n"});
+        let input =
+            serde_json::json!({"path":"__new_file_preview_test__.rs","content":"fn main() {}\n"});
         let preview = preview_call("write", &input);
-        assert!(preview.starts_with("write src/main.rs"));
+        assert!(preview.starts_with("write __new_file_preview_test__.rs"));
         assert!(preview.contains("--- /dev/null"));
         assert!(preview.contains("+fn main() {}"));
     }

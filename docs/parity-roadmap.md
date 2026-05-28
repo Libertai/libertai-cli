@@ -36,8 +36,8 @@ SDK; those are flagged **(upstream)**.
   primary tool arguments (`read src/lib.rs:12+40`, `bash cargo test`,
   `grep pattern in src`) instead of only the tool name.
 - **CLI approval diff previews** — file-mutation approval prompts now
-  include proposed `write` content, `edit` old/new text, and structured
-  `hashline_edit` operation summaries.
+  compare proposed `write`/`edit` changes against current files when
+  available and show structured `hashline_edit` operation summaries.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
@@ -161,11 +161,11 @@ finish with a numbered plan for the user to approve."
 
 ### 2A. Inline diff renderer in approvals
 
-Shipped first pass for CLI approval prompts: `write` previews proposed
-added content, `edit` previews old/new text, and `hashline_edit`
-summarizes requested operations before the user approves. Remaining
-work is a richer current-file snapshot diff with color and post-exec
-rendering for exact file-system deltas.
+Shipped first pass for CLI approval prompts: `write` and `edit` compare
+against current files when readable, fall back to payload-only previews
+for new/unreadable files, and `hashline_edit` summarizes requested
+operations before the user approves. Remaining work is colored rendering
+and post-exec rendering for exact file-system deltas.
 
 **Files**: `src/commands/code_approvals.rs` (snapshot trigger),
 `src/commands/code_diff.rs` (renderer).

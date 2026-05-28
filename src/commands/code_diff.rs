@@ -1,11 +1,27 @@
+use std::path::{Component, Path, PathBuf};
+
 use serde_json::Value;
 
 const MAX_DIFF_LINES: usize = 80;
+const MAX_FILE_PREVIEW_BYTES: u64 = 128 * 1024;
 
 pub(crate) fn approval_diff_preview(tool: &str, input: &Value) -> Option<String> {
     match tool {
         "edit" => edit_diff(input),
         "write" => write_diff(input),
+        "hashline_edit" => hashline_summary(input),
+        _ => None,
+    }
+}
+
+pub(crate) fn approval_diff_preview_with_cwd(
+    tool: &str,
+    input: &Value,
+    cwd: &Path,
+) -> Option<String> {
+    match tool {
+        "edit" => edit_file_diff(input, cwd).or_else(|| edit_diff(input)),
+        "write" => write_file_diff(input, cwd).or_else(|| write_diff(input)),
         "hashline_edit" => hashline_summary(input),
         _ => None,
     }
@@ -17,6 +33,19 @@ fn edit_diff(input: &Value) -> Option<String> {
     Some(render_unified("oldText", "newText", old_text, new_text))
 }
 
+fn edit_file_diff(input: &Value, cwd: &Path) -> Option<String> {
+    let path = input.get("path").and_then(Value::as_str)?;
+    let old_text = input.get("oldText").and_then(Value::as_str)?;
+    let new_text = input.get("newText").and_then(Value::as_str)?;
+    let resolved = resolve_under_cwd(path, cwd)?;
+    let before = read_preview_file(&resolved)?;
+    let after = before.replacen(old_text, new_text, 1);
+    if before == after {
+        return None;
+    }
+    Some(render_line_diff(path, &before, &after))
+}
+
 fn write_diff(input: &Value) -> Option<String> {
     let content = input.get("content").and_then(Value::as_str)?;
     let mut lines = vec!["--- /dev/null".to_string(), "+++ proposed".to_string()];
@@ -24,6 +53,16 @@ fn write_diff(input: &Value) -> Option<String> {
         lines.push(format!("+{line}"));
     }
     Some(cap_lines(lines))
+}
+
+fn write_file_diff(input: &Value, cwd: &Path) -> Option<String> {
+    let path = input.get("path").and_then(Value::as_str)?;
+    let content = input.get("content").and_then(Value::as_str)?;
+    let resolved = resolve_under_cwd(path, cwd)?;
+    match read_preview_file(&resolved) {
+        Some(before) => Some(render_line_diff(path, &before, content)),
+        None => write_diff(input),
+    }
 }
 
 fn hashline_summary(input: &Value) -> Option<String> {
@@ -47,6 +86,48 @@ fn hashline_summary(input: &Value) -> Option<String> {
     Some(cap_lines(lines))
 }
 
+fn render_line_diff(path: &str, before: &str, after: &str) -> String {
+    let before_lines: Vec<&str> = before.lines().collect();
+    let after_lines: Vec<&str> = after.lines().collect();
+    if before_lines == after_lines {
+        return "no text change".to_string();
+    }
+
+    let mut prefix = 0;
+    while prefix < before_lines.len()
+        && prefix < after_lines.len()
+        && before_lines[prefix] == after_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0;
+    while suffix + prefix < before_lines.len()
+        && suffix + prefix < after_lines.len()
+        && before_lines[before_lines.len() - 1 - suffix]
+            == after_lines[after_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let mut lines = vec![format!("--- {path}"), format!("+++ proposed/{path}")];
+    let context_start = prefix.saturating_sub(3);
+    for line in &before_lines[context_start..prefix] {
+        lines.push(format!(" {line}"));
+    }
+    for line in &before_lines[prefix..before_lines.len() - suffix] {
+        lines.push(format!("-{line}"));
+    }
+    for line in &after_lines[prefix..after_lines.len() - suffix] {
+        lines.push(format!("+{line}"));
+    }
+    let context_end = (before_lines.len() - suffix + 3).min(before_lines.len());
+    for line in &before_lines[before_lines.len() - suffix..context_end] {
+        lines.push(format!(" {line}"));
+    }
+    cap_lines(lines)
+}
+
 fn render_unified(old_label: &str, new_label: &str, old_text: &str, new_text: &str) -> String {
     let old_lines: Vec<&str> = old_text.lines().collect();
     let new_lines: Vec<&str> = new_text.lines().collect();
@@ -62,6 +143,43 @@ fn render_unified(old_label: &str, new_label: &str, old_text: &str, new_text: &s
         lines.push(format!("+{line}"));
     }
     cap_lines(lines)
+}
+
+fn read_preview_file(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_FILE_PREVIEW_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
+fn resolve_under_cwd(path: &str, cwd: &Path) -> Option<PathBuf> {
+    let path = Path::new(path);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let normalized = normalize(&joined);
+    if normalized.starts_with(cwd) {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn cap_lines(mut lines: Vec<String>) -> String {
@@ -111,6 +229,49 @@ mod tests {
     fn write_preview_renders_added_content() {
         let preview = approval_diff_preview("write", &json!({"content":"alpha\nbeta"})).unwrap();
         assert_eq!(preview, "--- /dev/null\n+++ proposed\n+alpha\n+beta");
+    }
+
+    #[test]
+    fn write_preview_compares_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("notes.txt"), "alpha\nbeta\n").unwrap();
+        let preview = approval_diff_preview_with_cwd(
+            "write",
+            &json!({"path":"notes.txt","content":"alpha\ngamma\n"}),
+            temp.path(),
+        )
+        .unwrap();
+        assert!(preview.contains("--- notes.txt"));
+        assert!(preview.contains(" alpha"));
+        assert!(preview.contains("-beta"));
+        assert!(preview.contains("+gamma"));
+    }
+
+    #[test]
+    fn edit_preview_compares_result_against_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("lib.rs"), "fn main() {\n    old();\n}\n").unwrap();
+        let preview = approval_diff_preview_with_cwd(
+            "edit",
+            &json!({"path":"lib.rs","oldText":"old();","newText":"new();"}),
+            temp.path(),
+        )
+        .unwrap();
+        assert!(preview.contains("--- lib.rs"));
+        assert!(preview.contains("-    old();"));
+        assert!(preview.contains("+    new();"));
+    }
+
+    #[test]
+    fn cwd_preview_rejects_parent_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let preview = approval_diff_preview_with_cwd(
+            "write",
+            &json!({"path":"../outside.txt","content":"hello"}),
+            temp.path(),
+        )
+        .unwrap();
+        assert_eq!(preview, "--- /dev/null\n+++ proposed\n+hello");
     }
 
     #[test]
