@@ -97,6 +97,10 @@ SDK; those are flagged **(upstream)**.
 - **Native notebook tools** — `notebook_read` summarizes local `.ipynb`
   files cell-by-cell, and approval-gated `notebook_edit` can replace,
   insert, or delete notebook cells while preserving the rest of the JSON.
+- **Tool-call loop guardrail** — every registered tool is wrapped by a
+  shared guardrail that warns on repeated exact calls / same-tool loops
+  and returns a synthetic tool error when a loop crosses the hard-stop
+  threshold.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
@@ -356,15 +360,14 @@ before it enters the model's context. Cribbed from
 
 ### 3E. Tool-call guardrail / loop detector
 
-Per-turn controller that hashes `(tool_name, canonical_args)` and tracks
-exact-call repeats, same-name repeats, and idempotent-result repeats;
-emits warnings at thresholds, hard-stops at higher thresholds
-(`/tmp/hermes-agent/agent/tool_guardrails.py`). Hand the "halt"
-decision back to the agent loop as a synthetic tool result.
+Shipped: the CLI factory wraps every registered tool in
+`code_guardrail::GuardrailTool`. It hashes `(tool_name, canonical_args)`,
+tracks same-tool loops and repeated idempotent results, injects warnings
+at soft thresholds, and returns a synthetic tool error at hard-stop
+thresholds.
 
 **Files**: new `src/commands/code_guardrail.rs`,
 hook in `src/commands/code_factory.rs` (wrap every tool).
-**Effort**: S (1 day).
 
 ---
 
@@ -508,7 +511,7 @@ demand emerges.
 | 3B stale-write | ✓ | — | Tool-level invariant. |
 | 3C sensitive-path deny | ✓ (preferred) | fallback | Cleaner upstream. |
 | 3D secret redaction | ✓ | — | Tool-level invariant. |
-| 3E loop detector | — | ✓ | Wraps tools at factory level. |
+| 3E loop detector | ✓ | ✓ | Wraps tools at factory level. |
 | 4A smart-approval | — | ✓ | Reuses our provider config. |
 | 4B skill-review fork | — | ✓ | Spawns child via SDK. |
 | 4C compaction prefix | ✓ | — | Upstream the prefix; config local. |

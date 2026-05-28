@@ -25,6 +25,7 @@ use pi::sdk::{default_tool_registry, Config as PiConfig, Tool, ToolFactory, Tool
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi};
 use crate::commands::code_ask_user::AskUserTool;
+use crate::commands::code_guardrail::{GuardrailTool, ToolGuardrailState};
 use crate::commands::code_task::TaskTool;
 use crate::commands::code_todo::TodoTool;
 use crate::commands::fetch_tool::FetchTool;
@@ -131,6 +132,8 @@ pub struct FactoryFeatures {
     pub image: bool,
     /// Enable native Jupyter notebook read/edit tools.
     pub notebook: bool,
+    /// Enable repeat-call loop guardrails around the full tool set.
+    pub guardrails: bool,
 }
 
 impl FactoryFeatures {
@@ -146,6 +149,7 @@ impl FactoryFeatures {
             fetch: true,
             image: true,
             notebook: true,
+            guardrails: true,
         }
     }
 }
@@ -295,6 +299,17 @@ impl ToolFactory for LibertaiToolFactory {
                     Arc::new(cwd.to_path_buf()),
                 )));
             }
+        }
+
+        if self.features.guardrails {
+            let guardrail_state = ToolGuardrailState::shared();
+            wrapped = wrapped
+                .into_iter()
+                .map(|tool| {
+                    Box::new(GuardrailTool::new(tool, Arc::clone(&guardrail_state)))
+                        as Box<dyn Tool>
+                })
+                .collect();
         }
 
         ToolRegistry::from_tools(wrapped)

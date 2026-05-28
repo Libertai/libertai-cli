@@ -10,6 +10,7 @@ pub mod code_ask_user;
 pub mod code_diff;
 pub mod code_env_prompt;
 pub mod code_factory;
+pub mod code_guardrail;
 pub mod code_init;
 pub mod code_memory;
 pub mod code_mode_prompt;
