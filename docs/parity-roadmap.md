@@ -286,8 +286,11 @@ Shipped: CLI and desktop `/init` call `code_init::init_project`, which
 creates `AGENTS.md` when missing and preserves existing files. The
 generated file is deterministic and based on visible repo manifests
 (`Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`) plus common
-directory names. Remaining work is richer project-specific inference
-and optional editing/merge UI.
+directory names. It now parses manifest names, package scripts, Go
+modules, and common config files such as Dockerfile / GitHub Actions /
+Makefile. Remaining work is optional editing/merge UI and any
+model-assisted project-specific prose we later decide is worth the
+extra turn.
 
 ### 2E. `!` shell prefix in REPL
 
