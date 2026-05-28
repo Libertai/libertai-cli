@@ -106,6 +106,9 @@ SDK; those are flagged **(upstream)**.
   SSH keys/config, cloud credential directories, system account files)
   before approval prompts; `LIBERTAI_WRITE_SAFE_ROOT` can further limit
   writes to a subdirectory.
+- **Upstream stale-write detection** — `pi_agent_rust` now shares
+  read mtimes across built-in read/write/edit/hashline tools; writes
+  attach a `_warning` when the target changed after the last read.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
@@ -335,12 +338,13 @@ hooks.
 
 ### 3B. Stale-write detection (upstream)
 
-Per-task `read_timestamps` map; before write, check if mtime
-changed since last read; append `_warning` to the result.
-Cross-agent variant (task-tool concurrency) deferred.
+Shipped upstream in the LibertAI fork: the built-in tool registry shares
+file read mtimes across `read`, `write`, `edit`, and `hashline_edit`.
+Before mutating an already-read file, write tools compare the current
+mtime and attach `_warning` if the file changed after the last read.
+Cross-agent concurrency remains deferred.
 
 **Files**: `pi_agent_rust/src/tools/write.rs` + `edit.rs`.
-**Effort**: S (1 day).
 
 ### 3C. Sensitive-path write deny list + LIBERTAI_WRITE_SAFE_ROOT
 
@@ -514,7 +518,7 @@ demand emerges.
 | 2D pi slash routing | — | ✓ | Plumbing in REPL. |
 | 2E `!` shell prefix | — | ✓ | REPL parser. |
 | 3A read-dedup | ✓ | — | Tool-level invariant. |
-| 3B stale-write | ✓ | — | Tool-level invariant. |
+| 3B stale-write | ✓ | — | Tool-level invariant shipped in LibertAI fork. |
 | 3C sensitive-path deny | — | ✓ | Local wrapper protects desktop/CLI; upstream still cleaner long-term. |
 | 3D secret redaction | ✓ | — | Tool-level invariant. |
 | 3E loop detector | ✓ | ✓ | Wraps tools at factory level. |
