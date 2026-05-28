@@ -57,6 +57,9 @@ SDK; those are flagged **(upstream)**.
   with noisy dependency/build directories skipped.
 - **CLI `/changelog` command** — REPL users can inspect recent git
   commits with `/changelog [count]`.
+- **CLI `/reload`, `/login`, and `/logout` commands** — REPL users can
+  refresh config/auth state and rebuild the active agent session without
+  leaving `libertai code`.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
@@ -225,7 +228,7 @@ the saved rules.
 The libertai-cli REPL handles `/help`, `/plan`, `/clear`, `/exit`,
 `/forget`, `/permissions`, `/remember`, `/memory`, `/init`, `/agents`, `/agent`,
 `/template`, custom `/<name>` templates, `/status`, `/usage`/`/cost`,
-`/config`, `/settings`, `/model`, `/name`, `/new`, `/export`, `/history`, `/copy`, `/hotkeys`, `/tree`, `/changelog`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
+`/config`, `/settings`, `/model`, `/name`, `/new`, `/export`, `/history`, `/copy`, `/hotkeys`, `/tree`, `/changelog`, `/reload`, `/login`, `/logout`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
 (`/compact`, `/resume`, `/fork`, `/export`, `/thinking`, `/theme`,
 `/scoped-models`, `/template`, `/share`, `/login`, `/logout`,
 `/history`, `/copy`, `/name`, `/hotkeys`, `/changelog`, `/tree`,

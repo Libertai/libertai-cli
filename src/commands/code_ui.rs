@@ -299,7 +299,7 @@ async fn repl_loop(
     approvals: Arc<ApprovalState>,
     resume_path: Option<PathBuf>,
     bash_command_wrapper: Option<Vec<String>>,
-    cfg: Arc<LibertaiConfig>,
+    mut cfg: Arc<LibertaiConfig>,
 ) -> Result<()> {
     // Shared mode flag — flipped by Shift+Tab and `/plan`. The same
     // Arc is held by every ApprovalTool inside the session's
@@ -429,6 +429,76 @@ async fn repl_loop(
             }
             "/changelog" => {
                 print_changelog(CHANGELOG_DEFAULT_LIMIT);
+                continue;
+            }
+            "/reload" => {
+                match reload_repl_session(
+                    "reloaded config",
+                    &mut provider,
+                    &mut model,
+                    &mut cfg,
+                    mode.clone(),
+                    Arc::clone(&approvals),
+                    bash_command_wrapper.clone(),
+                )
+                .await
+                {
+                    Ok(next) => {
+                        handle = next;
+                        usage_history.clear();
+                    }
+                    Err(e) => eprintln!("{DIM}  /reload: {e:#}{RESET}"),
+                }
+                continue;
+            }
+            "/login" => {
+                match crate::commands::login::run() {
+                    Ok(()) => {
+                        match reload_repl_session(
+                            "logged in",
+                            &mut provider,
+                            &mut model,
+                            &mut cfg,
+                            mode.clone(),
+                            Arc::clone(&approvals),
+                            bash_command_wrapper.clone(),
+                        )
+                        .await
+                        {
+                            Ok(next) => {
+                                handle = next;
+                                usage_history.clear();
+                            }
+                            Err(e) => eprintln!("{DIM}  /login reload: {e:#}{RESET}"),
+                        }
+                    }
+                    Err(e) => eprintln!("{DIM}  /login: {e:#}{RESET}"),
+                }
+                continue;
+            }
+            "/logout" => {
+                match crate::commands::logout::run() {
+                    Ok(()) => {
+                        match reload_repl_session(
+                            "logged out",
+                            &mut provider,
+                            &mut model,
+                            &mut cfg,
+                            mode.clone(),
+                            Arc::clone(&approvals),
+                            bash_command_wrapper.clone(),
+                        )
+                        .await
+                        {
+                            Ok(next) => {
+                                handle = next;
+                                usage_history.clear();
+                            }
+                            Err(e) => eprintln!("{DIM}  /logout reload: {e:#}{RESET}"),
+                        }
+                    }
+                    Err(e) => eprintln!("{DIM}  /logout: {e:#}{RESET}"),
+                }
                 continue;
             }
             "/memory" => {
@@ -831,6 +901,58 @@ async fn build_handle(
     Ok(handle)
 }
 
+async fn reload_repl_session(
+    label: &str,
+    provider: &mut String,
+    model: &mut String,
+    cfg: &mut Arc<LibertaiConfig>,
+    mode: ModeFlag,
+    approvals: Arc<ApprovalState>,
+    bash_command_wrapper: Option<Vec<String>>,
+) -> Result<AgentSessionHandle> {
+    let next_cfg = crate::config::load().context("reload config")?;
+    let (next_provider, next_model) =
+        reload_model_selection(cfg.as_ref(), &next_cfg, provider, model);
+    *cfg = Arc::new(next_cfg);
+    *provider = next_provider;
+    *model = next_model;
+    let handle = build_handle(
+        provider,
+        model,
+        mode,
+        approvals,
+        None,
+        bash_command_wrapper,
+        Arc::clone(cfg),
+    )
+    .await?;
+    set_bar_status(BarStatus {
+        model_label: format!("{provider}/{model}"),
+        input_tokens: 0,
+        context_window: context_window_for(model),
+    });
+    println!("{DIM}  → {label}; fresh session using {provider}/{model}.{RESET}");
+    Ok(handle)
+}
+
+fn reload_model_selection(
+    old_cfg: &LibertaiConfig,
+    next_cfg: &LibertaiConfig,
+    current_provider: &str,
+    current_model: &str,
+) -> (String, String) {
+    if current_provider == old_cfg.default_code_provider
+        && current_model == old_cfg.default_code_model
+    {
+        (
+            next_cfg.default_code_provider.clone(),
+            next_cfg.default_code_model.clone(),
+        )
+    } else {
+        (current_provider.to_string(), current_model.to_string())
+    }
+}
+
 /// Render a previously-saved conversation in the same shape the live REPL
 /// uses, so a `--resume` user sees their context as static history before
 /// the input bar appears. Streamed output during normal operation comes
@@ -897,6 +1019,9 @@ fn print_help() {
     println!("{DIM}  /hotkeys  — show input bar keyboard controls{RESET}");
     println!("{DIM}  /tree [path] — show a bounded project tree{RESET}");
     println!("{DIM}  /changelog [count] — show recent git commits{RESET}");
+    println!("{DIM}  /reload   — reload config and start a fresh agent session{RESET}");
+    println!("{DIM}  /login    — run libertai login, then reload this REPL session{RESET}");
+    println!("{DIM}  /logout   — run libertai logout, then reload this REPL session{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
     println!("{DIM}  /init     — create AGENTS.md for this project if missing{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
@@ -2421,6 +2546,24 @@ mod tests {
                 .split_whitespace()
                 .next()
                 .is_some_and(|hash| hash.len() >= 7)
+        );
+    }
+
+    #[test]
+    fn reload_model_selection_tracks_changed_defaults_only_when_user_is_on_defaults() {
+        let mut old_cfg = LibertaiConfig::default();
+        old_cfg.default_code_provider = "libertai".to_string();
+        old_cfg.default_code_model = "old-default".to_string();
+        let mut next_cfg = old_cfg.clone();
+        next_cfg.default_code_model = "new-default".to_string();
+
+        assert_eq!(
+            reload_model_selection(&old_cfg, &next_cfg, "libertai", "old-default"),
+            ("libertai".to_string(), "new-default".to_string())
+        );
+        assert_eq!(
+            reload_model_selection(&old_cfg, &next_cfg, "libertai", "custom-model"),
+            ("libertai".to_string(), "custom-model".to_string())
         );
     }
 
