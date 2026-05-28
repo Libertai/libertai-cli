@@ -843,7 +843,7 @@ async fn repl_loop(
                 }
             } else {
                 if trimmed == "/agent" {
-                    println!("{DIM}  usage: /agent <name> <task>{RESET}");
+                    println!("{DIM}  usage: /agent [--worktree] <name> <task>{RESET}");
                     continue;
                 }
                 if let Some(rest) = trimmed.strip_prefix("/agent ") {
@@ -1426,7 +1426,7 @@ fn print_help() {
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
     println!("{DIM}  /init     — create AGENTS.md for this project if missing{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
-    println!("{DIM}  /agent <name> <task> — run a named sub-agent task{RESET}");
+    println!("{DIM}  /agent [--worktree] <name> <task> — run a named sub-agent task{RESET}");
     println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
     println!("{DIM}  /export [path] — write this session transcript as Markdown{RESET}");
     println!("{DIM}  /share [path] — write this session transcript as shareable HTML{RESET}");
@@ -2615,31 +2615,70 @@ fn build_custom_slash_prompt(name: &str, args: &str) -> Result<Option<String>> {
 }
 
 fn build_agent_slash_prompt(query: &str) -> Result<String> {
-    let (name, task) = parse_agent_slash_query(query)?;
+    let parsed = parse_agent_slash_query(query)?;
     let cwd = std::env::current_dir().context("resolving cwd")?;
     let agents = crate::commands::code_agents::discover_agents(&cwd)?;
-    build_agent_prompt_from_defs(name, task, &agents)
+    build_agent_prompt_from_defs(&parsed, &agents)
 }
 
-fn parse_agent_slash_query(query: &str) -> Result<(&str, &str)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentSlashQuery<'a> {
+    name: &'a str,
+    task: &'a str,
+    worktree: bool,
+}
+
+fn parse_agent_slash_query(query: &str) -> Result<AgentSlashQuery<'_>> {
     let raw = query.trim();
-    let Some((name, task)) = raw.split_once(char::is_whitespace) else {
-        anyhow::bail!("usage: /agent <name> <task>");
+    let mut worktree = false;
+    let mut rest = raw;
+    loop {
+        let Some((head, tail)) = split_first_word(rest) else {
+            anyhow::bail!("usage: /agent [--worktree] <name> <task>");
+        };
+        match head {
+            "--worktree" | "--isolation=worktree" => {
+                worktree = true;
+                rest = tail.trim_start();
+            }
+            "--same-cwd" | "--isolation=same-cwd" => {
+                worktree = false;
+                rest = tail.trim_start();
+            }
+            _ => break,
+        }
+    }
+    let Some((name, task)) = rest.split_once(char::is_whitespace) else {
+        anyhow::bail!("usage: /agent [--worktree] <name> <task>");
     };
     let name = name.trim();
     let task = task.trim();
     if name.is_empty() || task.is_empty() {
-        anyhow::bail!("usage: /agent <name> <task>");
+        anyhow::bail!("usage: /agent [--worktree] <name> <task>");
     }
-    Ok((name, task))
+    Ok(AgentSlashQuery {
+        name,
+        task,
+        worktree,
+    })
+}
+
+fn split_first_word(s: &str) -> Option<(&str, &str)> {
+    let trimmed = s.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.find(char::is_whitespace) {
+        Some(idx) => Some((&trimmed[..idx], &trimmed[idx..])),
+        None => Some((trimmed, "")),
+    }
 }
 
 fn build_agent_prompt_from_defs(
-    name: &str,
-    task: &str,
+    query: &AgentSlashQuery<'_>,
     agents: &[crate::commands::code_agents::AgentDefinition],
 ) -> Result<String> {
-    let needle = name.trim().trim_start_matches('@');
+    let needle = query.name.trim().trim_start_matches('@');
     let Some(agent) = agents
         .iter()
         .find(|agent| agent.name == needle)
@@ -2657,11 +2696,16 @@ fn build_agent_prompt_from_defs(
                     .join(", ")
             )
         };
-        anyhow::bail!("unknown agent `{name}` ({suffix})");
+        anyhow::bail!("unknown agent `{}` ({suffix})", query.name);
+    };
+    let isolation = if query.worktree {
+        " and isolation: \"worktree\""
+    } else {
+        ""
     };
     Ok(format!(
-        "Use the task tool with subagent_type \"{}\" for this focused task:\n\n{}\n\nReturn the named sub-agent's findings and cite any files or commands it used.",
-        agent.name, task
+        "Use the task tool with subagent_type \"{}\"{} for this focused task:\n\n{}\n\nReturn the named sub-agent's findings and cite any files or commands it used.",
+        agent.name, isolation, query.task
     ))
 }
 
@@ -4009,7 +4053,35 @@ mod tests {
     fn parse_agent_slash_query_requires_name_and_task() {
         assert_eq!(
             parse_agent_slash_query("reviewer inspect src").unwrap(),
-            ("reviewer", "inspect src")
+            AgentSlashQuery {
+                name: "reviewer",
+                task: "inspect src",
+                worktree: false
+            }
+        );
+        assert_eq!(
+            parse_agent_slash_query("--worktree reviewer inspect src").unwrap(),
+            AgentSlashQuery {
+                name: "reviewer",
+                task: "inspect src",
+                worktree: true
+            }
+        );
+        assert_eq!(
+            parse_agent_slash_query("--isolation=worktree reviewer inspect src").unwrap(),
+            AgentSlashQuery {
+                name: "reviewer",
+                task: "inspect src",
+                worktree: true
+            }
+        );
+        assert_eq!(
+            parse_agent_slash_query("--worktree --same-cwd reviewer inspect src").unwrap(),
+            AgentSlashQuery {
+                name: "reviewer",
+                task: "inspect src",
+                worktree: false
+            }
         );
         assert!(parse_agent_slash_query("reviewer").is_err());
         assert!(parse_agent_slash_query("reviewer   ").is_err());
@@ -4113,9 +4185,42 @@ mod tests {
                 "/tmp/.claude/agents",
             )),
         }];
-        let prompt = build_agent_prompt_from_defs("rev", "check the diff", &agents).unwrap();
+        let prompt = build_agent_prompt_from_defs(
+            &AgentSlashQuery {
+                name: "rev",
+                task: "check the diff",
+                worktree: false,
+            },
+            &agents,
+        )
+        .unwrap();
         assert!(prompt.contains("subagent_type \"reviewer\""));
         assert!(prompt.contains("check the diff"));
+    }
+
+    #[test]
+    fn build_agent_prompt_from_defs_includes_worktree_isolation() {
+        let agents = vec![crate::commands::code_agents::AgentDefinition {
+            name: "reviewer".to_string(),
+            description: "Reviews changes".to_string(),
+            tools: None,
+            model: None,
+            system_prompt: "Review carefully.".to_string(),
+            source: crate::commands::code_agents::AgentSource::Project(PathBuf::from(
+                "/tmp/.claude/agents",
+            )),
+        }];
+        let prompt = build_agent_prompt_from_defs(
+            &AgentSlashQuery {
+                name: "reviewer",
+                task: "check the diff",
+                worktree: true,
+            },
+            &agents,
+        )
+        .unwrap();
+        assert!(prompt.contains("subagent_type \"reviewer\""));
+        assert!(prompt.contains("isolation: \"worktree\""));
     }
 
     #[test]
