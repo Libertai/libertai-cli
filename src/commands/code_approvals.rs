@@ -268,7 +268,7 @@ pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubjec
                 format!("hashline_edit({s})"),
             )
         }
-        "notebook_edit" => {
+        "notebook_edit" | "notebook_execute" => {
             let path = input
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -277,7 +277,7 @@ pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubjec
             (
                 s.clone(),
                 AllowRule::exact(tool, s.clone()),
-                format!("notebook_edit({s})"),
+                format!("{tool}({s})"),
             )
         }
         // Unknown/future wrapped tools fall back to exact raw-JSON matching
@@ -893,6 +893,14 @@ pub fn preview_call(tool: &str, input: &serde_json::Value) -> String {
                 .and_then(|v| v.as_u64())
                 .map_or_else(|| "?".to_string(), |v| v.to_string());
             format!("notebook_edit {path} cell {cell} ({mode})")
+        }
+        "notebook_execute" => {
+            let path = sanitize(field(input, "path").unwrap_or("<missing path>"));
+            let timeout = input
+                .get("timeout_seconds")
+                .and_then(|v| v.as_u64())
+                .map_or_else(|| "120".to_string(), |v| v.to_string());
+            format!("notebook_execute {path} (timeout {timeout}s)")
         }
         _ => {
             let raw = input.to_string();

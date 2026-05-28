@@ -2,6 +2,8 @@
 
 use std::fs;
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -12,7 +14,10 @@ use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
 
 const READ_NAME: &str = "notebook_read";
 const EDIT_NAME: &str = "notebook_edit";
+const EXECUTE_NAME: &str = "notebook_execute";
 const MAX_READ_CHARS: usize = 24_000;
+const DEFAULT_EXECUTE_TIMEOUT_SECS: u64 = 120;
+const MAX_EXECUTE_TIMEOUT_SECS: u64 = 900;
 
 #[derive(Debug, Clone, Deserialize)]
 struct NotebookReadInput {
@@ -38,6 +43,13 @@ struct NotebookEditInput {
     cell_type: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct NotebookExecuteInput {
+    path: String,
+    timeout_seconds: Option<u64>,
+    max_chars: Option<usize>,
+}
+
 pub struct NotebookReadTool;
 
 impl NotebookReadTool {
@@ -61,6 +73,20 @@ impl NotebookEditTool {
 }
 
 impl Default for NotebookEditTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct NotebookExecuteTool;
+
+impl NotebookExecuteTool {
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for NotebookExecuteTool {
     fn default() -> Self {
         Self::new()
     }
@@ -173,10 +199,155 @@ cells while preserving the rest of the notebook JSON."
     }
 }
 
+#[async_trait]
+impl Tool for NotebookExecuteTool {
+    fn name(&self) -> &str {
+        EXECUTE_NAME
+    }
+
+    fn label(&self) -> &str {
+        "Execute Jupyter notebook"
+    }
+
+    fn description(&self) -> &str {
+        "Execute a local .ipynb notebook in place using the system `jupyter` CLI, \
+then return a compact cell/output summary. This mutates notebook outputs and should be approval-gated."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Path to a local .ipynb file to execute in place." },
+                "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 900, "description": "Execution timeout. Defaults to 120 seconds; capped at 900." },
+                "max_chars": { "type": "integer", "minimum": 1000, "maximum": 50000, "description": "Optional summary output cap after execution; defaults to 24000 characters." }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        _tool_call_id: &str,
+        input: Value,
+        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+    ) -> PiResult<ToolExecution> {
+        let parsed: NotebookExecuteInput = match serde_json::from_value(input) {
+            Ok(v) => v,
+            Err(e) => return Ok(err_output(&format!("invalid `notebook_execute` payload: {e}"))),
+        };
+        let max_chars = parsed.max_chars.unwrap_or(MAX_READ_CHARS).clamp(1_000, 50_000);
+        let timeout = parsed
+            .timeout_seconds
+            .unwrap_or(DEFAULT_EXECUTE_TIMEOUT_SECS)
+            .clamp(1, MAX_EXECUTE_TIMEOUT_SECS);
+
+        let report = match execute_notebook_file(&parsed.path, timeout) {
+            Ok(report) => report,
+            Err(e) => return Ok(err_output(&e)),
+        };
+        let notebook = match read_notebook(&parsed.path) {
+            Ok(v) => v,
+            Err(e) => return Ok(err_output(&e)),
+        };
+        let summary = match summarize_notebook(&parsed.path, &notebook, None, max_chars) {
+            Ok(v) => v,
+            Err(e) => return Ok(err_output(&e)),
+        };
+        Ok(text_output(&format!("{report}\n\n{summary}"), false))
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+}
+
 fn read_notebook(path: &str) -> Result<Value, String> {
     ensure_ipynb(path)?;
     let raw = fs::read_to_string(path).map_err(|e| format!("failed to read {path}: {e}"))?;
     serde_json::from_str(&raw).map_err(|e| format!("failed to parse notebook JSON in {path}: {e}"))
+}
+
+fn execute_notebook_file(path: &str, timeout_seconds: u64) -> Result<String, String> {
+    ensure_ipynb(path)?;
+    let notebook_path = Path::new(path);
+    if !notebook_path.is_file() {
+        return Err(format!("notebook does not exist: {path}"));
+    }
+    let notebook_path = notebook_path
+        .canonicalize()
+        .map_err(|e| format!("failed to resolve notebook path {path}: {e}"))?;
+    let args = jupyter_execute_args(notebook_path.to_string_lossy().as_ref(), timeout_seconds);
+    let mut command = Command::new("jupyter");
+    command.args(&args);
+    if let Some(parent) = notebook_path.parent() {
+        command.current_dir(parent);
+    }
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to start `jupyter nbconvert`: {e}"))?;
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|e| format!("failed to collect notebook execution output: {e}"))?;
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !output.status.success() {
+                    return Err(format!(
+                        "notebook execution failed with status {}\nstdout:\n{}\nstderr:\n{}",
+                        output.status,
+                        truncate_output(&stdout),
+                        truncate_output(&stderr)
+                    ));
+                }
+                return Ok(format!(
+                    "executed notebook in place: {path}\nstdout:\n{}\nstderr:\n{}",
+                    truncate_output(&stdout),
+                    truncate_output(&stderr)
+                ));
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "notebook execution timed out after {timeout_seconds}s: {path}"
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("failed while waiting for notebook execution: {e}")),
+        }
+    }
+}
+
+fn jupyter_execute_args(path: &str, timeout_seconds: u64) -> Vec<String> {
+    vec![
+        "nbconvert".to_string(),
+        "--to".to_string(),
+        "notebook".to_string(),
+        "--execute".to_string(),
+        "--inplace".to_string(),
+        format!("--ExecutePreprocessor.timeout={timeout_seconds}"),
+        path.to_string(),
+    ]
+}
+
+fn truncate_output(text: &str) -> String {
+    const MAX_OUTPUT_CHARS: usize = 4_000;
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX_OUTPUT_CHARS {
+        return trimmed.to_string();
+    }
+    let mut out: String = trimmed.chars().take(MAX_OUTPUT_CHARS).collect();
+    out.push_str("\n...(truncated)");
+    out
 }
 
 fn edit_notebook_file(input: &NotebookEditInput) -> Result<String, String> {
@@ -577,6 +748,30 @@ mod tests {
     fn rejects_non_notebook_paths() {
         let err = ensure_ipynb("notes.json").unwrap_err();
         assert!(err.contains(".ipynb"));
+    }
+
+    #[test]
+    fn jupyter_execute_args_include_inplace_timeout_and_path() {
+        assert_eq!(
+            jupyter_execute_args("demo.ipynb", 45),
+            vec![
+                "nbconvert",
+                "--to",
+                "notebook",
+                "--execute",
+                "--inplace",
+                "--ExecutePreprocessor.timeout=45",
+                "demo.ipynb",
+            ]
+        );
+    }
+
+    #[test]
+    fn truncate_output_caps_long_text() {
+        let long = "a".repeat(4_100);
+        let truncated = truncate_output(&long);
+        assert!(truncated.len() < long.len());
+        assert!(truncated.ends_with("...(truncated)"));
     }
 
     #[test]

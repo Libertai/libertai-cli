@@ -107,8 +107,10 @@ SDK; those are flagged **(upstream)**.
   file in the next prompt with `/mention <path> [prompt]`.
 - **Native notebook tools** — `notebook_read` summarizes local `.ipynb`
   files cell-by-cell, including stream/result/error output previews and
-  rich MIME hints, and approval-gated `notebook_edit` can replace,
-  insert, or delete notebook cells while preserving the rest of the JSON.
+  rich MIME hints; approval-gated `notebook_edit` can replace, insert,
+  or delete notebook cells while preserving the rest of the JSON; and
+  approval-gated `notebook_execute` runs the system Jupyter CLI in
+  place with a bounded timeout before returning an updated summary.
 - **Tool-call loop guardrail** — every registered tool is wrapped by a
   shared guardrail that warns on repeated exact calls / same-tool loops
   and returns a synthetic tool error when a loop crosses the hard-stop

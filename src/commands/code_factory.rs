@@ -34,7 +34,7 @@ use crate::commands::code_task::TaskTool;
 use crate::commands::code_todo::TodoTool;
 use crate::commands::fetch_tool::FetchTool;
 use crate::commands::image_tool::ImageGenTool;
-use crate::commands::notebook_tool::{NotebookEditTool, NotebookReadTool};
+use crate::commands::notebook_tool::{NotebookEditTool, NotebookExecuteTool, NotebookReadTool};
 use crate::commands::search_tool::SearchTool;
 use crate::config::Config as LibertaiConfig;
 
@@ -313,9 +313,10 @@ impl ToolFactory for LibertaiToolFactory {
             wrapped.push(Box::new(PushNotificationTool::new(Arc::clone(&self.ui))));
         }
 
-        //    - `notebook_read` / `notebook_edit`: native .ipynb support.
-        //      Reads are safe in plan mode; edits go through the same
-        //      approval wrapper as pi's built-in mutating tools.
+        //    - `notebook_read` / `notebook_edit` / `notebook_execute`:
+        //      native .ipynb support. Reads are safe in plan mode; edits
+        //      and execution go through the same approval wrapper as pi's
+        //      built-in mutating tools.
         if self.features.notebook {
             wrapped.push(Box::new(NotebookReadTool::new()));
             let notebook_edit = ApprovalTool::new(
@@ -326,6 +327,14 @@ impl ToolFactory for LibertaiToolFactory {
             )
             .with_policy(self.tool_policy.clone());
             wrapped.push(Box::new(notebook_edit));
+            let notebook_execute = ApprovalTool::new(
+                self.wrap_path_safety(Box::new(NotebookExecuteTool::new()), cwd, safe_root.as_ref()),
+                Arc::clone(&self.approvals),
+                self.mode.clone(),
+                Arc::clone(&self.ui),
+            )
+            .with_policy(self.tool_policy.clone());
+            wrapped.push(Box::new(notebook_execute));
         }
 
         //    - `search` / `generate_image`: LibertAI-endpoint tools that

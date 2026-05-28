@@ -79,7 +79,10 @@ pub fn safe_root_from_env(cwd: &Path) -> Option<PathBuf> {
 }
 
 pub fn is_path_mutation_tool(name: &str) -> bool {
-    matches!(name, "write" | "edit" | "hashline_edit" | "notebook_edit")
+    matches!(
+        name,
+        "write" | "edit" | "hashline_edit" | "notebook_edit" | "notebook_execute"
+    )
 }
 
 fn check_write_path(raw_path: &str, cwd: &Path, safe_root: Option<&Path>) -> Result<(), String> {
