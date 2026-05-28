@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use pi::model::{ContentBlock, TextContent};
+use pi::model::{ContentBlock, ImageContent, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
 
 const READ_NAME: &str = "notebook_read";
@@ -18,6 +18,8 @@ const EXECUTE_NAME: &str = "notebook_execute";
 const MAX_READ_CHARS: usize = 24_000;
 const DEFAULT_EXECUTE_TIMEOUT_SECS: u64 = 120;
 const MAX_EXECUTE_TIMEOUT_SECS: u64 = 900;
+const MAX_NOTEBOOK_IMAGES: usize = 8;
+const MAX_NOTEBOOK_IMAGE_BASE64_CHARS: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 struct NotebookReadInput {
@@ -139,7 +141,7 @@ Use this instead of raw JSON reads when inspecting notebooks."
             Ok(v) => v,
             Err(e) => return Ok(err_output(&e)),
         };
-        Ok(text_output(&summary, false))
+        Ok(notebook_output(&summary, &notebook, false))
     }
 
     fn is_read_only(&self) -> bool {
@@ -254,7 +256,11 @@ then return a compact cell/output summary. This mutates notebook outputs and sho
             Ok(v) => v,
             Err(e) => return Ok(err_output(&e)),
         };
-        Ok(text_output(&format!("{report}\n\n{summary}"), false))
+        Ok(notebook_output(
+            &format!("{report}\n\n{summary}"),
+            &notebook,
+            false,
+        ))
     }
 
     fn is_read_only(&self) -> bool {
@@ -583,6 +589,56 @@ fn output_label(output: &Value) -> String {
     }
 }
 
+fn notebook_images(notebook: &Value) -> Vec<ImageContent> {
+    let mut images = Vec::new();
+    let Some(cells) = notebook.get("cells").and_then(Value::as_array) else {
+        return images;
+    };
+    for cell in cells {
+        let Some(outputs) = cell.get("outputs").and_then(Value::as_array) else {
+            continue;
+        };
+        for output in outputs {
+            let Some(data) = output.get("data").and_then(Value::as_object) else {
+                continue;
+            };
+            for mime in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
+                let Some(raw) = data.get(mime) else {
+                    continue;
+                };
+                let Some(base64) = image_data_to_base64(raw) else {
+                    continue;
+                };
+                if base64.len() > MAX_NOTEBOOK_IMAGE_BASE64_CHARS {
+                    continue;
+                }
+                images.push(ImageContent {
+                    data: base64,
+                    mime_type: mime.to_string(),
+                });
+                if images.len() >= MAX_NOTEBOOK_IMAGES {
+                    return images;
+                }
+            }
+        }
+    }
+    images
+}
+
+fn image_data_to_base64(value: &Value) -> Option<String> {
+    let raw = source_to_string(Some(value));
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let data = trimmed
+        .split_once(',')
+        .filter(|(prefix, _)| prefix.trim_start().starts_with("data:image/"))
+        .map_or(trimmed, |(_, data)| data);
+    let compact: String = data.chars().filter(|c| !c.is_whitespace()).collect();
+    (!compact.is_empty()).then_some(compact)
+}
+
 fn replace_cell_source(cell: &mut Value, cell_type: &str, source: &str) -> Result<(), String> {
     validate_cell_type(cell_type)?;
     let object = cell
@@ -653,6 +709,17 @@ fn text_output(text: &str, is_error: bool) -> ToolExecution {
     .into()
 }
 
+fn notebook_output(text: &str, notebook: &Value, is_error: bool) -> ToolExecution {
+    let mut content = vec![ContentBlock::Text(TextContent::new(text.to_string()))];
+    content.extend(notebook_images(notebook).into_iter().map(ContentBlock::Image));
+    ToolOutput {
+        content,
+        details: None,
+        is_error,
+    }
+    .into()
+}
+
 fn err_output(msg: &str) -> ToolExecution {
     text_output(msg, true)
 }
@@ -697,6 +764,31 @@ mod tests {
             "metadata": {},
             "nbformat": 4,
             "nbformat_minor": 5
+        })
+    }
+
+    fn sample_image_notebook() -> Value {
+        json!({
+            "cells": [{
+                "cell_type": "code",
+                "metadata": {},
+                "source": ["display(image)\n"],
+                "execution_count": 1,
+                "outputs": [{
+                    "output_type": "display_data",
+                    "data": {
+                        "image/png": ["iVBORw0KGgo=\n"],
+                        "text/plain": "<PngImageFile>"
+                    },
+                    "metadata": {}
+                }, {
+                    "output_type": "display_data",
+                    "data": {
+                        "image/jpeg": "data:image/jpeg;base64,/9j/4AAQSkZJRg=="
+                    },
+                    "metadata": {}
+                }]
+            }]
         })
     }
 
@@ -772,6 +864,34 @@ mod tests {
         let truncated = truncate_output(&long);
         assert!(truncated.len() < long.len());
         assert!(truncated.ends_with("...(truncated)"));
+    }
+
+    #[test]
+    fn notebook_images_extract_supported_mime_payloads() {
+        let images = notebook_images(&sample_image_notebook());
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!(images[0].data, "iVBORw0KGgo=");
+        assert_eq!(images[1].mime_type, "image/jpeg");
+        assert_eq!(images[1].data, "/9j/4AAQSkZJRg==");
+    }
+
+    #[test]
+    fn notebook_output_includes_image_blocks_after_summary() {
+        let execution = notebook_output("summary", &sample_image_notebook(), false);
+        let ToolExecution::Done(output) = execution else {
+            panic!("expected done output");
+        };
+        assert_eq!(output.content.len(), 3);
+        assert!(
+            matches!(&output.content[0], ContentBlock::Text(text) if text.text == "summary")
+        );
+        assert!(
+            matches!(&output.content[1], ContentBlock::Image(image) if image.mime_type == "image/png")
+        );
+        assert!(
+            matches!(&output.content[2], ContentBlock::Image(image) if image.mime_type == "image/jpeg")
+        );
     }
 
     #[test]
