@@ -72,6 +72,9 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/compact` command** — REPL users can trigger pi's explicit
   compaction pass from the REPL, with optional user notes threaded
   into the summarization prompt.
+- **CLI `/loop` command** — REPL users can queue a bounded foreground
+  autonomous follow-up loop with `/loop [turns] [goal]` or `/autoloop`,
+  capped at 10 turns.
 - **CLI `/doctor` command** — REPL users can print a local diagnostic
   report for session state, auth/config, memory/templates/agents, git,
   and usage.

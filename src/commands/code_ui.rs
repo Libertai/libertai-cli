@@ -60,6 +60,8 @@ const MENTION_ATTACHMENT_MAX_BYTES: usize = 256 * 1024;
 const TREE_MAX_ENTRIES: usize = 200;
 const CHANGELOG_DEFAULT_LIMIT: usize = 10;
 const CHANGELOG_MAX_LIMIT: usize = 50;
+const LOOP_DEFAULT_TURNS: usize = 3;
+const LOOP_MAX_TURNS: usize = 10;
 const STATUS_LINE_TEMPLATE_MAX_CHARS: usize = 240;
 const STATUS_LINE_TOKENS: &[&str] = &[
     "project", "path", "session", "backend", "model", "mode", "style", "tokens", "ctx", "live",
@@ -104,6 +106,12 @@ enum PermissionsCommand {
     Set(Mode),
     Forget,
     UnsupportedBypass,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoopRequest {
+    turns: usize,
+    goal: String,
 }
 
 /// Process-global because the Ctrl-C handler (spawned by the `ctrlc`
@@ -353,26 +361,38 @@ async fn repl_loop(
     let mut output_style: Option<String> = None;
     let mut usage_history: Vec<UsageRecord> = Vec::new();
     let mut session_name: Option<String> = None;
+    let mut autonomous_queue: VecDeque<String> = VecDeque::new();
 
     loop {
-        let mut line = match read_line(mode.get(), &history)? {
-            LineResult::Submit(s) => s,
-            LineResult::Interrupted => {
-                // Ctrl+C in the input bar: discard this line, keep looping.
-                // We're now in cooked mode (read_line restored it); emit a
-                // visible marker so the user knows the cancel registered.
-                println!("{DIM}  (interrupted){RESET}");
-                continue;
+        let autonomous_turn = autonomous_queue.pop_front();
+        let is_autonomous = autonomous_turn.is_some();
+        let mut line = match autonomous_turn {
+            Some(prompt) => {
+                println!(
+                    "{DIM}  /loop: running autonomous turn; {} queued after this.{RESET}",
+                    autonomous_queue.len()
+                );
+                prompt
             }
-            LineResult::Eof => {
-                println!("{DIM}goodbye.{RESET}");
-                return Ok(());
-            }
-            LineResult::ToggleMode => {
-                let new_mode = flip(mode.get());
-                mode.set(new_mode);
-                announce_mode_change(new_mode);
-                continue;
+            None => match read_line(mode.get(), &history)? {
+                LineResult::Submit(s) => s,
+                LineResult::Interrupted => {
+                    // Ctrl+C in the input bar: discard this line, keep looping.
+                    // We're now in cooked mode (read_line restored it); emit a
+                    // visible marker so the user knows the cancel registered.
+                    println!("{DIM}  (interrupted){RESET}");
+                    continue;
+                }
+                LineResult::Eof => {
+                    println!("{DIM}goodbye.{RESET}");
+                    return Ok(());
+                }
+                LineResult::ToggleMode => {
+                    let new_mode = flip(mode.get());
+                    mode.set(new_mode);
+                    announce_mode_change(new_mode);
+                    continue;
+                }
             }
         };
 
@@ -766,6 +786,16 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some(rest) = loop_command_arg(trimmed) {
+            let request = parse_loop_request(rest);
+            autonomous_queue = autonomous_loop_prompts(&request);
+            println!(
+                "{DIM}  /loop: queued {} autonomous turn(s){}.{RESET}",
+                request.turns,
+                if request.goal.is_empty() { "" } else { " with a goal" }
+            );
+            continue;
+        }
         if let Some(rest) = thinking_command_arg(trimmed) {
             match parse_thinking_level(rest) {
                 Ok(level) => match handle.set_thinking_level(level).await {
@@ -981,7 +1011,7 @@ async fn repl_loop(
         }
 
         // Remember the submitted line.
-        if history.back().is_none_or(|last| last != trimmed) {
+        if !is_autonomous && history.back().is_none_or(|last| last != trimmed) {
             if history.len() == 64 {
                 history.pop_front();
             }
@@ -1045,10 +1075,12 @@ async fn repl_loop(
                 }
             }
             Err(PiError::Aborted) => {
+                autonomous_queue.clear();
                 println!();
                 eprintln!("{DIM}  (interrupted){RESET}");
             }
             Err(e) => {
+                autonomous_queue.clear();
                 println!();
                 eprintln!("{DIM}  error: {e}{RESET}");
             }
@@ -1510,6 +1542,7 @@ fn print_help() {
     println!("{DIM}  /fork [list|index|id] — fork from a previous user message{RESET}");
     println!("{DIM}  /thinking [off|minimal|low|medium|high|xhigh] — show or set thinking{RESET}");
     println!("{DIM}  /compact — compact older conversation history now{RESET}");
+    println!("{DIM}  /loop [turns] [goal] — run bounded autonomous follow-up turns{RESET}");
     println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
     println!("{DIM}  /attach <path> [prompt] — alias for /image{RESET}");
     println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
@@ -2333,6 +2366,62 @@ fn share_path(path: Option<&str>) -> Result<PathBuf> {
 
 fn compact_command_notes(trimmed: &str) -> Option<&str> {
     trimmed.strip_prefix("/compact ").map(str::trim)
+}
+
+fn loop_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/loop" | "/autoloop" => Some(""),
+        _ => trimmed
+            .strip_prefix("/loop ")
+            .or_else(|| trimmed.strip_prefix("/autoloop "))
+            .map(str::trim),
+    }
+}
+
+fn parse_loop_request(input: &str) -> LoopRequest {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return LoopRequest {
+            turns: LOOP_DEFAULT_TURNS,
+            goal: String::new(),
+        };
+    }
+    let mut parts = raw.splitn(2, char::is_whitespace);
+    let Some(first) = parts.next() else {
+        return LoopRequest {
+            turns: LOOP_DEFAULT_TURNS,
+            goal: String::new(),
+        };
+    };
+    match first.parse::<usize>() {
+        Ok(turns) => LoopRequest {
+            turns: turns.clamp(1, LOOP_MAX_TURNS),
+            goal: parts.next().unwrap_or("").trim().to_string(),
+        },
+        Err(_) => LoopRequest {
+            turns: LOOP_DEFAULT_TURNS,
+            goal: raw.to_string(),
+        },
+    }
+}
+
+fn autonomous_loop_prompts(request: &LoopRequest) -> VecDeque<String> {
+    (1..=request.turns)
+        .map(|idx| autonomous_loop_prompt(idx, request.turns, &request.goal))
+        .collect()
+}
+
+fn autonomous_loop_prompt(idx: usize, total: usize, goal: &str) -> String {
+    [
+        format!("Autonomous loop turn {idx}/{total}."),
+        if goal.trim().is_empty() {
+            "Continue making concrete progress on the current task.".to_string()
+        } else {
+            format!("Goal: {}", goal.trim())
+        },
+        "Use tools as needed. If the task is complete or blocked, report the exact status and do not invent extra work.".to_string(),
+    ]
+    .join("\n\n")
 }
 
 fn render_markdown_transcript(messages: &[Message]) -> String {
@@ -4185,6 +4274,54 @@ mod tests {
         assert_eq!(compact_command_notes("/compact   "), Some(""));
         assert_eq!(compact_command_notes("/compact"), None);
         assert_eq!(compact_command_notes("/compactly keep"), None);
+    }
+
+    #[test]
+    fn loop_command_arg_accepts_loop_and_autoloop() {
+        assert_eq!(loop_command_arg("/loop"), Some(""));
+        assert_eq!(loop_command_arg("/loop 5 ship it"), Some("5 ship it"));
+        assert_eq!(loop_command_arg("/autoloop 2"), Some("2"));
+        assert_eq!(loop_command_arg("/looper 2"), None);
+    }
+
+    #[test]
+    fn parse_loop_request_defaults_clamps_and_keeps_goal() {
+        assert_eq!(
+            parse_loop_request(""),
+            LoopRequest {
+                turns: LOOP_DEFAULT_TURNS,
+                goal: String::new(),
+            }
+        );
+        assert_eq!(
+            parse_loop_request("12 finish parity"),
+            LoopRequest {
+                turns: LOOP_MAX_TURNS,
+                goal: "finish parity".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_loop_request("0"),
+            LoopRequest {
+                turns: 1,
+                goal: String::new(),
+            }
+        );
+        assert_eq!(
+            parse_loop_request("keep going"),
+            LoopRequest {
+                turns: LOOP_DEFAULT_TURNS,
+                goal: "keep going".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn autonomous_loop_prompt_matches_desktop_contract() {
+        let prompt = autonomous_loop_prompt(2, 4, "close gaps");
+        assert!(prompt.contains("Autonomous loop turn 2/4."));
+        assert!(prompt.contains("Goal: close gaps"));
+        assert!(prompt.contains("do not invent extra work"));
     }
 
     #[test]
