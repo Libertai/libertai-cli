@@ -76,6 +76,15 @@ pub struct MemoryClaudeImportResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryClaudeImportAllResult {
+    pub imported_projects: usize,
+    pub imported_files: usize,
+    pub imported_bytes: usize,
+    pub skipped_projects: usize,
+    pub skipped_files: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedMemoryNote {
     pub kind: MemoryKind,
     pub text: String,
@@ -237,6 +246,53 @@ pub fn import_claude_memory(cwd: &Path) -> Result<MemoryClaudeImportResult> {
     let source_dir = find_claude_memory_dir(cwd)
         .with_context(|| format!("finding Claude Code memory for {}", cwd.display()))?;
     import_claude_memory_from_dir(cwd, source_dir)
+}
+
+pub fn import_all_claude_memory() -> Result<MemoryClaudeImportAllResult> {
+    let cwd = std::env::current_dir().context("resolving current directory")?;
+    let sessions = crate::commands::claude_code_import::discover(&cwd, true)?;
+    let mut projects = std::collections::BTreeMap::<PathBuf, PathBuf>::new();
+    for session in sessions {
+        let Some(recorded_cwd) = session.recorded_cwd else {
+            continue;
+        };
+        projects.entry(session.project_dir).or_insert(recorded_cwd);
+    }
+    import_all_claude_memory_from_projects(projects)
+}
+
+fn import_all_claude_memory_from_projects(
+    projects: std::collections::BTreeMap<PathBuf, PathBuf>,
+) -> Result<MemoryClaudeImportAllResult> {
+    let mut result = MemoryClaudeImportAllResult {
+        imported_projects: 0,
+        imported_files: 0,
+        imported_bytes: 0,
+        skipped_projects: 0,
+        skipped_files: 0,
+    };
+    for (project_dir, recorded_cwd) in projects {
+        let source_dir = project_dir.join("memory");
+        if !source_dir.is_dir() {
+            result.skipped_projects += 1;
+            continue;
+        }
+        match import_claude_memory_from_dir(&recorded_cwd, source_dir) {
+            Ok(imported) => {
+                result.imported_projects += 1;
+                result.imported_files += imported.imported_files;
+                result.imported_bytes += imported.imported_bytes;
+                result.skipped_files += imported.skipped_files;
+            }
+            Err(_) => {
+                result.skipped_projects += 1;
+            }
+        }
+    }
+    if result.imported_projects == 0 {
+        anyhow::bail!("no importable Claude Code project memory found");
+    }
+    Ok(result)
 }
 
 fn import_claude_memory_from_dir(
@@ -909,6 +965,26 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert!(files.iter().any(|file| file.kind == MemoryKind::User));
         assert!(files.iter().any(|file| file.kind == MemoryKind::Reference));
+    }
+
+    #[test]
+    fn import_all_claude_memory_from_projects_uses_recorded_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("project-with-hyphen");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let project_dir = temp.path().join("-tmp-project-with-hyphen");
+        let memory_dir = project_dir.join("memory");
+        std::fs::create_dir_all(&memory_dir).unwrap();
+        std::fs::write(memory_dir.join("project_notes.md"), "# Notes\n\nbulk import\n").unwrap();
+
+        let mut projects = std::collections::BTreeMap::new();
+        projects.insert(project_dir, cwd.clone());
+        let result = import_all_claude_memory_from_projects(projects).unwrap();
+
+        assert_eq!(result.imported_projects, 1);
+        assert_eq!(result.imported_files, 1);
+        let imported = read_memory(&cwd).unwrap();
+        assert!(imported.content.contains("bulk import"));
     }
 
     #[test]
