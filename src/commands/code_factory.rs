@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use pi::sdk::{default_tool_registry, Config as PiConfig, Tool, ToolFactory, ToolRegistry};
 
-use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi};
+use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi, ToolPolicy};
 use crate::commands::code_ask_user::AskUserTool;
 use crate::commands::code_guardrail::{GuardrailTool, ToolGuardrailState};
 use crate::commands::code_notification::PushNotificationTool;
@@ -175,6 +175,7 @@ pub struct LibertaiToolFactory {
     /// register those tools. Captured as `Arc` so it's cheap to clone
     /// into each tool's per-instance state.
     pub libertai_cfg: Option<Arc<LibertaiConfig>>,
+    pub tool_policy: Option<Arc<dyn ToolPolicy>>,
 }
 
 impl LibertaiToolFactory {
@@ -187,6 +188,7 @@ impl LibertaiToolFactory {
             depth: 0,
             features: FactoryFeatures::cli_defaults(),
             libertai_cfg: None,
+            tool_policy: None,
         }
     }
 
@@ -206,7 +208,13 @@ impl LibertaiToolFactory {
             depth: 0,
             features,
             libertai_cfg,
+            tool_policy: None,
         }
+    }
+
+    pub fn with_tool_policy(mut self, policy: Option<Arc<dyn ToolPolicy>>) -> Self {
+        self.tool_policy = policy;
+        self
     }
 
     /// Factory for a child session spawned by the Task tool. Inherits
@@ -222,6 +230,7 @@ impl LibertaiToolFactory {
             depth: self.depth.saturating_add(1),
             features: self.features.clone(),
             libertai_cfg: self.libertai_cfg.clone(),
+            tool_policy: self.tool_policy.clone(),
         }
     }
 }
@@ -240,12 +249,14 @@ impl ToolFactory for LibertaiToolFactory {
         let safe_root = safe_root_from_env(cwd);
         for tool in defaults {
             let tool = self.wrap_path_safety(tool, cwd, safe_root.as_ref());
-            wrapped.push(Box::new(ApprovalTool::new(
+            let approval_tool = ApprovalTool::new(
                 tool,
                 Arc::clone(&self.approvals),
                 self.mode.clone(),
                 Arc::clone(&self.ui),
-            )));
+            )
+            .with_policy(self.tool_policy.clone());
+            wrapped.push(Box::new(approval_tool));
         }
 
         // 3. Add our own tools, gated by FactoryFeatures.
@@ -292,12 +303,14 @@ impl ToolFactory for LibertaiToolFactory {
         //      approval wrapper as pi's built-in mutating tools.
         if self.features.notebook {
             wrapped.push(Box::new(NotebookReadTool::new()));
-            wrapped.push(Box::new(ApprovalTool::new(
+            let notebook_edit = ApprovalTool::new(
                 self.wrap_path_safety(Box::new(NotebookEditTool::new()), cwd, safe_root.as_ref()),
                 Arc::clone(&self.approvals),
                 self.mode.clone(),
                 Arc::clone(&self.ui),
-            )));
+            )
+            .with_policy(self.tool_policy.clone());
+            wrapped.push(Box::new(notebook_edit));
         }
 
         //    - `search` / `generate_image`: LibertAI-endpoint tools that

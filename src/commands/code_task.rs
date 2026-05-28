@@ -227,6 +227,7 @@ impl Tool for TaskTool {
             depth: self.parent_depth,
             features,
             libertai_cfg: Some(Arc::new(cfg.clone())),
+            tool_policy: None,
         }
         .child();
 

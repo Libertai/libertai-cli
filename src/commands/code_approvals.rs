@@ -48,6 +48,25 @@ pub enum PromptChoice {
     },
 }
 
+/// Optional host-side policy that can observe a tool call before the
+/// regular approval prompt. Desktop uses this for Claude Code-style
+/// PreToolUse hooks.
+pub trait ToolPolicy: Send + Sync {
+    fn decide(
+        &self,
+        tool_call_id: &str,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> ToolPolicyDecision;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolPolicyDecision {
+    NoDecision,
+    Allow,
+    Deny { reason: Option<String> },
+}
+
 /// Result of an [`ApprovalUi::ask`] call. Mirrors [`PromptChoice`]'s
 /// pause story: a UI that can't currently surface the questions
 /// returns `Paused`, and [`AskUserTool`] turns that into
@@ -508,6 +527,7 @@ pub struct ApprovalTool {
     state: Arc<ApprovalState>,
     mode: ModeFlag,
     ui: Arc<dyn ApprovalUi>,
+    policy: Option<Arc<dyn ToolPolicy>>,
 }
 
 impl ApprovalTool {
@@ -522,7 +542,13 @@ impl ApprovalTool {
             state,
             mode,
             ui,
+            policy: None,
         }
+    }
+
+    pub fn with_policy(mut self, policy: Option<Arc<dyn ToolPolicy>>) -> Self {
+        self.policy = policy;
+        self
     }
 }
 
@@ -550,6 +576,16 @@ impl Tool for ApprovalTool {
         input: serde_json::Value,
         on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> PiResult<ToolExecution> {
+        let name = self.inner.name();
+        let policy_decision = self
+            .policy
+            .as_ref()
+            .map(|policy| policy.decide(tool_call_id, name, &input))
+            .unwrap_or(ToolPolicyDecision::NoDecision);
+        if let ToolPolicyDecision::Deny { reason } = policy_decision.clone() {
+            return Ok(denial_output(reason).into());
+        }
+
         // Plan mode short-circuit: mutating tools are auto-denied
         // without a prompt. The agent sees a tool error, learns the
         // tool isn't available right now, and adapts. Read-only tools
@@ -558,7 +594,6 @@ impl Tool for ApprovalTool {
             return Ok(plan_denial_output(self.inner.name()).into());
         }
 
-        let name = self.inner.name();
         // AcceptEdits short-circuit: path-edit tools (write / edit /
         // hashline_edit) auto-allow without a modal. bash and any
         // other mutating tools still go through the regular
@@ -570,6 +605,9 @@ impl Tool for ApprovalTool {
         }
         let subject = approval_subject(name, &input);
         if self.state.is_pre_allowed(name, &subject.value) {
+            return self.inner.execute(tool_call_id, input, on_update).await;
+        }
+        if matches!(policy_decision, ToolPolicyDecision::Allow) {
             return self.inner.execute(tool_call_id, input, on_update).await;
         }
 
