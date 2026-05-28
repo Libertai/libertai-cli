@@ -31,6 +31,7 @@ use crossterm::{
 use pi::model::{AssistantMessageEvent, ContentBlock, Message, UserContent};
 use pi::sdk::{
     create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle, Error as PiError,
+    RpcForkMessage,
 };
 
 use crate::commands::code_approvals::ApprovalState;
@@ -526,6 +527,14 @@ async fn repl_loop(
                 }
                 continue;
             }
+            "/fork" => {
+                match handle_fork(&mut handle, "").await {
+                    Ok(true) => usage_history.clear(),
+                    Ok(false) => {}
+                    Err(e) => eprintln!("{DIM}  /fork: {e:#}{RESET}"),
+                }
+                continue;
+            }
             "/memory" => {
                 print_memory("show");
                 continue;
@@ -653,6 +662,14 @@ async fn repl_loop(
                     }
                 }
                 Err(e) => eprintln!("{DIM}  /resume: {e:#}{RESET}"),
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/fork ") {
+            match handle_fork(&mut handle, rest.trim()).await {
+                Ok(true) => usage_history.clear(),
+                Ok(false) => {}
+                Err(e) => eprintln!("{DIM}  /fork: {e:#}{RESET}"),
             }
             continue;
         }
@@ -1046,6 +1063,104 @@ fn resolve_repl_resume_path(input: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+async fn handle_fork(handle: &mut AgentSessionHandle, query: &str) -> Result<bool> {
+    let messages = handle
+        .get_fork_messages()
+        .await
+        .context("list forkable messages")?;
+    if messages.is_empty() {
+        println!("{DIM}  /fork: no user messages to fork from.{RESET}");
+        return Ok(false);
+    }
+    if matches!(query.trim().to_ascii_lowercase().as_str(), "list" | "ls") {
+        print_fork_messages(&messages);
+        return Ok(false);
+    }
+    let selected = select_fork_message(&messages, query)?;
+    let forked = handle
+        .fork(&selected.entry_id)
+        .await
+        .context("fork session")?;
+    if forked.cancelled {
+        println!("{DIM}  /fork: cancelled by session hook.{RESET}");
+        return Ok(false);
+    }
+    println!("{DIM}  → forked from {}{RESET}", selected.entry_id);
+    if let Ok(messages) = handle.messages().await {
+        if !messages.is_empty() {
+            print_rehydrated_transcript(&messages);
+        }
+    }
+    let restored = forked.text.trim();
+    if !restored.is_empty() {
+        println!("{BOLD}restored prompt{RESET}");
+        println!("{restored}");
+        println!("{DIM}  edit or resubmit that prompt as your next message.{RESET}");
+    }
+    Ok(true)
+}
+
+fn select_fork_message(messages: &[RpcForkMessage], query: &str) -> Result<RpcForkMessage> {
+    let raw = query.trim();
+    if raw.is_empty() {
+        return messages
+            .last()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no user messages to fork from"));
+    }
+    if raw.chars().all(|c| c.is_ascii_digit()) {
+        let idx = raw.parse::<usize>().context("invalid fork index")?;
+        if idx == 0 || idx > messages.len() {
+            anyhow::bail!("invalid fork index {idx}; expected 1..={}", messages.len());
+        }
+        return Ok(messages[idx - 1].clone());
+    }
+    let needle = raw.trim_start_matches('/');
+    let mut hits = messages
+        .iter()
+        .filter(|m| m.entry_id == needle || m.entry_id.starts_with(needle));
+    let Some(first) = hits.next() else {
+        anyhow::bail!("no user message id matches `{raw}`");
+    };
+    if hits.next().is_some() {
+        anyhow::bail!("ambiguous fork id `{raw}`");
+    }
+    Ok(first.clone())
+}
+
+fn print_fork_messages(messages: &[RpcForkMessage]) {
+    println!("{BOLD}forkable user messages{RESET}");
+    for (idx, message) in messages.iter().enumerate() {
+        println!(
+            "{DIM}  {:>2}. {} — {}{RESET}",
+            idx + 1,
+            message.entry_id,
+            fork_message_preview(&message.text)
+        );
+    }
+}
+
+fn fork_message_preview(text: &str) -> String {
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("(empty)");
+    truncate_chars(first, 80)
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for (idx, ch) in text.chars().enumerate() {
+        if idx >= max {
+            out.push_str("...");
+            return out;
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Render a previously-saved conversation in the same shape the live REPL
 /// uses, so a `--resume` user sees their context as static history before
 /// the input bar appears. Streamed output during normal operation comes
@@ -1114,6 +1229,7 @@ fn print_help() {
     println!("{DIM}  /changelog [count] — show recent git commits{RESET}");
     println!("{DIM}  /reload   — reload config and start a fresh agent session{RESET}");
     println!("{DIM}  /resume [path] — resume the latest or specified saved session{RESET}");
+    println!("{DIM}  /fork [list|index|id] — fork from a previous user message{RESET}");
     println!("{DIM}  /login    — run libertai login, then reload this REPL session{RESET}");
     println!("{DIM}  /logout   — run libertai logout, then reload this REPL session{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
@@ -2674,6 +2790,62 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("missing.jsonl");
         assert!(resolve_repl_resume_path(path.to_str().unwrap()).is_err());
+    }
+
+    fn fork_messages_for_tests() -> Vec<RpcForkMessage> {
+        vec![
+            RpcForkMessage {
+                entry_id: "abc111".to_string(),
+                text: "first prompt".to_string(),
+            },
+            RpcForkMessage {
+                entry_id: "def222".to_string(),
+                text: "second prompt".to_string(),
+            },
+        ]
+    }
+
+    #[test]
+    fn select_fork_message_defaults_to_latest_and_accepts_index() {
+        let messages = fork_messages_for_tests();
+        assert_eq!(
+            select_fork_message(&messages, "").unwrap().entry_id,
+            "def222"
+        );
+        assert_eq!(
+            select_fork_message(&messages, "1").unwrap().entry_id,
+            "abc111"
+        );
+        assert!(select_fork_message(&messages, "0").is_err());
+        assert!(select_fork_message(&messages, "3").is_err());
+    }
+
+    #[test]
+    fn select_fork_message_accepts_unique_id_prefix() {
+        let messages = fork_messages_for_tests();
+        assert_eq!(
+            select_fork_message(&messages, "def").unwrap().entry_id,
+            "def222"
+        );
+        assert!(select_fork_message(&messages, "missing").is_err());
+        let ambiguous = vec![
+            RpcForkMessage {
+                entry_id: "abc111".to_string(),
+                text: String::new(),
+            },
+            RpcForkMessage {
+                entry_id: "abc222".to_string(),
+                text: String::new(),
+            },
+        ];
+        assert!(select_fork_message(&ambiguous, "abc").is_err());
+    }
+
+    #[test]
+    fn fork_message_preview_uses_first_non_empty_line_and_truncates() {
+        let preview = fork_message_preview("\n  hello world\nsecond");
+        assert_eq!(preview, "hello world");
+        assert!(fork_message_preview(&"x".repeat(100)).ends_with("..."));
     }
 
     #[test]
