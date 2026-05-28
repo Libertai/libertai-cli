@@ -418,6 +418,10 @@ async fn repl_loop(
                 .await;
                 continue;
             }
+            "/abort" => {
+                println!("{}", abort_status_message());
+                continue;
+            }
             "/sandbox" => {
                 print_sandbox_status("info");
                 continue;
@@ -1335,6 +1339,7 @@ fn print_help() {
     println!("{DIM}  /name <name> — set this session's display name (also /rename){RESET}");
     println!("{DIM}  /status   — show current REPL session status{RESET}");
     println!("{DIM}  /doctor   — run a local session/config diagnostic report{RESET}");
+    println!("{DIM}  /abort    — show how to interrupt the active CLI turn{RESET}");
     println!("{DIM}  /review [scope] — ask the agent to review current code changes{RESET}");
     println!("{DIM}  /security-review [scope] — ask for a focused security review{RESET}");
     println!("{DIM}  /pr_comments [scope] — ask the agent to inspect PR review comments{RESET}");
@@ -1568,6 +1573,12 @@ fn print_sandbox_status(action: &str) {
             eprintln!("{DIM}  unknown /sandbox action: {value}. try \"info\" or \"reload\".{RESET}");
         }
     }
+}
+
+fn abort_status_message() -> String {
+    format!(
+        "{DIM}  no active turn to abort. Press Ctrl+C while the assistant is streaming to interrupt the running turn.{RESET}"
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3360,6 +3371,13 @@ mod tests {
         assert_eq!(parse_sandbox_action("STATUS"), SandboxAction::Info);
         assert_eq!(parse_sandbox_action("reload"), SandboxAction::Reload);
         assert_eq!(parse_sandbox_action("reset"), SandboxAction::Unknown("reset"));
+    }
+
+    #[test]
+    fn abort_status_message_points_to_ctrl_c() {
+        let message = abort_status_message();
+        assert!(message.contains("no active turn"));
+        assert!(message.contains("Ctrl+C"));
     }
 
     #[test]
