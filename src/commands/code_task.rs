@@ -228,6 +228,7 @@ impl Tool for TaskTool {
             features,
             libertai_cfg: Some(Arc::new(cfg.clone())),
             tool_policy: None,
+            safe_root_override: None,
         }
         .child();
 

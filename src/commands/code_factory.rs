@@ -176,6 +176,10 @@ pub struct LibertaiToolFactory {
     /// into each tool's per-instance state.
     pub libertai_cfg: Option<Arc<LibertaiConfig>>,
     pub tool_policy: Option<Arc<dyn ToolPolicy>>,
+    /// Optional per-session safe root for mutating path tools. When
+    /// unset, the factory falls back to `LIBERTAI_WRITE_SAFE_ROOT` so
+    /// the CLI env-var behavior stays unchanged.
+    pub safe_root_override: Option<std::path::PathBuf>,
 }
 
 impl LibertaiToolFactory {
@@ -189,6 +193,7 @@ impl LibertaiToolFactory {
             features: FactoryFeatures::cli_defaults(),
             libertai_cfg: None,
             tool_policy: None,
+            safe_root_override: None,
         }
     }
 
@@ -209,11 +214,17 @@ impl LibertaiToolFactory {
             features,
             libertai_cfg,
             tool_policy: None,
+            safe_root_override: None,
         }
     }
 
     pub fn with_tool_policy(mut self, policy: Option<Arc<dyn ToolPolicy>>) -> Self {
         self.tool_policy = policy;
+        self
+    }
+
+    pub fn with_safe_root(mut self, safe_root: Option<std::path::PathBuf>) -> Self {
+        self.safe_root_override = safe_root;
         self
     }
 
@@ -231,6 +242,7 @@ impl LibertaiToolFactory {
             features: self.features.clone(),
             libertai_cfg: self.libertai_cfg.clone(),
             tool_policy: self.tool_policy.clone(),
+            safe_root_override: self.safe_root_override.clone(),
         }
     }
 }
@@ -246,7 +258,10 @@ impl ToolFactory for LibertaiToolFactory {
         // 2. Wrap each in ApprovalTool, sharing the mode flag, approval
         //    allowlist, and approval UI.
         let mut wrapped: Vec<Box<dyn Tool>> = Vec::with_capacity(defaults.len() + 2);
-        let safe_root = safe_root_from_env(cwd);
+        let safe_root = self
+            .safe_root_override
+            .clone()
+            .or_else(|| safe_root_from_env(cwd));
         for tool in defaults {
             let tool = self.wrap_path_safety(tool, cwd, safe_root.as_ref());
             let approval_tool = ApprovalTool::new(
