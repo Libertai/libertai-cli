@@ -26,6 +26,25 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::Local;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryKind {
+    User,
+    Feedback,
+    Project,
+    Reference,
+}
+
+impl MemoryKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Feedback => "feedback",
+            Self::Project => "project",
+            Self::Reference => "reference",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryDocument {
     pub path: PathBuf,
@@ -37,6 +56,12 @@ pub struct MemoryDocument {
 pub struct MemoryClearResult {
     pub path: PathBuf,
     pub backup_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedMemoryNote {
+    pub kind: MemoryKind,
+    pub text: String,
 }
 
 /// Resolve the directory under which all per-project memory dirs live.
@@ -75,13 +100,30 @@ pub fn ensure_memory_env() -> Result<()> {
 /// Append `text` as a dated bullet to the project's MEMORY.md.
 /// Creates parent directories and the file if needed.
 pub fn append_memory(cwd: &Path, text: &str) -> Result<PathBuf> {
+    append_memory_with_kind(cwd, MemoryKind::Project, text)
+}
+
+/// Parse a user-entered memory note and append it with the requested
+/// category. Accepted forms:
+///
+/// - `user: prefers terse answers`
+/// - `feedback: avoid noisy status updates`
+/// - `project: run cargo check before commits`
+/// - `reference: API docs live at ...`
+/// - `--type user prefers terse answers`
+pub fn append_memory_from_input(cwd: &Path, input: &str) -> Result<PathBuf> {
+    let parsed = parse_memory_note(input);
+    append_memory_with_kind(cwd, parsed.kind, &parsed.text)
+}
+
+pub fn append_memory_with_kind(cwd: &Path, kind: MemoryKind, text: &str) -> Result<PathBuf> {
     let path = memory_file_for(cwd)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
     let stamp = Local::now().format("%Y-%m-%d %H:%M");
-    let line = format!("- {stamp} {}\n", text.trim());
+    let line = format!("- {stamp} [{}] {}\n", kind.label(), text.trim());
 
     use std::io::Write as _;
     let mut f = std::fs::OpenOptions::new()
@@ -92,6 +134,43 @@ pub fn append_memory(cwd: &Path, text: &str) -> Result<PathBuf> {
     f.write_all(line.as_bytes())
         .with_context(|| format!("writing to {}", path.display()))?;
     Ok(path)
+}
+
+pub fn parse_memory_note(input: &str) -> ParsedMemoryNote {
+    let trimmed = input.trim();
+    if let Some(rest) = trimmed.strip_prefix("--type ") {
+        let mut parts = rest.trim_start().splitn(2, char::is_whitespace);
+        if let Some(kind_raw) = parts.next() {
+            if let Some(kind) = parse_memory_kind(kind_raw) {
+                return ParsedMemoryNote {
+                    kind,
+                    text: parts.next().unwrap_or("").trim().to_string(),
+                };
+            }
+        }
+    }
+    if let Some((prefix, rest)) = trimmed.split_once(':') {
+        if let Some(kind) = parse_memory_kind(prefix.trim()) {
+            return ParsedMemoryNote {
+                kind,
+                text: rest.trim().to_string(),
+            };
+        }
+    }
+    ParsedMemoryNote {
+        kind: MemoryKind::Project,
+        text: trimmed.to_string(),
+    }
+}
+
+fn parse_memory_kind(raw: &str) -> Option<MemoryKind> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "user" => Some(MemoryKind::User),
+        "feedback" => Some(MemoryKind::Feedback),
+        "project" => Some(MemoryKind::Project),
+        "reference" | "ref" => Some(MemoryKind::Reference),
+        _ => None,
+    }
 }
 
 /// Ensure the project's MEMORY.md exists and return its path.
@@ -219,5 +298,53 @@ mod tests {
         let path = temp.path().join("MEMORY.md");
         std::fs::write(path.with_extension("md.bak"), "old").unwrap();
         assert_eq!(next_backup_path(&path), path.with_extension("md.bak.2"));
+    }
+
+    #[test]
+    fn parse_memory_note_defaults_to_project() {
+        assert_eq!(
+            parse_memory_note("run cargo check"),
+            ParsedMemoryNote {
+                kind: MemoryKind::Project,
+                text: "run cargo check".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_memory_note_accepts_colon_kind() {
+        assert_eq!(
+            parse_memory_note("feedback: avoid noisy status"),
+            ParsedMemoryNote {
+                kind: MemoryKind::Feedback,
+                text: "avoid noisy status".into(),
+            }
+        );
+        assert_eq!(
+            parse_memory_note("ref: https://example.test"),
+            ParsedMemoryNote {
+                kind: MemoryKind::Reference,
+                text: "https://example.test".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_memory_note_accepts_type_flag() {
+        assert_eq!(
+            parse_memory_note("--type user prefers terse answers"),
+            ParsedMemoryNote {
+                kind: MemoryKind::User,
+                text: "prefers terse answers".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn append_memory_with_kind_writes_category_label() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = append_memory_with_kind(temp.path(), MemoryKind::Reference, "docs url").unwrap();
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("[reference] docs url"));
     }
 }

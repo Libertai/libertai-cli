@@ -893,7 +893,7 @@ async fn repl_loop(
             let text = rest.trim();
             if text.is_empty() {
                 println!(
-                    "{DIM}  usage: /remember <text> — appends a dated bullet to this project's MEMORY.md{RESET}"
+                    "{DIM}  usage: /remember [user:|feedback:|project:|reference:] <text>{RESET}"
                 );
                 continue;
             }
@@ -904,11 +904,23 @@ async fn repl_loop(
                     continue;
                 }
             };
-            match crate::commands::code_memory::append_memory(&cwd, text) {
+            let parsed = crate::commands::code_memory::parse_memory_note(text);
+            if parsed.text.is_empty() {
+                println!(
+                    "{DIM}  usage: /remember [user:|feedback:|project:|reference:] <text>{RESET}"
+                );
+                continue;
+            }
+            match crate::commands::code_memory::append_memory_with_kind(
+                &cwd,
+                parsed.kind,
+                &parsed.text,
+            ) {
                 Ok(path) => {
                     println!(
-                        "{DIM}  → remembered in {} (takes effect next session){RESET}",
-                        path.display()
+                        "{DIM}  → remembered [{}] in {} (takes effect next session){RESET}",
+                        parsed.kind.label(),
+                        path.display(),
                     );
                 }
                 Err(e) => {
@@ -1420,7 +1432,7 @@ fn print_help() {
     println!("{DIM}  /bug      — print a bug report template{RESET}");
     println!("{DIM}  /clear    — wipe the screen and start a fresh session (also /new){RESET}");
     println!("{DIM}  /forget   — clear saved allow rules{RESET}");
-    println!("{DIM}  /remember <text> — append a dated note to this project's MEMORY.md{RESET}");
+    println!("{DIM}  /remember [kind:] <text> — append typed project memory (user, feedback, project, reference){RESET}");
     println!("{DIM}  !<cmd>    — run a local shell command in this cwd{RESET}");
     println!("{DIM}  ↑ / ↓     — walk through previously submitted prompts{RESET}");
     println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
@@ -2349,12 +2361,34 @@ fn print_memory(action: &str) {
     } else if doc.content.trim().is_empty() {
         println!("{DIM}  MEMORY.md is empty. Use /remember <text> to append a note.{RESET}");
     } else {
+        print_memory_summary(&doc.content);
         print!("{}", doc.content);
         if !doc.content.ends_with('\n') {
             println!();
         }
     }
     println!();
+}
+
+fn print_memory_summary(content: &str) {
+    let mut user = 0usize;
+    let mut feedback = 0usize;
+    let mut project = 0usize;
+    let mut reference = 0usize;
+    for line in content.lines() {
+        if line.contains("[user]") {
+            user += 1;
+        } else if line.contains("[feedback]") {
+            feedback += 1;
+        } else if line.contains("[reference]") {
+            reference += 1;
+        } else if line.contains("[project]") || line.trim_start().starts_with("- ") {
+            project += 1;
+        }
+    }
+    println!(
+        "{DIM}  entries: user {user} · feedback {feedback} · project {project} · reference {reference}{RESET}"
+    );
 }
 
 fn print_agents() {
