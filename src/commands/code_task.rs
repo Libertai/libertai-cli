@@ -10,6 +10,7 @@
 //! once we're at the cap, the parent factory stops registering `task`,
 //! so the agent sees it as unavailable and cannot chain further.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -21,6 +22,7 @@ use pi::sdk::{
 };
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi};
+use crate::commands::code_agents;
 use crate::commands::code_factory::{LibertaiToolFactory, ModeFlag};
 use crate::commands::code_session::{
     build_session_options, CodeSessionConfig, SessionPersistence,
@@ -50,6 +52,7 @@ pub struct TaskTool {
     approvals: Arc<ApprovalState>,
     ui: Arc<dyn ApprovalUi>,
     parent_depth: u8,
+    cwd: PathBuf,
 }
 
 impl TaskTool {
@@ -58,12 +61,14 @@ impl TaskTool {
         approvals: Arc<ApprovalState>,
         ui: Arc<dyn ApprovalUi>,
         parent_depth: u8,
+        cwd: PathBuf,
     ) -> Self {
         Self {
             mode,
             approvals,
             ui,
             parent_depth,
+            cwd,
         }
     }
 }
@@ -91,6 +96,10 @@ impl Tool for TaskTool {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Optional subset of tool names to enable (defaults to read, grep, find, ls)."
+                },
+                "subagent_type": {
+                    "type": "string",
+                    "description": "Optional named sub-agent from .claude/agents or .libertai/agents."
                 }
             },
             "required": ["prompt"]
@@ -111,6 +120,29 @@ impl Tool for TaskTool {
                 ));
             }
         };
+        let subagent_type = input
+            .get("subagent_type")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let agent = match subagent_type {
+            Some(name) => match code_agents::find_agent(&self.cwd, name) {
+                Ok(Some(agent)) => Some(agent),
+                Ok(None) => {
+                    let available = code_agents::agent_names(&self.cwd).unwrap_or_default();
+                    let suffix = if available.is_empty() {
+                        "no named sub-agents are configured".to_string()
+                    } else {
+                        format!("available sub-agents: {}", available.join(", "))
+                    };
+                    return Ok(err_output(&format!(
+                        "task: unknown subagent_type `{name}` ({suffix})"
+                    )));
+                }
+                Err(e) => return Ok(err_output(&format!("task: could not load agents: {e:#}"))),
+            },
+            None => None,
+        };
 
         // Intersect the caller's tool list with our read-only allowlist.
         // A missing or empty `tools` argument falls back to the full
@@ -126,15 +158,26 @@ impl Tool for TaskTool {
                     .collect()
             })
             .unwrap_or_default();
-        let filtered: Vec<String> = if requested.is_empty() {
+        let agent_tools = agent.as_ref().and_then(|a| a.tools.clone());
+        let ceiling: Vec<String> = agent_tools
+            .unwrap_or_else(|| TASK_TOOL_ALLOWLIST.iter().map(|&s| s.to_string()).collect())
+            .into_iter()
+            .filter(|name| TASK_TOOL_ALLOWLIST.contains(&name.as_str()))
+            .collect();
+        let ceiling = if ceiling.is_empty() {
             TASK_TOOL_ALLOWLIST.iter().map(|&s| s.to_string()).collect()
+        } else {
+            ceiling
+        };
+        let filtered: Vec<String> = if requested.is_empty() {
+            ceiling.clone()
         } else {
             let f: Vec<String> = requested
                 .into_iter()
-                .filter(|name| TASK_TOOL_ALLOWLIST.contains(&name.as_str()))
+                .filter(|name| ceiling.iter().any(|allowed| allowed == name))
                 .collect();
             if f.is_empty() {
-                TASK_TOOL_ALLOWLIST.iter().map(|&s| s.to_string()).collect()
+                ceiling
             } else {
                 f
             }
@@ -175,15 +218,30 @@ impl Tool for TaskTool {
         .child();
 
         let max_tokens = Some(crate::commands::code_session::DEFAULT_MAX_TOKENS);
-        let skill_cwd = std::env::current_dir().ok();
-        let append_system_prompt =
-            code_skills::prompt_for_pillar(SkillPillar::Code, skill_cwd.as_deref())
-                .ok()
-                .flatten();
+        let mut append_parts = Vec::new();
+        if let Ok(Some(skills)) = code_skills::prompt_for_pillar(SkillPillar::Code, Some(&self.cwd))
+        {
+            append_parts.push(skills);
+        }
+        if let Some(agent) = agent.as_ref() {
+            append_parts.push(format!(
+                "## Named sub-agent: {}\n\n{}",
+                agent.name, agent.system_prompt
+            ));
+        }
+        let append_system_prompt = if append_parts.is_empty() {
+            None
+        } else {
+            Some(append_parts.join("\n\n"))
+        };
+        let model = agent
+            .as_ref()
+            .and_then(|a| a.model.clone())
+            .unwrap_or_else(|| cfg.default_code_model.clone());
         let options = build_session_options(CodeSessionConfig {
             provider: cfg.default_code_provider.clone(),
-            model: cfg.default_code_model.clone(),
-            working_directory: None,
+            model,
+            working_directory: Some(self.cwd.clone()),
             include_cwd_in_prompt: true,
             max_tool_iterations: 25,
             tool_factory: Arc::new(factory),
@@ -200,7 +258,14 @@ impl Tool for TaskTool {
             bash_command_wrapper: None,
         });
 
-        eprintln!("\n  \x1b[2m[subagent] running: {prompt}\x1b[0m");
+        if let Some(agent) = agent.as_ref() {
+            eprintln!(
+                "\n  \x1b[2m[subagent:{}] running: {prompt}\x1b[0m",
+                agent.name
+            );
+        } else {
+            eprintln!("\n  \x1b[2m[subagent] running: {prompt}\x1b[0m");
+        }
 
         let mut handle = match create_agent_session(options).await {
             Ok(h) => h,

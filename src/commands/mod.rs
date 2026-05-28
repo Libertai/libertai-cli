@@ -5,6 +5,7 @@ pub mod claude_code_import;
 pub mod claude_code_import_cli;
 pub mod code;
 pub mod code_approvals;
+pub mod code_agents;
 pub mod code_ask_user;
 pub mod code_factory;
 pub mod code_memory;

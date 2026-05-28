@@ -253,6 +253,7 @@ impl ToolFactory for LibertaiToolFactory {
                 Arc::clone(&self.approvals),
                 Arc::clone(&self.ui),
                 self.depth,
+                cwd.to_path_buf(),
             )));
         }
 
