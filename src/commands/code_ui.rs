@@ -12,11 +12,12 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -59,6 +60,7 @@ const OUTPUT_STYLES: &[(&str, &str)] = &[
         "Use code-review style: findings first, then assumptions, then a short summary.",
     ),
 ];
+const SHELL_ESCAPE_MAX_DISPLAY_BYTES: usize = 256 * 1024;
 
 /// Snapshot of the last completed turn's token usage. Written in
 /// `repl_loop` after each successful prompt, read in `repaint()` to
@@ -434,6 +436,15 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix('!') {
+            let command = rest.trim();
+            if command.is_empty() {
+                println!("{DIM}  usage: !<command> — run a local shell command in this cwd{RESET}");
+            } else {
+                run_shell_escape(command, bash_command_wrapper.as_deref());
+            }
+            continue;
+        }
 
         // Remember the submitted line.
         if history.back().is_none_or(|last| last != trimmed) {
@@ -642,9 +653,107 @@ fn print_help() {
     println!("{DIM}  /clear    — wipe the screen and start a fresh session{RESET}");
     println!("{DIM}  /forget   — clear session-scoped allow rules{RESET}");
     println!("{DIM}  /remember <text> — append a dated note to this project's MEMORY.md{RESET}");
+    println!("{DIM}  !<cmd>    — run a local shell command in this cwd{RESET}");
     println!("{DIM}  ↑ / ↓     — walk through previously submitted prompts{RESET}");
     println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
     println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");
+    println!();
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellEscapeResult {
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i32>,
+}
+
+fn run_shell_escape(command: &str, wrapper: Option<&[String]>) {
+    println!("{BOLD}$ {command}{RESET}");
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  shell: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    match execute_shell_escape(&cwd, command, wrapper) {
+        Ok(result) => print_shell_escape_result(&result),
+        Err(e) => eprintln!("{DIM}  shell: {e:#}{RESET}"),
+    }
+}
+
+fn execute_shell_escape(
+    cwd: &Path,
+    command: &str,
+    wrapper: Option<&[String]>,
+) -> Result<ShellEscapeResult> {
+    let argv = shell_escape_argv(wrapper);
+    let Some((program, args)) = argv.split_first() else {
+        anyhow::bail!("empty shell argv");
+    };
+    let output = Command::new(program)
+        .args(args)
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("spawn shell escape via {}", argv.join(" ")))?;
+    Ok(ShellEscapeResult {
+        stdout: truncate_shell_output(&String::from_utf8_lossy(&output.stdout)),
+        stderr: truncate_shell_output(&String::from_utf8_lossy(&output.stderr)),
+        exit_code: output.status.code(),
+    })
+}
+
+fn shell_escape_argv(wrapper: Option<&[String]>) -> Vec<String> {
+    match wrapper.filter(|w| !w.is_empty()) {
+        Some(wrapper) => {
+            let mut argv = wrapper.to_vec();
+            argv.push("/bin/sh".to_string());
+            argv
+        }
+        None => vec!["/bin/sh".to_string()],
+    }
+}
+
+fn truncate_shell_output(raw: &str) -> String {
+    if raw.len() <= SHELL_ESCAPE_MAX_DISPLAY_BYTES {
+        return raw.to_string();
+    }
+    let mut end = SHELL_ESCAPE_MAX_DISPLAY_BYTES;
+    while !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n[truncated after {} bytes]",
+        &raw[..end],
+        SHELL_ESCAPE_MAX_DISPLAY_BYTES
+    )
+}
+
+fn print_shell_escape_result(result: &ShellEscapeResult) {
+    if result.stdout.is_empty() && result.stderr.is_empty() {
+        println!("{DIM}  (no output){RESET}");
+    } else {
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
+            if !result.stdout.ends_with('\n') {
+                println!();
+            }
+        }
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+            if !result.stderr.ends_with('\n') {
+                eprintln!();
+            }
+        }
+    }
+    match result.exit_code {
+        Some(0) => println!("{DIM}  exit 0{RESET}"),
+        Some(code) => println!("{DIM}  exit {code}{RESET}"),
+        None => println!("{DIM}  terminated by signal{RESET}"),
+    }
     println!();
 }
 
@@ -1104,5 +1213,31 @@ mod tests {
         let prompt = apply_output_style(Some("concise"), "hello");
         assert!(prompt.starts_with("hello\n\n[Session output style: concise."));
         assert!(prompt.contains("Be concise."));
+    }
+
+    #[test]
+    fn shell_escape_argv_uses_plain_shell_without_wrapper() {
+        assert_eq!(shell_escape_argv(None), vec!["/bin/sh".to_string()]);
+    }
+
+    #[test]
+    fn shell_escape_argv_appends_shell_to_wrapper() {
+        let wrapper = vec!["/usr/bin/env".to_string(), "FOO=bar".to_string()];
+        assert_eq!(
+            shell_escape_argv(Some(&wrapper)),
+            vec![
+                "/usr/bin/env".to_string(),
+                "FOO=bar".to_string(),
+                "/bin/sh".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_escape_executes_in_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let result = execute_shell_escape(temp.path(), "pwd", None).unwrap();
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.stdout.trim(), temp.path().display().to_string());
     }
 }

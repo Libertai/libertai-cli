@@ -217,15 +217,15 @@ plumbing are still TODO.
 
 ### 2E. `!` shell prefix in REPL
 
-Prefix-`!` lines run a shell command and inject the output as a
-synthetic user-prompt addendum (Claude Code muscle memory). Pi's REPL
-already parses `!`/`!!` per the parity doc — verify it reaches our
-REPL too; if not, wire it.
+Prefix-`!` lines run a shell command in the current cwd and render the
+captured output locally (Claude Code muscle memory). The CLI REPL now
+matches the desktop composer escape and reuses the same bash wrapper
+argv when `--sandbox=strict` is active.
 
 **Files**: `src/commands/code_ui.rs`.
-**Effort**: S (a few hours).
+**Status**: shipped for local `!cmd`; `!!` repeat and agent-history
+injection remain optional follow-ups.
 **Desktop note**: shipped on desktop (composer commit `7029b1b`).
-The CLI REPL parity is still TODO.
 
 ---
 
