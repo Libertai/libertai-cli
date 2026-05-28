@@ -88,6 +88,8 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/image` and `/attach` commands** — REPL users can attach a
   local PNG/JPEG/GIF/WebP to a multimodal prompt using
   `/image <path> [prompt]` or the `/attach` alias.
+- **CLI `/mention` command** — REPL users can include a local UTF-8 text
+  file in the next prompt with `/mention <path> [prompt]`.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +

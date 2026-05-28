@@ -71,6 +71,7 @@ const HISTORY_DEFAULT_LIMIT: usize = 20;
 const HISTORY_MAX_LIMIT: usize = 64;
 const OSC52_MAX_TEXT_BYTES: usize = 128 * 1024;
 const IMAGE_ATTACHMENT_MAX_BYTES: usize = 10 * 1024 * 1024;
+const MENTION_ATTACHMENT_MAX_BYTES: usize = 256 * 1024;
 const TREE_MAX_ENTRIES: usize = 200;
 const CHANGELOG_DEFAULT_LIMIT: usize = 10;
 const CHANGELOG_MAX_LIMIT: usize = 50;
@@ -366,6 +367,7 @@ async fn repl_loop(
             continue;
         }
         let mut content_override: Option<Vec<ContentBlock>> = None;
+        let mut slash_prompt_handled = false;
         match trimmed {
             "/exit" | "/quit" => {
                 println!("{DIM}goodbye.{RESET}");
@@ -599,6 +601,10 @@ async fn repl_loop(
                 println!("{DIM}  usage: {trimmed} <path> [prompt]{RESET}");
                 continue;
             }
+            "/mention" => {
+                println!("{DIM}  usage: /mention <path> [prompt]{RESET}");
+                continue;
+            }
             "/vim" => {
                 println!(
                     "{DIM}  Vim bindings are not implemented in the CLI REPL yet. The input bar uses native line-editing keys.{RESET}"
@@ -802,9 +808,22 @@ async fn repl_loop(
             match build_image_prompt_content(rest, output_style) {
                 Ok(content) => {
                     content_override = Some(content);
+                    slash_prompt_handled = true;
                 }
                 Err(e) => {
                     eprintln!("{DIM}  {command}: {e:#}{RESET}");
+                    continue;
+                }
+            }
+        }
+        if let Some(rest) = mention_command_arg(trimmed) {
+            match build_mention_prompt(rest, output_style) {
+                Ok(prompt) => {
+                    line = prompt;
+                    slash_prompt_handled = true;
+                }
+                Err(e) => {
+                    eprintln!("{DIM}  /mention: {e:#}{RESET}");
                     continue;
                 }
             }
@@ -813,7 +832,7 @@ async fn repl_loop(
             print_sandbox_status(rest.trim());
             continue;
         }
-        if content_override.is_none() {
+        if !slash_prompt_handled {
             if let Some((command, scope)) = review_command_parts(trimmed) {
                 match build_review_slash_prompt(command, scope) {
                     Ok(prompt) => line = prompt,
@@ -1385,6 +1404,7 @@ fn print_help() {
     println!("{DIM}  /compact — compact older conversation history now{RESET}");
     println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
     println!("{DIM}  /attach <path> [prompt] — alias for /image{RESET}");
+    println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
     println!("{DIM}  /login    — run libertai login, then reload this REPL session{RESET}");
     println!("{DIM}  /logout   — run libertai logout, then reload this REPL session{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
@@ -1775,6 +1795,52 @@ fn image_command_arg(trimmed: &str) -> Option<(&'static str, &str)> {
         }
     }
     None
+}
+
+fn mention_command_arg(trimmed: &str) -> Option<&str> {
+    trimmed
+        .strip_prefix("/mention")
+        .filter(|rest| rest.starts_with(char::is_whitespace))
+        .map(str::trim_start)
+}
+
+fn build_mention_prompt(input: &str, output_style: Option<&'static str>) -> Result<String> {
+    let (path, prompt) = parse_mention_prompt(input)?;
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    if bytes.len() > MENTION_ATTACHMENT_MAX_BYTES {
+        anyhow::bail!(
+            "{} is too large ({} bytes); max is {} bytes",
+            path.display(),
+            bytes.len(),
+            MENTION_ATTACHMENT_MAX_BYTES
+        );
+    }
+    let text = String::from_utf8(bytes)
+        .with_context(|| format!("{} is not valid UTF-8 text", path.display()))?;
+    let prompt = if prompt.is_empty() {
+        "Please use this file as context.".to_string()
+    } else {
+        prompt
+    };
+    let body = format!(
+        "{}\n\nMentioned file: `{}`\n\n```text\n{}\n```",
+        prompt,
+        path.display(),
+        text
+    );
+    Ok(apply_output_style(output_style, &body))
+}
+
+fn parse_mention_prompt(input: &str) -> Result<(PathBuf, String)> {
+    let input = input.trim();
+    if input.is_empty() {
+        anyhow::bail!("usage: /mention <path> [prompt]");
+    }
+    let (path, rest) = parse_path_and_rest(input)?;
+    if path.as_os_str().is_empty() {
+        anyhow::bail!("usage: /mention <path> [prompt]");
+    }
+    Ok((path, rest.trim().to_string()))
 }
 
 fn build_image_prompt_content(
@@ -3927,6 +3993,16 @@ mod tests {
     }
 
     #[test]
+    fn mention_command_arg_accepts_mention_only() {
+        assert_eq!(
+            mention_command_arg("/mention src/lib.rs summarize"),
+            Some("src/lib.rs summarize")
+        );
+        assert_eq!(mention_command_arg("/mentions src/lib.rs"), None);
+        assert_eq!(mention_command_arg("/mention"), None);
+    }
+
+    #[test]
     fn parse_image_prompt_supports_quoted_paths() {
         let (path, prompt) = parse_image_prompt("'has space.png' what is here").unwrap();
         assert_eq!(path, PathBuf::from("has space.png"));
@@ -3935,6 +4011,13 @@ mod tests {
         let (path, prompt) = parse_image_prompt("\"dir/has \\\" quote.png\"").unwrap();
         assert_eq!(path, PathBuf::from("dir/has \" quote.png"));
         assert!(prompt.is_empty());
+    }
+
+    #[test]
+    fn parse_mention_prompt_reuses_quoted_path_parsing() {
+        let (path, prompt) = parse_mention_prompt("\"has space.txt\" explain").unwrap();
+        assert_eq!(path, PathBuf::from("has space.txt"));
+        assert_eq!(prompt, "explain");
     }
 
     #[test]
@@ -3967,6 +4050,18 @@ mod tests {
         assert!(
             matches!(&content[1], ContentBlock::Image(image) if image.mime_type == "image/png")
         );
+    }
+
+    #[test]
+    fn build_mention_prompt_reads_local_text_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("note.txt");
+        std::fs::write(&path, "alpha\nbeta").unwrap();
+
+        let prompt = build_mention_prompt(&format!("{} summarize", path.display()), None).unwrap();
+        assert!(prompt.contains("summarize"));
+        assert!(prompt.contains("Mentioned file:"));
+        assert!(prompt.contains("alpha\nbeta"));
     }
 
     #[test]
