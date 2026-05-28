@@ -33,6 +33,12 @@ pub struct MemoryDocument {
     pub exists: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryClearResult {
+    pub path: PathBuf,
+    pub backup_path: Option<PathBuf>,
+}
+
 /// Resolve the directory under which all per-project memory dirs live.
 /// `LIBERTAI_HOME` takes priority for tests; otherwise the XDG config
 /// dir. Always returns a path even if the dir doesn't exist yet —
@@ -88,6 +94,21 @@ pub fn append_memory(cwd: &Path, text: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Ensure the project's MEMORY.md exists and return its path.
+pub fn ensure_memory_file(cwd: &Path) -> Result<PathBuf> {
+    let path = memory_file_for(cwd)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    Ok(path)
+}
+
 /// Read the project's MEMORY.md without creating it.
 pub fn read_memory(cwd: &Path) -> Result<MemoryDocument> {
     let path = memory_file_for(cwd)?;
@@ -108,6 +129,47 @@ fn read_memory_path(path: PathBuf) -> Result<MemoryDocument> {
         }),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
+}
+
+/// Clear MEMORY.md, preserving existing content in a numbered backup.
+pub fn clear_memory(cwd: &Path) -> Result<MemoryClearResult> {
+    let path = memory_file_for(cwd)?;
+    clear_memory_path(path)
+}
+
+fn clear_memory_path(path: PathBuf) -> Result<MemoryClearResult> {
+    if !path.exists() {
+        return Ok(MemoryClearResult {
+            path,
+            backup_path: None,
+        });
+    }
+    let backup_path = next_backup_path(&path);
+    std::fs::rename(&path, &backup_path)
+        .with_context(|| format!("moving {} to {}", path.display(), backup_path.display()))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(&path, "").with_context(|| format!("clearing {}", path.display()))?;
+    Ok(MemoryClearResult {
+        path,
+        backup_path: Some(backup_path),
+    })
+}
+
+fn next_backup_path(path: &Path) -> PathBuf {
+    let first = path.with_extension("md.bak");
+    if !first.exists() {
+        return first;
+    }
+    for i in 2.. {
+        let candidate = path.with_extension(format!("md.bak.{i}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded backup suffix search should always return");
 }
 
 #[cfg(test)]
@@ -135,5 +197,27 @@ mod tests {
         assert!(!doc.exists);
         assert_eq!(doc.path, path);
         assert!(doc.content.is_empty());
+    }
+
+    #[test]
+    fn clear_memory_path_moves_existing_content_to_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("MEMORY.md");
+        std::fs::write(&path, "- keep this\n").unwrap();
+        let backup = next_backup_path(&path);
+
+        let result = clear_memory_path(path.clone()).unwrap();
+
+        assert_eq!(result.backup_path.as_ref(), Some(&backup));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), "- keep this\n");
+    }
+
+    #[test]
+    fn next_backup_path_skips_existing_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("MEMORY.md");
+        std::fs::write(path.with_extension("md.bak"), "old").unwrap();
+        assert_eq!(next_backup_path(&path), path.with_extension("md.bak.2"));
     }
 }

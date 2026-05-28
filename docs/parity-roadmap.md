@@ -355,9 +355,10 @@ new `src/commands/code_agent_registry.rs`.
 Single `~/.config/libertai/projects/<cwd-hash>/MEMORY.md` per project,
 loaded alongside `AGENTS.md`. Add a `/remember <text>` slash command
 that appends a dated bullet. CLI `/memory` can inspect the resolved
-file/path; desktop `/memory` can inspect and edit it. Full four-type
-memory system (user / feedback / project / reference) deferred —
-minimal version covers 80% of value per parity doc section F.
+file/path, open it in `$VISUAL`/`$EDITOR`, and clear it with a backup;
+desktop `/memory` can inspect and edit it. Full four-type memory system
+(user / feedback / project / reference) deferred — minimal version
+covers 80% of value per parity doc section F.
 
 **Files**: new `src/commands/code_memory.rs`,
 `pi_agent_rust/src/app.rs` (system-prompt assembly hook).

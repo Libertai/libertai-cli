@@ -697,7 +697,7 @@ fn print_help() {
     println!("{DIM}  /status   — show current REPL session status{RESET}");
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
     println!("{DIM}  /config   — show active configuration summary (/config path for file path){RESET}");
-    println!("{DIM}  /memory   — show this project's MEMORY.md (/memory path for file path){RESET}");
+    println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
     println!("{DIM}  /output-style <default|concise|explanatory|review|status>{RESET}");
     println!("{DIM}  /vim      — show Vim-input status{RESET}");
     println!("{DIM}  /ide      — show IDE integration status{RESET}");
@@ -720,6 +720,33 @@ fn print_memory(action: &str) {
             return;
         }
     };
+    if action.eq_ignore_ascii_case("edit") {
+        match crate::commands::code_memory::ensure_memory_file(&cwd) {
+            Ok(path) => open_memory_editor(&path),
+            Err(e) => eprintln!("{DIM}  /memory edit: failed: {e:#}{RESET}"),
+        }
+        return;
+    }
+    if action.eq_ignore_ascii_case("clear") {
+        match crate::commands::code_memory::clear_memory(&cwd) {
+            Ok(result) => {
+                if let Some(backup) = result.backup_path {
+                    println!(
+                        "{DIM}  memory cleared: {} (backup: {}){RESET}",
+                        result.path.display(),
+                        backup.display()
+                    );
+                } else {
+                    println!(
+                        "{DIM}  no MEMORY.md to clear: {}{RESET}",
+                        result.path.display()
+                    );
+                }
+            }
+            Err(e) => eprintln!("{DIM}  /memory clear: failed: {e:#}{RESET}"),
+        }
+        return;
+    }
     let doc = match crate::commands::code_memory::read_memory(&cwd) {
         Ok(doc) => doc,
         Err(e) => {
@@ -744,6 +771,30 @@ fn print_memory(action: &str) {
         }
     }
     println!();
+}
+
+fn open_memory_editor(path: &Path) {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let cmd = format!("{editor} {}", quote_for_sh(path));
+    match Command::new("/bin/sh").arg("-c").arg(&cmd).status() {
+        Ok(status) if status.success() => {
+            println!("{DIM}  memory saved: {}{RESET}", path.display());
+            println!("{DIM}  changes take effect in new agent sessions.{RESET}");
+        }
+        Ok(status) => {
+            eprintln!("{DIM}  editor exited with status {status}{RESET}");
+        }
+        Err(e) => {
+            eprintln!("{DIM}  failed to launch editor `{editor}`: {e}{RESET}");
+        }
+    }
+}
+
+fn quote_for_sh(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    format!("'{}'", raw.replace('\'', "'\\''"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1425,5 +1476,13 @@ mod tests {
     #[test]
     fn usage_summary_empty_when_no_turns() {
         assert!(usage_summary(&[]).is_none());
+    }
+
+    #[test]
+    fn quote_for_sh_wraps_and_escapes_single_quotes() {
+        assert_eq!(
+            quote_for_sh(Path::new("/tmp/has ' quote/MEMORY.md")),
+            "'/tmp/has '\\'' quote/MEMORY.md'"
+        );
     }
 }
