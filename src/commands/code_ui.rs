@@ -539,6 +539,12 @@ async fn repl_loop(
                 print_thinking_status(&handle);
                 continue;
             }
+            "/compact" => {
+                if compact_transcript(&mut handle, None).await {
+                    usage_history.clear();
+                }
+                continue;
+            }
             "/memory" => {
                 print_memory("show");
                 continue;
@@ -678,6 +684,12 @@ async fn repl_loop(
                 Ok(true) => usage_history.clear(),
                 Ok(false) => {}
                 Err(e) => eprintln!("{DIM}  /fork: {e:#}{RESET}"),
+            }
+            continue;
+        }
+        if let Some(rest) = compact_command_notes(trimmed) {
+            if compact_transcript(&mut handle, Some(rest)).await {
+                usage_history.clear();
             }
             continue;
         }
@@ -1279,6 +1291,7 @@ fn print_help() {
     println!("{DIM}  /resume [path] — resume the latest or specified saved session{RESET}");
     println!("{DIM}  /fork [list|index|id] — fork from a previous user message{RESET}");
     println!("{DIM}  /thinking [off|minimal|low|medium|high|xhigh] — show or set thinking{RESET}");
+    println!("{DIM}  /compact — compact older conversation history now{RESET}");
     println!("{DIM}  /login    — run libertai login, then reload this REPL session{RESET}");
     println!("{DIM}  /logout   — run libertai logout, then reload this REPL session{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
@@ -1708,6 +1721,26 @@ async fn share_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
     }
 }
 
+async fn compact_transcript(handle: &mut AgentSessionHandle, notes: Option<&str>) -> bool {
+    let notes = notes.unwrap_or("").trim();
+    if !notes.is_empty() {
+        eprintln!(
+            "{DIM}  /compact: notes are not supported in the CLI yet; compacting without notes.{RESET}"
+        );
+    }
+    println!("{DIM}  compacting conversation history...{RESET}");
+    match handle.compact_force(render_event).await {
+        Ok(()) => {
+            println!("{DIM}  compact complete.{RESET}");
+            true
+        }
+        Err(e) => {
+            eprintln!("{DIM}  /compact: {e:#}{RESET}");
+            false
+        }
+    }
+}
+
 fn export_path(path: Option<&str>) -> Result<PathBuf> {
     let raw = path.unwrap_or("").trim();
     if raw.is_empty() {
@@ -1722,6 +1755,10 @@ fn share_path(path: Option<&str>) -> Result<PathBuf> {
         return Ok(PathBuf::from("libertai-share.html"));
     }
     Ok(PathBuf::from(raw))
+}
+
+fn compact_command_notes(trimmed: &str) -> Option<&str> {
+    trimmed.strip_prefix("/compact ").map(str::trim)
 }
 
 fn render_markdown_transcript(messages: &[Message]) -> String {
@@ -2504,6 +2541,22 @@ fn render_event(event: AgentEvent) {
             let preview = crate::commands::code_tool_preview::tool_preview(&tool_name, &args);
             println!("\n{DIM}  [tool] {preview}{RESET}");
         }
+        AgentEvent::AutoCompactionStart { reason } => {
+            println!("{DIM}  [compact] {reason}{RESET}");
+        }
+        AgentEvent::AutoCompactionEnd {
+            aborted,
+            error_message,
+            ..
+        } => {
+            if aborted {
+                println!("{DIM}  [compact] aborted{RESET}");
+            } else if let Some(message) = error_message {
+                println!("{DIM}  [compact] failed: {message}{RESET}");
+            } else {
+                println!("{DIM}  [compact] finished{RESET}");
+            }
+        }
         AgentEvent::AgentEnd { .. } => {
             // Pi doesn't emit a trailing newline after the last text delta;
             // seed one here so the usage stats line lands cleanly below.
@@ -3040,6 +3093,14 @@ mod tests {
         assert_eq!(thinking_command_arg("/t medium"), Some("medium"));
         assert_eq!(thinking_command_arg("/thinking"), None);
         assert_eq!(thinking_command_arg("/theme high"), None);
+    }
+
+    #[test]
+    fn compact_command_notes_accepts_only_compact_prefix() {
+        assert_eq!(compact_command_notes("/compact keep setup"), Some("keep setup"));
+        assert_eq!(compact_command_notes("/compact   "), Some(""));
+        assert_eq!(compact_command_notes("/compact"), None);
+        assert_eq!(compact_command_notes("/compactly keep"), None);
     }
 
     #[test]
