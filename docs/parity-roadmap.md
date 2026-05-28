@@ -32,6 +32,9 @@ SDK; those are flagged **(upstream)**.
   mode, switches among `default`, `acceptEdits`, and `plan`, clears
   session-scoped allow rules, and documents that native `bypassPermissions`
   is intentionally unavailable.
+- **CLI tool preview lines** — REPL and one-shot renderers now show the
+  primary tool arguments (`read src/lib.rs:12+40`, `bash cargo test`,
+  `grep pattern in src`) instead of only the tool name.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
@@ -175,13 +178,15 @@ new `src/commands/code_diff.rs` (renderer).
 
 ### 2B. Tool preview line
 
-One-line summary printed before each tool call (`read_file src/main.rs`,
-`bash cargo build`, `edit src/foo.rs +12 -3`). Match Hermes's
-per-tool primary-arg map (`agent/display.py:170-276`).
+Shipped for CLI renderers: one-line summaries now print before each tool
+call (`read src/main.rs`, `bash cargo build`, `edit src/foo.rs`,
+`grep pattern in src`). The formatter is shared by interactive and
+one-shot mode and caps long payloads.
 
 **Files**: `src/commands/code_ui.rs` (interactive renderer) +
-`src/commands/code.rs` (one-shot renderer).
-**Effort**: S (half-day).
+`src/commands/code.rs` (one-shot renderer), plus
+`src/commands/code_tool_preview.rs`.
+**Status**: shipped.
 **Desktop note**: desktop renders tool calls richly already — this is
 CLI-only.
 

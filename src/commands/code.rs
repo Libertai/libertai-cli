@@ -232,8 +232,11 @@ fn render(event: AgentEvent) {
         AgentEvent::TurnStart { turn_index, .. } => {
             eprintln!("\n  \x1b[2m[turn {turn_index}]\x1b[0m");
         }
-        AgentEvent::ToolExecutionStart { tool_name, .. } if tool_name != "todo" => {
-            eprintln!("  \x1b[2m[tool] {tool_name}\x1b[0m");
+        AgentEvent::ToolExecutionStart {
+            tool_name, args, ..
+        } if tool_name != "todo" => {
+            let preview = crate::commands::code_tool_preview::tool_preview(&tool_name, &args);
+            eprintln!("  \x1b[2m[tool] {preview}\x1b[0m");
         }
         AgentEvent::AgentEnd { .. } => {
             // AgentEnd fires at the tail of the agent loop; a newline here

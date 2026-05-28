@@ -1423,8 +1423,11 @@ fn render_event(event: AgentEvent) {
         }
         // The todo tool renders its own nicely-formatted output;
         // adding "[tool] todo" above it is just noise.
-        AgentEvent::ToolExecutionStart { tool_name, .. } if tool_name != "todo" => {
-            println!("\n{DIM}  [tool] {tool_name}{RESET}");
+        AgentEvent::ToolExecutionStart {
+            tool_name, args, ..
+        } if tool_name != "todo" => {
+            let preview = crate::commands::code_tool_preview::tool_preview(&tool_name, &args);
+            println!("\n{DIM}  [tool] {preview}{RESET}");
         }
         AgentEvent::AgentEnd { .. } => {
             // Pi doesn't emit a trailing newline after the last text delta;
