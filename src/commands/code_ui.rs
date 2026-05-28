@@ -31,7 +31,7 @@ use crossterm::{
 use pi::model::{AssistantMessageEvent, ContentBlock, Message, UserContent};
 use pi::sdk::{
     create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle, Error as PiError,
-    RpcForkMessage,
+    RpcForkMessage, ThinkingLevel,
 };
 
 use crate::commands::code_approvals::ApprovalState;
@@ -535,6 +535,10 @@ async fn repl_loop(
                 }
                 continue;
             }
+            "/thinking" | "/think" | "/t" => {
+                print_thinking_status(&handle);
+                continue;
+            }
             "/memory" => {
                 print_memory("show");
                 continue;
@@ -670,6 +674,16 @@ async fn repl_loop(
                 Ok(true) => usage_history.clear(),
                 Ok(false) => {}
                 Err(e) => eprintln!("{DIM}  /fork: {e:#}{RESET}"),
+            }
+            continue;
+        }
+        if let Some(rest) = thinking_command_arg(trimmed) {
+            match parse_thinking_level(rest) {
+                Ok(level) => match handle.set_thinking_level(level).await {
+                    Ok(()) => println!("{DIM}  → thinking set to {level}{RESET}"),
+                    Err(e) => eprintln!("{DIM}  /thinking: {e:#}{RESET}"),
+                },
+                Err(e) => eprintln!("{DIM}  /thinking: {e:#}{RESET}"),
             }
             continue;
         }
@@ -1161,6 +1175,32 @@ fn truncate_chars(text: &str, max: usize) -> String {
     out
 }
 
+fn thinking_command_arg(input: &str) -> Option<&str> {
+    for prefix in ["/thinking ", "/think ", "/t "] {
+        if let Some(rest) = input.strip_prefix(prefix) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
+fn parse_thinking_level(input: &str) -> Result<ThinkingLevel> {
+    let raw = input.trim();
+    if raw.is_empty() {
+        anyhow::bail!("usage: /thinking <off|minimal|low|medium|high|xhigh>");
+    }
+    raw.parse::<ThinkingLevel>()
+        .map_err(|_| anyhow::anyhow!("unknown thinking level `{raw}`"))
+}
+
+fn print_thinking_status(handle: &AgentSessionHandle) {
+    let current = handle.thinking_level().unwrap_or_default();
+    println!("{BOLD}thinking{RESET}");
+    println!("{DIM}  current:{RESET} {current}");
+    println!("{DIM}  supported:{RESET} off, minimal, low, medium, high, xhigh");
+    println!("{DIM}  usage:{RESET} /thinking <level> (also /think or /t)");
+}
+
 /// Render a previously-saved conversation in the same shape the live REPL
 /// uses, so a `--resume` user sees their context as static history before
 /// the input bar appears. Streamed output during normal operation comes
@@ -1230,6 +1270,7 @@ fn print_help() {
     println!("{DIM}  /reload   — reload config and start a fresh agent session{RESET}");
     println!("{DIM}  /resume [path] — resume the latest or specified saved session{RESET}");
     println!("{DIM}  /fork [list|index|id] — fork from a previous user message{RESET}");
+    println!("{DIM}  /thinking [off|minimal|low|medium|high|xhigh] — show or set thinking{RESET}");
     println!("{DIM}  /login    — run libertai login, then reload this REPL session{RESET}");
     println!("{DIM}  /logout   — run libertai logout, then reload this REPL session{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
@@ -2846,6 +2887,27 @@ mod tests {
         let preview = fork_message_preview("\n  hello world\nsecond");
         assert_eq!(preview, "hello world");
         assert!(fork_message_preview(&"x".repeat(100)).ends_with("..."));
+    }
+
+    #[test]
+    fn thinking_command_arg_accepts_aliases() {
+        assert_eq!(thinking_command_arg("/thinking high"), Some("high"));
+        assert_eq!(thinking_command_arg("/think low"), Some("low"));
+        assert_eq!(thinking_command_arg("/t medium"), Some("medium"));
+        assert_eq!(thinking_command_arg("/thinking"), None);
+        assert_eq!(thinking_command_arg("/theme high"), None);
+    }
+
+    #[test]
+    fn parse_thinking_level_accepts_supported_levels() {
+        assert_eq!(parse_thinking_level("off").unwrap(), ThinkingLevel::Off);
+        assert_eq!(parse_thinking_level("minimal").unwrap(), ThinkingLevel::Minimal);
+        assert_eq!(parse_thinking_level("low").unwrap(), ThinkingLevel::Low);
+        assert_eq!(parse_thinking_level("medium").unwrap(), ThinkingLevel::Medium);
+        assert_eq!(parse_thinking_level("high").unwrap(), ThinkingLevel::High);
+        assert_eq!(parse_thinking_level("xhigh").unwrap(), ThinkingLevel::XHigh);
+        assert!(parse_thinking_level("").is_err());
+        assert!(parse_thinking_level("maximum").is_err());
     }
 
     #[test]
