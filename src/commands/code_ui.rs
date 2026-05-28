@@ -445,7 +445,7 @@ async fn repl_loop(
                 print_bug_template(&provider, &model, mode.get(), output_style);
                 continue;
             }
-            "/clear" => {
+            "/clear" | "/new" => {
                 // Wipe the screen *and* rebuild the session so the
                 // agent's message history starts fresh too. (Mode
                 // toggles no longer rebuild — they preserve history —
@@ -858,7 +858,7 @@ fn print_help() {
     println!("{DIM}  /vim      — show Vim-input status{RESET}");
     println!("{DIM}  /ide      — show IDE integration status{RESET}");
     println!("{DIM}  /bug      — print a bug report template{RESET}");
-    println!("{DIM}  /clear    — wipe the screen and start a fresh session{RESET}");
+    println!("{DIM}  /clear    — wipe the screen and start a fresh session (also /new){RESET}");
     println!("{DIM}  /forget   — clear saved allow rules{RESET}");
     println!("{DIM}  /remember <text> — append a dated note to this project's MEMORY.md{RESET}");
     println!("{DIM}  !<cmd>    — run a local shell command in this cwd{RESET}");
