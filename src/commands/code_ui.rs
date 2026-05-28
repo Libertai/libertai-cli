@@ -28,7 +28,9 @@ use crossterm::{
     terminal::{self, Clear, ClearType},
 };
 
-use pi::model::{AssistantMessageEvent, ContentBlock, Message, UserContent};
+use pi::model::{
+    AssistantMessageEvent, ContentBlock, ImageContent, Message, TextContent, UserContent,
+};
 use pi::sdk::{
     create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle, Error as PiError,
     RpcForkMessage, ThinkingLevel,
@@ -68,6 +70,7 @@ const SHELL_ESCAPE_MAX_DISPLAY_BYTES: usize = 256 * 1024;
 const HISTORY_DEFAULT_LIMIT: usize = 20;
 const HISTORY_MAX_LIMIT: usize = 64;
 const OSC52_MAX_TEXT_BYTES: usize = 128 * 1024;
+const IMAGE_ATTACHMENT_MAX_BYTES: usize = 10 * 1024 * 1024;
 const TREE_MAX_ENTRIES: usize = 200;
 const CHANGELOG_DEFAULT_LIMIT: usize = 10;
 const CHANGELOG_MAX_LIMIT: usize = 50;
@@ -362,6 +365,7 @@ async fn repl_loop(
         if trimmed.is_empty() {
             continue;
         }
+        let mut content_override: Option<Vec<ContentBlock>> = None;
         match trimmed {
             "/exit" | "/quit" => {
                 println!("{DIM}goodbye.{RESET}");
@@ -591,6 +595,10 @@ async fn repl_loop(
                 share_transcript(&handle, None).await;
                 continue;
             }
+            "/image" | "/attach" => {
+                println!("{DIM}  usage: {trimmed} <path> [prompt]{RESET}");
+                continue;
+            }
             "/vim" => {
                 println!(
                     "{DIM}  Vim bindings are not implemented in the CLI REPL yet. The input bar uses native line-editing keys.{RESET}"
@@ -790,53 +798,66 @@ async fn repl_loop(
             share_transcript(&handle, Some(rest.trim())).await;
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("/sandbox ") {
-            print_sandbox_status(rest.trim());
-            continue;
-        }
-        if let Some((command, scope)) = review_command_parts(trimmed) {
-            match build_review_slash_prompt(command, scope) {
-                Ok(prompt) => line = prompt,
+        if let Some((command, rest)) = image_command_arg(trimmed) {
+            match build_image_prompt_content(rest, output_style) {
+                Ok(content) => {
+                    content_override = Some(content);
+                }
                 Err(e) => {
                     eprintln!("{DIM}  {command}: {e:#}{RESET}");
                     continue;
                 }
             }
-        } else {
-            if trimmed == "/agent" {
-                println!("{DIM}  usage: /agent <name> <task>{RESET}");
-                continue;
-            }
-            if let Some(rest) = trimmed.strip_prefix("/agent ") {
-                match build_agent_slash_prompt(rest.trim()) {
-                    Ok(prompt) => {
-                        line = prompt;
-                    }
+        }
+        if let Some(rest) = trimmed.strip_prefix("/sandbox ") {
+            print_sandbox_status(rest.trim());
+            continue;
+        }
+        if content_override.is_none() {
+            if let Some((command, scope)) = review_command_parts(trimmed) {
+                match build_review_slash_prompt(command, scope) {
+                    Ok(prompt) => line = prompt,
                     Err(e) => {
-                        eprintln!("{DIM}  /agent: {e:#}{RESET}");
+                        eprintln!("{DIM}  {command}: {e:#}{RESET}");
                         continue;
                     }
                 }
-            }
-            if let Some(rest) = trimmed.strip_prefix("/template ") {
-                match build_template_slash_prompt(rest.trim()) {
-                    Ok(prompt) => {
-                        line = prompt;
-                    }
-                    Err(e) => {
-                        eprintln!("{DIM}  /template: {e:#}{RESET}");
-                        continue;
+            } else {
+                if trimmed == "/agent" {
+                    println!("{DIM}  usage: /agent <name> <task>{RESET}");
+                    continue;
+                }
+                if let Some(rest) = trimmed.strip_prefix("/agent ") {
+                    match build_agent_slash_prompt(rest.trim()) {
+                        Ok(prompt) => {
+                            line = prompt;
+                        }
+                        Err(e) => {
+                            eprintln!("{DIM}  /agent: {e:#}{RESET}");
+                            continue;
+                        }
                     }
                 }
-            } else if let Some((name, args)) = parse_direct_custom_slash(trimmed) {
-                match build_custom_slash_prompt(name, args) {
-                    Ok(Some(prompt)) => {
-                        line = prompt;
+                if let Some(rest) = trimmed.strip_prefix("/template ") {
+                    match build_template_slash_prompt(rest.trim()) {
+                        Ok(prompt) => {
+                            line = prompt;
+                        }
+                        Err(e) => {
+                            eprintln!("{DIM}  /template: {e:#}{RESET}");
+                            continue;
+                        }
                     }
-                    Ok(None) => {}
-                    Err(e) => {
-                        eprintln!("{DIM}  /{name}: {e:#}{RESET}");
-                        continue;
+                } else if let Some((name, args)) = parse_direct_custom_slash(trimmed) {
+                    match build_custom_slash_prompt(name, args) {
+                        Ok(Some(prompt)) => {
+                            line = prompt;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("{DIM}  /{name}: {e:#}{RESET}");
+                            continue;
+                        }
                     }
                 }
             }
@@ -902,10 +923,16 @@ async fn repl_loop(
         // interrupt an in-flight turn without tearing the REPL down.
         let (abort_handle, abort_signal) = AbortHandle::new();
         set_current_abort(abort_handle);
-        let agent_line = apply_output_style(output_style, &line);
-        let result = handle
-            .prompt_with_abort(agent_line, abort_signal, render_event)
-            .await;
+        let result = if let Some(content) = content_override {
+            handle
+                .prompt_with_content_with_abort(content, abort_signal, render_event)
+                .await
+        } else {
+            let agent_line = apply_output_style(output_style, &line);
+            handle
+                .prompt_with_abort(agent_line, abort_signal, render_event)
+                .await
+        };
         clear_current_abort();
 
         // `render_event` already emits a trailing newline on AgentEnd,
@@ -1356,6 +1383,8 @@ fn print_help() {
     println!("{DIM}  /fork [list|index|id] — fork from a previous user message{RESET}");
     println!("{DIM}  /thinking [off|minimal|low|medium|high|xhigh] — show or set thinking{RESET}");
     println!("{DIM}  /compact — compact older conversation history now{RESET}");
+    println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
+    println!("{DIM}  /attach <path> [prompt] — alias for /image{RESET}");
     println!("{DIM}  /login    — run libertai login, then reload this REPL session{RESET}");
     println!("{DIM}  /logout   — run libertai logout, then reload this REPL session{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
@@ -1735,6 +1764,109 @@ fn print_history(history: &VecDeque<String>, limit: usize) {
     for (idx, item) in history.iter().enumerate().skip(start) {
         println!("{DIM}  {:>2}.{RESET} {}", idx + 1, item);
     }
+}
+
+fn image_command_arg(trimmed: &str) -> Option<(&'static str, &str)> {
+    for command in ["/image", "/attach"] {
+        if let Some(rest) = trimmed.strip_prefix(command) {
+            if rest.starts_with(char::is_whitespace) {
+                return Some((command, rest.trim_start()));
+            }
+        }
+    }
+    None
+}
+
+fn build_image_prompt_content(
+    input: &str,
+    output_style: Option<&'static str>,
+) -> Result<Vec<ContentBlock>> {
+    let (path, prompt) = parse_image_prompt(input)?;
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    if bytes.len() > IMAGE_ATTACHMENT_MAX_BYTES {
+        anyhow::bail!(
+            "{} is too large ({} bytes); max is {} bytes",
+            path.display(),
+            bytes.len(),
+            IMAGE_ATTACHMENT_MAX_BYTES
+        );
+    }
+    let mime_type = detect_supported_image_mime_type(&bytes)
+        .ok_or_else(|| anyhow::anyhow!("unsupported image type; use PNG, JPEG, GIF, or WebP"))?;
+    let prompt = if prompt.is_empty() {
+        "Please analyze this image.".to_string()
+    } else {
+        prompt
+    };
+    Ok(vec![
+        ContentBlock::Text(TextContent::new(apply_output_style(output_style, &prompt))),
+        ContentBlock::Image(ImageContent {
+            data: BASE64_STANDARD.encode(bytes),
+            mime_type: mime_type.to_string(),
+        }),
+    ])
+}
+
+fn parse_image_prompt(input: &str) -> Result<(PathBuf, String)> {
+    let input = input.trim();
+    if input.is_empty() {
+        anyhow::bail!("usage: /image <path> [prompt]");
+    }
+    let (path, rest) = parse_path_and_rest(input)?;
+    if path.as_os_str().is_empty() {
+        anyhow::bail!("usage: /image <path> [prompt]");
+    }
+    Ok((path, rest.trim().to_string()))
+}
+
+fn parse_path_and_rest(input: &str) -> Result<(PathBuf, &str)> {
+    let Some(first) = input.chars().next() else {
+        anyhow::bail!("usage: /image <path> [prompt]");
+    };
+    if first == '"' || first == '\'' {
+        let quote = first;
+        let mut path = String::new();
+        let mut escaped = false;
+        let mut end = None;
+        for (idx, ch) in input.char_indices().skip(1) {
+            if escaped {
+                path.push(ch);
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote {
+                end = Some(idx + ch.len_utf8());
+                break;
+            } else {
+                path.push(ch);
+            }
+        }
+        let Some(end) = end else {
+            anyhow::bail!("unterminated quoted image path");
+        };
+        return Ok((PathBuf::from(path), &input[end..]));
+    }
+
+    match input.find(char::is_whitespace) {
+        Some(idx) => Ok((PathBuf::from(&input[..idx]), &input[idx..])),
+        None => Ok((PathBuf::from(input), "")),
+    }
+}
+
+fn detect_supported_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 8 && bytes.starts_with(b"\x89PNG\r\n\x1A\n") {
+        return Some("image/png");
+    }
+    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 6 && (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
 }
 
 fn parse_permissions_command(input: &str) -> PermissionsCommand {
@@ -3778,6 +3910,63 @@ mod tests {
         );
         assert!(parse_agent_slash_query("reviewer").is_err());
         assert!(parse_agent_slash_query("reviewer   ").is_err());
+    }
+
+    #[test]
+    fn image_command_arg_accepts_image_and_attach_only() {
+        assert_eq!(
+            image_command_arg("/image screenshot.png describe"),
+            Some(("/image", "screenshot.png describe"))
+        );
+        assert_eq!(
+            image_command_arg("/attach screenshot.png describe"),
+            Some(("/attach", "screenshot.png describe"))
+        );
+        assert_eq!(image_command_arg("/imagex screenshot.png"), None);
+        assert_eq!(image_command_arg("/image"), None);
+    }
+
+    #[test]
+    fn parse_image_prompt_supports_quoted_paths() {
+        let (path, prompt) = parse_image_prompt("'has space.png' what is here").unwrap();
+        assert_eq!(path, PathBuf::from("has space.png"));
+        assert_eq!(prompt, "what is here");
+
+        let (path, prompt) = parse_image_prompt("\"dir/has \\\" quote.png\"").unwrap();
+        assert_eq!(path, PathBuf::from("dir/has \" quote.png"));
+        assert!(prompt.is_empty());
+    }
+
+    #[test]
+    fn detect_supported_image_mime_type_checks_magic_bytes() {
+        assert_eq!(
+            detect_supported_image_mime_type(b"\x89PNG\r\n\x1A\nrest"),
+            Some("image/png")
+        );
+        assert_eq!(
+            detect_supported_image_mime_type(b"\xFF\xD8\xFF"),
+            Some("image/jpeg")
+        );
+        assert_eq!(detect_supported_image_mime_type(b"GIF89a"), Some("image/gif"));
+        assert_eq!(
+            detect_supported_image_mime_type(b"RIFFxxxxWEBPrest"),
+            Some("image/webp")
+        );
+        assert_eq!(detect_supported_image_mime_type(b"not an image"), None);
+    }
+
+    #[test]
+    fn build_image_prompt_content_reads_local_image() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("tiny.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1A\npayload").unwrap();
+
+        let content =
+            build_image_prompt_content(&format!("{} describe it", path.display()), None).unwrap();
+        assert!(matches!(&content[0], ContentBlock::Text(text) if text.text == "describe it"));
+        assert!(
+            matches!(&content[1], ContentBlock::Image(image) if image.mime_type == "image/png")
+        );
     }
 
     #[test]

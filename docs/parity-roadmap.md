@@ -85,6 +85,9 @@ SDK; those are flagged **(upstream)**.
   session naming.
 - **CLI `/abort` command** — REPL users get an explicit status message
   pointing to the active-turn Ctrl+C abort path.
+- **CLI `/image` and `/attach` commands** — REPL users can attach a
+  local PNG/JPEG/GIF/WebP to a multimodal prompt using
+  `/image <path> [prompt]` or the `/attach` alias.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
