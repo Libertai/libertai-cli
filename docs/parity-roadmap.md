@@ -122,6 +122,9 @@ SDK; those are flagged **(upstream)**.
 - **File-backed output styles** — `/output-style` keeps built-in
   response styles and discovers Markdown styles from project/user
   `.claude/output-styles` and `.libertai/output-styles` roots.
+- **CLI status line customization** — `/statusline <template>` persists
+  a terminal input-bar template with Claude-style tokens for project,
+  path, backend/model, mode, output style, token count, and context use.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +

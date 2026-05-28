@@ -66,6 +66,8 @@ pub struct Config {
         skip_serializing_if = "is_default_check_for_updates"
     )]
     pub check_for_updates: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status_line_template: String,
     #[serde(default)]
     pub auth: Auth,
 }
@@ -201,6 +203,7 @@ impl Default for Config {
             launcher_defaults: LauncherDefaults::default(),
             http_timeout_secs: DEFAULT_HTTP_TIMEOUT_SECS,
             check_for_updates: DEFAULT_CHECK_FOR_UPDATES,
+            status_line_template: String::new(),
             auth: Auth::default(),
         }
     }

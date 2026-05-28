@@ -12,6 +12,7 @@ fn empty_toml_parses_as_defaults() {
     assert_eq!(cfg.launcher_defaults.opus_model, "gemma-4-31b-it");
     assert_eq!(cfg.launcher_defaults.sonnet_model, "qwen3.6-35b-a3b");
     assert_eq!(cfg.launcher_defaults.haiku_model, "qwen3.6-35b-a3b");
+    assert!(cfg.status_line_template.is_empty());
     assert!(cfg.auth.api_key.is_none());
 }
 
@@ -28,6 +29,7 @@ fn save_then_load_preserves_fields() {
             opus_model: "opus-x".into(),
             ..Default::default()
         },
+        status_line_template: "{model} {ctx}".into(),
         ..Default::default()
     };
 
@@ -42,6 +44,7 @@ fn save_then_load_preserves_fields() {
     assert_eq!(round.auth.wallet_address.as_deref(), Some("0xabcdef"));
     assert_eq!(round.auth.chain.as_deref(), Some("base"));
     assert_eq!(round.launcher_defaults.opus_model, "opus-x");
+    assert_eq!(round.status_line_template, "{model} {ctx}");
 }
 
 #[test]

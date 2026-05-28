@@ -60,6 +60,10 @@ const MENTION_ATTACHMENT_MAX_BYTES: usize = 256 * 1024;
 const TREE_MAX_ENTRIES: usize = 200;
 const CHANGELOG_DEFAULT_LIMIT: usize = 10;
 const CHANGELOG_MAX_LIMIT: usize = 50;
+const STATUS_LINE_TEMPLATE_MAX_CHARS: usize = 240;
+const STATUS_LINE_TOKENS: &[&str] = &[
+    "project", "path", "session", "backend", "model", "mode", "style", "tokens", "ctx", "live",
+];
 
 /// Snapshot of the last completed turn's token usage. Written in
 /// `repl_loop` after each successful prompt, read in `repaint()` to
@@ -69,6 +73,8 @@ struct BarStatus {
     model_label: String,
     input_tokens: u64,
     context_window: u32,
+    output_style: Option<String>,
+    status_line_template: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,22 +157,22 @@ fn set_bar_status(status: BarStatus) {
     }
 }
 
-fn rule_chip(cols: usize) -> String {
+fn update_bar_status(mut update: impl FnMut(&mut BarStatus)) {
+    if let Ok(mut g) = BAR_STATUS.lock() {
+        if let Some(status) = g.as_mut() {
+            update(status);
+        }
+    }
+}
+
+fn rule_chip(cols: usize, mode: Mode) -> String {
     let status = BAR_STATUS.lock().ok().and_then(|g| g.clone());
     let inner = match status {
-        Some(s) if s.context_window > 0 => {
-            let pct = (f64::from(s.input_tokens as u32).min(f64::from(s.context_window))
-                / f64::from(s.context_window)
-                * 100.0)
-                .round() as u32;
-            format!(
-                " {pct}% · {} / {} · {} ",
-                human_tokens(s.input_tokens),
-                human_tokens(u64::from(s.context_window)),
-                s.model_label
-            )
+        Some(s) => {
+            let text = expand_status_line_template(&s.status_line_template, &s, mode)
+                .unwrap_or_else(|| default_rule_text(&s));
+            format!(" {text} ")
         }
-        Some(s) => format!(" {} ", s.model_label),
         None => String::new(),
     };
     // Pad with ─ so the whole line fills the terminal width.
@@ -182,6 +188,28 @@ fn rule_chip(cols: usize) -> String {
         inner,
         "\u{2500}".repeat(right)
     )
+}
+
+fn default_rule_text(status: &BarStatus) -> String {
+    if status.context_window > 0 {
+        let pct = context_percent(status.input_tokens, status.context_window);
+        format!(
+            "{pct}% · {} / {} · {}",
+            human_tokens(status.input_tokens),
+            human_tokens(u64::from(status.context_window)),
+            status.model_label
+        )
+    } else {
+        status.model_label.clone()
+    }
+}
+
+fn context_percent(input_tokens: u64, context_window: u32) -> u32 {
+    if context_window == 0 {
+        return 0;
+    }
+    ((input_tokens.min(u64::from(context_window)) as f64 / f64::from(context_window)) * 100.0)
+        .round() as u32
 }
 
 fn human_tokens(n: u64) -> String {
@@ -236,6 +264,8 @@ pub fn run_interactive(
         model_label: format!("{provider}/{model}"),
         input_tokens: 0,
         context_window: context_window_for(&model),
+        output_style: None,
+        status_line_template: cfg.status_line_template.clone(),
     });
 
     // Forward Ctrl-C during streaming to pi's AbortHandle.
@@ -433,6 +463,10 @@ async fn repl_loop(
                 print_config_status(&cfg);
                 continue;
             }
+            "/statusline" | "/status-line" => {
+                print_status_line_status(&cfg);
+                continue;
+            }
             "/hotkeys" => {
                 print_hotkeys();
                 continue;
@@ -460,6 +494,7 @@ async fn repl_loop(
                     Ok(next) => {
                         handle = next;
                         usage_history.clear();
+                        update_bar_status(|status| status.output_style = output_style.clone());
                     }
                     Err(e) => eprintln!("{DIM}  /reload: {e:#}{RESET}"),
                 }
@@ -482,6 +517,9 @@ async fn repl_loop(
                             Ok(next) => {
                                 handle = next;
                                 usage_history.clear();
+                                update_bar_status(|status| {
+                                    status.output_style = output_style.clone()
+                                });
                             }
                             Err(e) => eprintln!("{DIM}  /login reload: {e:#}{RESET}"),
                         }
@@ -507,6 +545,9 @@ async fn repl_loop(
                             Ok(next) => {
                                 handle = next;
                                 usage_history.clear();
+                                update_bar_status(|status| {
+                                    status.output_style = output_style.clone()
+                                });
                             }
                             Err(e) => eprintln!("{DIM}  /logout reload: {e:#}{RESET}"),
                         }
@@ -532,6 +573,9 @@ async fn repl_loop(
                             Ok(next) => {
                                 handle = next;
                                 usage_history.clear();
+                                update_bar_status(|status| {
+                                    status.output_style = output_style.clone()
+                                });
                             }
                             Err(e) => eprintln!("{DIM}  /resume: {e:#}{RESET}"),
                         }
@@ -657,6 +701,13 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some(rest) = status_line_command_arg(trimmed) {
+            match handle_status_line_command(rest, &mut cfg) {
+                Ok(()) => {}
+                Err(e) => eprintln!("{DIM}  /statusline: {e:#}{RESET}"),
+            }
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix("/history ") {
             match parse_history_limit(rest) {
                 Ok(limit) => print_history(&history, limit),
@@ -692,6 +743,7 @@ async fn repl_loop(
                         Ok(next) => {
                             handle = next;
                             usage_history.clear();
+                            update_bar_status(|status| status.output_style = output_style.clone());
                         }
                         Err(e) => eprintln!("{DIM}  /resume: {e:#}{RESET}"),
                     }
@@ -758,6 +810,8 @@ async fn repl_loop(
                                 model_label: format!("{provider}/{model}"),
                                 input_tokens: 0,
                                 context_window: context_window_for(&model),
+                                output_style: output_style.clone(),
+                                status_line_template: cfg.status_line_template.clone(),
                             });
                             println!("{DIM}  → model set to {provider}/{model}{RESET}");
                         }
@@ -868,10 +922,12 @@ async fn repl_loop(
         }
         if trimmed == "/output-style" {
             handle_output_style("", &mut output_style);
+            update_bar_status(|status| status.output_style = output_style.clone());
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/output-style ") {
             handle_output_style(rest, &mut output_style);
+            update_bar_status(|status| status.output_style = output_style.clone());
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/remember") {
@@ -970,6 +1026,8 @@ async fn repl_loop(
                     model_label: format!("{}/{}", msg.provider, msg.model),
                     input_tokens: msg.usage.input,
                     context_window,
+                    output_style: output_style.clone(),
+                    status_line_template: cfg.status_line_template.clone(),
                 });
                 eprintln!(
                     "{DIM}  {}/{}  stop: {:?}  in={} out={}{RESET}",
@@ -1160,6 +1218,8 @@ async fn reload_repl_session(
         model_label: format!("{provider}/{model}"),
         input_tokens: 0,
         context_window: context_window_for(model),
+        output_style: None,
+        status_line_template: cfg.status_line_template.clone(),
     });
     println!("{DIM}  → {label}; fresh session using {provider}/{model}.{RESET}");
     Ok(handle)
@@ -1441,6 +1501,7 @@ fn print_help() {
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
     println!("{DIM}  /config   — show active configuration summary (/settings is an alias){RESET}");
+    println!("{DIM}  /statusline <template|reset> — customize the input-bar status line{RESET}");
     println!("{DIM}  /hotkeys  — show input bar keyboard controls{RESET}");
     println!("{DIM}  /tree [path] — show a bounded project tree{RESET}");
     println!("{DIM}  /changelog [count] — show recent git commits{RESET}");
@@ -1996,6 +2057,134 @@ fn parse_permissions_command(input: &str) -> PermissionsCommand {
         }
         _ => PermissionsCommand::Show,
     }
+}
+
+fn status_line_command_arg(input: &str) -> Option<&str> {
+    for command in ["/statusline", "/status-line"] {
+        if let Some(rest) = input.strip_prefix(&format!("{command} ")) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
+fn normalize_status_line_template(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .take(STATUS_LINE_TEMPLATE_MAX_CHARS)
+        .collect()
+}
+
+fn status_line_help() -> String {
+    format!(
+        "tokens: {}",
+        STATUS_LINE_TOKENS
+            .iter()
+            .map(|name| format!("{{{name}}}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn expand_status_line_template(
+    template: &str,
+    status: &BarStatus,
+    mode: Mode,
+) -> Option<String> {
+    let template = normalize_status_line_template(template);
+    if template.is_empty() {
+        return None;
+    }
+    let cwd = std::env::current_dir().ok();
+    let path = cwd
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let project = cwd
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("-");
+    let backend = status
+        .model_label
+        .split_once('/')
+        .map(|(provider, _)| provider)
+        .unwrap_or(status.model_label.as_str());
+    let model = status
+        .model_label
+        .split_once('/')
+        .map(|(_, model)| model)
+        .unwrap_or(status.model_label.as_str());
+    let ctx = if status.context_window > 0 {
+        format!("{}%", context_percent(status.input_tokens, status.context_window))
+    } else {
+        "-".to_string()
+    };
+    let output_style = status.output_style.as_deref().unwrap_or("default");
+
+    Some(replace_status_line_tokens(&template, |name| match name {
+        "project" => Some(project.to_string()),
+        "path" => Some(path.clone()),
+        "session" => Some("cli".to_string()),
+        "backend" => Some(backend.to_string()),
+        "model" => Some(model.to_string()),
+        "mode" => Some(mode_label(mode).to_string()),
+        "style" => Some(output_style.to_string()),
+        "tokens" => Some(human_tokens(status.input_tokens)),
+        "ctx" => Some(ctx.clone()),
+        "live" => Some("idle".to_string()),
+        _ => None,
+    }))
+}
+
+fn replace_status_line_tokens(
+    template: &str,
+    mut value_for: impl FnMut(&str) -> Option<String>,
+) -> String {
+    let mut out = String::new();
+    let mut chars = template.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '{' {
+            out.push(ch);
+            continue;
+        }
+        let mut name = String::new();
+        let mut closed = false;
+        while let Some(next) = chars.next() {
+            if next == '}' {
+                closed = true;
+                break;
+            }
+            name.push(next);
+        }
+        if closed && is_status_line_token_name(&name) {
+            let normalized = name.replace('-', "_");
+            match value_for(&normalized) {
+                Some(value) if !value.trim().is_empty() => out.push_str(value.trim()),
+                Some(_) => out.push('-'),
+                None => {
+                    out.push('{');
+                    out.push_str(&name);
+                    out.push('}');
+                }
+            }
+        } else {
+            out.push('{');
+            out.push_str(&name);
+            if closed {
+                out.push('}');
+            }
+        }
+    }
+    out
+}
+
+fn is_status_line_token_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic())
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
 }
 
 fn print_permissions_status(mode: Mode) {
@@ -3164,6 +3353,54 @@ fn print_config_status(cfg: &LibertaiConfig) {
     println!();
 }
 
+fn print_status_line_status(cfg: &LibertaiConfig) {
+    println!("{BOLD}statusline{RESET}");
+    println!(
+        "{DIM}  current:{RESET} {}",
+        if cfg.status_line_template.trim().is_empty() {
+            "(default)"
+        } else {
+            cfg.status_line_template.as_str()
+        }
+    );
+    println!("{DIM}  {}{RESET}", status_line_help());
+    println!(
+        "{DIM}  usage:{RESET} /statusline <template>, /statusline reset, /statusline status"
+    );
+    println!();
+}
+
+fn handle_status_line_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Result<()> {
+    let action = raw.trim();
+    if action.is_empty()
+        || action.eq_ignore_ascii_case("status")
+        || action.eq_ignore_ascii_case("show")
+    {
+        print_status_line_status(cfg);
+        return Ok(());
+    }
+
+    let mut next = cfg.as_ref().clone();
+    if action.eq_ignore_ascii_case("reset") || action.eq_ignore_ascii_case("clear") {
+        next.status_line_template.clear();
+    } else {
+        next.status_line_template = normalize_status_line_template(action);
+    }
+    crate::config::save(&next).context("save config")?;
+    *cfg = Arc::new(next);
+    let template = cfg.status_line_template.clone();
+    update_bar_status(|status| status.status_line_template = template.clone());
+    if cfg.status_line_template.trim().is_empty() {
+        println!("{DIM}  status line reset to the default.{RESET}");
+    } else {
+        println!(
+            "{DIM}  status line updated: {}{RESET}",
+            cfg.status_line_template
+        );
+    }
+    Ok(())
+}
+
 fn handle_output_style(raw: &str, output_style: &mut Option<String>) {
     let value = raw.trim();
     let key = if value.is_empty() {
@@ -3473,7 +3710,7 @@ fn repaint(
         .map(|(c, _)| c as usize)
         .filter(|c| *c > 0)
         .unwrap_or(80);
-    let rule: String = rule_chip(cols);
+    let rule: String = rule_chip(cols, mode);
 
     // Mode chip printed in-line with the prompt, left of ❯. Dimmed so
     // it's a status cue, not a shout.
@@ -3654,6 +3891,48 @@ mod tests {
     #[test]
     fn usage_summary_empty_when_no_turns() {
         assert!(usage_summary(&[]).is_none());
+    }
+
+    #[test]
+    fn status_line_template_normalizes_and_expands_known_tokens() {
+        let status = BarStatus {
+            model_label: "libertai/qwen".to_string(),
+            input_tokens: 2048,
+            context_window: 4096,
+            output_style: Some("review".to_string()),
+            status_line_template: "{backend}/{model} {mode} {style} {tokens} {ctx} {unknown}"
+                .to_string(),
+        };
+        let expanded =
+            expand_status_line_template(&status.status_line_template, &status, Mode::Plan)
+                .unwrap();
+        assert_eq!(expanded, "libertai/qwen plan review 2.0k 50% {unknown}");
+    }
+
+    #[test]
+    fn status_line_template_reset_falls_back_to_default_rule_text() {
+        let status = BarStatus {
+            model_label: "libertai/qwen".to_string(),
+            input_tokens: 512,
+            context_window: 1024,
+            output_style: None,
+            status_line_template: String::new(),
+        };
+        assert!(expand_status_line_template("", &status, Mode::Normal).is_none());
+        assert_eq!(default_rule_text(&status), "50% · 512 / 1.0k · libertai/qwen");
+    }
+
+    #[test]
+    fn status_line_command_arg_accepts_dash_alias() {
+        assert_eq!(
+            status_line_command_arg("/statusline {model}").unwrap(),
+            "{model}"
+        );
+        assert_eq!(
+            status_line_command_arg("/status-line reset").unwrap(),
+            "reset"
+        );
+        assert!(status_line_command_arg("/status").is_none());
     }
 
     #[test]
