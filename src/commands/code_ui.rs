@@ -1621,7 +1621,7 @@ fn print_help() {
     println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
     println!("{DIM}  /login    — run libertai login, then reload this REPL session{RESET}");
     println!("{DIM}  /logout   — run libertai logout, then reload this REPL session{RESET}");
-    println!("{DIM}  /memory   — show project memory (/memory edit|clear|files|references|import <path>|path){RESET}");
+    println!("{DIM}  /memory   — show project memory (/memory edit|clear|files|references|import <path>|import-claude|path){RESET}");
     println!("{DIM}  /init     — create AGENTS.md for this project if missing{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
     println!("{DIM}  /agent [--worktree] <name> <task> — run a named sub-agent task{RESET}");
@@ -2719,6 +2719,28 @@ fn print_memory(action: &str) {
                 println!("{DIM}  changes take effect in new agent sessions.{RESET}");
             }
             Err(e) => eprintln!("{DIM}  /memory import: failed: {e:#}{RESET}"),
+        }
+        return;
+    }
+    if matches!(
+        action.to_ascii_lowercase().as_str(),
+        "import-claude" | "migrate-claude" | "claude"
+    ) {
+        match crate::commands::code_memory::import_claude_memory(&cwd) {
+            Ok(result) => {
+                println!("{BOLD}memory import-claude{RESET}");
+                println!("{DIM}  source:{RESET} {}", result.source_dir.display());
+                println!(
+                    "{DIM}  imported:{RESET} {} files ({} bytes)",
+                    result.imported_files, result.imported_bytes
+                );
+                if result.skipped_files > 0 {
+                    println!("{DIM}  skipped:{RESET} {} files", result.skipped_files);
+                }
+                println!("{DIM}  memory path:{RESET} {}", result.path.display());
+                println!("{DIM}  changes take effect in new agent sessions.{RESET}");
+            }
+            Err(e) => eprintln!("{DIM}  /memory import-claude: failed: {e:#}{RESET}"),
         }
         return;
     }

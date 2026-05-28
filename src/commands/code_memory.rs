@@ -67,6 +67,15 @@ pub struct MemoryImportResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryClaudeImportResult {
+    pub path: PathBuf,
+    pub source_dir: PathBuf,
+    pub imported_files: usize,
+    pub imported_bytes: usize,
+    pub skipped_files: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedMemoryNote {
     pub kind: MemoryKind,
     pub text: String,
@@ -222,6 +231,158 @@ pub fn import_memory_file(cwd: &Path, source: &Path) -> Result<MemoryImportResul
         source_path,
         bytes: content.len(),
     })
+}
+
+pub fn import_claude_memory(cwd: &Path) -> Result<MemoryClaudeImportResult> {
+    let source_dir = find_claude_memory_dir(cwd)
+        .with_context(|| format!("finding Claude Code memory for {}", cwd.display()))?;
+    import_claude_memory_from_dir(cwd, source_dir)
+}
+
+fn import_claude_memory_from_dir(
+    cwd: &Path,
+    source_dir: PathBuf,
+) -> Result<MemoryClaudeImportResult> {
+    const MAX_IMPORT_BYTES: u64 = 256 * 1024;
+    let path = memory_file_for(cwd)?;
+    let mut files = std::fs::read_dir(&source_dir)
+        .with_context(|| format!("reading {}", source_dir.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
+        .collect::<Vec<_>>();
+    files.sort();
+
+    let sidecars = files
+        .iter()
+        .filter(|path| path.file_name().and_then(|s| s.to_str()) != Some("MEMORY.md"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let import_files = if sidecars.is_empty() {
+        files
+    } else {
+        sidecars
+    };
+    if import_files.is_empty() {
+        anyhow::bail!("no Claude Code memory markdown files found in {}", source_dir.display());
+    }
+
+    let mut imported_files = 0usize;
+    let mut imported_bytes = 0usize;
+    let mut skipped_files = 0usize;
+    for source_path in import_files {
+        let meta = match std::fs::metadata(&source_path) {
+            Ok(meta) if meta.is_file() && meta.len() <= MAX_IMPORT_BYTES => meta,
+            Ok(_) | Err(_) => {
+                skipped_files += 1;
+                continue;
+            }
+        };
+        let content = match std::fs::read_to_string(&source_path) {
+            Ok(content) if !content.trim().is_empty() => content,
+            Ok(_) | Err(_) => {
+                skipped_files += 1;
+                continue;
+            }
+        };
+        let kind = infer_claude_memory_kind(&source_path, &content);
+        let note = format!(
+            "Imported from Claude Code `{}`.\n\n{}",
+            source_path.display(),
+            content.trim()
+        );
+        append_memory_with_kind(cwd, kind, &note)?;
+        imported_files += 1;
+        imported_bytes += meta.len() as usize;
+    }
+
+    if imported_files == 0 {
+        anyhow::bail!(
+            "no importable Claude Code memory files found in {}",
+            source_dir.display()
+        );
+    }
+    Ok(MemoryClaudeImportResult {
+        path,
+        source_dir,
+        imported_files,
+        imported_bytes,
+        skipped_files,
+    })
+}
+
+fn find_claude_memory_dir(cwd: &Path) -> Result<PathBuf> {
+    let Some(root) = crate::commands::claude_code_import::claude_code_projects_root() else {
+        anyhow::bail!("could not resolve Claude Code projects directory");
+    };
+    for dir in claude_memory_dir_candidates(cwd, &root) {
+        if dir.is_dir() {
+            return Ok(dir);
+        }
+    }
+    anyhow::bail!(
+        "no Claude Code memory directory found under {} for {}",
+        root.display(),
+        cwd.display()
+    );
+}
+
+fn claude_memory_dir_candidates(cwd: &Path, root: &Path) -> Vec<PathBuf> {
+    let mut encoded = Vec::new();
+    push_unique(
+        &mut encoded,
+        crate::commands::claude_code_import::encode_project_dir(cwd),
+    );
+    if let Ok(canonical) = cwd.canonicalize() {
+        push_unique(
+            &mut encoded,
+            crate::commands::claude_code_import::encode_project_dir(&canonical),
+        );
+    }
+    let pi_encoded = pi::app::encode_project_cwd(cwd);
+    push_unique(&mut encoded, pi_encoded.clone());
+    if !pi_encoded.starts_with('-') {
+        push_unique(&mut encoded, format!("-{pi_encoded}"));
+    }
+    encoded
+        .into_iter()
+        .map(|name| root.join(name).join("memory"))
+        .collect()
+}
+
+fn push_unique(out: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !out.iter().any(|existing| existing == &value) {
+        out.push(value);
+    }
+}
+
+fn infer_claude_memory_kind(path: &Path, content: &str) -> MemoryKind {
+    let name = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    for (prefix, kind) in [
+        ("user", MemoryKind::User),
+        ("feedback", MemoryKind::Feedback),
+        ("project", MemoryKind::Project),
+        ("reference", MemoryKind::Reference),
+        ("ref", MemoryKind::Reference),
+    ] {
+        if name == prefix
+            || name.starts_with(&format!("{prefix}_"))
+            || name.starts_with(&format!("{prefix}-"))
+        {
+            return kind;
+        }
+    }
+    content
+        .lines()
+        .find_map(|line| {
+            let value = line.trim().strip_prefix("- kind:")?.trim();
+            parse_memory_kind(value)
+        })
+        .unwrap_or(MemoryKind::Project)
 }
 
 fn write_memory_entry_file(
@@ -716,6 +877,46 @@ mod tests {
         assert!(content.contains("CLAUDE.md"));
         assert!(content.contains("run cargo test"));
         assert_eq!(list_memory_files(temp.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn import_claude_memory_from_dir_imports_sidecars_by_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("project");
+        let source = temp.path().join("claude-memory");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("MEMORY.md"), "- summarized index\n").unwrap();
+        std::fs::write(source.join("user_profile.md"), "# User\n\nprefers terse answers\n")
+            .unwrap();
+        std::fs::write(
+            source.join("reference_docs.md"),
+            "# Docs\n\n- kind: reference\n\nSee docs/api.md\n",
+        )
+        .unwrap();
+
+        let result = import_claude_memory_from_dir(&cwd, source.clone()).unwrap();
+        assert_eq!(result.source_dir, source);
+        assert_eq!(result.imported_files, 2);
+        assert_eq!(result.skipped_files, 0);
+
+        let content = std::fs::read_to_string(result.path).unwrap();
+        assert!(content.contains("[user] Imported from Claude Code"));
+        assert!(content.contains("[reference] Imported from Claude Code"));
+        assert!(!content.contains("summarized index"));
+
+        let files = list_memory_files(&cwd).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|file| file.kind == MemoryKind::User));
+        assert!(files.iter().any(|file| file.kind == MemoryKind::Reference));
+    }
+
+    #[test]
+    fn claude_memory_dir_candidates_include_claude_and_pi_encodings() {
+        let root = Path::new("/tmp/claude-projects");
+        let dirs = claude_memory_dir_candidates(Path::new("/home/jon/repos/demo"), root);
+        assert!(dirs.contains(&root.join("-home-jon-repos-demo").join("memory")));
+        assert!(dirs.contains(&root.join("home-jon-repos-demo").join("memory")));
     }
 
     #[test]
