@@ -70,7 +70,8 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/share` command** — REPL users can write a self-contained
   HTML transcript with `/share [path]` for local sharing/review.
 - **CLI `/compact` command** — REPL users can trigger pi's explicit
-  compaction pass from the REPL. Optional notes are not wired yet.
+  compaction pass from the REPL, with optional user notes threaded
+  into the summarization prompt.
 - **CLI `/doctor` command** — REPL users can print a local diagnostic
   report for session state, auth/config, memory/templates/agents, git,
   and usage.

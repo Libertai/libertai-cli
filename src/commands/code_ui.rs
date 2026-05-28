@@ -2062,13 +2062,12 @@ async fn share_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
 
 async fn compact_transcript(handle: &mut AgentSessionHandle, notes: Option<&str>) -> bool {
     let notes = notes.unwrap_or("").trim();
-    if !notes.is_empty() {
-        eprintln!(
-            "{DIM}  /compact: notes are not supported in the CLI yet; compacting without notes.{RESET}"
-        );
-    }
     println!("{DIM}  compacting conversation history...{RESET}");
-    match handle.compact_force(render_event).await {
+    let instructions = (!notes.is_empty()).then_some(notes);
+    match handle
+        .compact_force_with_instructions(instructions, render_event)
+        .await
+    {
         Ok(()) => {
             println!("{DIM}  compact complete.{RESET}");
             true
