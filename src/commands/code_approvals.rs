@@ -60,10 +60,13 @@ pub trait ToolPolicy: Send + Sync {
     ) -> ToolPolicyDecision;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ToolPolicyDecision {
     NoDecision,
-    Allow,
+    Allow {
+        updated_input: Option<serde_json::Value>,
+        additional_context: Option<String>,
+    },
     Deny { reason: Option<String> },
 }
 
@@ -585,6 +588,7 @@ impl Tool for ApprovalTool {
         if let ToolPolicyDecision::Deny { reason } = policy_decision.clone() {
             return Ok(denial_output(reason).into());
         }
+        let effective_input = policy_updated_input(&policy_decision, &input);
 
         // Plan mode short-circuit: mutating tools are auto-denied
         // without a prompt. The agent sees a tool error, learns the
@@ -601,26 +605,47 @@ impl Tool for ApprovalTool {
         // shell exec while drafting code. Mirrors Claude Code's
         // `acceptEdits` permission tier.
         if matches!(self.mode.get(), Mode::AcceptEdits) && is_path_edit_tool(name) {
-            return self.inner.execute(tool_call_id, input, on_update).await;
+            return with_policy_context(
+                self.inner
+                    .execute(tool_call_id, effective_input, on_update)
+                    .await,
+                &policy_decision,
+            );
         }
-        let subject = approval_subject(name, &input);
+        let subject = approval_subject(name, &effective_input);
         if self.state.is_pre_allowed(name, &subject.value) {
-            return self.inner.execute(tool_call_id, input, on_update).await;
+            return with_policy_context(
+                self.inner
+                    .execute(tool_call_id, effective_input, on_update)
+                    .await,
+                &policy_decision,
+            );
         }
-        if matches!(policy_decision, ToolPolicyDecision::Allow) {
-            return self.inner.execute(tool_call_id, input, on_update).await;
+        if matches!(policy_decision, ToolPolicyDecision::Allow { .. }) {
+            return with_policy_context(
+                self.inner
+                    .execute(tool_call_id, effective_input, on_update)
+                    .await,
+                &policy_decision,
+            );
         }
 
         // Build sanitized display text from the *raw* input (not from
         // subject.value, which is unsanitized). preview_call handles
         // all sanitization and formatting.
-        let preview = preview_call(name, &input);
+        let preview = preview_call(name, &effective_input);
         let always_label = sanitize_inline(&subject.suggested_label);
         match self.ui.decide(name, &preview, &always_label).await {
-            PromptChoice::Allow => self.inner.execute(tool_call_id, input, on_update).await,
+            PromptChoice::Allow => {
+                self.inner
+                    .execute(tool_call_id, effective_input, on_update)
+                    .await
+            }
             PromptChoice::AlwaysAllow => {
                 self.state.record_always(subject.suggested_rule);
-                self.inner.execute(tool_call_id, input, on_update).await
+                self.inner
+                    .execute(tool_call_id, effective_input, on_update)
+                    .await
             }
             PromptChoice::Deny => Ok(denial_output(None).into()),
             PromptChoice::Paused {
@@ -652,6 +677,47 @@ impl Tool for ApprovalTool {
                 payload,
             } => Ok(wrap_paused_approval(request_id, payload, &tool_input)),
         }
+    }
+}
+
+fn policy_updated_input(
+    decision: &ToolPolicyDecision,
+    original: &serde_json::Value,
+) -> serde_json::Value {
+    match decision {
+        ToolPolicyDecision::Allow {
+            updated_input: Some(input),
+            ..
+        } => input.clone(),
+        _ => original.clone(),
+    }
+}
+
+fn with_policy_context(
+    result: PiResult<ToolExecution>,
+    decision: &ToolPolicyDecision,
+) -> PiResult<ToolExecution> {
+    let Some(context) = policy_additional_context(decision) else {
+        return result;
+    };
+    result.map(|execution| match execution {
+        ToolExecution::Done(mut output) => {
+            output.content.push(ContentBlock::Text(TextContent::new(format!(
+                "Additional context from PreToolUse hook:\n\n{context}"
+            ))));
+            ToolExecution::Done(output)
+        }
+        paused => paused,
+    })
+}
+
+fn policy_additional_context(decision: &ToolPolicyDecision) -> Option<&str> {
+    match decision {
+        ToolPolicyDecision::Allow {
+            additional_context: Some(context),
+            ..
+        } if !context.trim().is_empty() => Some(context.as_str()),
+        _ => None,
     }
 }
 
@@ -881,6 +947,47 @@ mod tests {
             sanitize_inline("bash(echo a\n[A] fake\tmenu)"),
             "bash(echo a [A] fake menu)"
         );
+    }
+
+    #[test]
+    fn policy_allow_can_replace_tool_input() {
+        let original = serde_json::json!({"command": "npm test"});
+        let decision = ToolPolicyDecision::Allow {
+            updated_input: Some(serde_json::json!({"command": "npm run lint"})),
+            additional_context: None,
+        };
+        assert_eq!(
+            policy_updated_input(&decision, &original),
+            serde_json::json!({"command": "npm run lint"})
+        );
+    }
+
+    #[test]
+    fn policy_context_appends_to_tool_output() {
+        let output = ToolOutput {
+            content: vec![ContentBlock::Text(TextContent::new("ok"))],
+            details: None,
+            is_error: false,
+        };
+        let decision = ToolPolicyDecision::Allow {
+            updated_input: None,
+            additional_context: Some("remember to cite files".to_string()),
+        };
+        let wrapped = with_policy_context(Ok(output.into()), &decision).unwrap();
+        let ToolExecution::Done(output) = wrapped else {
+            panic!("expected done output");
+        };
+        let text = output
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("ok"));
+        assert!(text.contains("remember to cite files"));
     }
 
     #[test]
