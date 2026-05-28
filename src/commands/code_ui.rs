@@ -419,6 +419,10 @@ async fn repl_loop(
                 print_templates();
                 continue;
             }
+            "/export" => {
+                export_transcript(&handle, None).await;
+                continue;
+            }
             "/vim" => {
                 println!(
                     "{DIM}  Vim bindings are not implemented in the CLI REPL yet. The input bar uses native line-editing keys.{RESET}"
@@ -529,6 +533,10 @@ async fn repl_loop(
                 },
                 Err(e) => eprintln!("{DIM}  /name: {e:#}{RESET}"),
             }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/export ") {
+            export_transcript(&handle, Some(rest.trim())).await;
             continue;
         }
         if trimmed == "/agent" {
@@ -831,6 +839,7 @@ fn print_help() {
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
     println!("{DIM}  /agent <name> <task> — run a named sub-agent task{RESET}");
     println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
+    println!("{DIM}  /export [path] — write this session transcript as Markdown{RESET}");
     println!("{DIM}  /output-style <default|concise|explanatory|review|status>{RESET}");
     println!("{DIM}  /vim      — show Vim-input status{RESET}");
     println!("{DIM}  /ide      — show IDE integration status{RESET}");
@@ -912,6 +921,115 @@ fn print_name_status(name: Option<&str>) {
         None => println!("{DIM}  current:{RESET} unnamed or not loaded in this REPL"),
     }
     println!("{DIM}  usage:{RESET} /name <name>");
+}
+
+async fn export_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
+    let path = match export_path(path) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("{DIM}  /export: {e:#}{RESET}");
+            return;
+        }
+    };
+    let messages = match handle.messages().await {
+        Ok(messages) => messages,
+        Err(e) => {
+            eprintln!("{DIM}  /export: could not read transcript: {e:#}{RESET}");
+            return;
+        }
+    };
+    let markdown = render_markdown_transcript(&messages);
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("{DIM}  /export: could not create {}: {e}{RESET}", parent.display());
+            return;
+        }
+    }
+    match std::fs::write(&path, markdown) {
+        Ok(()) => println!("{DIM}  exported transcript: {}{RESET}", path.display()),
+        Err(e) => eprintln!("{DIM}  /export: could not write {}: {e}{RESET}", path.display()),
+    }
+}
+
+fn export_path(path: Option<&str>) -> Result<PathBuf> {
+    let raw = path.unwrap_or("").trim();
+    if raw.is_empty() {
+        return Ok(PathBuf::from("libertai-transcript.md"));
+    }
+    Ok(PathBuf::from(raw))
+}
+
+fn render_markdown_transcript(messages: &[Message]) -> String {
+    let mut out = String::from("# LibertAI Code Transcript\n\n");
+    for message in messages {
+        match message {
+            Message::User(user) => {
+                out.push_str("## User\n\n");
+                out.push_str(&content_text(&user.content));
+                out.push_str("\n\n");
+            }
+            Message::Assistant(assistant) => {
+                out.push_str("## Assistant\n\n");
+                render_blocks_markdown(&mut out, &assistant.content);
+                out.push_str("\n\n");
+            }
+            Message::ToolResult(result) => {
+                out.push_str(&format!("## Tool Result: {}\n\n", result.tool_name));
+                if result.is_error {
+                    out.push_str("**Error**\n\n");
+                }
+                render_blocks_markdown(&mut out, &result.content);
+                out.push_str("\n\n");
+            }
+            Message::Custom(custom) => {
+                out.push_str(&format!("## {}\n\n", custom.custom_type));
+                out.push_str(&custom.content);
+                out.push_str("\n\n");
+            }
+        }
+    }
+    out
+}
+
+fn content_text(content: &UserContent) -> String {
+    match content {
+        UserContent::Text(text) => text.clone(),
+        UserContent::Blocks(blocks) => blocks_text(blocks),
+    }
+}
+
+fn blocks_text(blocks: &[ContentBlock]) -> String {
+    let mut out = String::new();
+    render_blocks_markdown(&mut out, blocks);
+    out.trim_end().to_string()
+}
+
+fn render_blocks_markdown(out: &mut String, blocks: &[ContentBlock]) {
+    for block in blocks {
+        match block {
+            ContentBlock::Text(text) => {
+                out.push_str(&text.text);
+                out.push('\n');
+            }
+            ContentBlock::Thinking(thinking) => {
+                out.push_str("<details><summary>Thinking</summary>\n\n");
+                out.push_str(&thinking.thinking);
+                out.push_str("\n\n</details>\n");
+            }
+            ContentBlock::Image(image) => {
+                out.push_str(&format!("![image](data:{};base64,...)\n", image.mime_type));
+            }
+            ContentBlock::ToolCall(tool) => {
+                out.push_str(&format!("### Tool Call: {}\n\n", tool.name));
+                out.push_str("```json\n");
+                out.push_str(
+                    &serde_json::to_string_pretty(&tool.arguments)
+                        .unwrap_or_else(|_| tool.arguments.to_string()),
+                );
+                out.push_str("\n```\n");
+            }
+        }
+    }
 }
 
 fn print_init_project() {
@@ -1960,6 +2078,62 @@ mod tests {
     fn parse_session_name_rejects_empty_or_too_long() {
         assert!(parse_session_name("   ").is_err());
         assert!(parse_session_name(&"x".repeat(121)).is_err());
+    }
+
+    #[test]
+    fn export_path_uses_default_or_custom_path() {
+        assert_eq!(
+            export_path(None).unwrap(),
+            PathBuf::from("libertai-transcript.md")
+        );
+        assert_eq!(
+            export_path(Some("out/session.md")).unwrap(),
+            PathBuf::from("out/session.md")
+        );
+    }
+
+    #[test]
+    fn render_markdown_transcript_includes_roles_and_tools() {
+        let messages = vec![
+            Message::User(pi::model::UserMessage {
+                content: UserContent::Text("hello".to_string()),
+                timestamp: 1,
+            }),
+            Message::assistant(pi::model::AssistantMessage {
+                content: vec![
+                    ContentBlock::Text(pi::model::TextContent::new("hi")),
+                    ContentBlock::ToolCall(pi::model::ToolCall {
+                        id: "tool-1".to_string(),
+                        name: "read".to_string(),
+                        arguments: serde_json::json!({"path":"src/lib.rs"}),
+                        thought_signature: None,
+                    }),
+                ],
+                api: "openai".to_string(),
+                provider: "libertai".to_string(),
+                model: "fast".to_string(),
+                usage: pi::model::Usage::default(),
+                stop_reason: pi::model::StopReason::Stop,
+                error_message: None,
+                timestamp: 2,
+            }),
+            Message::tool_result(pi::model::ToolResultMessage {
+                tool_call_id: "tool-1".to_string(),
+                tool_name: "read".to_string(),
+                content: vec![ContentBlock::Text(pi::model::TextContent::new("contents"))],
+                details: None,
+                is_error: false,
+                paused: None,
+                timestamp: 3,
+            }),
+        ];
+        let rendered = render_markdown_transcript(&messages);
+        assert!(rendered.contains("## User\n\nhello"));
+        assert!(rendered.contains("## Assistant"));
+        assert!(rendered.contains("### Tool Call: read"));
+        assert!(rendered.contains("\"path\": \"src/lib.rs\""));
+        assert!(rendered.contains("## Tool Result: read"));
+        assert!(rendered.contains("contents"));
     }
 
     #[test]
