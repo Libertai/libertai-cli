@@ -313,12 +313,21 @@ fn push_cell_summary(out: &mut String, index: usize, cell: &Value) {
         let outputs = cell.get("outputs").and_then(Value::as_array);
         let count = outputs.map_or(0, Vec::len);
         out.push_str(&format!("Outputs: {count}\n"));
-        if let Some(first) = outputs.and_then(|items| items.first()) {
-            let preview = output_preview(first);
-            if !preview.is_empty() {
-                out.push_str("First output: ");
-                out.push_str(&truncate_chars(&preview, 500));
+        if let Some(items) = outputs {
+            for (output_index, output) in items.iter().take(5).enumerate() {
+                let preview = output_preview(output);
+                out.push_str(&format!(
+                    "- Output {output_index}: {}",
+                    output_label(output)
+                ));
+                if !preview.is_empty() {
+                    out.push_str(" - ");
+                    out.push_str(&truncate_chars(&preview, 500));
+                }
                 out.push('\n');
+            }
+            if items.len() > 5 {
+                out.push_str(&format!("- ... {} more output(s)\n", items.len() - 5));
             }
         }
     }
@@ -333,7 +342,23 @@ fn source_to_string(source: Option<&Value>) -> String {
 }
 
 fn output_preview(output: &Value) -> String {
-    for key in ["text", "ename", "name"] {
+    if let Some(output_type) = output.get("output_type").and_then(Value::as_str) {
+        if output_type == "error" {
+            let ename = output.get("ename").and_then(Value::as_str).unwrap_or("error");
+            let evalue = output.get("evalue").and_then(Value::as_str).unwrap_or("");
+            let traceback = output
+                .get("traceback")
+                .and_then(Value::as_array)
+                .map(|items| items.iter().filter_map(Value::as_str).collect::<String>())
+                .unwrap_or_default();
+            return [ename, evalue, traceback.as_str()]
+                .into_iter()
+                .filter(|part| !part.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join(": ");
+        }
+    }
+    for key in ["text", "ename", "evalue", "name"] {
         if let Some(s) = output.get(key).and_then(Value::as_str) {
             return s.to_string();
         }
@@ -345,7 +370,7 @@ fn output_preview(output: &Value) -> String {
         }
     }
     if let Some(data) = output.get("data").and_then(Value::as_object) {
-        for key in ["text/plain", "text/markdown"] {
+        for key in ["text/plain", "text/markdown", "text/html", "application/json"] {
             if let Some(value) = data.get(key) {
                 let text = source_to_string(Some(value));
                 if !text.is_empty() {
@@ -355,6 +380,36 @@ fn output_preview(output: &Value) -> String {
         }
     }
     String::new()
+}
+
+fn output_label(output: &Value) -> String {
+    let output_type = output
+        .get("output_type")
+        .and_then(Value::as_str)
+        .unwrap_or("output");
+    match output_type {
+        "stream" => {
+            let name = output.get("name").and_then(Value::as_str).unwrap_or("stream");
+            format!("stream/{name}")
+        }
+        "display_data" | "execute_result" => {
+            let data = output.get("data").and_then(Value::as_object);
+            let mimes = data
+                .map(|data| {
+                    let mut keys = data.keys().cloned().collect::<Vec<_>>();
+                    keys.sort();
+                    keys.join(", ")
+                })
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "no mime data".to_string());
+            format!("{output_type} [{mimes}]")
+        }
+        "error" => {
+            let ename = output.get("ename").and_then(Value::as_str).unwrap_or("error");
+            format!("error/{ename}")
+        }
+        other => other.to_string(),
+    }
 }
 
 fn replace_cell_source(cell: &mut Value, cell_type: &str, source: &str) -> Result<(), String> {
@@ -448,7 +503,22 @@ mod tests {
                     "execution_count": 1,
                     "metadata": {},
                     "outputs": [
-                        { "output_type": "stream", "name": "stdout", "text": ["hello\n"] }
+                        { "output_type": "stream", "name": "stdout", "text": ["hello\n"] },
+                        {
+                            "output_type": "execute_result",
+                            "execution_count": 1,
+                            "data": {
+                                "text/plain": ["2"],
+                                "text/html": ["<b>2</b>"]
+                            },
+                            "metadata": {}
+                        },
+                        {
+                            "output_type": "error",
+                            "ename": "ValueError",
+                            "evalue": "bad value",
+                            "traceback": ["ValueError: bad value"]
+                        }
                     ],
                     "source": ["print('hello')\n"]
                 }
@@ -465,8 +535,11 @@ mod tests {
         assert!(summary.contains("# demo.ipynb"));
         assert!(summary.contains("## Cell 0 - markdown"));
         assert!(summary.contains("## Cell 1 - code"));
-        assert!(summary.contains("Outputs: 1"));
-        assert!(summary.contains("First output: hello"));
+        assert!(summary.contains("Outputs: 3"));
+        assert!(summary.contains("Output 0: stream/stdout"));
+        assert!(summary.contains("Output 1: execute_result [text/html, text/plain]"));
+        assert!(summary.contains("Output 2: error/ValueError"));
+        assert!(summary.contains("ValueError: bad value"));
     }
 
     #[test]

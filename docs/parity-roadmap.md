@@ -95,7 +95,8 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/mention` command** — REPL users can include a local UTF-8 text
   file in the next prompt with `/mention <path> [prompt]`.
 - **Native notebook tools** — `notebook_read` summarizes local `.ipynb`
-  files cell-by-cell, and approval-gated `notebook_edit` can replace,
+  files cell-by-cell, including stream/result/error output previews and
+  rich MIME hints, and approval-gated `notebook_edit` can replace,
   insert, or delete notebook cells while preserving the rest of the JSON.
 - **Tool-call loop guardrail** — every registered tool is wrapped by a
   shared guardrail that warns on repeated exact calls / same-tool loops
