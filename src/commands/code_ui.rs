@@ -66,6 +66,7 @@ const SHELL_ESCAPE_MAX_DISPLAY_BYTES: usize = 256 * 1024;
 const HISTORY_DEFAULT_LIMIT: usize = 20;
 const HISTORY_MAX_LIMIT: usize = 64;
 const OSC52_MAX_TEXT_BYTES: usize = 128 * 1024;
+const TREE_MAX_ENTRIES: usize = 200;
 
 /// Snapshot of the last completed turn's token usage. Written in
 /// `repl_loop` after each successful prompt, read in `repaint()` to
@@ -420,6 +421,10 @@ async fn repl_loop(
                 print_hotkeys();
                 continue;
             }
+            "/tree" => {
+                print_project_tree(None);
+                continue;
+            }
             "/memory" => {
                 print_memory("show");
                 continue;
@@ -512,6 +517,10 @@ async fn repl_loop(
                 Ok(limit) => print_history(&history, limit),
                 Err(e) => eprintln!("{DIM}  /history: {e:#}{RESET}"),
             }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/tree ") {
+            print_project_tree(Some(rest.trim()));
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/memory ") {
@@ -873,6 +882,7 @@ fn print_help() {
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
     println!("{DIM}  /config   — show active configuration summary (/settings is an alias){RESET}");
     println!("{DIM}  /hotkeys  — show input bar keyboard controls{RESET}");
+    println!("{DIM}  /tree [path] — show a bounded project tree{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
     println!("{DIM}  /init     — create AGENTS.md for this project if missing{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
@@ -911,6 +921,133 @@ fn print_hotkeys() {
     for line in hotkey_lines() {
         println!("{DIM}  {line}{RESET}");
     }
+}
+
+fn print_project_tree(path: Option<&str>) {
+    let root = match tree_root(path) {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("{DIM}  /tree: {e:#}{RESET}");
+            return;
+        }
+    };
+    match render_project_tree(&root, TREE_MAX_ENTRIES) {
+        Ok(tree) => print!("{tree}"),
+        Err(e) => eprintln!("{DIM}  /tree: {e:#}{RESET}"),
+    }
+}
+
+fn tree_root(path: Option<&str>) -> Result<PathBuf> {
+    let raw = path.unwrap_or("").trim();
+    if raw.is_empty() {
+        return std::env::current_dir().context("resolve current directory");
+    }
+    Ok(PathBuf::from(raw))
+}
+
+fn render_project_tree(root: &Path, max_entries: usize) -> Result<String> {
+    let meta = std::fs::metadata(root).with_context(|| format!("read {}", root.display()))?;
+    if !meta.is_dir() {
+        anyhow::bail!("{} is not a directory", root.display());
+    }
+    let name = root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(".");
+    let mut out = format!("{BOLD}{name}/{RESET}\n");
+    let mut remaining = max_entries;
+    render_tree_children(root, "", &mut remaining, &mut out)?;
+    if remaining == 0 {
+        out.push_str(&format!("{DIM}... truncated after {max_entries} entries{RESET}\n"));
+    }
+    Ok(out)
+}
+
+fn render_tree_children(
+    dir: &Path,
+    prefix: &str,
+    remaining: &mut usize,
+    out: &mut String,
+) -> Result<()> {
+    if *remaining == 0 {
+        return Ok(());
+    }
+    let mut entries = tree_entries(dir)?;
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let len = entries.len();
+    for (idx, entry) in entries.into_iter().enumerate() {
+        if *remaining == 0 {
+            break;
+        }
+        *remaining -= 1;
+        let is_last = idx + 1 == len;
+        let connector = if is_last { "`-- " } else { "|-- " };
+        let suffix = if entry.is_dir { "/" } else { "" };
+        out.push_str(prefix);
+        out.push_str(connector);
+        out.push_str(&entry.name);
+        out.push_str(suffix);
+        out.push('\n');
+        if entry.is_dir && !entry.is_symlink {
+            let child_prefix = if is_last {
+                format!("{prefix}    ")
+            } else {
+                format!("{prefix}|   ")
+            };
+            render_tree_children(&entry.path, &child_prefix, remaining, out)?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TreeEntry {
+    name: String,
+    path: PathBuf,
+    is_dir: bool,
+    is_symlink: bool,
+}
+
+fn tree_entries(dir: &Path) -> Result<Vec<TreeEntry>> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir).with_context(|| format!("list {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if should_skip_tree_entry(&name) {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        entries.push(TreeEntry {
+            name,
+            path: entry.path(),
+            is_dir: file_type.is_dir(),
+            is_symlink: file_type.is_symlink(),
+        });
+    }
+    Ok(entries)
+}
+
+fn should_skip_tree_entry(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | ".hg"
+            | ".svn"
+            | "target"
+            | "node_modules"
+            | ".next"
+            | ".nuxt"
+            | "dist"
+            | "build"
+            | ".venv"
+            | "__pycache__"
+    )
 }
 
 async fn copy_last_assistant(handle: &AgentSessionHandle) {
@@ -2167,6 +2304,33 @@ mod tests {
         assert!(joined.contains("Up / Down"));
         assert!(joined.contains("Ctrl+C"));
         assert!(joined.contains("Ctrl+D"));
+    }
+
+    #[test]
+    fn tree_skip_rules_cover_noisy_directories() {
+        assert!(should_skip_tree_entry(".git"));
+        assert!(should_skip_tree_entry("target"));
+        assert!(should_skip_tree_entry("node_modules"));
+        assert!(!should_skip_tree_entry("src"));
+    }
+
+    #[test]
+    fn render_project_tree_sorts_dirs_first_and_skips_noise() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
+        std::fs::create_dir(temp.path().join("target")).unwrap();
+        std::fs::write(temp.path().join("README.md"), "readme").unwrap();
+        std::fs::write(temp.path().join("src").join("main.rs"), "fn main() {}").unwrap();
+
+        let rendered = render_project_tree(temp.path(), 20).unwrap();
+        assert!(rendered.contains("src/"));
+        assert!(rendered.contains("main.rs"));
+        assert!(rendered.contains("README.md"));
+        assert!(!rendered.contains("target/"));
+        assert!(
+            rendered.find("src/").unwrap() < rendered.find("README.md").unwrap(),
+            "directories should be printed before files"
+        );
     }
 
     #[test]
