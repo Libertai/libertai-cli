@@ -26,6 +26,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::Local;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryDocument {
+    pub path: PathBuf,
+    pub content: String,
+    pub exists: bool,
+}
+
 /// Resolve the directory under which all per-project memory dirs live.
 /// `LIBERTAI_HOME` takes priority for tests; otherwise the XDG config
 /// dir. Always returns a path even if the dir doesn't exist yet —
@@ -79,4 +86,54 @@ pub fn append_memory(cwd: &Path, text: &str) -> Result<PathBuf> {
     f.write_all(line.as_bytes())
         .with_context(|| format!("writing to {}", path.display()))?;
     Ok(path)
+}
+
+/// Read the project's MEMORY.md without creating it.
+pub fn read_memory(cwd: &Path) -> Result<MemoryDocument> {
+    let path = memory_file_for(cwd)?;
+    read_memory_path(path)
+}
+
+fn read_memory_path(path: PathBuf) -> Result<MemoryDocument> {
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Ok(MemoryDocument {
+            path,
+            content,
+            exists: true,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(MemoryDocument {
+            path,
+            content: String::new(),
+            exists: false,
+        }),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_memory_file_reports_existing_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("MEMORY.md");
+        std::fs::write(&path, "- keep this\n").unwrap();
+
+        let doc = read_memory_path(path.clone()).unwrap();
+        assert!(doc.exists);
+        assert_eq!(doc.path, path);
+        assert_eq!(doc.content, "- keep this\n");
+    }
+
+    #[test]
+    fn read_memory_file_reports_missing_without_creating() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing").join("MEMORY.md");
+
+        let doc = read_memory_path(path.clone()).unwrap();
+        assert!(!doc.exists);
+        assert_eq!(doc.path, path);
+        assert!(doc.content.is_empty());
+    }
 }

@@ -379,6 +379,10 @@ async fn repl_loop(
                 print_config_status(&cfg);
                 continue;
             }
+            "/memory" => {
+                print_memory("show");
+                continue;
+            }
             "/vim" => {
                 println!(
                     "{DIM}  Vim bindings are not implemented in the CLI REPL yet. The input bar uses native line-editing keys.{RESET}"
@@ -432,6 +436,10 @@ async fn repl_loop(
             } else {
                 print_config_status(&cfg);
             }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/memory ") {
+            print_memory(rest.trim());
             continue;
         }
         if trimmed == "/output-style" {
@@ -689,6 +697,7 @@ fn print_help() {
     println!("{DIM}  /status   — show current REPL session status{RESET}");
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
     println!("{DIM}  /config   — show active configuration summary (/config path for file path){RESET}");
+    println!("{DIM}  /memory   — show this project's MEMORY.md (/memory path for file path){RESET}");
     println!("{DIM}  /output-style <default|concise|explanatory|review|status>{RESET}");
     println!("{DIM}  /vim      — show Vim-input status{RESET}");
     println!("{DIM}  /ide      — show IDE integration status{RESET}");
@@ -700,6 +709,40 @@ fn print_help() {
     println!("{DIM}  ↑ / ↓     — walk through previously submitted prompts{RESET}");
     println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
     println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");
+    println!();
+}
+
+fn print_memory(action: &str) {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /memory: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let doc = match crate::commands::code_memory::read_memory(&cwd) {
+        Ok(doc) => doc,
+        Err(e) => {
+            eprintln!("{DIM}  /memory: failed: {e:#}{RESET}");
+            return;
+        }
+    };
+    if action.eq_ignore_ascii_case("path") {
+        println!("{DIM}  memory path: {}{RESET}", doc.path.display());
+        return;
+    }
+    println!("{BOLD}memory{RESET}");
+    println!("{DIM}  path:{RESET} {}", doc.path.display());
+    if !doc.exists {
+        println!("{DIM}  no MEMORY.md yet. Use /remember <text> to create one.{RESET}");
+    } else if doc.content.trim().is_empty() {
+        println!("{DIM}  MEMORY.md is empty. Use /remember <text> to append a note.{RESET}");
+    } else {
+        print!("{}", doc.content);
+        if !doc.content.ends_with('\n') {
+            println!();
+        }
+    }
     println!();
 }
 

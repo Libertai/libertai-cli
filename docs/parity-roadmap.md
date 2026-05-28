@@ -197,7 +197,7 @@ on-disk `~/.config/libertai/allow-rules.toml`: array of
 ### 2D. Surface pi's slash commands in REPL
 
 The libertai-cli REPL handles `/help`, `/plan`, `/clear`, `/exit`,
-`/forget`, `/remember`, `/status`, `/usage`/`/cost`, `/config`,
+`/forget`, `/remember`, `/memory`, `/status`, `/usage`/`/cost`, `/config`,
 `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
 (`/compact`, `/resume`, `/fork`, `/export`, `/thinking`, `/theme`,
 `/scoped-models`, `/template`, `/share`, `/login`, `/logout`,
@@ -354,9 +354,10 @@ new `src/commands/code_agent_registry.rs`.
 
 Single `~/.config/libertai/projects/<cwd-hash>/MEMORY.md` per project,
 loaded alongside `AGENTS.md`. Add a `/remember <text>` slash command
-that appends a dated bullet. Full four-type memory system (user /
-feedback / project / reference) deferred — minimal version covers 80%
-of value per parity doc section F.
+that appends a dated bullet. CLI `/memory` can inspect the resolved
+file/path; desktop `/memory` can inspect and edit it. Full four-type
+memory system (user / feedback / project / reference) deferred —
+minimal version covers 80% of value per parity doc section F.
 
 **Files**: new `src/commands/code_memory.rs`,
 `pi_agent_rust/src/app.rs` (system-prompt assembly hook).
