@@ -315,7 +315,7 @@ async fn repl_loop(
     let mut usage_history: Vec<UsageRecord> = Vec::new();
 
     loop {
-        let line = match read_line(mode.get(), &history)? {
+        let mut line = match read_line(mode.get(), &history)? {
             LineResult::Submit(s) => s,
             LineResult::Interrupted => {
                 // Ctrl+C in the input bar: discard this line, keep looping.
@@ -336,7 +336,8 @@ async fn repl_loop(
             }
         };
 
-        let trimmed = line.trim();
+        let trimmed_owned = line.trim().to_string();
+        let trimmed = trimmed_owned.as_str();
         if trimmed.is_empty() {
             continue;
         }
@@ -381,6 +382,10 @@ async fn repl_loop(
             }
             "/memory" => {
                 print_memory("show");
+                continue;
+            }
+            "/agents" => {
+                print_agents();
                 continue;
             }
             "/vim" => {
@@ -441,6 +446,21 @@ async fn repl_loop(
         if let Some(rest) = trimmed.strip_prefix("/memory ") {
             print_memory(rest.trim());
             continue;
+        }
+        if trimmed == "/agent" {
+            println!("{DIM}  usage: /agent <name> <task>{RESET}");
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/agent ") {
+            match build_agent_slash_prompt(rest.trim()) {
+                Ok(prompt) => {
+                    line = prompt;
+                }
+                Err(e) => {
+                    eprintln!("{DIM}  /agent: {e:#}{RESET}");
+                    continue;
+                }
+            }
         }
         if trimmed == "/output-style" {
             handle_output_style("", &mut output_style);
@@ -698,6 +718,8 @@ fn print_help() {
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
     println!("{DIM}  /config   — show active configuration summary (/config path for file path){RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
+    println!("{DIM}  /agents   — list named sub-agents{RESET}");
+    println!("{DIM}  /agent <name> <task> — run a named sub-agent task{RESET}");
     println!("{DIM}  /output-style <default|concise|explanatory|review|status>{RESET}");
     println!("{DIM}  /vim      — show Vim-input status{RESET}");
     println!("{DIM}  /ide      — show IDE integration status{RESET}");
@@ -771,6 +793,115 @@ fn print_memory(action: &str) {
         }
     }
     println!();
+}
+
+fn print_agents() {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /agents: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let agents = match crate::commands::code_agents::discover_agents(&cwd) {
+        Ok(agents) => agents,
+        Err(e) => {
+            eprintln!("{DIM}  /agents: failed: {e:#}{RESET}");
+            return;
+        }
+    };
+    println!("{BOLD}agents{RESET}");
+    if agents.is_empty() {
+        println!("{DIM}  no named sub-agents found.{RESET}");
+        println!("{DIM}  create .claude/agents/<name>.md or .libertai/agents/<name>.md in this project.{RESET}");
+    } else {
+        for agent in agents {
+            let tools = agent
+                .tools
+                .as_ref()
+                .filter(|tools| !tools.is_empty())
+                .map(|tools| tools.join(", "))
+                .unwrap_or_else(|| "read, grep, find, ls".to_string());
+            let model = agent.model.as_deref().unwrap_or("default");
+            println!(
+                "- {}: {}",
+                agent.name,
+                if agent.description.trim().is_empty() {
+                    "Named sub-agent"
+                } else {
+                    agent.description.as_str()
+                }
+            );
+            println!(
+                "{DIM}  model: {model} · tools: {tools} · {}{RESET}",
+                agent_source_label(&agent.source)
+            );
+        }
+        println!("{DIM}  run /agent <name> <task> to dispatch a focused task.{RESET}");
+    }
+    println!();
+}
+
+fn build_agent_slash_prompt(query: &str) -> Result<String> {
+    let (name, task) = parse_agent_slash_query(query)?;
+    let cwd = std::env::current_dir().context("resolving cwd")?;
+    let agents = crate::commands::code_agents::discover_agents(&cwd)?;
+    build_agent_prompt_from_defs(name, task, &agents)
+}
+
+fn parse_agent_slash_query(query: &str) -> Result<(&str, &str)> {
+    let raw = query.trim();
+    let Some((name, task)) = raw.split_once(char::is_whitespace) else {
+        anyhow::bail!("usage: /agent <name> <task>");
+    };
+    let name = name.trim();
+    let task = task.trim();
+    if name.is_empty() || task.is_empty() {
+        anyhow::bail!("usage: /agent <name> <task>");
+    }
+    Ok((name, task))
+}
+
+fn build_agent_prompt_from_defs(
+    name: &str,
+    task: &str,
+    agents: &[crate::commands::code_agents::AgentDefinition],
+) -> Result<String> {
+    let needle = name.trim().trim_start_matches('@');
+    let Some(agent) = agents
+        .iter()
+        .find(|agent| agent.name == needle)
+        .or_else(|| agents.iter().find(|agent| agent.name.starts_with(needle)))
+    else {
+        let suffix = if agents.is_empty() {
+            "no named sub-agents are configured".to_string()
+        } else {
+            format!(
+                "available sub-agents: {}",
+                agents
+                    .iter()
+                    .map(|agent| agent.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        anyhow::bail!("unknown agent `{name}` ({suffix})");
+    };
+    Ok(format!(
+        "Use the task tool with subagent_type \"{}\" for this focused task:\n\n{}\n\nReturn the named sub-agent's findings and cite any files or commands it used.",
+        agent.name, task
+    ))
+}
+
+fn agent_source_label(source: &crate::commands::code_agents::AgentSource) -> String {
+    match source {
+        crate::commands::code_agents::AgentSource::Project(path) => {
+            format!("project: {}", path.display())
+        }
+        crate::commands::code_agents::AgentSource::User(path) => {
+            format!("user: {}", path.display())
+        }
+    }
 }
 
 fn open_memory_editor(path: &Path) {
@@ -1484,5 +1615,32 @@ mod tests {
             quote_for_sh(Path::new("/tmp/has ' quote/MEMORY.md")),
             "'/tmp/has '\\'' quote/MEMORY.md'"
         );
+    }
+
+    #[test]
+    fn parse_agent_slash_query_requires_name_and_task() {
+        assert_eq!(
+            parse_agent_slash_query("reviewer inspect src").unwrap(),
+            ("reviewer", "inspect src")
+        );
+        assert!(parse_agent_slash_query("reviewer").is_err());
+        assert!(parse_agent_slash_query("reviewer   ").is_err());
+    }
+
+    #[test]
+    fn build_agent_prompt_from_defs_matches_prefix() {
+        let agents = vec![crate::commands::code_agents::AgentDefinition {
+            name: "reviewer".to_string(),
+            description: "Reviews changes".to_string(),
+            tools: None,
+            model: None,
+            system_prompt: "Review carefully.".to_string(),
+            source: crate::commands::code_agents::AgentSource::Project(PathBuf::from(
+                "/tmp/.claude/agents",
+            )),
+        }];
+        let prompt = build_agent_prompt_from_defs("rev", "check the diff", &agents).unwrap();
+        assert!(prompt.contains("subagent_type \"reviewer\""));
+        assert!(prompt.contains("check the diff"));
     }
 }

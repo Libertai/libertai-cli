@@ -197,8 +197,8 @@ on-disk `~/.config/libertai/allow-rules.toml`: array of
 ### 2D. Surface pi's slash commands in REPL
 
 The libertai-cli REPL handles `/help`, `/plan`, `/clear`, `/exit`,
-`/forget`, `/remember`, `/memory`, `/status`, `/usage`/`/cost`, `/config`,
-`/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
+`/forget`, `/remember`, `/memory`, `/agents`, `/agent`, `/status`,
+`/usage`/`/cost`, `/config`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
 (`/compact`, `/resume`, `/fork`, `/export`, `/thinking`, `/theme`,
 `/scoped-models`, `/template`, `/share`, `/login`, `/logout`,
 `/history`, `/copy`, `/name`, `/hotkeys`, `/changelog`, `/tree`,
@@ -339,16 +339,18 @@ Gated on open question 1. Two cases:
 
 ### 4D. Named sub-agent registry
 
-Today's `task` tool spawns a generic read-only subagent
-(`src/commands/code_task.rs`, hard-coded to `read/grep/find/ls`). Add a
-subagent_type arg + a `~/.config/libertai/agents/<name>.md` registry,
-each agent file carrying frontmatter for `tools:`, `model:`,
-`system_prompt:`, `description:`. Matches Claude Code's `.claude/agents/`.
+Shipped: the `task` tool accepts `subagent_type` and discovers
+Claude-compatible `.claude/agents/<name>.md`, project
+`.libertai/agents/<name>.md`, user `~/.claude/agents`, and user
+`~/.config/libertai/agents`. Agent files carry frontmatter for
+`description:`, `tools:`, and `model:` plus a body system prompt.
+CLI `/agents` lists discovered definitions and `/agent <name> <task>`
+routes through the active agent with an instruction to call the `task`
+tool for that named sub-agent. Remaining work is richer management UI,
+background/worktree isolation, and child event streaming.
 
-**Files**: `src/commands/code_task.rs`,
-new `src/commands/code_agent_registry.rs`.
-**Effort**: M-L (3 days).
-**Desktop note**: handoff doc D-4 — desktop needs a "manage agents" UI.
+**Files**: `src/commands/code_agents.rs`, `src/commands/code_task.rs`,
+`src/commands/code_ui.rs`.
 
 ### 4E. Memory v1
 
