@@ -61,6 +61,8 @@ const OUTPUT_STYLES: &[(&str, &str)] = &[
     ),
 ];
 const SHELL_ESCAPE_MAX_DISPLAY_BYTES: usize = 256 * 1024;
+const HISTORY_DEFAULT_LIMIT: usize = 20;
+const HISTORY_MAX_LIMIT: usize = 64;
 
 /// Snapshot of the last completed turn's token usage. Written in
 /// `repl_loop` after each successful prompt, read in `repaint()` to
@@ -399,6 +401,10 @@ async fn repl_loop(
                 print_usage_summary(usage_summary(&usage_history));
                 continue;
             }
+            "/history" => {
+                print_history(&history, HISTORY_DEFAULT_LIMIT);
+                continue;
+            }
             "/config" => {
                 print_config_status(&cfg);
                 continue;
@@ -475,6 +481,13 @@ async fn repl_loop(
                 }
             } else {
                 print_config_status(&cfg);
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/history ") {
+            match parse_history_limit(rest) {
+                Ok(limit) => print_history(&history, limit),
+                Err(e) => eprintln!("{DIM}  /history: {e:#}{RESET}"),
             }
             continue;
         }
@@ -833,6 +846,7 @@ fn print_help() {
     println!("{DIM}  /name <name> — set this session's display name{RESET}");
     println!("{DIM}  /status   — show current REPL session status{RESET}");
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
+    println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /config   — show active configuration summary (/config path for file path){RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
     println!("{DIM}  /init     — create AGENTS.md for this project if missing{RESET}");
@@ -852,6 +866,31 @@ fn print_help() {
     println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
     println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");
     println!();
+}
+
+fn parse_history_limit(input: &str) -> Result<usize> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(HISTORY_DEFAULT_LIMIT);
+    }
+    let limit = value
+        .parse::<usize>()
+        .context("usage: /history [count]")?
+        .clamp(1, HISTORY_MAX_LIMIT);
+    Ok(limit)
+}
+
+fn print_history(history: &VecDeque<String>, limit: usize) {
+    println!("{BOLD}history{RESET}");
+    if history.is_empty() {
+        println!("{DIM}  no submitted prompts yet.{RESET}");
+        return;
+    }
+    let shown = history.len().min(limit);
+    let start = history.len() - shown;
+    for (idx, item) in history.iter().enumerate().skip(start) {
+        println!("{DIM}  {:>2}.{RESET} {}", idx + 1, item);
+    }
 }
 
 fn parse_permissions_command(input: &str) -> PermissionsCommand {
@@ -2012,6 +2051,15 @@ mod tests {
     #[test]
     fn usage_summary_empty_when_no_turns() {
         assert!(usage_summary(&[]).is_none());
+    }
+
+    #[test]
+    fn parse_history_limit_defaults_and_clamps() {
+        assert_eq!(parse_history_limit("").unwrap(), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(parse_history_limit("3").unwrap(), 3);
+        assert_eq!(parse_history_limit("0").unwrap(), 1);
+        assert_eq!(parse_history_limit("999").unwrap(), HISTORY_MAX_LIMIT);
+        assert!(parse_history_limit("recent").is_err());
     }
 
     #[test]
