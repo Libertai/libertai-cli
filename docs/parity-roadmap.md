@@ -78,6 +78,10 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/doctor` command** — REPL users can print a local diagnostic
   report for session state, auth/config, memory/templates/agents, git,
   and usage.
+- **CLI `/usage` / `/cost` tool activity** — REPL usage summaries show
+  turn counts, token high-water/output totals, and observed per-tool
+  call counts/durations for the current session. True per-tool
+  token/cost attribution remains deferred.
 - **Typed project memory** — `/remember` accepts `user:`, `feedback:`,
   `project:`, `reference:`, or `--type <kind>` prefixes and stores
   categorized bullets in the shared `MEMORY.md` index, with per-entry

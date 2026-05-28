@@ -10,12 +10,13 @@
 //! runtime thread; mixing that with a parallel stdin reader is out of
 //! scope); persistent history file; multi-line paste; syntax highlighting.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -98,6 +99,66 @@ struct UsageSummary {
     context_window: u32,
     provider: String,
     model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolActivitySummary {
+    tool_name: String,
+    count: u64,
+    total_duration: Duration,
+}
+
+#[derive(Debug, Default)]
+struct ToolActivityTracker {
+    active: HashMap<String, (String, Instant)>,
+    totals: BTreeMap<String, ToolActivityTotal>,
+}
+
+#[derive(Debug, Default)]
+struct ToolActivityTotal {
+    count: u64,
+    total_duration: Duration,
+}
+
+impl ToolActivityTracker {
+    fn observe(&mut self, event: &AgentEvent) {
+        match event {
+            AgentEvent::ToolExecutionStart {
+                tool_call_id,
+                tool_name,
+                ..
+            } => {
+                self.active
+                    .insert(tool_call_id.clone(), (tool_name.clone(), Instant::now()));
+            }
+            AgentEvent::ToolExecutionEnd {
+                tool_call_id,
+                tool_name,
+                ..
+            } => {
+                let elapsed = self
+                    .active
+                    .remove(tool_call_id)
+                    .map(|(_, started_at)| started_at.elapsed())
+                    .unwrap_or_default();
+                let total = self.totals.entry(tool_name.clone()).or_default();
+                total.count += 1;
+                total.total_duration += elapsed;
+            }
+            _ => {}
+        }
+    }
+
+    fn summary(&self) -> Vec<ToolActivitySummary> {
+        self.totals
+            .iter()
+            .map(|(tool_name, total)| ToolActivitySummary {
+                tool_name: tool_name.clone(),
+                count: total.count,
+                total_duration: total.total_duration,
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,6 +421,7 @@ async fn repl_loop(
     let mut history: VecDeque<String> = VecDeque::with_capacity(64);
     let mut output_style: Option<String> = None;
     let mut usage_history: Vec<UsageRecord> = Vec::new();
+    let tool_activity = Arc::new(Mutex::new(ToolActivityTracker::default()));
     let mut session_name: Option<String> = None;
     let mut autonomous_queue: VecDeque<String> = VecDeque::new();
 
@@ -468,7 +530,11 @@ async fn repl_loop(
                 continue;
             }
             "/usage" | "/cost" => {
-                print_usage_summary(usage_summary(&usage_history));
+                let tool_activity = tool_activity
+                    .lock()
+                    .map(|tracker| tracker.summary())
+                    .unwrap_or_default();
+                print_usage_summary(usage_summary(&usage_history), &tool_activity);
                 continue;
             }
             "/history" => {
@@ -1025,15 +1091,22 @@ async fn repl_loop(
         // interrupt an in-flight turn without tearing the REPL down.
         let (abort_handle, abort_signal) = AbortHandle::new();
         set_current_abort(abort_handle);
+        let render = {
+            let tool_activity = Arc::clone(&tool_activity);
+            move |event: AgentEvent| {
+                if let Ok(mut tracker) = tool_activity.lock() {
+                    tracker.observe(&event);
+                }
+                render_event(event);
+            }
+        };
         let result = if let Some(content) = content_override {
             handle
-                .prompt_with_content_with_abort(content, abort_signal, render_event)
+                .prompt_with_content_with_abort(content, abort_signal, render)
                 .await
         } else {
             let agent_line = apply_output_style(output_style.as_deref(), &line);
-            handle
-                .prompt_with_abort(agent_line, abort_signal, render_event)
-                .await
+            handle.prompt_with_abort(agent_line, abort_signal, render).await
         };
         clear_current_abort();
 
@@ -3405,7 +3478,7 @@ fn usage_summary(records: &[UsageRecord]) -> Option<UsageSummary> {
     })
 }
 
-fn print_usage_summary(summary: Option<UsageSummary>) {
+fn print_usage_summary(summary: Option<UsageSummary>, tool_activity: &[ToolActivitySummary]) {
     println!("{BOLD}usage{RESET}");
     match summary {
         Some(summary) => {
@@ -3440,12 +3513,42 @@ fn print_usage_summary(summary: Option<UsageSummary>) {
             println!(
                 "{DIM}  note:{RESET} input is cumulative context; output is summed across completed turns."
             );
+            print_tool_activity(tool_activity);
         }
         None => {
             println!("{DIM}  no usage recorded yet — send a prompt first.{RESET}");
+            print_tool_activity(tool_activity);
         }
     }
     println!();
+}
+
+fn print_tool_activity(tool_activity: &[ToolActivitySummary]) {
+    if tool_activity.is_empty() {
+        return;
+    }
+    println!("{DIM}  tool activity:{RESET}");
+    for tool in tool_activity {
+        println!(
+            "{DIM}    -{RESET} {}: {} call(s), {} observed",
+            tool.tool_name,
+            tool.count,
+            format_duration(tool.total_duration)
+        );
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let millis = duration.as_millis();
+    if millis < 1_000 {
+        format!("{millis}ms")
+    } else if millis < 60_000 {
+        format!("{:.1}s", millis as f64 / 1_000.0)
+    } else {
+        let minutes = millis / 60_000;
+        let seconds = (millis % 60_000) / 1_000;
+        format!("{minutes}m {seconds}s")
+    }
 }
 
 fn print_config_status(cfg: &LibertaiConfig) {
@@ -4009,6 +4112,42 @@ mod tests {
     }
 
     #[test]
+    fn tool_activity_tracker_counts_completed_tool_calls() {
+        let mut tracker = ToolActivityTracker::default();
+        tracker.observe(&AgentEvent::ToolExecutionStart {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "read".to_string(),
+            args: serde_json::json!({"path": "/tmp/a"}),
+        });
+        tracker.observe(&AgentEvent::ToolExecutionEnd {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "read".to_string(),
+            result: empty_tool_output(),
+            is_error: false,
+        });
+        tracker.observe(&AgentEvent::ToolExecutionEnd {
+            tool_call_id: "call-2".to_string(),
+            tool_name: "bash".to_string(),
+            result: empty_tool_output(),
+            is_error: true,
+        });
+
+        let summary = tracker.summary();
+        assert_eq!(summary.len(), 2);
+        assert_eq!(summary[0].tool_name, "bash");
+        assert_eq!(summary[0].count, 1);
+        assert_eq!(summary[1].tool_name, "read");
+        assert_eq!(summary[1].count, 1);
+    }
+
+    #[test]
+    fn format_duration_scales_units() {
+        assert_eq!(format_duration(Duration::from_millis(42)), "42ms");
+        assert_eq!(format_duration(Duration::from_millis(1_500)), "1.5s");
+        assert_eq!(format_duration(Duration::from_millis(61_000)), "1m 1s");
+    }
+
+    #[test]
     fn status_line_template_normalizes_and_expands_known_tokens() {
         let status = BarStatus {
             model_label: "libertai/qwen".to_string(),
@@ -4022,6 +4161,14 @@ mod tests {
             expand_status_line_template(&status.status_line_template, &status, Mode::Plan)
                 .unwrap();
         assert_eq!(expanded, "libertai/qwen plan review 2.0k 50% {unknown}");
+    }
+
+    fn empty_tool_output() -> pi::sdk::ToolOutput {
+        pi::sdk::ToolOutput {
+            content: Vec::new(),
+            details: None,
+            is_error: false,
+        }
     }
 
     #[test]
