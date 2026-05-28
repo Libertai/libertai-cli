@@ -105,7 +105,7 @@ impl Tool for TaskTool {
                 },
                 "worktree": {
                     "type": "boolean",
-                    "description": "When true, run the child in a temporary git worktree checked out at HEAD."
+                    "description": "When true, run the child in a temporary isolated workspace. Git repositories use a detached worktree at HEAD; non-git directories use a copied workspace snapshot."
                 },
                 "isolation": {
                     "type": "string",
@@ -303,7 +303,7 @@ impl Tool for TaskTool {
             );
         } else if wants_worktree {
             eprintln!(
-                "\n  \x1b[2m[subagent] running in isolated worktree: {prompt}\x1b[0m"
+                "\n  \x1b[2m[subagent] running in isolated workspace: {prompt}\x1b[0m"
             );
         } else {
             eprintln!("\n  \x1b[2m[subagent] running: {prompt}\x1b[0m");
@@ -376,15 +376,20 @@ fn task_wants_same_cwd(input: &serde_json::Value) -> bool {
 }
 
 struct TaskWorktree {
-    repo_root: PathBuf,
+    repo_root: Option<PathBuf>,
     path: PathBuf,
     temp_root: PathBuf,
 }
 
 impl TaskWorktree {
     fn create(cwd: &Path) -> Result<Self, String> {
-        let root = git_stdout(cwd, ["rev-parse", "--show-toplevel"])?;
-        let root = PathBuf::from(root.trim());
+        match git_stdout(cwd, ["rev-parse", "--show-toplevel"]) {
+            Ok(root) => Self::create_git_worktree(PathBuf::from(root.trim())),
+            Err(_) => Self::create_snapshot(cwd),
+        }
+    }
+
+    fn create_git_worktree(root: PathBuf) -> Result<Self, String> {
         let temp_root = std::env::temp_dir().join(format!(
             "libertai-task-worktree-{}-{}",
             std::process::id(),
@@ -404,7 +409,24 @@ impl TaskWorktree {
             return Err(format!("git worktree add failed with status {status}"));
         }
         Ok(Self {
-            repo_root: root,
+            repo_root: Some(root),
+            path,
+            temp_root,
+        })
+    }
+
+    fn create_snapshot(cwd: &Path) -> Result<Self, String> {
+        let temp_root = std::env::temp_dir().join(format!(
+            "libertai-task-snapshot-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        std::fs::create_dir_all(&temp_root).map_err(|e| format!("tempdir: {e}"))?;
+        let path = temp_root.join("workspace");
+        std::fs::create_dir_all(&path).map_err(|e| format!("snapshot dir: {e}"))?;
+        copy_workspace_snapshot(cwd, &path)?;
+        Ok(Self {
+            repo_root: None,
             path,
             temp_root,
         })
@@ -413,14 +435,61 @@ impl TaskWorktree {
 
 impl Drop for TaskWorktree {
     fn drop(&mut self) {
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(&self.repo_root)
-            .args(["worktree", "remove", "--force"])
-            .arg(&self.path)
-            .status();
+        if let Some(repo_root) = self.repo_root.as_ref() {
+            let _ = Command::new("git")
+                .arg("-C")
+                .arg(repo_root)
+                .args(["worktree", "remove", "--force"])
+                .arg(&self.path)
+                .status();
+        }
         let _ = std::fs::remove_dir_all(&self.temp_root);
     }
+}
+
+fn copy_workspace_snapshot(src: &Path, dst: &Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(src).map_err(|e| format!("read snapshot source: {e}"))? {
+        let entry = entry.map_err(|e| format!("read snapshot entry: {e}"))?;
+        let name = entry.file_name();
+        if should_skip_snapshot_entry(&name.to_string_lossy()) {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("read snapshot file type: {e}"))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            std::fs::create_dir_all(&to).map_err(|e| format!("create snapshot dir: {e}"))?;
+            copy_workspace_snapshot(&from, &to)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&from, &to).map_err(|e| {
+                format!("copy snapshot file {} -> {}: {e}", from.display(), to.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn should_skip_snapshot_entry(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | "target"
+            | "node_modules"
+            | "dist"
+            | "build"
+            | ".next"
+            | ".nuxt"
+            | ".svelte-kit"
+            | ".cache"
+            | ".venv"
+            | "venv"
+            | "__pycache__"
+    )
 }
 
 fn unique_suffix() -> u128 {
@@ -477,7 +546,9 @@ fn err_output(text: &str) -> ToolExecution {
 
 #[cfg(test)]
 mod tests {
-    use super::{task_wants_same_cwd, task_wants_worktree, TaskWorktree};
+    use super::{
+        should_skip_snapshot_entry, task_wants_same_cwd, task_wants_worktree, TaskWorktree,
+    };
     use serde_json::json;
     use std::process::Command;
 
@@ -525,6 +596,37 @@ mod tests {
         }
         assert!(!checkout.exists());
         assert!(!temp_root.exists());
+    }
+
+    #[test]
+    fn task_worktree_falls_back_to_snapshot_outside_git() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("plain");
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::write(cwd.join("notes.txt"), "hello\n").unwrap();
+        std::fs::create_dir(cwd.join("node_modules")).unwrap();
+        std::fs::write(cwd.join("node_modules/skip.txt"), "skip\n").unwrap();
+
+        let temp_root;
+        let snapshot;
+        {
+            let worktree = TaskWorktree::create(&cwd).unwrap();
+            temp_root = worktree.temp_root.clone();
+            snapshot = worktree.path.clone();
+            assert!(snapshot.join("notes.txt").exists());
+            assert!(!snapshot.join("node_modules/skip.txt").exists());
+            assert!(temp_root.exists());
+        }
+        assert!(!snapshot.exists());
+        assert!(!temp_root.exists());
+    }
+
+    #[test]
+    fn snapshot_skips_noisy_build_directories() {
+        assert!(should_skip_snapshot_entry(".git"));
+        assert!(should_skip_snapshot_entry("target"));
+        assert!(should_skip_snapshot_entry("node_modules"));
+        assert!(!should_skip_snapshot_entry("src"));
     }
 
     fn git(cwd: &std::path::Path, args: &[&str]) {
