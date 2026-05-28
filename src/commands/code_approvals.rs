@@ -475,6 +475,31 @@ impl ApprovalState {
         }
     }
 
+    /// Snapshot the user-promoted allow rules. Used by desktop settings
+    /// management; read-only auto-allow defaults are intentionally not
+    /// included because they are not user-managed memory.
+    pub fn always_rules(&self) -> Vec<AllowRule> {
+        self.always_allow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Remove one remembered allow rule by its current list index.
+    /// Returns false when the index is stale or out of range.
+    pub fn remove_always(&self, index: usize) -> bool {
+        let mut list = self
+            .always_allow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if index >= list.len() {
+            return false;
+        }
+        list.remove(index);
+        self.persist_locked_rules(&list);
+        true
+    }
+
     /// Drop every "always allow" entry and clear the persistent store if
     /// this state is backed by one.
     /// Invoked by the `/forget` slash command in the REPL.
@@ -1305,6 +1330,30 @@ mod tests {
 
         let reloaded = ApprovalState::with_persistent_store(path).unwrap();
         assert!(!reloaded.is_pre_allowed("bash", "echo hi"));
+    }
+
+    #[test]
+    fn persistent_store_lists_and_removes_rules() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("allow-rules.toml");
+        let state = ApprovalState::with_persistent_store(path.clone()).unwrap();
+
+        state.record_always(AllowRule::exact("bash", "cargo test"));
+        state.record_always(AllowRule::wildcard("edit", "src/*.rs"));
+
+        let rules = state.always_rules();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0], AllowRule::exact("bash", "cargo test"));
+        assert!(state.remove_always(0));
+        assert!(!state.remove_always(10));
+
+        let reloaded = ApprovalState::with_persistent_store(path).unwrap();
+        assert!(!reloaded.is_pre_allowed("bash", "cargo test"));
+        assert!(reloaded.is_pre_allowed("edit", "src/lib.rs"));
+        assert_eq!(
+            reloaded.always_rules(),
+            vec![AllowRule::wildcard("edit", "src/*.rs")]
+        );
     }
 
     #[test]
