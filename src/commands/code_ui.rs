@@ -382,7 +382,7 @@ async fn repl_loop(
                 println!("{DIM}  cleared saved \"always allow\" rules.{RESET}");
                 continue;
             }
-            "/permissions" => {
+            "/permissions" | "/mode" => {
                 print_permissions_status(mode.get());
                 continue;
             }
@@ -390,7 +390,7 @@ async fn repl_loop(
                 print_model_status(&handle, &cfg);
                 continue;
             }
-            "/name" => {
+            "/name" | "/rename" => {
                 print_name_status(session_name.as_deref());
                 continue;
             }
@@ -725,7 +725,7 @@ async fn repl_loop(
             print_memory(rest.trim());
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("/permissions ") {
+        if let Some((_command, rest)) = mode_command_arg(trimmed) {
             match parse_permissions_command(rest) {
                 PermissionsCommand::Show => print_permissions_status(mode.get()),
                 PermissionsCommand::Set(new_mode) => {
@@ -765,16 +765,16 @@ async fn repl_loop(
             }
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("/name ") {
+        if let Some((command, rest)) = name_command_arg(trimmed) {
             match parse_session_name(rest) {
                 Ok(name) => match handle.set_session_name(name.clone()).await {
                     Ok(()) => {
                         session_name = Some(name.clone());
                         println!("{DIM}  → session name set to {name}{RESET}");
                     }
-                    Err(e) => eprintln!("{DIM}  /name: {e:#}{RESET}"),
+                    Err(e) => eprintln!("{DIM}  {command}: {e:#}{RESET}"),
                 },
-                Err(e) => eprintln!("{DIM}  /name: {e:#}{RESET}"),
+                Err(e) => eprintln!("{DIM}  {command}: {e:#}{RESET}"),
             }
             continue;
         }
@@ -1236,6 +1236,27 @@ fn thinking_command_arg(input: &str) -> Option<&str> {
     None
 }
 
+fn mode_command_arg(input: &str) -> Option<(&str, &str)> {
+    for command in ["/permissions", "/mode"] {
+        if input == command {
+            return Some((command, ""));
+        }
+        if let Some(rest) = input.strip_prefix(&format!("{command} ")) {
+            return Some((command, rest.trim()));
+        }
+    }
+    None
+}
+
+fn name_command_arg(input: &str) -> Option<(&str, &str)> {
+    for command in ["/name", "/rename"] {
+        if let Some(rest) = input.strip_prefix(&format!("{command} ")) {
+            return Some((command, rest.trim()));
+        }
+    }
+    None
+}
+
 fn parse_thinking_level(input: &str) -> Result<ThinkingLevel> {
     let raw = input.trim();
     if raw.is_empty() {
@@ -1309,8 +1330,9 @@ fn print_help() {
     println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
     println!("{DIM}  /permissions [default|acceptEdits|plan|forget]{RESET}");
+    println!("{DIM}  /mode [default|acceptEdits|plan] — alias for /permissions{RESET}");
     println!("{DIM}  /model [model|provider/model]{RESET}");
-    println!("{DIM}  /name <name> — set this session's display name{RESET}");
+    println!("{DIM}  /name <name> — set this session's display name (also /rename){RESET}");
     println!("{DIM}  /status   — show current REPL session status{RESET}");
     println!("{DIM}  /doctor   — run a local session/config diagnostic report{RESET}");
     println!("{DIM}  /review [scope] — ask the agent to review current code changes{RESET}");
@@ -3464,6 +3486,28 @@ mod tests {
         assert_eq!(thinking_command_arg("/t medium"), Some("medium"));
         assert_eq!(thinking_command_arg("/thinking"), None);
         assert_eq!(thinking_command_arg("/theme high"), None);
+    }
+
+    #[test]
+    fn mode_command_arg_accepts_permissions_and_mode_alias() {
+        assert_eq!(mode_command_arg("/permissions"), Some(("/permissions", "")));
+        assert_eq!(
+            mode_command_arg("/permissions acceptEdits"),
+            Some(("/permissions", "acceptEdits"))
+        );
+        assert_eq!(mode_command_arg("/mode plan"), Some(("/mode", "plan")));
+        assert_eq!(mode_command_arg("/model plan"), None);
+    }
+
+    #[test]
+    fn name_command_arg_accepts_name_and_rename_alias() {
+        assert_eq!(name_command_arg("/name release work"), Some(("/name", "release work")));
+        assert_eq!(
+            name_command_arg("/rename bug bash"),
+            Some(("/rename", "bug bash"))
+        );
+        assert_eq!(name_command_arg("/rename"), None);
+        assert_eq!(name_command_arg("/nameplate foo"), None);
     }
 
     #[test]
