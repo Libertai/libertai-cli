@@ -2378,6 +2378,13 @@ fn print_memory(action: &str) {
         }
         return;
     }
+    if matches!(action.to_ascii_lowercase().as_str(), "references" | "refs" | "verify") {
+        match crate::commands::code_memory::verify_memory_references(&cwd) {
+            Ok(refs) => print_memory_references(&refs),
+            Err(e) => eprintln!("{DIM}  /memory references: failed: {e:#}{RESET}"),
+        }
+        return;
+    }
     let doc = match crate::commands::code_memory::read_memory(&cwd) {
         Ok(doc) => doc,
         Err(e) => {
@@ -2401,6 +2408,26 @@ fn print_memory(action: &str) {
         if !doc.content.ends_with('\n') {
             println!();
         }
+    }
+    println!();
+}
+
+fn print_memory_references(refs: &[crate::commands::code_memory::MemoryReference]) {
+    println!("{BOLD}memory references{RESET}");
+    if refs.is_empty() {
+        println!("{DIM}  no [reference] entries found in project memory{RESET}");
+        println!();
+        return;
+    }
+    for reference in refs {
+        let target = reference.target.as_deref().unwrap_or("(no target)");
+        println!(
+            "{DIM}  line {} · {}:{RESET} {} — {}",
+            reference.line_number,
+            reference.status.label(),
+            target,
+            reference.detail
+        );
     }
     println!();
 }

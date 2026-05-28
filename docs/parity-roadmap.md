@@ -469,8 +469,9 @@ loaded alongside `AGENTS.md`. Add a typed `/remember <kind>: <text>`
 slash command that appends a categorized dated bullet. CLI `/memory`
 can inspect typed counts, show the resolved file/path, open it in
 `$VISUAL`/`$EDITOR`, and clear it with a backup; desktop `/memory` can
-inspect and edit it. Full file-per-memory storage and reference
-verification are deferred.
+inspect and edit it. CLI and desktop `/memory references` verify
+`[reference]` bullets by marking external URLs and checking local path
+targets against the session cwd. Full file-per-memory storage is deferred.
 
 **Files**: new `src/commands/code_memory.rs`,
 `pi_agent_rust/src/app.rs` (system-prompt assembly hook).

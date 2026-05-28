@@ -64,6 +64,34 @@ pub struct ParsedMemoryNote {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryReference {
+    pub line_number: usize,
+    pub text: String,
+    pub target: Option<String>,
+    pub status: MemoryReferenceStatus,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryReferenceStatus {
+    Ok,
+    Missing,
+    External,
+    Unparsed,
+}
+
+impl MemoryReferenceStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Missing => "missing",
+            Self::External => "external",
+            Self::Unparsed => "unparsed",
+        }
+    }
+}
+
 /// Resolve the directory under which all per-project memory dirs live.
 /// `LIBERTAI_HOME` takes priority for tests; otherwise the XDG config
 /// dir. Always returns a path even if the dir doesn't exist yet —
@@ -210,6 +238,110 @@ fn read_memory_path(path: PathBuf) -> Result<MemoryDocument> {
     }
 }
 
+pub fn verify_memory_references(cwd: &Path) -> Result<Vec<MemoryReference>> {
+    let doc = read_memory(cwd)?;
+    Ok(verify_memory_references_in_content(cwd, &doc.content))
+}
+
+pub fn verify_memory_references_in_content(cwd: &Path, content: &str) -> Vec<MemoryReference> {
+    content
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| memory_reference_from_line(cwd, idx + 1, line))
+        .collect()
+}
+
+fn memory_reference_from_line(cwd: &Path, line_number: usize, line: &str) -> Option<MemoryReference> {
+    let marker = "[reference]";
+    let marker_idx = line.find(marker)?;
+    let text = line[marker_idx + marker.len()..].trim().to_string();
+    let Some(target) = extract_reference_target(cwd, &text) else {
+        return Some(MemoryReference {
+            line_number,
+            text,
+            target: None,
+            status: MemoryReferenceStatus::Unparsed,
+            detail: "no URL or local path target found".to_string(),
+        });
+    };
+    if is_external_reference(&target) {
+        return Some(MemoryReference {
+            line_number,
+            text,
+            target: Some(target),
+            status: MemoryReferenceStatus::External,
+            detail: "external reference; not checked locally".to_string(),
+        });
+    }
+    let path = resolve_reference_path(cwd, &target);
+    if path.exists() {
+        Some(MemoryReference {
+            line_number,
+            text,
+            target: Some(target),
+            status: MemoryReferenceStatus::Ok,
+            detail: path.display().to_string(),
+        })
+    } else {
+        Some(MemoryReference {
+            line_number,
+            text,
+            target: Some(target),
+            status: MemoryReferenceStatus::Missing,
+            detail: path.display().to_string(),
+        })
+    }
+}
+
+fn extract_reference_target(cwd: &Path, text: &str) -> Option<String> {
+    if let Some(start) = text.find("](") {
+        let rest = &text[start + 2..];
+        if let Some(end) = rest.find(')') {
+            return clean_reference_token(&rest[..end]);
+        }
+    }
+    for raw in text.split_whitespace() {
+        if let Some(cleaned) = clean_reference_token(raw) {
+            if is_external_reference(&cleaned)
+                || cleaned.starts_with("file:")
+                || cleaned.starts_with('/')
+                || cleaned.starts_with("./")
+                || cleaned.starts_with("../")
+                || cleaned.contains('/')
+                || Path::new(&cleaned).extension().is_some()
+                || cwd.join(&cleaned).exists()
+            {
+                return Some(cleaned);
+            }
+        }
+    }
+    None
+}
+
+fn clean_reference_token(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_matches('`').trim_matches('"').trim_matches('\'');
+    let trimmed = trimmed.trim_end_matches(|c: char| matches!(c, ',' | '.' | ';' | ':'));
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn is_external_reference(target: &str) -> bool {
+    target.starts_with("http://") || target.starts_with("https://")
+}
+
+fn resolve_reference_path(cwd: &Path, target: &str) -> PathBuf {
+    let raw = target.strip_prefix("file://").or_else(|| target.strip_prefix("file:")).unwrap_or(target);
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
+}
+
 /// Clear MEMORY.md, preserving existing content in a numbered backup.
 pub fn clear_memory(cwd: &Path) -> Result<MemoryClearResult> {
     let path = memory_file_for(cwd)?;
@@ -346,5 +478,28 @@ mod tests {
         let path = append_memory_with_kind(temp.path(), MemoryKind::Reference, "docs url").unwrap();
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("[reference] docs url"));
+    }
+
+    #[test]
+    fn verify_memory_references_checks_local_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("docs.md"), "hi").unwrap();
+        let content = "- 2026-01-01 [reference] `docs.md`\n- 2026-01-01 [reference] missing.md\n";
+        let refs = verify_memory_references_in_content(temp.path(), content);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].status, MemoryReferenceStatus::Ok);
+        assert_eq!(refs[0].target.as_deref(), Some("docs.md"));
+        assert_eq!(refs[1].status, MemoryReferenceStatus::Missing);
+    }
+
+    #[test]
+    fn verify_memory_references_marks_external_and_unparsed() {
+        let temp = tempfile::tempdir().unwrap();
+        let content = "- [reference] [api](https://example.test/docs)\n- [reference] ask Sam about this\n";
+        let refs = verify_memory_references_in_content(temp.path(), content);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].status, MemoryReferenceStatus::External);
+        assert_eq!(refs[0].target.as_deref(), Some("https://example.test/docs"));
+        assert_eq!(refs[1].status, MemoryReferenceStatus::Unparsed);
     }
 }
