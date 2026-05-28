@@ -93,6 +93,14 @@ struct UsageSummary {
     model: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionsCommand {
+    Show,
+    Set(Mode),
+    Forget,
+    UnsupportedBypass,
+}
+
 /// Process-global because the Ctrl-C handler (spawned by the `ctrlc`
 /// crate on a separate thread) needs to reach both pieces of state
 /// without a reference chain.
@@ -361,6 +369,10 @@ async fn repl_loop(
                 println!("{DIM}  cleared session-scoped \"always allow\" list.{RESET}");
                 continue;
             }
+            "/permissions" => {
+                print_permissions_status(mode.get());
+                continue;
+            }
             "/status" => {
                 print_session_status(
                     &provider,
@@ -453,6 +465,25 @@ async fn repl_loop(
         }
         if let Some(rest) = trimmed.strip_prefix("/memory ") {
             print_memory(rest.trim());
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/permissions ") {
+            match parse_permissions_command(rest) {
+                PermissionsCommand::Show => print_permissions_status(mode.get()),
+                PermissionsCommand::Set(new_mode) => {
+                    mode.set(new_mode);
+                    announce_mode_change(new_mode);
+                }
+                PermissionsCommand::Forget => {
+                    approvals.forget();
+                    println!("{DIM}  cleared session-scoped \"always allow\" list.{RESET}");
+                }
+                PermissionsCommand::UnsupportedBypass => {
+                    println!(
+                        "{DIM}  native bypassPermissions is intentionally unavailable. Use default, acceptEdits, or plan.{RESET}"
+                    );
+                }
+            }
             continue;
         }
         if trimmed == "/agent" {
@@ -744,6 +775,7 @@ fn print_help() {
     println!("{DIM}  /help     — show this message{RESET}");
     println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
+    println!("{DIM}  /permissions [default|acceptEdits|plan|forget]{RESET}");
     println!("{DIM}  /status   — show current REPL session status{RESET}");
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
     println!("{DIM}  /config   — show active configuration summary (/config path for file path){RESET}");
@@ -764,6 +796,29 @@ fn print_help() {
     println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
     println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");
     println!();
+}
+
+fn parse_permissions_command(input: &str) -> PermissionsCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "show" | "status" => PermissionsCommand::Show,
+        "default" | "normal" => PermissionsCommand::Set(Mode::Normal),
+        "acceptedits" | "accept-edits" | "accept_edits" => {
+            PermissionsCommand::Set(Mode::AcceptEdits)
+        }
+        "plan" => PermissionsCommand::Set(Mode::Plan),
+        "forget" | "clear" => PermissionsCommand::Forget,
+        "bypass" | "bypasspermissions" | "bypass-permissions" | "bypass_permissions" => {
+            PermissionsCommand::UnsupportedBypass
+        }
+        _ => PermissionsCommand::Show,
+    }
+}
+
+fn print_permissions_status(mode: Mode) {
+    println!("{DIM}  permission mode: {}{RESET}", mode_label(mode));
+    println!("{DIM}  supported: default, acceptEdits, plan{RESET}");
+    println!("{DIM}  native bypassPermissions is intentionally unavailable.{RESET}");
+    println!("{DIM}  use /permissions forget to clear session-scoped allow rules.{RESET}");
 }
 
 fn print_init_project() {
@@ -1743,6 +1798,38 @@ mod tests {
     #[test]
     fn usage_summary_empty_when_no_turns() {
         assert!(usage_summary(&[]).is_none());
+    }
+
+    #[test]
+    fn parse_permissions_command_maps_supported_modes() {
+        assert_eq!(
+            parse_permissions_command("acceptEdits"),
+            PermissionsCommand::Set(Mode::AcceptEdits)
+        );
+        assert_eq!(
+            parse_permissions_command("accept-edits"),
+            PermissionsCommand::Set(Mode::AcceptEdits)
+        );
+        assert_eq!(
+            parse_permissions_command("default"),
+            PermissionsCommand::Set(Mode::Normal)
+        );
+        assert_eq!(
+            parse_permissions_command("plan"),
+            PermissionsCommand::Set(Mode::Plan)
+        );
+    }
+
+    #[test]
+    fn parse_permissions_command_handles_management_actions() {
+        assert_eq!(parse_permissions_command(""), PermissionsCommand::Show);
+        assert_eq!(parse_permissions_command("status"), PermissionsCommand::Show);
+        assert_eq!(parse_permissions_command("forget"), PermissionsCommand::Forget);
+        assert_eq!(
+            parse_permissions_command("bypassPermissions"),
+            PermissionsCommand::UnsupportedBypass
+        );
+        assert_eq!(parse_permissions_command("wat"), PermissionsCommand::Show);
     }
 
     #[test]

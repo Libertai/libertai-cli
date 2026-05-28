@@ -28,6 +28,10 @@ SDK; those are flagged **(upstream)**.
 - **`libertai hermes` launcher** (`eeb433f`) — Hermes Agent (Nous Research)
   launched against LibertAI credentials. Not part of `libertai code`, listed
   here so the next refresh of the parity doc doesn't list it as "missing."
+- **CLI `/permissions` command** — reports the current native permission
+  mode, switches among `default`, `acceptEdits`, and `plan`, clears
+  session-scoped allow rules, and documents that native `bypassPermissions`
+  is intentionally unavailable.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
@@ -197,7 +201,7 @@ on-disk `~/.config/libertai/allow-rules.toml`: array of
 ### 2D. Surface pi's slash commands in REPL
 
 The libertai-cli REPL handles `/help`, `/plan`, `/clear`, `/exit`,
-`/forget`, `/remember`, `/memory`, `/init`, `/agents`, `/agent`,
+`/forget`, `/permissions`, `/remember`, `/memory`, `/init`, `/agents`, `/agent`,
 `/template`, custom `/<name>` templates, `/status`, `/usage`/`/cost`,
 `/config`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
 (`/compact`, `/resume`, `/fork`, `/export`, `/thinking`, `/theme`,
