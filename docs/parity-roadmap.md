@@ -127,7 +127,9 @@ SDK; those are flagged **(upstream)**.
   `pi::app::build_system_prompt` when cwd is a git work tree.
 - **Phase 1D / parity G** (plan-mode prompt swap):
   `src/commands/code_mode_prompt.rs` prepends `## Plan mode` guidance to
-  `append_system_prompt` when sessions start under `Mode::Plan`.
+  `append_system_prompt` when sessions start under `Mode::Plan`, and
+  the interactive CLI now prompts to approve the plan and switch back
+  to normal mode after a successful plan-mode turn.
 - **Parity B expansion** (executing-actions-with-care): skill section
   expanded to parity-doc target depth with reversibility, blast-radius,
   risky-op categories, scope-of-authorization, investigate-before-bypass.

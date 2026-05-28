@@ -994,6 +994,12 @@ async fn repl_loop(
                     msg.usage.input,
                     msg.usage.output,
                 );
+                if matches!(mode.get(), Mode::Plan) && prompt_plan_exit_handoff()? {
+                    mode.set(Mode::Normal);
+                    println!(
+                        "{DIM}  → plan approved. normal mode is active; mutating tools are back online.{RESET}"
+                    );
+                }
             }
             Err(PiError::Aborted) => {
                 println!();
@@ -1042,6 +1048,46 @@ fn announce_mode_change(new_mode: Mode) {
     // Trailing blank line so the next read_line's first paint doesn't
     // overwrite the status message we just emitted.
     println!();
+}
+
+fn prompt_plan_exit_handoff() -> Result<bool> {
+    let mut stderr = io::stderr();
+    eprintln!();
+    eprintln!("  \x1b[36;1m⎯ plan ready for approval ⎯\x1b[0m");
+    eprint!("  \x1b[2m[a]\x1b[0m approve plan and switch to normal mode  ");
+    eprint!("\x1b[2m[d]\x1b[0m keep planning: ");
+    let _ = stderr.flush();
+
+    let _guard = match RawModeGuard::enter() {
+        Ok(g) => g,
+        Err(_) => {
+            let mut line = String::new();
+            let _ = io::stdin().read_line(&mut line);
+            eprintln!();
+            return Ok(parse_plan_exit_choice(&line));
+        }
+    };
+    let approved = loop {
+        match event::read() {
+            Ok(Event::Key(KeyEvent { code, .. })) => match code {
+                KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Enter => break true,
+                KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc => break false,
+                _ => continue,
+            },
+            Ok(_) => continue,
+            Err(e) => return Err(anyhow::anyhow!("read plan approval: {e}")),
+        }
+    };
+    drop(_guard);
+    eprintln!(
+        "\x1b[2m{}\x1b[0m",
+        if approved { "approved" } else { "kept in plan mode" }
+    );
+    Ok(approved)
+}
+
+fn parse_plan_exit_choice(line: &str) -> bool {
+    matches!(line.trim().chars().next(), Some('a') | Some('A') | None)
 }
 
 async fn build_handle(
@@ -3868,6 +3914,16 @@ mod tests {
             PermissionsCommand::UnsupportedBypass
         );
         assert_eq!(parse_permissions_command("wat"), PermissionsCommand::Show);
+    }
+
+    #[test]
+    fn parse_plan_exit_choice_accepts_approve_and_enter() {
+        assert!(parse_plan_exit_choice("a"));
+        assert!(parse_plan_exit_choice("A"));
+        assert!(parse_plan_exit_choice(""));
+        assert!(parse_plan_exit_choice("\n"));
+        assert!(!parse_plan_exit_choice("d"));
+        assert!(!parse_plan_exit_choice("no"));
     }
 
     #[test]
