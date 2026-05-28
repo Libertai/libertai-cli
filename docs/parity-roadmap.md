@@ -197,7 +197,7 @@ on-disk `~/.config/libertai/allow-rules.toml`: array of
 ### 2D. Surface pi's slash commands in REPL
 
 The libertai-cli REPL handles `/help`, `/plan`, `/clear`, `/exit`,
-`/forget`, `/remember`, `/memory`, `/agents`, `/agent`, `/status`,
+`/forget`, `/remember`, `/memory`, `/init`, `/agents`, `/agent`, `/status`,
 `/usage`/`/cost`, `/config`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
 (`/compact`, `/resume`, `/fork`, `/export`, `/thinking`, `/theme`,
 `/scoped-models`, `/template`, `/share`, `/login`, `/logout`,
@@ -215,6 +215,15 @@ local-command set. Add help routing so `/help` includes pi's commands.
 `fcff279`, later extended with `/status /config /output-style /vim
 /ide /bug`); the remaining palette commands and shared dispatcher
 plumbing are still TODO.
+
+### 2F. Native `/init`
+
+Shipped: CLI and desktop `/init` call `code_init::init_project`, which
+creates `AGENTS.md` when missing and preserves existing files. The
+generated file is deterministic and based on visible repo manifests
+(`Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`) plus common
+directory names. Remaining work is richer project-specific inference
+and optional editing/merge UI.
 
 ### 2E. `!` shell prefix in REPL
 

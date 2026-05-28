@@ -384,6 +384,10 @@ async fn repl_loop(
                 print_memory("show");
                 continue;
             }
+            "/init" => {
+                print_init_project();
+                continue;
+            }
             "/agents" => {
                 print_agents();
                 continue;
@@ -718,6 +722,7 @@ fn print_help() {
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
     println!("{DIM}  /config   — show active configuration summary (/config path for file path){RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
+    println!("{DIM}  /init     — create AGENTS.md for this project if missing{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
     println!("{DIM}  /agent <name> <task> — run a named sub-agent task{RESET}");
     println!("{DIM}  /output-style <default|concise|explanatory|review|status>{RESET}");
@@ -732,6 +737,31 @@ fn print_help() {
     println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
     println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");
     println!();
+}
+
+fn print_init_project() {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /init: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    match crate::commands::code_init::init_project(&cwd) {
+        Ok(result) if result.created => {
+            println!("{BOLD}init{RESET}");
+            println!("{DIM}  created: {}{RESET}", result.path.display());
+            println!("{DIM}  future sessions in this tree will load it automatically.{RESET}");
+            println!();
+        }
+        Ok(result) => {
+            println!("{BOLD}init{RESET}");
+            println!("{DIM}  AGENTS.md already exists: {}{RESET}", result.path.display());
+            println!("{DIM}  left existing content unchanged.{RESET}");
+            println!();
+        }
+        Err(e) => eprintln!("{DIM}  /init: failed: {e:#}{RESET}"),
+    }
 }
 
 fn print_memory(action: &str) {
