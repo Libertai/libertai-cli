@@ -363,4 +363,16 @@ mod tests {
         let names = active_skill_names(SkillPillar::Code, None).expect("names");
         assert_eq!(names, vec!["libertai-code-workflow", "libertai-harness"]);
     }
+
+    #[test]
+    fn code_prompt_includes_auto_memory_protocol() {
+        let prompt = prompt_for_pillar(SkillPillar::Code, None)
+            .expect("prompt")
+            .expect("code prompt");
+        assert!(prompt.contains("## Auto memory"));
+        assert!(prompt.contains("stable user preferences"));
+        assert!(prompt.contains("durable repository facts"));
+        assert!(prompt.contains("Do not save transient facts"));
+        assert!(prompt.contains("/remember <kind>: <short fact>"));
+    }
 }

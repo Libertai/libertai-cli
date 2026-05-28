@@ -24,7 +24,8 @@ SDK; those are flagged **(upstream)**.
   (`src/agent_skills/libertai-harness/SKILL.md`); covers parity-doc Section A
   (terse responses, exploratory framing, `file_path:line`, parallel tool
   use, end-of-turn brevity), Section C (tool posture), Section D (per-tool
-  notes).
+  notes), and the auto-memory protocol for when to save `user`,
+  `feedback`, `project`, and `reference` memories.
 - **`libertai hermes` launcher** (`eeb433f`) — Hermes Agent (Nous Research)
   launched against LibertAI credentials. Not part of `libertai code`, listed
   here so the next refresh of the parity doc doesn't list it as "missing."
@@ -88,7 +89,9 @@ SDK; those are flagged **(upstream)**.
   sidecar Markdown files under `memory/<kind>/`; `/memory files` lists
   those sidecars, `/memory import <path>` imports local Markdown/text
   into project memory with source provenance, and `/memory clear` backs
-  sidecars up with the index.
+  sidecars up with the index. The built-in harness now tells the model
+  when to save durable memories, when to ask first, and what not to
+  persist.
 - **CLI `/review`, `/security-review`, and `/pr_comments` commands** —
   REPL users can dispatch the same structured review and PR-comment
   prompts already used by the desktop slash palette.
@@ -157,10 +160,13 @@ SDK; those are flagged **(upstream)**.
   `pi::app::load_project_memory` reads `<PI_PROJECT_MEMORY_DIR>/<encoded-cwd>/MEMORY.md`;
   libertai-cli sets the env to `~/.config/libertai/projects` (overridable
   via `LIBERTAI_HOME`) and ships a `/remember <text>` REPL command in
-  `src/commands/code_memory.rs`.
+  `src/commands/code_memory.rs`; the harness now carries the
+  Claude-style auto-memory save/avoid/verify protocol for the typed
+  memory categories.
 
-After this sprint, parity-doc Sections A–G are all shipped. Section H
-(per-subagent prompts) remains gated on Phase 4D named-agent registry.
+After this sprint, parity-doc Sections A–G are all shipped, including
+the model-facing memory guidance. Section H (per-subagent prompts)
+remains gated on Phase 4D named-agent registry.
 
 `../libertai-code-desktop/docs/claude-code-parity.md` has been refreshed
 to move AcceptEdits, `libertai-harness`, desktop `!cmd`, custom slash
@@ -212,9 +218,7 @@ Port the meat of parity-doc Section A into the existing
 9. *End-of-turn = one or two sentences, not a recap.*
 10. *Make independent tool calls in parallel.*
 
-**Files**: `src/skills_content/libertai-harness/SKILL.md`.
-**Effort**: S (half-day). Pure prompt edits; lint-test by running a
-sample session and checking output shape.
+**Status**: shipped in `src/agent_skills/libertai-harness/SKILL.md`.
 
 ### 1B. Per-tool usage notes (upstream)
 
