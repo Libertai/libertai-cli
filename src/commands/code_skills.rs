@@ -4,10 +4,11 @@
 //! a skill directory containing `SKILL.md` with YAML frontmatter and a
 //! Markdown body. LibertAI-specific routing lives under `metadata.*`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillPillar {
@@ -50,6 +51,21 @@ pub enum SkillSource {
     Builtin,
     Project(PathBuf),
     User(PathBuf),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillInventoryEntry {
+    pub name: String,
+    pub description: String,
+    pub allowed_tools: Option<String>,
+    pub source: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DisabledSkillsConfig {
+    #[serde(default)]
+    disabled: Vec<String>,
 }
 
 struct BuiltinSkill {
@@ -118,6 +134,40 @@ pub fn active_skill_names(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Vec
 }
 
 pub fn active_skills(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Vec<AgentSkill>> {
+    let disabled = load_disabled_skill_names()?;
+    Ok(collect_matching_skills(pillar, cwd)?
+        .into_iter()
+        .filter(|skill| !disabled.contains(&skill.name))
+        .collect())
+}
+
+pub fn skill_inventory(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Vec<SkillInventoryEntry>> {
+    let disabled = load_disabled_skill_names()?;
+    Ok(collect_matching_skills(pillar, cwd)?
+        .into_iter()
+        .map(|skill| SkillInventoryEntry {
+            enabled: !disabled.contains(&skill.name),
+            name: skill.name,
+            description: skill.description,
+            allowed_tools: skill.allowed_tools,
+            source: source_label(&skill.source),
+        })
+        .collect())
+}
+
+pub fn set_skill_enabled(name: &str, enabled: bool) -> Result<()> {
+    let name = name.trim();
+    validate_name(name)?;
+    let mut disabled = load_disabled_skill_names()?;
+    if enabled {
+        disabled.remove(name);
+    } else {
+        disabled.insert(name.to_string());
+    }
+    save_disabled_skill_names(&disabled)
+}
+
+fn collect_matching_skills(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Vec<AgentSkill>> {
     let mut skills = Vec::new();
 
     for builtin in BUILTINS {
@@ -155,6 +205,42 @@ pub fn active_skills(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Vec<Agen
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills.dedup_by(|a, b| a.name == b.name);
     Ok(skills)
+}
+
+fn disabled_skills_path() -> Result<PathBuf> {
+    Ok(crate::config::libertai_config_dir()?.join("disabled-skills.toml"))
+}
+
+fn load_disabled_skill_names() -> Result<BTreeSet<String>> {
+    let path = disabled_skills_path()?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let cfg: DisabledSkillsConfig =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(cfg
+        .disabled
+        .into_iter()
+        .filter_map(|name| {
+            let name = name.trim().to_string();
+            validate_name(&name).ok().map(|_| name)
+        })
+        .collect())
+}
+
+fn save_disabled_skill_names(disabled: &BTreeSet<String>) -> Result<()> {
+    let path = disabled_skills_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let cfg = DisabledSkillsConfig {
+        disabled: disabled.iter().cloned().collect(),
+    };
+    let raw = toml::to_string_pretty(&cfg).context("serializing disabled skills")?;
+    std::fs::write(&path, raw).with_context(|| format!("writing {}", path.display()))
 }
 
 #[derive(Clone, Copy)]
@@ -362,6 +448,34 @@ mod tests {
         // alphabetically.
         let names = active_skill_names(SkillPillar::Code, None).expect("names");
         assert_eq!(names, vec!["libertai-code-workflow", "libertai-harness"]);
+    }
+
+    #[test]
+    fn inventory_entries_mark_disabled_names() {
+        let mut disabled = BTreeSet::new();
+        disabled.insert("libertai-harness".to_string());
+        let entries = collect_matching_skills(SkillPillar::Code, None)
+            .expect("skills")
+            .into_iter()
+            .map(|skill| SkillInventoryEntry {
+                enabled: !disabled.contains(&skill.name),
+                name: skill.name,
+                description: skill.description,
+                allowed_tools: skill.allowed_tools,
+                source: source_label(&skill.source),
+            })
+            .collect::<Vec<_>>();
+
+        let harness = entries
+            .iter()
+            .find(|skill| skill.name == "libertai-harness")
+            .expect("harness");
+        assert!(!harness.enabled);
+        let workflow = entries
+            .iter()
+            .find(|skill| skill.name == "libertai-code-workflow")
+            .expect("workflow");
+        assert!(workflow.enabled);
     }
 
     #[test]

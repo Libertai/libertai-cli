@@ -117,6 +117,10 @@ SDK; those are flagged **(upstream)**.
   approval-gated `notebook_execute` runs the system Jupyter CLI in place
   with a bounded timeout before returning an updated summary plus any
   supported image outputs.
+- **Skill disable registry** — native sessions skip skill names listed
+  in `~/.config/libertai/disabled-skills.toml`, allowing desktop and
+  future CLI surfaces to manage built-in, project, and user skills
+  without editing `SKILL.md` files.
 - **Tool-call loop guardrail** — every registered tool is wrapped by a
   shared guardrail that warns on repeated exact calls / same-tool loops
   and returns a synthetic tool error when a loop crosses the hard-stop
