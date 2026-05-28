@@ -2625,12 +2625,18 @@ fn build_agent_slash_prompt(query: &str) -> Result<String> {
 struct AgentSlashQuery<'a> {
     name: &'a str,
     task: &'a str,
-    worktree: bool,
+    isolation: Option<AgentSlashIsolation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentSlashIsolation {
+    Worktree,
+    SameCwd,
 }
 
 fn parse_agent_slash_query(query: &str) -> Result<AgentSlashQuery<'_>> {
     let raw = query.trim();
-    let mut worktree = false;
+    let mut isolation = None;
     let mut rest = raw;
     loop {
         let Some((head, tail)) = split_first_word(rest) else {
@@ -2638,11 +2644,11 @@ fn parse_agent_slash_query(query: &str) -> Result<AgentSlashQuery<'_>> {
         };
         match head {
             "--worktree" | "--isolation=worktree" => {
-                worktree = true;
+                isolation = Some(AgentSlashIsolation::Worktree);
                 rest = tail.trim_start();
             }
             "--same-cwd" | "--isolation=same-cwd" => {
-                worktree = false;
+                isolation = Some(AgentSlashIsolation::SameCwd);
                 rest = tail.trim_start();
             }
             _ => break,
@@ -2659,7 +2665,7 @@ fn parse_agent_slash_query(query: &str) -> Result<AgentSlashQuery<'_>> {
     Ok(AgentSlashQuery {
         name,
         task,
-        worktree,
+        isolation,
     })
 }
 
@@ -2698,7 +2704,12 @@ fn build_agent_prompt_from_defs(
         };
         anyhow::bail!("unknown agent `{}` ({suffix})", query.name);
     };
-    let isolation = if query.worktree {
+    let use_worktree = match query.isolation {
+        Some(AgentSlashIsolation::Worktree) => true,
+        Some(AgentSlashIsolation::SameCwd) => false,
+        None => agent.worktree,
+    };
+    let isolation = if use_worktree {
         " and isolation: \"worktree\""
     } else {
         ""
@@ -4056,7 +4067,7 @@ mod tests {
             AgentSlashQuery {
                 name: "reviewer",
                 task: "inspect src",
-                worktree: false
+                isolation: None
             }
         );
         assert_eq!(
@@ -4064,7 +4075,7 @@ mod tests {
             AgentSlashQuery {
                 name: "reviewer",
                 task: "inspect src",
-                worktree: true
+                isolation: Some(AgentSlashIsolation::Worktree)
             }
         );
         assert_eq!(
@@ -4072,7 +4083,7 @@ mod tests {
             AgentSlashQuery {
                 name: "reviewer",
                 task: "inspect src",
-                worktree: true
+                isolation: Some(AgentSlashIsolation::Worktree)
             }
         );
         assert_eq!(
@@ -4080,7 +4091,7 @@ mod tests {
             AgentSlashQuery {
                 name: "reviewer",
                 task: "inspect src",
-                worktree: false
+                isolation: Some(AgentSlashIsolation::SameCwd)
             }
         );
         assert!(parse_agent_slash_query("reviewer").is_err());
@@ -4180,6 +4191,7 @@ mod tests {
             description: "Reviews changes".to_string(),
             tools: None,
             model: None,
+            worktree: false,
             system_prompt: "Review carefully.".to_string(),
             source: crate::commands::code_agents::AgentSource::Project(PathBuf::from(
                 "/tmp/.claude/agents",
@@ -4189,7 +4201,7 @@ mod tests {
             &AgentSlashQuery {
                 name: "rev",
                 task: "check the diff",
-                worktree: false,
+                isolation: None,
             },
             &agents,
         )
@@ -4205,6 +4217,7 @@ mod tests {
             description: "Reviews changes".to_string(),
             tools: None,
             model: None,
+            worktree: false,
             system_prompt: "Review carefully.".to_string(),
             source: crate::commands::code_agents::AgentSource::Project(PathBuf::from(
                 "/tmp/.claude/agents",
@@ -4214,13 +4227,49 @@ mod tests {
             &AgentSlashQuery {
                 name: "reviewer",
                 task: "check the diff",
-                worktree: true,
+                isolation: Some(AgentSlashIsolation::Worktree),
             },
             &agents,
         )
         .unwrap();
         assert!(prompt.contains("subagent_type \"reviewer\""));
         assert!(prompt.contains("isolation: \"worktree\""));
+    }
+
+    #[test]
+    fn build_agent_prompt_from_defs_uses_worktree_default() {
+        let agents = vec![crate::commands::code_agents::AgentDefinition {
+            name: "reviewer".to_string(),
+            description: "Reviews changes".to_string(),
+            tools: None,
+            model: None,
+            worktree: true,
+            system_prompt: "Review carefully.".to_string(),
+            source: crate::commands::code_agents::AgentSource::Project(PathBuf::from(
+                "/tmp/.claude/agents",
+            )),
+        }];
+        let prompt = build_agent_prompt_from_defs(
+            &AgentSlashQuery {
+                name: "reviewer",
+                task: "check the diff",
+                isolation: None,
+            },
+            &agents,
+        )
+        .unwrap();
+        assert!(prompt.contains("isolation: \"worktree\""));
+
+        let prompt = build_agent_prompt_from_defs(
+            &AgentSlashQuery {
+                name: "reviewer",
+                task: "check the diff",
+                isolation: Some(AgentSlashIsolation::SameCwd),
+            },
+            &agents,
+        )
+        .unwrap();
+        assert!(!prompt.contains("isolation: \"worktree\""));
     }
 
     #[test]

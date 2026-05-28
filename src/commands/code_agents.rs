@@ -21,6 +21,7 @@ pub struct AgentDefinition {
     pub description: String,
     pub tools: Option<Vec<String>>,
     pub model: Option<String>,
+    pub worktree: bool,
     pub system_prompt: String,
     pub source: AgentSource,
 }
@@ -104,6 +105,7 @@ pub(crate) fn parse_agent_md(
     let mut description = None;
     let mut tools = None;
     let mut model = None;
+    let mut worktree = false;
 
     for raw in frontmatter.lines() {
         let line = raw.trim();
@@ -118,6 +120,8 @@ pub(crate) fn parse_agent_md(
             "description" => description = Some(unquote(v)),
             "tools" | "allowed-tools" => tools = Some(parse_list(v)),
             "model" => model = Some(unquote(v)),
+            "worktree" => worktree = parse_bool(v),
+            "isolation" => worktree = unquote(v).eq_ignore_ascii_case("worktree"),
             _ => {}
         }
     }
@@ -138,6 +142,7 @@ pub(crate) fn parse_agent_md(
         description,
         tools: tools.filter(|t| !t.is_empty()),
         model: model.filter(|m| !m.trim().is_empty()),
+        worktree,
         system_prompt: body.trim().to_string(),
         source,
     })
@@ -187,6 +192,13 @@ fn parse_list(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn parse_bool(value: &str) -> bool {
+    matches!(
+        unquote(value).to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on" | "worktree"
+    )
+}
+
 fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 64 {
         anyhow::bail!("agent name must be 1-64 characters");
@@ -220,7 +232,27 @@ mod tests {
         assert_eq!(agent.description, "Reviews changes");
         assert_eq!(agent.tools, Some(vec!["read".into(), "grep".into(), "find".into()]));
         assert_eq!(agent.model.as_deref(), Some("gpt-4o"));
+        assert!(!agent.worktree);
         assert_eq!(agent.system_prompt, "Focus on correctness.");
+    }
+
+    #[test]
+    fn parses_agent_worktree_default() {
+        let agent = parse_agent_md(
+            "---\nname: reviewer\nworktree: true\n---\nFocus on correctness.",
+            Some("reviewer"),
+            AgentSource::User(PathBuf::from("/tmp/agents")),
+        )
+        .expect("parse");
+        assert!(agent.worktree);
+
+        let agent = parse_agent_md(
+            "---\nname: reviewer\nisolation: worktree\n---\nFocus on correctness.",
+            Some("reviewer"),
+            AgentSource::User(PathBuf::from("/tmp/agents")),
+        )
+        .expect("parse");
+        assert!(agent.worktree);
     }
 
     #[test]

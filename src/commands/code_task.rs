@@ -136,7 +136,8 @@ impl Tool for TaskTool {
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty());
-        let wants_worktree = task_wants_worktree(&input);
+        let requested_worktree = task_wants_worktree(&input);
+        let requested_same_cwd = task_wants_same_cwd(&input);
         let agent = match subagent_type {
             Some(name) => match code_agents::find_agent(&self.cwd, name) {
                 Ok(Some(agent)) => Some(agent),
@@ -229,6 +230,11 @@ impl Tool for TaskTool {
         }
         .child();
 
+        let wants_worktree = if requested_same_cwd {
+            false
+        } else {
+            requested_worktree || agent.as_ref().is_some_and(|a| a.worktree)
+        };
         let max_tokens = Some(crate::commands::code_session::DEFAULT_MAX_TOKENS);
         let worktree = if wants_worktree {
             match TaskWorktree::create(&self.cwd) {
@@ -357,6 +363,18 @@ fn task_wants_worktree(input: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+fn task_wants_same_cwd(input: &serde_json::Value) -> bool {
+    input
+        .get("same_cwd")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || input
+            .get("isolation")
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("same-cwd") || s.eq_ignore_ascii_case("same_cwd"))
+            .unwrap_or(false)
+}
+
 struct TaskWorktree {
     repo_root: PathBuf,
     path: PathBuf,
@@ -459,7 +477,7 @@ fn err_output(text: &str) -> ToolExecution {
 
 #[cfg(test)]
 mod tests {
-    use super::{task_wants_worktree, TaskWorktree};
+    use super::{task_wants_same_cwd, task_wants_worktree, TaskWorktree};
     use serde_json::json;
     use std::process::Command;
 
@@ -474,6 +492,14 @@ mod tests {
         assert!(task_wants_worktree(&json!({"isolation": "worktree"})));
         assert!(task_wants_worktree(&json!({"isolation": "WorkTree"})));
         assert!(!task_wants_worktree(&json!({"isolation": "same-cwd"})));
+    }
+
+    #[test]
+    fn task_same_cwd_flag_accepts_override() {
+        assert!(task_wants_same_cwd(&json!({"same_cwd": true})));
+        assert!(task_wants_same_cwd(&json!({"isolation": "same-cwd"})));
+        assert!(task_wants_same_cwd(&json!({"isolation": "same_cwd"})));
+        assert!(!task_wants_same_cwd(&json!({"isolation": "worktree"})));
     }
 
     #[test]
