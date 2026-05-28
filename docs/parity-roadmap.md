@@ -109,10 +109,11 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/mention` command** — REPL users can include a local UTF-8 text
   file in the next prompt with `/mention <path> [prompt]`.
 - **Native notebook tools** — `notebook_read` summarizes local `.ipynb`
-  files cell-by-cell, including stream/result/error output previews and
-  rich MIME hints, and emits supported image MIME payloads as image
-  blocks; approval-gated `notebook_edit` can replace, insert, or delete
-  notebook cells while preserving the rest of the JSON; and
+  files cell-by-cell, including stream/result/error output previews,
+  rich MIME hints, and rich non-image MIME previews for HTML, Markdown,
+  JSON, and data-resource table payloads, and emits supported image MIME
+  payloads as image blocks; approval-gated `notebook_edit` can replace,
+  insert, or delete notebook cells while preserving the rest of the JSON; and
   approval-gated `notebook_execute` runs the system Jupyter CLI in place
   with a bounded timeout before returning an updated summary plus any
   supported image outputs.

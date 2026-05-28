@@ -547,9 +547,15 @@ fn output_preview(output: &Value) -> String {
         }
     }
     if let Some(data) = output.get("data").and_then(Value::as_object) {
-        for key in ["text/plain", "text/markdown", "text/html", "application/json"] {
+        for key in [
+            "text/html",
+            "text/markdown",
+            "application/vnd.dataresource+json",
+            "application/json",
+            "text/plain",
+        ] {
             if let Some(value) = data.get(key) {
-                let text = source_to_string(Some(value));
+                let text = output_data_to_string(value);
                 if !text.is_empty() {
                     return text;
                 }
@@ -557,6 +563,17 @@ fn output_preview(output: &Value) -> String {
         }
     }
     String::new()
+}
+
+fn output_data_to_string(value: &Value) -> String {
+    let text = source_to_string(Some(value));
+    if !text.is_empty() {
+        return text;
+    }
+    if value.is_null() {
+        return String::new();
+    }
+    serde_json::to_string(value).unwrap_or_default()
 }
 
 fn output_label(output: &Value) -> String {
@@ -801,8 +818,36 @@ mod tests {
         assert!(summary.contains("Outputs: 3"));
         assert!(summary.contains("Output 0: stream/stdout"));
         assert!(summary.contains("Output 1: execute_result [text/html, text/plain]"));
+        assert!(summary.contains("<b>2</b>"));
         assert!(summary.contains("Output 2: error/ValueError"));
         assert!(summary.contains("ValueError: bad value"));
+    }
+
+    #[test]
+    fn output_preview_prefers_rich_mime_data() {
+        let output = json!({
+            "output_type": "display_data",
+            "data": {
+                "text/plain": ["plain table"],
+                "application/json": { "rows": 2 },
+                "text/html": ["<table><tr><td>rich</td></tr></table>"]
+            },
+            "metadata": {}
+        });
+        assert_eq!(
+            output_preview(&output),
+            "<table><tr><td>rich</td></tr></table>"
+        );
+
+        let json_output = json!({
+            "output_type": "display_data",
+            "data": {
+                "text/plain": ["plain"],
+                "application/json": { "rows": 2 }
+            },
+            "metadata": {}
+        });
+        assert_eq!(output_preview(&json_output), "{\"rows\":2}");
     }
 
     #[test]
