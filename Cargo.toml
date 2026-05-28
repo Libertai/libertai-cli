@@ -62,7 +62,8 @@ zeroize = { version = "1", features = ["derive"] }
 # - `AgentSessionHandle::set_max_tokens` (per-prompt cap override, upstream issue #63)
 # - `hashline_edit` op defaulting to "replace" when omitted by the model
 # - `AgentSessionHandle::prompt_with_content[_with_abort]` (multimodal SDK)
-pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "79ca6b6e", default-features = false }
+# - `AgentSessionHandle::{get_fork_messages,fork}` (desktop /fork integration)
+pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "92fc0b29", default-features = false }
 asupersync = { version = "=0.3.1", default-features = false, features = ["tls-native-roots"] }
 async-trait = "0.1"
 futures = "0.3"
@@ -99,9 +100,3 @@ tier2-probes = []
 [profile.release]
 lto = "thin"
 strip = true
-
-# Local dev override: iterating on pi's compact_force hook. Bump the
-# `rev` in [dependencies] once the pi commit is pushed and remove this
-# block.
-[patch."https://github.com/Libertai/pi_agent_rust"]
-pi_agent_rust = { path = "../pi_agent_rust" }
