@@ -94,6 +94,9 @@ SDK; those are flagged **(upstream)**.
   `/image <path> [prompt]` or the `/attach` alias.
 - **CLI `/mention` command** — REPL users can include a local UTF-8 text
   file in the next prompt with `/mention <path> [prompt]`.
+- **Native notebook tools** — `notebook_read` summarizes local `.ipynb`
+  files cell-by-cell, and approval-gated `notebook_edit` can replace,
+  insert, or delete notebook cells while preserving the rest of the JSON.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +

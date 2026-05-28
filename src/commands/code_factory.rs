@@ -24,11 +24,12 @@ use std::sync::Arc;
 use pi::sdk::{default_tool_registry, Config as PiConfig, Tool, ToolFactory, ToolRegistry};
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi};
-use crate::commands::code_task::TaskTool;
 use crate::commands::code_ask_user::AskUserTool;
+use crate::commands::code_task::TaskTool;
 use crate::commands::code_todo::TodoTool;
 use crate::commands::fetch_tool::FetchTool;
 use crate::commands::image_tool::ImageGenTool;
+use crate::commands::notebook_tool::{NotebookEditTool, NotebookReadTool};
 use crate::commands::search_tool::SearchTool;
 use crate::config::Config as LibertaiConfig;
 
@@ -128,6 +129,8 @@ pub struct FactoryFeatures {
     /// Enable the LibertAI `generate_image` tool. Requires a libertai-cli
     /// `Config` with a valid api_key.
     pub image: bool,
+    /// Enable native Jupyter notebook read/edit tools.
+    pub notebook: bool,
 }
 
 impl FactoryFeatures {
@@ -142,6 +145,7 @@ impl FactoryFeatures {
             search: true,
             fetch: true,
             image: true,
+            notebook: true,
         }
     }
 }
@@ -261,6 +265,19 @@ impl ToolFactory for LibertaiToolFactory {
         //      whenever the feature is on, regardless of cfg presence.
         if self.features.fetch {
             wrapped.push(Box::new(FetchTool::new()));
+        }
+
+        //    - `notebook_read` / `notebook_edit`: native .ipynb support.
+        //      Reads are safe in plan mode; edits go through the same
+        //      approval wrapper as pi's built-in mutating tools.
+        if self.features.notebook {
+            wrapped.push(Box::new(NotebookReadTool::new()));
+            wrapped.push(Box::new(ApprovalTool::new(
+                Box::new(NotebookEditTool::new()),
+                Arc::clone(&self.approvals),
+                self.mode.clone(),
+                Arc::clone(&self.ui),
+            )));
         }
 
         //    - `search` / `generate_image`: LibertAI-endpoint tools that

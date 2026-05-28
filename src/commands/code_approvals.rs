@@ -231,6 +231,18 @@ pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubjec
                 format!("hashline_edit({s})"),
             )
         }
+        "notebook_edit" => {
+            let path = input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<missing path>");
+            let s = path.to_string();
+            (
+                s.clone(),
+                AllowRule::exact(tool, s.clone()),
+                format!("notebook_edit({s})"),
+            )
+        }
         // Unknown/future wrapped tools fall back to exact raw-JSON matching
         // instead of whole-tool approval.
         other => {
@@ -681,6 +693,15 @@ pub fn preview_call(tool: &str, input: &serde_json::Value) -> String {
         "hashline_edit" => {
             let path = sanitize(field(input, "path").unwrap_or("<missing path>"));
             with_diff(format!("hashline_edit {path}"), tool, input)
+        }
+        "notebook_edit" => {
+            let path = sanitize(field(input, "path").unwrap_or("<missing path>"));
+            let mode = sanitize(field(input, "mode").unwrap_or("replace"));
+            let cell = input
+                .get("cell_index")
+                .and_then(|v| v.as_u64())
+                .map_or_else(|| "?".to_string(), |v| v.to_string());
+            format!("notebook_edit {path} cell {cell} ({mode})")
         }
         _ => {
             let raw = input.to_string();
