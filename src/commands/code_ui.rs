@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -63,6 +65,7 @@ const OUTPUT_STYLES: &[(&str, &str)] = &[
 const SHELL_ESCAPE_MAX_DISPLAY_BYTES: usize = 256 * 1024;
 const HISTORY_DEFAULT_LIMIT: usize = 20;
 const HISTORY_MAX_LIMIT: usize = 64;
+const OSC52_MAX_TEXT_BYTES: usize = 128 * 1024;
 
 /// Snapshot of the last completed turn's token usage. Written in
 /// `repl_loop` after each successful prompt, read in `repaint()` to
@@ -403,6 +406,10 @@ async fn repl_loop(
             }
             "/history" => {
                 print_history(&history, HISTORY_DEFAULT_LIMIT);
+                continue;
+            }
+            "/copy" => {
+                copy_last_assistant(&handle).await;
                 continue;
             }
             "/config" => {
@@ -847,6 +854,7 @@ fn print_help() {
     println!("{DIM}  /status   — show current REPL session status{RESET}");
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
+    println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
     println!("{DIM}  /config   — show active configuration summary (/config path for file path){RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
     println!("{DIM}  /init     — create AGENTS.md for this project if missing{RESET}");
@@ -866,6 +874,59 @@ fn print_help() {
     println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
     println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");
     println!();
+}
+
+async fn copy_last_assistant(handle: &AgentSessionHandle) {
+    let messages = match handle.messages().await {
+        Ok(messages) => messages,
+        Err(e) => {
+            eprintln!("{DIM}  /copy: could not read transcript: {e:#}{RESET}");
+            return;
+        }
+    };
+    let Some(text) = last_assistant_text(&messages) else {
+        println!("{DIM}  /copy: no assistant response to copy yet.{RESET}");
+        return;
+    };
+    if text.len() > OSC52_MAX_TEXT_BYTES {
+        eprintln!(
+            "{DIM}  /copy: last response is too large for terminal clipboard copy ({} bytes, max {}).{RESET}",
+            text.len(),
+            OSC52_MAX_TEXT_BYTES
+        );
+        return;
+    }
+    let sequence = osc52_sequence(&text);
+    print!("{sequence}");
+    let _ = io::stdout().flush();
+    println!("{DIM}  copied last assistant response to terminal clipboard.{RESET}");
+}
+
+fn last_assistant_text(messages: &[Message]) -> Option<String> {
+    messages.iter().rev().find_map(|message| {
+        let Message::Assistant(assistant) = message else {
+            return None;
+        };
+        let mut out = String::new();
+        for block in &assistant.content {
+            if let ContentBlock::Text(text) = block {
+                out.push_str(&text.text);
+                if !text.text.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+        }
+        let text = out.trim_end().to_string();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    })
+}
+
+fn osc52_sequence(text: &str) -> String {
+    format!("\x1b]52;c;{}\x07", BASE64_STANDARD.encode(text.as_bytes()))
 }
 
 fn parse_history_limit(input: &str) -> Result<usize> {
@@ -2182,6 +2243,51 @@ mod tests {
         assert!(rendered.contains("\"path\": \"src/lib.rs\""));
         assert!(rendered.contains("## Tool Result: read"));
         assert!(rendered.contains("contents"));
+    }
+
+    #[test]
+    fn last_assistant_text_extracts_latest_text_blocks_only() {
+        let messages = vec![
+            Message::assistant(pi::model::AssistantMessage {
+                content: vec![ContentBlock::Text(pi::model::TextContent::new("old"))],
+                api: "openai".to_string(),
+                provider: "libertai".to_string(),
+                model: "fast".to_string(),
+                usage: pi::model::Usage::default(),
+                stop_reason: pi::model::StopReason::Stop,
+                error_message: None,
+                timestamp: 1,
+            }),
+            Message::User(pi::model::UserMessage {
+                content: UserContent::Text("again".to_string()),
+                timestamp: 2,
+            }),
+            Message::assistant(pi::model::AssistantMessage {
+                content: vec![
+                    ContentBlock::Text(pi::model::TextContent::new("new")),
+                    ContentBlock::ToolCall(pi::model::ToolCall {
+                        id: "tool-1".to_string(),
+                        name: "read".to_string(),
+                        arguments: serde_json::json!({"path":"src/lib.rs"}),
+                        thought_signature: None,
+                    }),
+                    ContentBlock::Text(pi::model::TextContent::new("reply")),
+                ],
+                api: "openai".to_string(),
+                provider: "libertai".to_string(),
+                model: "fast".to_string(),
+                usage: pi::model::Usage::default(),
+                stop_reason: pi::model::StopReason::Stop,
+                error_message: None,
+                timestamp: 3,
+            }),
+        ];
+        assert_eq!(last_assistant_text(&messages).unwrap(), "new\nreply");
+    }
+
+    #[test]
+    fn osc52_sequence_base64_encodes_clipboard_text() {
+        assert_eq!(osc52_sequence("hello"), "\x1b]52;c;aGVsbG8=\x07");
     }
 
     #[test]
