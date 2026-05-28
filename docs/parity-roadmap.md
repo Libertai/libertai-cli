@@ -77,6 +77,9 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/review`, `/security-review`, and `/pr_comments` commands** —
   REPL users can dispatch the same structured review and PR-comment
   prompts already used by the desktop slash palette.
+- **CLI `/sandbox` command** — REPL users can inspect the effective
+  strict bash sandbox profile with `/sandbox [info]`; `/sandbox reload`
+  explains the CLI restart requirement.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
@@ -245,7 +248,7 @@ the saved rules.
 The libertai-cli REPL handles `/help`, `/plan`, `/clear`, `/exit`,
 `/forget`, `/permissions`, `/remember`, `/memory`, `/init`, `/agents`, `/agent`,
 `/template`, custom `/<name>` templates, `/status`, `/usage`/`/cost`,
-`/config`, `/settings`, `/model`, `/name`, `/new`, `/export`, `/share`, `/history`, `/copy`, `/hotkeys`, `/tree`, `/changelog`, `/reload`, `/resume`, `/fork`, `/compact`, `/doctor`, `/review`, `/security-review`, `/pr_comments`, `/thinking`, `/login`, `/logout`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
+`/config`, `/settings`, `/model`, `/name`, `/new`, `/export`, `/share`, `/history`, `/copy`, `/hotkeys`, `/tree`, `/changelog`, `/reload`, `/resume`, `/fork`, `/compact`, `/doctor`, `/review`, `/security-review`, `/pr_comments`, `/sandbox`, `/thinking`, `/login`, `/logout`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
 (`/compact`, `/resume`, `/fork`, `/export`, `/thinking`, `/theme`,
 `/scoped-models`, `/template`, `/share`, `/login`, `/logout`,
 `/history`, `/copy`, `/name`, `/hotkeys`, `/changelog`, `/tree`,

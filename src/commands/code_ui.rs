@@ -36,6 +36,7 @@ use pi::sdk::{
 
 use crate::commands::code_approvals::ApprovalState;
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
+use crate::commands::code_sandbox::{detect_strict_profile, format_profile_text};
 use crate::commands::code_session::{
     build_session_options, most_recent_session, CodeSessionConfig, SessionPersistence,
 };
@@ -417,6 +418,10 @@ async fn repl_loop(
                 .await;
                 continue;
             }
+            "/sandbox" => {
+                print_sandbox_status("info");
+                continue;
+            }
             "/usage" | "/cost" => {
                 print_usage_summary(usage_summary(&usage_history));
                 continue;
@@ -779,6 +784,10 @@ async fn repl_loop(
         }
         if let Some(rest) = trimmed.strip_prefix("/share ") {
             share_transcript(&handle, Some(rest.trim())).await;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/sandbox ") {
+            print_sandbox_status(rest.trim());
             continue;
         }
         if let Some((command, scope)) = review_command_parts(trimmed) {
@@ -1307,6 +1316,7 @@ fn print_help() {
     println!("{DIM}  /review [scope] — ask the agent to review current code changes{RESET}");
     println!("{DIM}  /security-review [scope] — ask for a focused security review{RESET}");
     println!("{DIM}  /pr_comments [scope] — ask the agent to inspect PR review comments{RESET}");
+    println!("{DIM}  /sandbox [info|reload] — inspect the bash sandbox profile{RESET}");
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
@@ -1511,6 +1521,52 @@ fn print_changelog(limit: usize) {
             }
         }
         Err(e) => eprintln!("{DIM}  /changelog: {e:#}{RESET}"),
+    }
+}
+
+fn print_sandbox_status(action: &str) {
+    match parse_sandbox_action(action) {
+        SandboxAction::Info => {
+            let cwd = match std::env::current_dir() {
+                Ok(cwd) => cwd,
+                Err(e) => {
+                    eprintln!("{DIM}  /sandbox: could not resolve cwd: {e}{RESET}");
+                    return;
+                }
+            };
+            let profile = detect_strict_profile(&cwd);
+            print!("{}", format_profile_text(&profile));
+        }
+        SandboxAction::Reload => {
+            println!(
+                "{DIM}  /sandbox reload: CLI sandbox policy is fixed when `libertai code` starts. Exit and restart with the desired --sandbox mode or policy settings.{RESET}"
+            );
+        }
+        SandboxAction::Unknown(value) => {
+            eprintln!("{DIM}  unknown /sandbox action: {value}. try \"info\" or \"reload\".{RESET}");
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxAction<'a> {
+    Info,
+    Reload,
+    Unknown(&'a str),
+}
+
+fn parse_sandbox_action(raw: &str) -> SandboxAction<'_> {
+    let value = raw.trim();
+    if value.is_empty()
+        || value.eq_ignore_ascii_case("info")
+        || value.eq_ignore_ascii_case("status")
+        || value.eq_ignore_ascii_case("show")
+    {
+        SandboxAction::Info
+    } else if value.eq_ignore_ascii_case("reload") {
+        SandboxAction::Reload
+    } else {
+        SandboxAction::Unknown(value)
     }
 }
 
@@ -3273,6 +3329,15 @@ mod tests {
         assert_eq!(parse_changelog_limit("0").unwrap(), 1);
         assert_eq!(parse_changelog_limit("999").unwrap(), CHANGELOG_MAX_LIMIT);
         assert!(parse_changelog_limit("recent").is_err());
+    }
+
+    #[test]
+    fn parse_sandbox_action_accepts_info_reload_and_unknown() {
+        assert_eq!(parse_sandbox_action(""), SandboxAction::Info);
+        assert_eq!(parse_sandbox_action("info"), SandboxAction::Info);
+        assert_eq!(parse_sandbox_action("STATUS"), SandboxAction::Info);
+        assert_eq!(parse_sandbox_action("reload"), SandboxAction::Reload);
+        assert_eq!(parse_sandbox_action("reset"), SandboxAction::Unknown("reset"));
     }
 
     #[test]
