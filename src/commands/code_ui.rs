@@ -67,6 +67,8 @@ const HISTORY_DEFAULT_LIMIT: usize = 20;
 const HISTORY_MAX_LIMIT: usize = 64;
 const OSC52_MAX_TEXT_BYTES: usize = 128 * 1024;
 const TREE_MAX_ENTRIES: usize = 200;
+const CHANGELOG_DEFAULT_LIMIT: usize = 10;
+const CHANGELOG_MAX_LIMIT: usize = 50;
 
 /// Snapshot of the last completed turn's token usage. Written in
 /// `repl_loop` after each successful prompt, read in `repaint()` to
@@ -425,6 +427,10 @@ async fn repl_loop(
                 print_project_tree(None);
                 continue;
             }
+            "/changelog" => {
+                print_changelog(CHANGELOG_DEFAULT_LIMIT);
+                continue;
+            }
             "/memory" => {
                 print_memory("show");
                 continue;
@@ -521,6 +527,13 @@ async fn repl_loop(
         }
         if let Some(rest) = trimmed.strip_prefix("/tree ") {
             print_project_tree(Some(rest.trim()));
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/changelog ") {
+            match parse_changelog_limit(rest) {
+                Ok(limit) => print_changelog(limit),
+                Err(e) => eprintln!("{DIM}  /changelog: {e:#}{RESET}"),
+            }
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/memory ") {
@@ -883,6 +896,7 @@ fn print_help() {
     println!("{DIM}  /config   — show active configuration summary (/settings is an alias){RESET}");
     println!("{DIM}  /hotkeys  — show input bar keyboard controls{RESET}");
     println!("{DIM}  /tree [path] — show a bounded project tree{RESET}");
+    println!("{DIM}  /changelog [count] — show recent git commits{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
     println!("{DIM}  /init     — create AGENTS.md for this project if missing{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
@@ -1048,6 +1062,62 @@ fn should_skip_tree_entry(name: &str) -> bool {
             | ".venv"
             | "__pycache__"
     )
+}
+
+fn parse_changelog_limit(input: &str) -> Result<usize> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Ok(CHANGELOG_DEFAULT_LIMIT);
+    }
+    let limit = value
+        .parse::<usize>()
+        .context("usage: /changelog [count]")?
+        .clamp(1, CHANGELOG_MAX_LIMIT);
+    Ok(limit)
+}
+
+fn print_changelog(limit: usize) {
+    match recent_git_commits(limit) {
+        Ok(lines) if lines.is_empty() => println!("{DIM}  /changelog: no commits found.{RESET}"),
+        Ok(lines) => {
+            println!("{BOLD}changelog{RESET}");
+            for line in lines {
+                println!("  {line}");
+            }
+        }
+        Err(e) => eprintln!("{DIM}  /changelog: {e:#}{RESET}"),
+    }
+}
+
+fn recent_git_commits(limit: usize) -> Result<Vec<String>> {
+    let cwd = std::env::current_dir().context("resolve current directory")?;
+    recent_git_commits_in(&cwd, limit)
+}
+
+fn recent_git_commits_in(cwd: &Path, limit: usize) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .arg("log")
+        .arg(format!("-n{}", limit.clamp(1, CHANGELOG_MAX_LIMIT)))
+        .arg("--oneline")
+        .arg("--decorate")
+        .output()
+        .context("run git log")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = stderr.trim();
+        if message.is_empty() {
+            anyhow::bail!("not a git repository");
+        }
+        anyhow::bail!("{}", message);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect())
 }
 
 async fn copy_last_assistant(handle: &AgentSessionHandle) {
@@ -2330,6 +2400,27 @@ mod tests {
         assert!(
             rendered.find("src/").unwrap() < rendered.find("README.md").unwrap(),
             "directories should be printed before files"
+        );
+    }
+
+    #[test]
+    fn parse_changelog_limit_defaults_and_clamps() {
+        assert_eq!(parse_changelog_limit("").unwrap(), CHANGELOG_DEFAULT_LIMIT);
+        assert_eq!(parse_changelog_limit("3").unwrap(), 3);
+        assert_eq!(parse_changelog_limit("0").unwrap(), 1);
+        assert_eq!(parse_changelog_limit("999").unwrap(), CHANGELOG_MAX_LIMIT);
+        assert!(parse_changelog_limit("recent").is_err());
+    }
+
+    #[test]
+    fn recent_git_commits_reads_repo_history() {
+        let lines = recent_git_commits_in(Path::new(env!("CARGO_MANIFEST_DIR")), 1).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0]
+                .split_whitespace()
+                .next()
+                .is_some_and(|hash| hash.len() >= 7)
         );
     }
 
