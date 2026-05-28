@@ -112,6 +112,9 @@ SDK; those are flagged **(upstream)**.
 - **Upstream read de-duplication** — repeated unchanged reads of the
   same path/range now escalate from a stub, to a warning, to a blocked
   tool result; successful writes invalidate the read-repeat state.
+- **Upstream read secret redaction** — `pi_agent_rust` redacts common
+  credential prefixes and sensitive key/value fields from text `read`
+  output before the content enters the model context.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
@@ -362,14 +365,16 @@ registering) or `pi_agent_rust/src/tools/write.rs` (upstream, cleaner).
 
 ### 3D. Secret redaction on file reads (upstream)
 
-Known-prefix detector (`sk-`, `ghp_`, `xox*`, `AIza*`, etc.) plus
-sensitive query-param/body-key names. Applied to `read_file` output
-before it enters the model's context. Cribbed from
-`/tmp/hermes-agent/agent/redact.py`.
+Shipped upstream in the LibertAI fork: text `read` output is redacted
+after line numbering/truncation and before it is returned to the model.
+The detector covers common credential prefixes (`sk-`, `ghp_`,
+`github_pat_`, `xox*`, `AIza*`, `AKIA`/`ASIA`) plus sensitive
+assignment/query keys such as `api_key`, `token`, `password`,
+`client_secret`, and `private_key`. Redaction counts are reported in
+tool `details`.
 
 **Files**: `pi_agent_rust/src/tools/read.rs` + a new
 `pi_agent_rust/src/redact.rs`.
-**Effort**: S (1 day).
 
 ### 3E. Tool-call guardrail / loop detector
 
@@ -523,7 +528,7 @@ demand emerges.
 | 3A read-dedup | ✓ | — | Tool-level invariant shipped in LibertAI fork. |
 | 3B stale-write | ✓ | — | Tool-level invariant shipped in LibertAI fork. |
 | 3C sensitive-path deny | — | ✓ | Local wrapper protects desktop/CLI; upstream still cleaner long-term. |
-| 3D secret redaction | ✓ | — | Tool-level invariant. |
+| 3D secret redaction | ✓ | — | Tool-level invariant shipped in LibertAI fork. |
 | 3E loop detector | ✓ | ✓ | Wraps tools at factory level. |
 | 4A smart-approval | — | ✓ | Reuses our provider config. |
 | 4B skill-review fork | — | ✓ | Spawns child via SDK. |
