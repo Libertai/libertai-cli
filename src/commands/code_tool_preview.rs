@@ -92,10 +92,25 @@ fn hashline_preview(args: &Value) -> Option<String> {
 
 fn task_preview(args: &Value) -> Option<String> {
     let prompt = str_arg(args, "prompt")?;
-    match str_arg(args, "subagent_type") {
-        Some(agent) if !agent.trim().is_empty() => Some(format!("{agent}: {}", short(prompt))),
-        _ => Some(short(prompt)),
-    }
+    let isolation = task_worktree_requested(args)
+        .then_some("worktree")
+        .unwrap_or("same-cwd");
+    let head = match str_arg(args, "subagent_type") {
+        Some(agent) if !agent.trim().is_empty() => format!("{agent} [{isolation}]"),
+        _ => format!("[{isolation}]"),
+    };
+    Some(format!("{head}: {}", short(prompt)))
+}
+
+fn task_worktree_requested(args: &Value) -> bool {
+    args.get("worktree")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || args
+            .get("isolation")
+            .and_then(Value::as_str)
+            .map(|s| s.eq_ignore_ascii_case("worktree"))
+            .unwrap_or(false)
 }
 
 fn ask_user_preview(args: &Value) -> Option<String> {
@@ -233,7 +248,14 @@ mod tests {
                 "task",
                 &json!({"subagent_type":"reviewer","prompt":"inspect the diff"})
             ),
-            "task reviewer: inspect the diff"
+            "task reviewer [same-cwd]: inspect the diff"
+        );
+        assert_eq!(
+            tool_preview(
+                "task",
+                &json!({"subagent_type":"reviewer","prompt":"inspect the diff","worktree":true})
+            ),
+            "task reviewer [worktree]: inspect the diff"
         );
         assert_eq!(
             tool_preview("ask_user", &json!({"questions":[{"question":"Proceed?"}]})),

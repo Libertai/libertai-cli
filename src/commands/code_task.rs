@@ -10,8 +10,10 @@
 //! once we're at the cap, the parent factory stops registering `task`,
 //! so the agent sees it as unavailable and cannot chain further.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
@@ -100,6 +102,15 @@ impl Tool for TaskTool {
                 "subagent_type": {
                     "type": "string",
                     "description": "Optional named sub-agent from .claude/agents or .libertai/agents."
+                },
+                "worktree": {
+                    "type": "boolean",
+                    "description": "When true, run the child in a temporary git worktree checked out at HEAD."
+                },
+                "isolation": {
+                    "type": "string",
+                    "enum": ["same-cwd", "worktree"],
+                    "description": "Optional isolation mode. `worktree` is equivalent to worktree=true."
                 }
             },
             "required": ["prompt"]
@@ -125,6 +136,7 @@ impl Tool for TaskTool {
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        let wants_worktree = task_wants_worktree(&input);
         let agent = match subagent_type {
             Some(name) => match code_agents::find_agent(&self.cwd, name) {
                 Ok(Some(agent)) => Some(agent),
@@ -218,6 +230,22 @@ impl Tool for TaskTool {
         .child();
 
         let max_tokens = Some(crate::commands::code_session::DEFAULT_MAX_TOKENS);
+        let worktree = if wants_worktree {
+            match TaskWorktree::create(&self.cwd) {
+                Ok(worktree) => Some(worktree),
+                Err(e) => {
+                    return Ok(err_output(&format!(
+                        "task: could not create isolated worktree: {e:#}"
+                    )))
+                }
+            }
+        } else {
+            None
+        };
+        let child_cwd = worktree
+            .as_ref()
+            .map(|w| w.path.clone())
+            .unwrap_or_else(|| self.cwd.clone());
         let mut append_parts = Vec::new();
         if let Ok(Some(skills)) = code_skills::prompt_for_pillar(SkillPillar::Code, Some(&self.cwd))
         {
@@ -241,7 +269,7 @@ impl Tool for TaskTool {
         let options = build_session_options(CodeSessionConfig {
             provider: cfg.default_code_provider.clone(),
             model,
-            working_directory: Some(self.cwd.clone()),
+            working_directory: Some(child_cwd.clone()),
             include_cwd_in_prompt: true,
             max_tool_iterations: 25,
             tool_factory: Arc::new(factory),
@@ -262,6 +290,10 @@ impl Tool for TaskTool {
             eprintln!(
                 "\n  \x1b[2m[subagent:{}] running: {prompt}\x1b[0m",
                 agent.name
+            );
+        } else if wants_worktree {
+            eprintln!(
+                "\n  \x1b[2m[subagent] running in isolated worktree: {prompt}\x1b[0m"
             );
         } else {
             eprintln!("\n  \x1b[2m[subagent] running: {prompt}\x1b[0m");
@@ -306,6 +338,90 @@ impl Tool for TaskTool {
     }
 }
 
+fn task_wants_worktree(input: &serde_json::Value) -> bool {
+    if input
+        .get("worktree")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    input
+        .get("isolation")
+        .and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("worktree"))
+        .unwrap_or(false)
+}
+
+struct TaskWorktree {
+    repo_root: PathBuf,
+    path: PathBuf,
+    temp_root: PathBuf,
+}
+
+impl TaskWorktree {
+    fn create(cwd: &Path) -> Result<Self, String> {
+        let root = git_stdout(cwd, ["rev-parse", "--show-toplevel"])?;
+        let root = PathBuf::from(root.trim());
+        let temp_root = std::env::temp_dir().join(format!(
+            "libertai-task-worktree-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        std::fs::create_dir_all(&temp_root).map_err(|e| format!("tempdir: {e}"))?;
+        let path = temp_root.join("checkout");
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["worktree", "add", "--detach"])
+            .arg(&path)
+            .arg("HEAD")
+            .status()
+            .map_err(|e| format!("git worktree add: {e}"))?;
+        if !status.success() {
+            return Err(format!("git worktree add failed with status {status}"));
+        }
+        Ok(Self {
+            repo_root: root,
+            path,
+            temp_root,
+        })
+    }
+}
+
+impl Drop for TaskWorktree {
+    fn drop(&mut self) {
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&self.repo_root)
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.path)
+            .status();
+        let _ = std::fs::remove_dir_all(&self.temp_root);
+    }
+}
+
+fn unique_suffix() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(stderr.trim().to_string());
+    }
+    String::from_utf8(out.stdout).map_err(|e| format!("git output was not utf-8: {e}"))
+}
+
 /// Render events from the child session with a dim `subagent:` prefix
 /// so they're visually distinct from the parent's main stream.
 fn render_child(event: AgentEvent) {
@@ -335,4 +451,59 @@ fn err_output(text: &str) -> ToolExecution {
         is_error: true,
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{task_wants_worktree, TaskWorktree};
+    use serde_json::json;
+    use std::process::Command;
+
+    #[test]
+    fn task_worktree_flag_accepts_boolean() {
+        assert!(task_wants_worktree(&json!({"worktree": true})));
+        assert!(!task_wants_worktree(&json!({"worktree": false})));
+    }
+
+    #[test]
+    fn task_worktree_flag_accepts_isolation_mode() {
+        assert!(task_wants_worktree(&json!({"isolation": "worktree"})));
+        assert!(task_wants_worktree(&json!({"isolation": "WorkTree"})));
+        assert!(!task_wants_worktree(&json!({"isolation": "same-cwd"})));
+    }
+
+    #[test]
+    fn task_worktree_creates_checkout_and_cleans_temp_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init"]);
+        git(&repo, &["config", "user.email", "test@example.invalid"]);
+        git(&repo, &["config", "user.name", "Test User"]);
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "init"]);
+
+        let temp_root;
+        let checkout;
+        {
+            let worktree = TaskWorktree::create(&repo).unwrap();
+            temp_root = worktree.temp_root.clone();
+            checkout = worktree.path.clone();
+            assert!(checkout.join("README.md").exists());
+            assert!(temp_root.exists());
+        }
+        assert!(!checkout.exists());
+        assert!(!temp_root.exists());
+    }
+
+    fn git(cwd: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed with {status}");
+    }
 }
