@@ -109,6 +109,9 @@ SDK; those are flagged **(upstream)**.
 - **Upstream stale-write detection** — `pi_agent_rust` now shares
   read mtimes across built-in read/write/edit/hashline tools; writes
   attach a `_warning` when the target changed after the last read.
+- **Upstream read de-duplication** — repeated unchanged reads of the
+  same path/range now escalate from a stub, to a warning, to a blocked
+  tool result; successful writes invalidate the read-repeat state.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
@@ -327,14 +330,14 @@ Mostly Hermes-inspired. Each is small and independent.
 
 ### 3A. Read-dedup with mtime invalidation (upstream)
 
-Three-tier "unchanged-stub → already-read-warning → blocked" on
-repeated reads of the same `(path, offset, limit)` with unchanged
-mtime. Cache invalidated on every successful write
-(`/tmp/hermes-agent/tools/file_tools.py:487-654`).
+Shipped upstream in the LibertAI fork: repeated reads of the same
+`(path, offset, limit, hashline)` with unchanged mtime escalate through
+an unchanged-result stub, an `_warning`, then a blocked tool result.
+Successful `write`, `edit`, and `hashline_edit` calls invalidate the
+path's read-repeat state.
 
 **Files**: `pi_agent_rust/src/tools/read.rs` + write/edit invalidation
 hooks.
-**Effort**: S (1 day).
 
 ### 3B. Stale-write detection (upstream)
 
@@ -517,7 +520,7 @@ demand emerges.
 | 2C persistent allow-rules | — | ✓ | But the desktop reads the same file (see handoff). |
 | 2D pi slash routing | — | ✓ | Plumbing in REPL. |
 | 2E `!` shell prefix | — | ✓ | REPL parser. |
-| 3A read-dedup | ✓ | — | Tool-level invariant. |
+| 3A read-dedup | ✓ | — | Tool-level invariant shipped in LibertAI fork. |
 | 3B stale-write | ✓ | — | Tool-level invariant shipped in LibertAI fork. |
 | 3C sensitive-path deny | — | ✓ | Local wrapper protects desktop/CLI; upstream still cleaner long-term. |
 | 3D secret redaction | ✓ | — | Tool-level invariant. |
