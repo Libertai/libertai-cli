@@ -26,6 +26,7 @@ use pi::sdk::{default_tool_registry, Config as PiConfig, Tool, ToolFactory, Tool
 use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi};
 use crate::commands::code_ask_user::AskUserTool;
 use crate::commands::code_guardrail::{GuardrailTool, ToolGuardrailState};
+use crate::commands::code_notification::PushNotificationTool;
 use crate::commands::code_path_safety::{
     is_path_mutation_tool, safe_root_from_env, PathSafetyTool,
 };
@@ -139,6 +140,8 @@ pub struct FactoryFeatures {
     pub guardrails: bool,
     /// Enable sensitive-path write denials for mutating path tools.
     pub path_safety: bool,
+    /// Enable agent-callable user notifications.
+    pub notifications: bool,
 }
 
 impl FactoryFeatures {
@@ -156,6 +159,7 @@ impl FactoryFeatures {
             notebook: true,
             guardrails: true,
             path_safety: true,
+            notifications: true,
         }
     }
 }
@@ -277,6 +281,10 @@ impl ToolFactory for LibertaiToolFactory {
         //      whenever the feature is on, regardless of cfg presence.
         if self.features.fetch {
             wrapped.push(Box::new(FetchTool::new()));
+        }
+
+        if self.features.notifications {
+            wrapped.push(Box::new(PushNotificationTool::new(Arc::clone(&self.ui))));
         }
 
         //    - `notebook_read` / `notebook_edit`: native .ipynb support.

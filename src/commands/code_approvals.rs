@@ -66,6 +66,15 @@ pub enum AskOutcome {
     },
 }
 
+/// Result of an agent-requested desktop/user notification.
+#[derive(Debug, Clone)]
+pub enum NotifyOutcome {
+    /// The UI accepted or displayed the notification.
+    Sent,
+    /// The UI does not support notifications or they are disabled.
+    Skipped(String),
+}
+
 /// A single allow rule binding a tool to a command/path pattern.
 ///
 /// Prompt-created rules are exact, even when the command/path contains `*`.
@@ -358,6 +367,12 @@ pub trait ApprovalUi: Send + Sync {
             "cancelled": true,
             "reason": "RESUME_NOT_SUPPORTED",
         }))
+    }
+    /// Fire-and-forget user notification channel used by the
+    /// `push_notification` tool. Default keeps non-desktop clients
+    /// compiling and tells the model the notification was unavailable.
+    async fn notify(&self, _title: &str, _body: &str) -> NotifyOutcome {
+        NotifyOutcome::Skipped("NOTIFY_NOT_SUPPORTED".to_string())
     }
 }
 

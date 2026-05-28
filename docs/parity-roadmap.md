@@ -115,6 +115,9 @@ SDK; those are flagged **(upstream)**.
 - **Upstream read secret redaction** — `pi_agent_rust` redacts common
   credential prefixes and sensitive key/value fields from text `read`
   output before the content enters the model context.
+- **Agent-callable push notifications** — the native `push_notification`
+  tool lets an agent request a short user notification through the active
+  UI; non-notification clients report a skipped result instead of failing.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
