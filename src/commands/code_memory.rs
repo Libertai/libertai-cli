@@ -60,6 +60,13 @@ pub struct MemoryClearResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryImportResult {
+    pub path: PathBuf,
+    pub source_path: PathBuf,
+    pub bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedMemoryNote {
     pub kind: MemoryKind,
     pub text: String,
@@ -185,6 +192,36 @@ pub fn append_memory_with_kind(cwd: &Path, kind: MemoryKind, text: &str) -> Resu
     f.write_all(line.as_bytes())
         .with_context(|| format!("writing to {}", path.display()))?;
     Ok(path)
+}
+
+pub fn import_memory_file(cwd: &Path, source: &Path) -> Result<MemoryImportResult> {
+    const MAX_IMPORT_BYTES: usize = 256 * 1024;
+    let source_path = if source.is_absolute() {
+        source.to_path_buf()
+    } else {
+        cwd.join(source)
+    };
+    let meta = std::fs::metadata(&source_path)
+        .with_context(|| format!("reading metadata for {}", source_path.display()))?;
+    if !meta.is_file() {
+        anyhow::bail!("memory import source is not a file: {}", source_path.display());
+    }
+    if meta.len() > MAX_IMPORT_BYTES as u64 {
+        anyhow::bail!("memory import source is too large; keep imports under 256 KiB");
+    }
+    let content = std::fs::read_to_string(&source_path)
+        .with_context(|| format!("reading {}", source_path.display()))?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("memory import source is empty: {}", source_path.display());
+    }
+    let note = format!("Imported from `{}`.\n\n{}", source_path.display(), trimmed);
+    let path = append_memory_with_kind(cwd, MemoryKind::Project, &note)?;
+    Ok(MemoryImportResult {
+        path,
+        source_path,
+        bytes: content.len(),
+    })
 }
 
 fn write_memory_entry_file(
@@ -662,6 +699,23 @@ mod tests {
         let content = std::fs::read_to_string(&files[0].path).unwrap();
         assert!(content.contains("- kind: user"));
         assert!(content.contains("prefers terse answers"));
+    }
+
+    #[test]
+    fn import_memory_file_appends_source_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("CLAUDE.md");
+        std::fs::write(&source, "# Notes\n\n- run cargo test\n").unwrap();
+
+        let result = import_memory_file(temp.path(), Path::new("CLAUDE.md")).unwrap();
+        assert_eq!(result.source_path, source);
+        assert!(result.bytes > 0);
+
+        let content = std::fs::read_to_string(result.path).unwrap();
+        assert!(content.contains("[project] Imported from"));
+        assert!(content.contains("CLAUDE.md"));
+        assert!(content.contains("run cargo test"));
+        assert_eq!(list_memory_files(temp.path()).unwrap().len(), 1);
     }
 
     #[test]

@@ -1621,7 +1621,7 @@ fn print_help() {
     println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
     println!("{DIM}  /login    — run libertai login, then reload this REPL session{RESET}");
     println!("{DIM}  /logout   — run libertai logout, then reload this REPL session{RESET}");
-    println!("{DIM}  /memory   — show project memory (/memory edit|clear|files|references|path){RESET}");
+    println!("{DIM}  /memory   — show project memory (/memory edit|clear|files|references|import <path>|path){RESET}");
     println!("{DIM}  /init     — create AGENTS.md for this project if missing{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
     println!("{DIM}  /agent [--worktree] <name> <task> — run a named sub-agent task{RESET}");
@@ -2709,6 +2709,19 @@ fn print_memory(action: &str) {
         }
         return;
     }
+    if let Some(source) = memory_import_source(action) {
+        match crate::commands::code_memory::import_memory_file(&cwd, Path::new(source)) {
+            Ok(result) => {
+                println!("{BOLD}memory import{RESET}");
+                println!("{DIM}  source:{RESET} {}", result.source_path.display());
+                println!("{DIM}  imported:{RESET} {} bytes", result.bytes);
+                println!("{DIM}  memory path:{RESET} {}", result.path.display());
+                println!("{DIM}  changes take effect in new agent sessions.{RESET}");
+            }
+            Err(e) => eprintln!("{DIM}  /memory import: failed: {e:#}{RESET}"),
+        }
+        return;
+    }
     if action.eq_ignore_ascii_case("clear") {
         match crate::commands::code_memory::clear_memory(&cwd) {
             Ok(result) => {
@@ -2768,6 +2781,16 @@ fn print_memory(action: &str) {
         }
     }
     println!();
+}
+
+fn memory_import_source(action: &str) -> Option<&str> {
+    let trimmed = action.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let command = parts.next()?;
+    if !command.eq_ignore_ascii_case("import") {
+        return None;
+    }
+    parts.next().map(str::trim).filter(|source| !source.is_empty())
 }
 
 fn print_memory_references(refs: &[crate::commands::code_memory::MemoryReference]) {
@@ -4109,6 +4132,17 @@ mod tests {
     #[test]
     fn usage_summary_empty_when_no_turns() {
         assert!(usage_summary(&[]).is_none());
+    }
+
+    #[test]
+    fn memory_import_source_parses_path_argument() {
+        assert_eq!(memory_import_source("import CLAUDE.md"), Some("CLAUDE.md"));
+        assert_eq!(
+            memory_import_source("IMPORT docs/project notes.md"),
+            Some("docs/project notes.md")
+        );
+        assert_eq!(memory_import_source("files"), None);
+        assert_eq!(memory_import_source("import"), None);
     }
 
     #[test]
