@@ -121,7 +121,7 @@ impl Tool for TaskTool {
         &self,
         _tool_call_id: &str,
         input: serde_json::Value,
-        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+        on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> PiResult<ToolExecution> {
         let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
             Some(p) => p.to_string(),
@@ -317,7 +317,13 @@ impl Tool for TaskTool {
         };
         handle.set_max_tokens(max_tokens);
 
-        let assistant = match handle.prompt(prompt, render_child).await {
+        let child_updates: Option<Arc<dyn Fn(ToolUpdate) + Send + Sync>> =
+            on_update.map(Arc::from);
+        let render = {
+            let child_updates = child_updates.clone();
+            move |event: AgentEvent| render_child(event, child_updates.as_deref())
+        };
+        let assistant = match handle.prompt(prompt, render).await {
             Ok(msg) => msg,
             Err(e) => return Ok(err_output(&format!("task: run failed: {e}"))),
         };
@@ -517,7 +523,7 @@ fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String, Str
 
 /// Render events from the child session with a dim `subagent:` prefix
 /// so they're visually distinct from the parent's main stream.
-fn render_child(event: AgentEvent) {
+fn render_child(event: AgentEvent, on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>) {
     match event {
         AgentEvent::MessageUpdate {
             assistant_message_event: pi::model::AssistantMessageEvent::TextDelta { delta, .. },
@@ -526,15 +532,36 @@ fn render_child(event: AgentEvent) {
             use std::io::Write;
             eprint!("\x1b[2m{delta}\x1b[0m");
             let _ = std::io::stderr().flush();
+            send_child_update(on_update, "subagent_text_delta", &delta);
         }
         AgentEvent::ToolExecutionStart { tool_name, .. } => {
             eprintln!("\n  \x1b[2m[subagent tool] {tool_name}\x1b[0m");
+            send_child_update(
+                on_update,
+                "subagent_tool_start",
+                &format!("\n[subagent tool] {tool_name}\n"),
+            );
         }
         AgentEvent::AgentEnd { .. } => {
             eprintln!();
+            send_child_update(on_update, "subagent_end", "\n[subagent done]\n");
         }
         _ => {}
     }
+}
+
+fn send_child_update(
+    on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>,
+    kind: &str,
+    text: &str,
+) {
+    let Some(on_update) = on_update else {
+        return;
+    };
+    on_update(ToolUpdate {
+        content: vec![ContentBlock::Text(TextContent::new(text.to_string()))],
+        details: Some(serde_json::json!({ "kind": kind })),
+    });
 }
 
 fn err_output(text: &str) -> ToolExecution {
