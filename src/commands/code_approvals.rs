@@ -67,6 +67,12 @@ pub enum ToolPolicyDecision {
         updated_input: Option<serde_json::Value>,
         additional_context: Option<String>,
     },
+    Ask {
+        reason: Option<String>,
+        updated_input: Option<serde_json::Value>,
+        additional_context: Option<String>,
+    },
+    Defer,
     Deny { reason: Option<String> },
 }
 
@@ -588,6 +594,9 @@ impl Tool for ApprovalTool {
         if let ToolPolicyDecision::Deny { reason } = policy_decision.clone() {
             return Ok(denial_output(reason).into());
         }
+        if matches!(policy_decision, ToolPolicyDecision::Defer) {
+            return Ok(defer_output(tool_call_id, name, &input));
+        }
         let effective_input = policy_updated_input(&policy_decision, &input);
 
         // Plan mode short-circuit: mutating tools are auto-denied
@@ -613,7 +622,9 @@ impl Tool for ApprovalTool {
             );
         }
         let subject = approval_subject(name, &effective_input);
-        if self.state.is_pre_allowed(name, &subject.value) {
+        if !matches!(policy_decision, ToolPolicyDecision::Ask { .. })
+            && self.state.is_pre_allowed(name, &subject.value)
+        {
             return with_policy_context(
                 self.inner
                     .execute(tool_call_id, effective_input, on_update)
@@ -633,19 +644,32 @@ impl Tool for ApprovalTool {
         // Build sanitized display text from the *raw* input (not from
         // subject.value, which is unsanitized). preview_call handles
         // all sanitization and formatting.
-        let preview = preview_call(name, &effective_input);
+        let mut preview = preview_call(name, &effective_input);
+        if let ToolPolicyDecision::Ask {
+            reason: Some(reason),
+            ..
+        } = &policy_decision
+        {
+            preview = format!("{preview}\n\nPreToolUse hook requested confirmation: {reason}");
+        }
         let always_label = sanitize_inline(&subject.suggested_label);
         match self.ui.decide(name, &preview, &always_label).await {
             PromptChoice::Allow => {
-                self.inner
-                    .execute(tool_call_id, effective_input, on_update)
-                    .await
+                with_policy_context(
+                    self.inner
+                        .execute(tool_call_id, effective_input, on_update)
+                        .await,
+                    &policy_decision,
+                )
             }
             PromptChoice::AlwaysAllow => {
                 self.state.record_always(subject.suggested_rule);
-                self.inner
-                    .execute(tool_call_id, effective_input, on_update)
-                    .await
+                with_policy_context(
+                    self.inner
+                        .execute(tool_call_id, effective_input, on_update)
+                        .await,
+                    &policy_decision,
+                )
             }
             PromptChoice::Deny => Ok(denial_output(None).into()),
             PromptChoice::Paused {
@@ -688,6 +712,10 @@ fn policy_updated_input(
         ToolPolicyDecision::Allow {
             updated_input: Some(input),
             ..
+        }
+        | ToolPolicyDecision::Ask {
+            updated_input: Some(input),
+            ..
         } => input.clone(),
         _ => original.clone(),
     }
@@ -717,7 +745,26 @@ fn policy_additional_context(decision: &ToolPolicyDecision) -> Option<&str> {
             additional_context: Some(context),
             ..
         } if !context.trim().is_empty() => Some(context.as_str()),
+        ToolPolicyDecision::Ask {
+            additional_context: Some(context),
+            ..
+        } if !context.trim().is_empty() => Some(context.as_str()),
         _ => None,
+    }
+}
+
+fn defer_output(tool_call_id: &str, tool_name: &str, input: &serde_json::Value) -> ToolExecution {
+    ToolExecution::Paused {
+        request_id: if tool_call_id.is_empty() {
+            format!("pre-tool-defer-{tool_name}")
+        } else {
+            tool_call_id.to_string()
+        },
+        kind: "pre_tool_defer".to_string(),
+        payload: serde_json::json!({
+            "tool_name": tool_name,
+            "tool_input": input,
+        }),
     }
 }
 
@@ -963,6 +1010,20 @@ mod tests {
     }
 
     #[test]
+    fn policy_ask_can_replace_tool_input() {
+        let original = serde_json::json!({"command": "npm test"});
+        let decision = ToolPolicyDecision::Ask {
+            reason: Some("prefer lint first".to_string()),
+            updated_input: Some(serde_json::json!({"command": "npm run lint"})),
+            additional_context: None,
+        };
+        assert_eq!(
+            policy_updated_input(&decision, &original),
+            serde_json::json!({"command": "npm run lint"})
+        );
+    }
+
+    #[test]
     fn policy_context_appends_to_tool_output() {
         let output = ToolOutput {
             content: vec![ContentBlock::Text(TextContent::new("ok"))],
@@ -988,6 +1049,22 @@ mod tests {
             .join("\n");
         assert!(text.contains("ok"));
         assert!(text.contains("remember to cite files"));
+    }
+
+    #[test]
+    fn policy_defer_returns_pause_sentinel() {
+        let execution = defer_output("call-1", "read", &serde_json::json!({"path":"README.md"}));
+        let ToolExecution::Paused {
+            request_id,
+            kind,
+            payload,
+        } = execution
+        else {
+            panic!("expected paused output");
+        };
+        assert_eq!(request_id, "call-1");
+        assert_eq!(kind, "pre_tool_defer");
+        assert_eq!(payload["tool_name"], "read");
     }
 
     #[test]
