@@ -412,8 +412,12 @@ async fn repl_loop(
                 copy_last_assistant(&handle).await;
                 continue;
             }
-            "/config" => {
+            "/config" | "/settings" => {
                 print_config_status(&cfg);
+                continue;
+            }
+            "/hotkeys" => {
+                print_hotkeys();
                 continue;
             }
             "/memory" => {
@@ -485,6 +489,18 @@ async fn repl_loop(
                 match crate::config::config_path() {
                     Ok(path) => println!("{DIM}  config path: {}{RESET}", path.display()),
                     Err(e) => eprintln!("{DIM}  /config path: {e:#}{RESET}"),
+                }
+            } else {
+                print_config_status(&cfg);
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/settings ") {
+            let action = rest.trim();
+            if action.eq_ignore_ascii_case("path") {
+                match crate::config::config_path() {
+                    Ok(path) => println!("{DIM}  config path: {}{RESET}", path.display()),
+                    Err(e) => eprintln!("{DIM}  /settings path: {e:#}{RESET}"),
                 }
             } else {
                 print_config_status(&cfg);
@@ -855,7 +871,8 @@ fn print_help() {
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
-    println!("{DIM}  /config   — show active configuration summary (/config path for file path){RESET}");
+    println!("{DIM}  /config   — show active configuration summary (/settings is an alias){RESET}");
+    println!("{DIM}  /hotkeys  — show input bar keyboard controls{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|path){RESET}");
     println!("{DIM}  /init     — create AGENTS.md for this project if missing{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
@@ -874,6 +891,26 @@ fn print_help() {
     println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
     println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");
     println!();
+}
+
+fn hotkey_lines() -> &'static [&'static str] {
+    &[
+        "Shift+Tab — cycle default / acceptEdits / plan modes",
+        "Up / Down — walk submitted prompt history",
+        "Left / Right — move cursor in the current line",
+        "Backspace / Delete — edit the current line",
+        "Home / End — jump to start or end of the line",
+        "Enter — submit the current line",
+        "Ctrl+C — clear the current line or interrupt streaming",
+        "Ctrl+D — exit when the line is empty",
+    ]
+}
+
+fn print_hotkeys() {
+    println!("{BOLD}hotkeys{RESET}");
+    for line in hotkey_lines() {
+        println!("{DIM}  {line}{RESET}");
+    }
 }
 
 async fn copy_last_assistant(handle: &AgentSessionHandle) {
@@ -2121,6 +2158,15 @@ mod tests {
         assert_eq!(parse_history_limit("0").unwrap(), 1);
         assert_eq!(parse_history_limit("999").unwrap(), HISTORY_MAX_LIMIT);
         assert!(parse_history_limit("recent").is_err());
+    }
+
+    #[test]
+    fn hotkey_lines_include_mode_history_and_interrupt_controls() {
+        let joined = hotkey_lines().join("\n");
+        assert!(joined.contains("Shift+Tab"));
+        assert!(joined.contains("Up / Down"));
+        assert!(joined.contains("Ctrl+C"));
+        assert!(joined.contains("Ctrl+D"));
     }
 
     #[test]
