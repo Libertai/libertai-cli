@@ -245,6 +245,8 @@ pub struct HookCommandConfig {
     pub hook_type: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub url: String,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -288,6 +290,7 @@ impl Default for HookCommandConfig {
             if_condition: String::new(),
             hook_type: default_hook_type(),
             command: String::new(),
+            args: Vec::new(),
             url: String::new(),
             headers: HashMap::new(),
             allowed_env_vars: Vec::new(),

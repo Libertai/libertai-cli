@@ -469,7 +469,8 @@ fn run_detached_shell_hook(
     payload: &serde_json::Value,
     event_name: &str,
 ) -> HookRun {
-    let mut cmd = shell_command(&hook.command, hook.shell.trim());
+    let command = hook_command_line(hook);
+    let mut cmd = shell_command(&command, hook.shell.trim());
     let spawn = cmd
         .current_dir(cwd)
         .env("LIBERTAI_HOOK_EVENT", event_name)
@@ -699,7 +700,8 @@ fn run_shell_hook(
     payload: &serde_json::Value,
     event_name: &str,
 ) -> HookRun {
-    let mut cmd = shell_command(&hook.command, hook.shell.trim());
+    let command = hook_command_line(hook);
+    let mut cmd = shell_command(&command, hook.shell.trim());
     let spawn = cmd
         .current_dir(cwd)
         .env("LIBERTAI_HOOK_EVENT", event_name)
@@ -800,6 +802,38 @@ fn shell_command(command: &str, shell: &str) -> Command {
         cmd.args(["-c", command]);
     }
     cmd
+}
+
+pub fn hook_command_display(hook: &HookCommandConfig) -> String {
+    hook_command_line(hook)
+}
+
+fn hook_command_line(hook: &HookCommandConfig) -> String {
+    command_line_from_parts(&hook.command, &hook.args)
+}
+
+fn command_line_from_parts(command: &str, args: &[String]) -> String {
+    let mut parts = Vec::new();
+    if !command.trim().is_empty() {
+        parts.push(command.to_string());
+    }
+    for arg in args {
+        parts.push(shell_quote_arg(arg));
+    }
+    parts.join(" ")
+}
+
+fn shell_quote_arg(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn hook_matches_tool(hook: &HookCommandConfig, tool_name: &str) -> bool {
@@ -1140,6 +1174,23 @@ mod tests {
         assert_eq!(run.status, 0);
         assert!(run.stdout.starts_with("PostToolUse|"));
         assert!(run.stdout.contains("\"event\":\"PostToolUse\""));
+    }
+
+    #[test]
+    fn shell_hook_appends_quoted_args() {
+        let cwd = tempfile::tempdir().unwrap();
+        let hook = HookCommandConfig {
+            command: "printf '%s|%s'".to_string(),
+            args: vec!["two words".to_string(), "quote's".to_string()],
+            ..HookCommandConfig::default()
+        };
+        let run = run_shell_hook(&hook, cwd.path(), &json!({}), "PostToolUse");
+        assert_eq!(run.status, 0);
+        assert_eq!(run.stdout, "two words|quote's");
+        assert_eq!(
+            hook_command_display(&hook),
+            "printf '%s|%s' 'two words' 'quote'\\''s'"
+        );
     }
 
     #[test]

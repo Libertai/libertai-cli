@@ -43,6 +43,7 @@ fn save_then_load_preserves_fields() {
             user_prompt_submit: vec![
                 HookCommandConfig {
                     command: "scripts/user-prompt-submit.sh".into(),
+                    args: vec!["--flag".into(), "two words".into()],
                     timeout: Some(2),
                     continue_on_block: true,
                     ..HookCommandConfig::default()
@@ -109,6 +110,10 @@ fn save_then_load_preserves_fields() {
     assert_eq!(
         round.hooks.user_prompt_submit[0].command,
         "scripts/user-prompt-submit.sh"
+    );
+    assert_eq!(
+        round.hooks.user_prompt_submit[0].args,
+        vec!["--flag".to_string(), "two words".to_string()]
     );
     assert_eq!(round.hooks.user_prompt_submit[0].timeout, Some(2));
     assert!(round.hooks.user_prompt_submit[0].continue_on_block);

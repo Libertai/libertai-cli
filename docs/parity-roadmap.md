@@ -627,7 +627,9 @@ as `Bash(rm *)` to match a tool name plus argument glob. Rows can set
 `async = true` (or imported `asyncHook =
 true`) to launch a command or HTTP hook without waiting for completion;
 async hook output is discarded and cannot affect prompt/tool decisions.
-CLI HTTP hook rows use `type = "http"`, `url`, optional `headers`,
+CLI command hook rows also support separate `args` arrays; args are shell
+quoted and appended to the configured command line. CLI HTTP hook rows use
+`type = "http"`, `url`, optional `headers`,
 `allowedEnvVars`, timeout, and `continueOnBlock`, POST the same JSON
 payloads as command hooks, and can return the same JSON decision/context
 fields for UserPromptSubmit and PreToolUse. CLI prompt/agent hook rows

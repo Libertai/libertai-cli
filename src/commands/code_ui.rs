@@ -5365,7 +5365,7 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
         } else if hook.command.trim().is_empty() {
             "(no command)".to_string()
         } else {
-            hook.command.trim().to_string()
+            crate::commands::code_hooks::hook_command_display(hook)
         };
         println!(
             "{DIM}  {}. {} [{}] type={} matcher={}{}{}{}{}{}:{RESET} {}",
