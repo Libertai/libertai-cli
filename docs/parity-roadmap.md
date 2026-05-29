@@ -629,9 +629,9 @@ as `Bash(rm *)` to match a tool name plus argument glob. Rows can set
 true`) to launch a command or HTTP hook without waiting for completion;
 async hook output is discarded and cannot affect prompt/tool decisions.
 CLI command hook rows also support separate `args` arrays; args are shell
-quoted and appended to the configured command line, and Claude-style
-command arrays deserialize into the first item as `command` plus the rest
-as `args`. CLI HTTP hook rows use
+quoted and appended to the configured command line, Claude-style command
+arrays deserialize into the first item as `command` plus the rest as `args`,
+and numeric-string `timeout` values deserialize to seconds. CLI HTTP hook rows use
 `type = "http"`, `url`, optional `headers`,
 `allowedEnvVars`, timeout, and `continueOnBlock`, POST the same JSON
 payloads as command hooks, and can return the same JSON decision/context

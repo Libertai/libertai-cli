@@ -273,7 +273,11 @@ pub struct HookCommandConfig {
     pub status_message: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub shell: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_timeout",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub timeout: Option<u64>,
     #[serde(
         default,
@@ -337,7 +341,7 @@ impl<'de> Deserialize<'de> for HookCommandConfig {
             status_message: String,
             #[serde(default)]
             shell: String,
-            #[serde(default)]
+            #[serde(default, deserialize_with = "deserialize_timeout")]
             timeout: Option<u64>,
             #[serde(default, rename = "async", alias = "asyncHook")]
             async_hook: bool,
@@ -479,6 +483,42 @@ where
             Ok(CommandParts { command, args })
         }
         None => Ok(CommandParts::default()),
+    }
+}
+
+fn deserialize_timeout<'de, D>(deserializer: D) -> std::result::Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum TimeoutValue {
+        Integer(u64),
+        String(String),
+    }
+
+    match Option::<TimeoutValue>::deserialize(deserializer)? {
+        Some(TimeoutValue::Integer(value)) if value > 0 => Ok(Some(value)),
+        Some(TimeoutValue::Integer(_)) => Err(serde::de::Error::custom(
+            "hook timeout must be a positive integer number of seconds",
+        )),
+        Some(TimeoutValue::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            trimmed
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .map(Some)
+                .ok_or_else(|| {
+                    serde::de::Error::custom(
+                        "hook timeout must be a positive integer number of seconds",
+                    )
+                })
+        }
+        None => Ok(None),
     }
 }
 

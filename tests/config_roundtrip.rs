@@ -233,6 +233,23 @@ args = ["--mode", "strict mode"]
 }
 
 #[test]
+fn hook_timeout_string_deserializes_to_seconds() {
+    let cfg: Config = toml::from_str(
+        r#"
+[[hooks.PostToolUse]]
+matcher = "bash"
+command = "scripts/post-tool-use.sh"
+timeout = "9"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(cfg.hooks.post_tool_use[0].timeout, Some(9));
+    let rendered = toml::to_string_pretty(&cfg).unwrap();
+    assert!(rendered.contains("timeout = 9"));
+}
+
+#[test]
 fn mask_key_hides_middle() {
     let masked = mask_key("LTAI_sk_abcdefgh12345678");
     assert!(masked.starts_with("LTAI"));
