@@ -124,7 +124,9 @@ SDK; those are flagged **(upstream)**.
   `/pr_comments edit <comment_id> <body>`. CLI and desktop can resolve
   review threads by ID, and the shared GitHub GraphQL helper also
   supports reopening mistakenly resolved threads with
-  `unresolveReviewThread`.
+  `unresolveReviewThread`. CLI and desktop can also submit summary PR
+  reviews with `/pr_comments review <event> <body>` using GitHub's
+  `addPullRequestReview` mutation.
 - **CLI `/sandbox` command** — REPL users can inspect the effective
   strict bash sandbox profile with `/sandbox [info]`; `/sandbox reload`
   explains the CLI restart requirement.

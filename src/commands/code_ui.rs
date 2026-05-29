@@ -1200,6 +1200,10 @@ async fn repl_loop(
             edit_pr_comment(rest);
             continue;
         }
+        if let Some(rest) = pr_comments_review_arg(trimmed) {
+            submit_pr_review(rest);
+            continue;
+        }
         if let Some((command, rest)) = image_command_arg(trimmed) {
             match build_image_prompt_content(rest, output_style.as_deref()) {
                 Ok(content) => {
@@ -1945,6 +1949,9 @@ fn print_help() {
     );
     println!(
         "{DIM}  /pr_comments edit <comment_id> <body> — edit a GitHub PR review comment{RESET}"
+    );
+    println!(
+        "{DIM}  /pr_comments review <approve|comment|request_changes> <body> — submit a GitHub PR summary review{RESET}"
     );
     println!("{DIM}  /sandbox [info|reload] — inspect the bash sandbox profile{RESET}");
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
@@ -3722,6 +3729,20 @@ fn pr_comments_edit_arg(trimmed: &str) -> Option<&str> {
     None
 }
 
+fn pr_comments_review_arg(trimmed: &str) -> Option<&str> {
+    for prefix in [
+        "/pr_comments review ",
+        "/pr-comments review ",
+        "/pr_comments submit ",
+        "/pr-comments submit ",
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
 fn pr_comments_resolve_arg(trimmed: &str) -> Option<&str> {
     for prefix in ["/pr_comments resolve ", "/pr-comments resolve "] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
@@ -3777,6 +3798,17 @@ fn parse_pr_comments_resolve(input: &str) -> Result<&str> {
         anyhow::bail!("usage: /pr_comments resolve <thread_id>");
     }
     Ok(thread_id)
+}
+
+fn parse_pr_comments_review(input: &str) -> Result<(&str, &str)> {
+    let raw = input.trim();
+    let (event, body) = raw
+        .split_once(char::is_whitespace)
+        .map_or((raw, ""), |(event, body)| (event, body.trim()));
+    if event.trim().is_empty() {
+        anyhow::bail!("usage: /pr_comments review <approve|comment|request_changes> <body>");
+    }
+    Ok((event.trim(), body))
 }
 
 fn reply_to_pr_comment_thread(input: &str) {
@@ -3888,6 +3920,43 @@ fn edit_pr_comment(input: &str) {
         })
         .unwrap_or("unknown error");
     eprintln!("{DIM}  /pr_comments: edit failed: {detail}{RESET}");
+}
+
+fn submit_pr_review(input: &str) {
+    let (event, body) = match parse_pr_comments_review(input) {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!("{DIM}  /pr_comments: {e:#}{RESET}");
+            return;
+        }
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /pr_comments: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let capture = crate::commands::code_pr_comments::submit_pull_request_review(
+        &cwd, "", event, body,
+    );
+    if capture.error.is_none() && capture.status == Some(0) {
+        println!("{DIM}  submitted PR review: {event}{RESET}");
+        return;
+    }
+    let detail = capture
+        .error
+        .as_deref()
+        .or_else(|| {
+            let stderr = capture.stderr.trim();
+            (!stderr.is_empty()).then_some(stderr)
+        })
+        .or_else(|| {
+            let stdout = capture.stdout.trim();
+            (!stdout.is_empty()).then_some(stdout)
+        })
+        .unwrap_or("unknown error");
+    eprintln!("{DIM}  /pr_comments: review submit failed: {detail}{RESET}");
 }
 
 fn parse_direct_custom_slash(trimmed: &str) -> Option<(&str, &str)> {
@@ -6605,6 +6674,23 @@ mod tests {
         assert_eq!(parse_pr_comments_resolve("PRRT_1").unwrap(), "PRRT_1");
         assert!(parse_pr_comments_resolve("").is_err());
         assert!(parse_pr_comments_resolve("PRRT_1 extra").is_err());
+    }
+
+    #[test]
+    fn parse_pr_comments_review_requires_event() {
+        assert_eq!(
+            pr_comments_review_arg("/pr_comments review approve Looks good."),
+            Some("approve Looks good.")
+        );
+        assert_eq!(
+            pr_comments_review_arg("/pr_comments submit request_changes Needs a test."),
+            Some("request_changes Needs a test.")
+        );
+        assert_eq!(
+            parse_pr_comments_review("comment Summary only.").unwrap(),
+            ("comment", "Summary only.")
+        );
+        assert_eq!(parse_pr_comments_review("approve").unwrap(), ("approve", ""));
     }
 
     #[test]

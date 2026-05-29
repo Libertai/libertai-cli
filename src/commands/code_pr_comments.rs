@@ -152,6 +152,76 @@ pub fn edit_review_comment(cwd: &Path, comment_id: &str, body: &str) -> CommandC
     run_gh(cwd, &args)
 }
 
+pub fn submit_pull_request_review(
+    cwd: &Path,
+    scope: &str,
+    event: &str,
+    body: &str,
+) -> CommandCapture {
+    let event = match normalize_review_event(event) {
+        Ok(event) => event,
+        Err(error) => {
+            return CommandCapture {
+                command: "gh api graphql".to_string(),
+                status: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                error: Some(error),
+            };
+        }
+    };
+    let body = body.trim();
+    if body.is_empty() && matches!(event, "COMMENT" | "REQUEST_CHANGES") {
+        return CommandCapture {
+            command: "gh api graphql".to_string(),
+            status: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("review body is required for comment and request_changes".to_string()),
+        };
+    }
+    let selector = pr_selector(scope);
+    let pr_view = run_gh(cwd, &pr_review_target_args(selector.as_deref()));
+    if !pr_view.success() {
+        return pr_view;
+    }
+    let Some(pr_id) = pr_id_from_view(&pr_view) else {
+        return CommandCapture {
+            command: pr_view.command,
+            status: pr_view.status,
+            stdout: pr_view.stdout,
+            stderr: pr_view.stderr,
+            error: Some("pull request node id was not returned by gh pr view".to_string()),
+        };
+    };
+    let mut args = vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        "query=mutation($pullRequestId:ID!,$event:PullRequestReviewEvent!,$body:String){addPullRequestReview(input:{pullRequestId:$pullRequestId,event:$event,body:$body}){pullRequestReview{id state body url}}}".to_string(),
+        "-f".to_string(),
+        format!("pullRequestId={pr_id}"),
+        "-f".to_string(),
+        format!("event={event}"),
+    ];
+    if !body.is_empty() {
+        args.extend(["-f".to_string(), format!("body={body}")]);
+    }
+    run_gh(cwd, &args)
+}
+
+fn normalize_review_event(event: &str) -> Result<&'static str, String> {
+    let normalized = event.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "approve" | "approved" | "approval" => Ok("APPROVE"),
+        "comment" | "comments" => Ok("COMMENT"),
+        "request_changes" | "requestchanges" | "changes" | "changes_requested" => {
+            Ok("REQUEST_CHANGES")
+        }
+        _ => Err("review event must be approve, comment, or request_changes".to_string()),
+    }
+}
+
 fn pr_selector(scope: &str) -> Option<String> {
     let trimmed = scope.trim();
     if trimmed.is_empty() {
@@ -205,8 +275,17 @@ fn pr_view_args(selector: Option<&str>) -> Vec<String> {
     }
     args.extend([
         "--json".to_string(),
-        "number,url,headRefName,baseRefName,reviewDecision,comments,reviews,files".to_string(),
+        "id,number,url,headRefName,baseRefName,reviewDecision,comments,reviews,files".to_string(),
     ]);
+    args
+}
+
+fn pr_review_target_args(selector: Option<&str>) -> Vec<String> {
+    let mut args = vec!["pr".to_string(), "view".to_string()];
+    if let Some(selector) = selector {
+        args.push(selector.to_string());
+    }
+    args.extend(["--json".to_string(), "id,number,url".to_string()]);
     args
 }
 
@@ -245,6 +324,15 @@ fn pr_reference_from_view(capture: &CommandCapture) -> Option<PrReference> {
         repo: repo.to_string(),
         number,
     })
+}
+
+fn pr_id_from_view(capture: &CommandCapture) -> Option<String> {
+    if !capture.success() {
+        return None;
+    }
+    let value: JsonValue = serde_json::from_str(capture.stdout.trim()).ok()?;
+    let id = value.get("id")?.as_str()?.trim();
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 fn pr_review_threads_args(pr: &PrReference) -> Vec<String> {
@@ -436,6 +524,40 @@ mod tests {
         assert!(joined.contains("owner=Libertai"));
         assert!(joined.contains("name=libertai-code-desktop"));
         assert!(joined.contains("number=42"));
+    }
+
+    #[test]
+    fn submit_review_validates_review_event_and_body() {
+        let capture = submit_pull_request_review(Path::new("."), "", "", "LGTM");
+        assert_eq!(
+            capture.error.as_deref(),
+            Some("review event must be approve, comment, or request_changes")
+        );
+        let capture = submit_pull_request_review(Path::new("."), "", "request_changes", "");
+        assert_eq!(
+            capture.error.as_deref(),
+            Some("review body is required for comment and request_changes")
+        );
+    }
+
+    #[test]
+    fn pr_review_target_args_request_node_id() {
+        let args = pr_review_target_args(Some("42"));
+        let joined = args.join(" ");
+        assert!(joined.contains("pr view 42"));
+        assert!(joined.contains("id,number,url"));
+    }
+
+    #[test]
+    fn pr_id_reads_node_id_from_pr_view() {
+        let capture = CommandCapture {
+            command: "gh pr view".to_string(),
+            status: Some(0),
+            stdout: r#"{"id":"PR_kwDOABC123","number":42}"#.to_string(),
+            stderr: String::new(),
+            error: None,
+        };
+        assert_eq!(pr_id_from_view(&capture).as_deref(), Some("PR_kwDOABC123"));
     }
 
     #[test]
