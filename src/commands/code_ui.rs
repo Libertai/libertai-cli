@@ -3238,28 +3238,10 @@ Rules:
 }
 
 fn pr_comments_prompt(scope: &str) -> String {
-    let scope = scope.trim();
-    let scope_line = if scope.is_empty() {
-        "User-requested PR scope: infer the current branch's pull request.".to_string()
-    } else {
-        format!("User-requested PR scope: {scope}")
-    };
-    format!(
-        r#"Inspect pull request review comments for this repository and turn them into an actionable response plan.
-
-{scope_line}
-
-Rules:
-- Do not modify files or make commits.
-- First inspect git state: git status --short, git branch --show-current,
-  git remote -v, and git diff --stat.
-- Prefer GitHub CLI when available: use gh pr view --json number,url,headRefName,baseRefName,reviewDecision,comments,reviews,files and gh pr checks.
-- If the user supplied a PR number or URL, use that exact PR. Otherwise infer the PR for the current branch.
-- Summarize unresolved review comments first, grouped by file and reviewer when possible.
-- For each actionable comment, cite file:line when available, explain the requested change, and propose the minimal fix.
-- Call out comments that appear already addressed by the current diff.
-- If PR data cannot be loaded, report the exact command/error and suggest the next concrete command the user can run."#
-    )
+    let snapshot = std::env::current_dir()
+        .ok()
+        .map(|cwd| crate::commands::code_pr_comments::collect_pr_comments_snapshot(&cwd, scope));
+    crate::commands::code_pr_comments::build_pr_comments_prompt(scope, snapshot.as_ref())
 }
 
 fn parse_direct_custom_slash(trimmed: &str) -> Option<(&str, &str)> {

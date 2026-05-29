@@ -18,6 +18,7 @@ pub mod code_models;
 pub mod code_notification;
 pub mod code_output_style;
 pub mod code_path_safety;
+pub mod code_pr_comments;
 pub mod code_sandbox;
 pub mod code_sandbox_cli;
 pub mod code_session;
