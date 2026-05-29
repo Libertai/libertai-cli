@@ -63,6 +63,8 @@ const CHANGELOG_DEFAULT_LIMIT: usize = 10;
 const CHANGELOG_MAX_LIMIT: usize = 50;
 const LOOP_DEFAULT_TURNS: usize = 3;
 const LOOP_MAX_TURNS: usize = 10;
+const AUTO_DEFAULT_TURNS: usize = 10;
+const AUTO_MAX_TURNS: usize = 25;
 const STATUS_LINE_TEMPLATE_MAX_CHARS: usize = 240;
 const STATUS_LINE_TOKENS: &[&str] = &[
     "project", "path", "session", "backend", "model", "mode", "style", "tokens", "ctx", "live",
@@ -173,6 +175,20 @@ enum PermissionsCommand {
 struct LoopRequest {
     turns: usize,
     goal: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutoRun {
+    limit: usize,
+    completed: usize,
+    goal: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AutoCommand {
+    Status,
+    Off,
+    On { turns: usize, goal: String },
 }
 
 /// Process-global because the Ctrl-C handler (spawned by the `ctrlc`
@@ -424,16 +440,35 @@ async fn repl_loop(
     let tool_activity = Arc::new(Mutex::new(ToolActivityTracker::default()));
     let mut session_name: Option<String> = None;
     let mut autonomous_queue: VecDeque<String> = VecDeque::new();
+    let mut auto_run: Option<AutoRun> = None;
 
     loop {
-        let autonomous_turn = autonomous_queue.pop_front();
+        let autonomous_turn = if let Some(prompt) = autonomous_queue.pop_front() {
+            Some(prompt)
+        } else if let Some(run) = auto_run.as_ref() {
+            if run.completed < run.limit {
+                Some(auto_loop_prompt(run.completed + 1, run.limit, &run.goal))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let is_autonomous = autonomous_turn.is_some();
         let mut line = match autonomous_turn {
             Some(prompt) => {
-                println!(
-                    "{DIM}  /loop: running autonomous turn; {} queued after this.{RESET}",
-                    autonomous_queue.len()
-                );
+                if let Some(run) = auto_run.as_ref() {
+                    println!(
+                        "{DIM}  /auto: running turn {}/{}.{RESET}",
+                        run.completed + 1,
+                        run.limit
+                    );
+                } else {
+                    println!(
+                        "{DIM}  /loop: running autonomous turn; {} queued after this.{RESET}",
+                        autonomous_queue.len()
+                    );
+                }
                 prompt
             }
             None => match read_line(mode.get(), &history)? {
@@ -854,12 +889,38 @@ async fn repl_loop(
         }
         if let Some(rest) = loop_command_arg(trimmed) {
             let request = parse_loop_request(rest);
+            auto_run = None;
             autonomous_queue = autonomous_loop_prompts(&request);
             println!(
                 "{DIM}  /loop: queued {} autonomous turn(s){}.{RESET}",
                 request.turns,
                 if request.goal.is_empty() { "" } else { " with a goal" }
             );
+            continue;
+        }
+        if let Some(rest) = auto_command_arg(trimmed) {
+            match parse_auto_command(rest) {
+                AutoCommand::Status => print_auto_status(auto_run.as_ref()),
+                AutoCommand::Off => {
+                    auto_run = None;
+                    autonomous_queue.clear();
+                    println!("{DIM}  /auto: continuous execution is off.{RESET}");
+                }
+                AutoCommand::On { turns, goal } => {
+                    autonomous_queue.clear();
+                    auto_run = Some(AutoRun {
+                        limit: turns,
+                        completed: 0,
+                        goal,
+                    });
+                    let run = auto_run.as_ref().expect("auto run set");
+                    println!(
+                        "{DIM}  /auto: continuous execution is on for up to {} turn(s){}. Press Ctrl+C during a turn to stop.{RESET}",
+                        run.limit,
+                        if run.goal.is_empty() { "" } else { " with a goal" }
+                    );
+                }
+            }
             continue;
         }
         if let Some(rest) = thinking_command_arg(trimmed) {
@@ -1115,6 +1176,9 @@ async fn repl_loop(
         // leave a gap between the response and the usage/status line.
         match result {
             Ok(msg) => {
+                if let Some(run) = auto_run.as_mut() {
+                    run.completed += 1;
+                }
                 let context_window = context_window_for(&msg.model);
                 usage_history.push(UsageRecord {
                     provider: msg.provider.clone(),
@@ -1146,14 +1210,30 @@ async fn repl_loop(
                         "{DIM}  → plan approved. normal mode is active; mutating tools are back online.{RESET}"
                     );
                 }
+                if let Some(run) = auto_run.as_ref() {
+                    let messages = handle.messages().await.unwrap_or_default();
+                    let text = last_assistant_text(&messages).unwrap_or_default();
+                    if text.contains("AUTO_DONE")
+                        || text.contains("AUTO_BLOCKED")
+                        || run.completed >= run.limit
+                    {
+                        println!(
+                            "{DIM}  /auto: stopped after {}/{} turn(s).{RESET}",
+                            run.completed, run.limit
+                        );
+                        auto_run = None;
+                    }
+                }
             }
             Err(PiError::Aborted) => {
                 autonomous_queue.clear();
+                auto_run = None;
                 println!();
                 eprintln!("{DIM}  (interrupted){RESET}");
             }
             Err(e) => {
                 autonomous_queue.clear();
+                auto_run = None;
                 println!();
                 eprintln!("{DIM}  error: {e}{RESET}");
             }
@@ -1616,6 +1696,7 @@ fn print_help() {
     println!("{DIM}  /thinking [off|minimal|low|medium|high|xhigh] — show or set thinking{RESET}");
     println!("{DIM}  /compact — compact older conversation history now{RESET}");
     println!("{DIM}  /loop [turns] [goal] — run bounded autonomous follow-up turns{RESET}");
+    println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|status){RESET}");
     println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
     println!("{DIM}  /attach <path> [prompt] — alias for /image{RESET}");
     println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
@@ -2451,6 +2532,85 @@ fn loop_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
+fn auto_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/auto" | "/autorun" | "/continuous" => Some(""),
+        _ => trimmed
+            .strip_prefix("/auto ")
+            .or_else(|| trimmed.strip_prefix("/autorun "))
+            .or_else(|| trimmed.strip_prefix("/continuous "))
+            .map(str::trim),
+    }
+}
+
+fn parse_auto_command(input: &str) -> AutoCommand {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return AutoCommand::Status;
+    }
+    let mut parts = raw.splitn(2, char::is_whitespace);
+    let head = parts.next().unwrap_or("").trim();
+    let rest = parts.next().unwrap_or("").trim();
+    match head {
+        "status" | "state" => AutoCommand::Status,
+        "off" | "stop" | "cancel" => AutoCommand::Off,
+        "on" | "start" | "run" => {
+            let request = parse_auto_request(rest);
+            AutoCommand::On {
+                turns: request.turns,
+                goal: request.goal,
+            }
+        }
+        _ => {
+            let request = parse_auto_request(raw);
+            AutoCommand::On {
+                turns: request.turns,
+                goal: request.goal,
+            }
+        }
+    }
+}
+
+fn parse_auto_request(input: &str) -> LoopRequest {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return LoopRequest {
+            turns: AUTO_DEFAULT_TURNS,
+            goal: String::new(),
+        };
+    }
+    let mut parts = raw.splitn(2, char::is_whitespace);
+    let Some(first) = parts.next() else {
+        return LoopRequest {
+            turns: AUTO_DEFAULT_TURNS,
+            goal: String::new(),
+        };
+    };
+    match first.parse::<usize>() {
+        Ok(turns) => LoopRequest {
+            turns: turns.clamp(1, AUTO_MAX_TURNS),
+            goal: parts.next().unwrap_or("").trim().to_string(),
+        },
+        Err(_) => LoopRequest {
+            turns: AUTO_DEFAULT_TURNS,
+            goal: raw.to_string(),
+        },
+    }
+}
+
+fn print_auto_status(auto_run: Option<&AutoRun>) {
+    match auto_run {
+        Some(run) => println!(
+            "{DIM}  /auto: on, completed {}/{}, remaining {}{}.{RESET}",
+            run.completed,
+            run.limit,
+            run.limit.saturating_sub(run.completed),
+            if run.goal.is_empty() { "" } else { ", goal set" }
+        ),
+        None => println!("{DIM}  /auto: continuous execution is off.{RESET}"),
+    }
+}
+
 fn parse_loop_request(input: &str) -> LoopRequest {
     let raw = input.trim();
     if raw.is_empty() {
@@ -2493,6 +2653,19 @@ fn autonomous_loop_prompt(idx: usize, total: usize, goal: &str) -> String {
             format!("Goal: {}", goal.trim())
         },
         "Use tools as needed. If the task is complete or blocked, report the exact status and do not invent extra work.".to_string(),
+    ]
+    .join("\n\n")
+}
+
+fn auto_loop_prompt(idx: usize, total: usize, goal: &str) -> String {
+    [
+        format!("Auto mode turn {idx}/{total}."),
+        if goal.trim().is_empty() {
+            "Continue making concrete progress on the current task.".to_string()
+        } else {
+            format!("Goal: {}", goal.trim())
+        },
+        "Use tools as needed. If the task is complete, end your response with AUTO_DONE. If blocked, end your response with AUTO_BLOCKED.".to_string(),
     ]
     .join("\n\n")
 }
@@ -4549,6 +4722,45 @@ mod tests {
         assert!(prompt.contains("Autonomous loop turn 2/4."));
         assert!(prompt.contains("Goal: close gaps"));
         assert!(prompt.contains("do not invent extra work"));
+    }
+
+    #[test]
+    fn auto_command_arg_accepts_aliases() {
+        assert_eq!(auto_command_arg("/auto"), Some(""));
+        assert_eq!(auto_command_arg("/auto on 5 ship it"), Some("on 5 ship it"));
+        assert_eq!(auto_command_arg("/autorun status"), Some("status"));
+        assert_eq!(auto_command_arg("/continuous off"), Some("off"));
+        assert_eq!(auto_command_arg("/automatic"), None);
+    }
+
+    #[test]
+    fn parse_auto_command_defaults_clamps_and_keeps_goal() {
+        assert_eq!(parse_auto_command(""), AutoCommand::Status);
+        assert_eq!(parse_auto_command("status"), AutoCommand::Status);
+        assert_eq!(parse_auto_command("off"), AutoCommand::Off);
+        assert_eq!(
+            parse_auto_command("on 30 finish parity"),
+            AutoCommand::On {
+                turns: AUTO_MAX_TURNS,
+                goal: "finish parity".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_auto_command("keep going"),
+            AutoCommand::On {
+                turns: AUTO_DEFAULT_TURNS,
+                goal: "keep going".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn auto_loop_prompt_matches_desktop_contract() {
+        let prompt = auto_loop_prompt(2, 4, "close gaps");
+        assert!(prompt.contains("Auto mode turn 2/4."));
+        assert!(prompt.contains("Goal: close gaps"));
+        assert!(prompt.contains("AUTO_DONE"));
+        assert!(prompt.contains("AUTO_BLOCKED"));
     }
 
     #[test]

@@ -76,6 +76,10 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/loop` command** — REPL users can queue a bounded foreground
   autonomous follow-up loop with `/loop [turns] [goal]` or `/autoloop`,
   capped at 10 turns.
+- **CLI `/auto` command** — REPL users can start a bounded foreground
+  continuous-execution mode with `/auto on [turns] [goal]`, inspect it
+  with `/auto status`, and cancel idle state with `/auto off`; active
+  runs are Ctrl-C stoppable and cap at 25 turns.
 - **Bash background execution** — the upstream `bash` tool accepts
   Claude-style `run_in_background: true` for long-running servers and
   watchers, returning immediately with a PID and temp log path.
