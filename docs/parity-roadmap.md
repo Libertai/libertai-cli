@@ -620,12 +620,17 @@ native CLI sessions/turn stops and warn on nonzero exit. Tool hook matchers
 support case-sensitive exact names, `*` globs, `|` alternatives,
 `regex:<pattern>`, and slash-delimited regex patterns that can contain
 alternation pipes. Rows can set `async = true` (or imported `asyncHook =
-true`) to launch a command hook without waiting for completion; async hook
-output is discarded and cannot affect prompt/tool decisions. `/hooks` and
-`libertai status` report configured command hooks.
+true`) to launch a command or HTTP hook without waiting for completion;
+async hook output is discarded and cannot affect prompt/tool decisions.
+CLI HTTP hook rows use `type = "http"`, `url`, optional `headers`,
+`allowedEnvVars`, timeout, and `continueOnBlock`, POST the same JSON
+payloads as command hooks, and can return the same JSON decision/context
+fields for UserPromptSubmit and PreToolUse. `/hooks` and `libertai
+status` report configured runnable hooks.
 
 Remaining work: any pi-level typed hook dispatcher.
-Native non-command hook handlers remain intentionally unexecuted.
+Native prompt/agent/MCP-tool hook handlers remain intentionally
+unexecuted in the CLI.
 
 **Files**: `src/config.rs`,
 `src/commands/code_hooks.rs`,

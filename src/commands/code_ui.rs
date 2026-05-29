@@ -4950,7 +4950,7 @@ fn format_hook_event_breakdown(cfg: &LibertaiConfig) -> String {
         .map(|(event, count)| format!("{event} {count}"))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("{total} runnable command hook(s); {events}")
+    format!("{total} runnable hook(s); {events}")
 }
 
 fn format_agent_doctor_summary(
@@ -5236,7 +5236,7 @@ fn print_config_status(cfg: &LibertaiConfig) {
          {pre_tool_hooks} PreToolUse, {post_tool_hooks} PostToolUse, \
          {subagent_stop_hooks} SubagentStop, \
          {session_start_hooks} SessionStart, {stop_hooks} Stop, \
-         {session_end_hooks} SessionEnd command hook(s)"
+         {session_end_hooks} SessionEnd hook(s)"
     );
     match cfg.auth.api_key.as_deref() {
         Some(key) => println!("{DIM}  auth:{RESET} {}", mask_key(key)),
@@ -5268,14 +5268,23 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     );
     println!("{DIM}  SubagentStop hooks run after task-tool subagents finish.{RESET}");
     println!("{DIM}  lifecycle hooks warn on nonzero exit and do not block the session.{RESET}");
-    println!("{DIM}  non-command hook handlers are not executed natively.{RESET}");
+    println!("{DIM}  command and HTTP hook handlers are executed natively; prompt, agent, and MCP-tool handlers are not.{RESET}");
     println!();
 }
 
 fn count_runnable_hooks(hooks: &[crate::config::HookCommandConfig]) -> usize {
     hooks
         .iter()
-        .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
+        .filter(|hook| {
+            hook.enabled
+                && if hook.hook_type.trim().eq_ignore_ascii_case("http") {
+                    !hook.url.trim().is_empty()
+                } else {
+                    let hook_type = hook.hook_type.trim();
+                    (hook_type.is_empty() || hook_type.eq_ignore_ascii_case("command"))
+                        && !hook.command.trim().is_empty()
+                }
+        })
         .count()
 }
 
@@ -5295,7 +5304,7 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
             .timeout
             .map(|secs| format!(", timeout={secs}s"))
             .unwrap_or_default();
-        let shell = if hook.shell.trim().is_empty() {
+        let shell = if hook.shell.trim().is_empty() || hook.hook_type.trim().eq_ignore_ascii_case("http") {
             String::new()
         } else {
             format!(", shell={}", hook.shell.trim())
@@ -5306,22 +5315,34 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
         } else {
             ""
         };
-        let command = if hook.command.trim().is_empty() {
+        let hook_type = if hook.hook_type.trim().is_empty() {
+            "command"
+        } else {
+            hook.hook_type.trim()
+        };
+        let target = if hook.hook_type.trim().eq_ignore_ascii_case("http") {
+            if hook.url.trim().is_empty() {
+                "(no url)"
+            } else {
+                hook.url.trim()
+            }
+        } else if hook.command.trim().is_empty() {
             "(no command)"
         } else {
             hook.command.trim()
         };
         println!(
-            "{DIM}  {}. {} [{}] matcher={}{}{}{}{}:{RESET} {}",
+            "{DIM}  {}. {} [{}] type={} matcher={}{}{}{}{}:{RESET} {}",
             idx + 1,
             event,
             marker,
+            hook_type,
             matcher,
             timeout,
             shell,
             async_flag,
             continue_on_block,
-            command
+            target
         );
     }
 }
@@ -6245,6 +6266,11 @@ mod tests {
             ..Default::default()
         });
         cfg.hooks.pre_tool_use.push(crate::config::HookCommandConfig {
+            hook_type: "http".to_string(),
+            url: "http://127.0.0.1/hook".to_string(),
+            ..Default::default()
+        });
+        cfg.hooks.pre_tool_use.push(crate::config::HookCommandConfig {
             enabled: false,
             command: "scripts/pre-disabled.sh".to_string(),
             ..Default::default()
@@ -6255,9 +6281,9 @@ mod tests {
         });
 
         let breakdown = format_hook_event_breakdown(&cfg);
-        assert!(breakdown.contains("2 runnable command hook(s)"));
+        assert!(breakdown.contains("3 runnable hook(s)"));
         assert!(breakdown.contains("UserPromptSubmit 1"));
-        assert!(breakdown.contains("PreToolUse 1"));
+        assert!(breakdown.contains("PreToolUse 2"));
         assert!(breakdown.contains("SubagentStop 0"));
         assert!(breakdown.contains("Stop 0"));
     }

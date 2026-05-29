@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub const DEFAULT_API_BASE: &str = "https://api.libertai.io";
@@ -231,8 +232,20 @@ pub struct HookCommandConfig {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub matcher: String,
+    #[serde(
+        default = "default_hook_type",
+        rename = "type",
+        skip_serializing_if = "is_default_hook_type"
+    )]
+    pub hook_type: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+    #[serde(default, rename = "allowedEnvVars", skip_serializing_if = "Vec::is_empty")]
+    pub allowed_env_vars: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub shell: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -257,7 +270,11 @@ impl Default for HookCommandConfig {
         Self {
             enabled: true,
             matcher: String::new(),
+            hook_type: default_hook_type(),
             command: String::new(),
+            url: String::new(),
+            headers: HashMap::new(),
+            allowed_env_vars: Vec::new(),
             shell: String::new(),
             timeout: None,
             async_hook: false,
@@ -268,6 +285,14 @@ impl Default for HookCommandConfig {
 
 fn default_hook_enabled() -> bool {
     true
+}
+
+fn default_hook_type() -> String {
+    "command".to_string()
+}
+
+fn is_default_hook_type(value: &str) -> bool {
+    value == "command"
 }
 
 fn is_false(value: &bool) -> bool {

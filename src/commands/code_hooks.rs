@@ -1,8 +1,8 @@
-//! Command-only Claude Code-style hooks for native CLI sessions.
+//! Claude Code-style hooks for native CLI sessions.
 //!
 //! The desktop has a richer hook registry. The CLI intentionally keeps
-//! this surface narrow: only configured shell commands are executed, and
-//! imported HTTP/prompt/agent/MCP hook handlers are not run natively.
+//! this surface narrow: configured shell commands and HTTP handlers are
+//! executed, while imported prompt/agent/MCP handlers are not run natively.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -53,13 +53,13 @@ pub fn run_user_prompt_submit_hooks(cfg: &Config, prompt: &str) -> anyhow::Resul
             spawn_async_hook(hook, &cwd, &payload, "UserPromptSubmit");
             continue;
         }
-        let run = run_shell_hook(hook, &cwd, &payload, "UserPromptSubmit");
+        let run = run_configured_hook(hook, &cwd, &payload, "UserPromptSubmit");
         if run.status != 0 && !hook.continue_on_block {
             let detail = first_non_empty(&run.stderr, &run.stdout)
                 .unwrap_or_else(|| format!("hook exited with status {}", run.status));
             anyhow::bail!(
                 "UserPromptSubmit hook `{}` blocked the prompt: {detail}",
-                hook.command.trim()
+                hook_target(hook)
             );
         }
         if let Some(context) = user_prompt_additional_context(&run.stdout) {
@@ -102,13 +102,13 @@ fn run_lifecycle_hooks(cfg: &Config, event_name: &str, hooks: &[HookCommandConfi
             spawn_async_hook(hook, &cwd, &payload, event_name);
             continue;
         }
-        let run = run_shell_hook(hook, &cwd, &payload, event_name);
+        let run = run_configured_hook(hook, &cwd, &payload, event_name);
         if run.status != 0 {
             let detail = first_non_empty(&run.stderr, &run.stdout)
                 .unwrap_or_else(|| format!("hook exited with status {}", run.status));
             eprintln!(
                 "  \x1b[2m[hook {event_name}] {}: {}\x1b[0m",
-                hook.command.trim(),
+                hook_target(hook),
                 detail
             );
         }
@@ -137,7 +137,31 @@ pub fn tool_policy_from_config(cfg: Arc<Config>) -> Option<Arc<dyn ToolPolicy>> 
 }
 
 fn is_runnable_hook(hook: &HookCommandConfig) -> bool {
-    hook.enabled && !hook.command.trim().is_empty()
+    hook.enabled
+        && if hook_is_http(hook) {
+            !hook.url.trim().is_empty()
+        } else if hook_is_command(hook) {
+            !hook.command.trim().is_empty()
+        } else {
+            false
+        }
+}
+
+fn hook_is_http(hook: &HookCommandConfig) -> bool {
+    hook.hook_type.trim().eq_ignore_ascii_case("http")
+}
+
+fn hook_is_command(hook: &HookCommandConfig) -> bool {
+    let hook_type = hook.hook_type.trim();
+    hook_type.is_empty() || hook_type.eq_ignore_ascii_case("command")
+}
+
+fn hook_target(hook: &HookCommandConfig) -> &str {
+    if hook_is_http(hook) {
+        hook.url.trim()
+    } else {
+        hook.command.trim()
+    }
 }
 
 struct ConfiguredHookPolicy {
@@ -180,7 +204,7 @@ impl ToolPolicy for ConfiguredHookPolicy {
                 continue;
             }
 
-            let run = run_shell_hook(hook, &cwd, &payload, "PreToolUse");
+            let run = run_configured_hook(hook, &cwd, &payload, "PreToolUse");
             if run.status == 2 {
                 deny_reason = Some(first_non_empty(&run.stderr, &run.stdout).unwrap_or_else(|| {
                     "PreToolUse hook denied this tool call".to_string()
@@ -300,14 +324,14 @@ fn run_tool_completion_hooks(
             spawn_async_hook(hook, cwd, payload, event_name);
             continue;
         }
-        let run = run_shell_hook(hook, cwd, payload, event_name);
+        let run = run_configured_hook(hook, cwd, payload, event_name);
         if run.status != 0 {
             let detail = first_non_empty(&run.stderr, &run.stdout).unwrap_or_else(|| {
                 format!("hook exited with status {}", run.status)
             });
             eprintln!(
                 "  \x1b[2m[hook {event_name}] {}: {}\x1b[0m",
-                hook.command.trim(),
+                hook_target(hook),
                 detail
             );
         }
@@ -360,13 +384,13 @@ fn spawn_async_hook(
     let payload = payload.clone();
     let event_name = event_name.to_string();
     std::thread::spawn(move || {
-        let run = run_detached_shell_hook(&hook, &cwd, &payload, &event_name);
+        let run = run_detached_hook(&hook, &cwd, &payload, &event_name);
         if run.status != 0 {
             let detail = first_non_empty(&run.stderr, &run.stdout)
                 .unwrap_or_else(|| format!("hook exited with status {}", run.status));
             eprintln!(
                 "  \x1b[2m[hook {event_name} async] {}: {}\x1b[0m",
-                hook.command.trim(),
+                hook_target(&hook),
                 detail
             );
         }
@@ -402,6 +426,115 @@ fn run_detached_shell_hook(
         stdout: String::new(),
         stderr: String::new(),
     }
+}
+
+fn run_detached_hook(
+    hook: &HookCommandConfig,
+    cwd: &std::path::Path,
+    payload: &serde_json::Value,
+    event_name: &str,
+) -> HookRun {
+    if hook_is_http(hook) {
+        run_http_hook(hook, payload, event_name)
+    } else {
+        run_detached_shell_hook(hook, cwd, payload, event_name)
+    }
+}
+
+fn run_configured_hook(
+    hook: &HookCommandConfig,
+    cwd: &std::path::Path,
+    payload: &serde_json::Value,
+    event_name: &str,
+) -> HookRun {
+    if hook_is_http(hook) {
+        run_http_hook(hook, payload, event_name)
+    } else {
+        run_shell_hook(hook, cwd, payload, event_name)
+    }
+}
+
+fn run_http_hook(
+    hook: &HookCommandConfig,
+    payload: &serde_json::Value,
+    event_name: &str,
+) -> HookRun {
+    let timeout = Duration::from_secs(hook.timeout.filter(|secs| *secs > 0).unwrap_or(30));
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("building HTTP hook client: {e}"),
+            };
+        }
+    };
+
+    let mut request = client
+        .post(hook.url.trim())
+        .header("content-type", "application/json")
+        .header("x-libertai-hook-event", event_name)
+        .json(payload);
+    for (name, value) in &hook.headers {
+        request = request.header(
+            name.as_str(),
+            expand_allowed_env_vars(value, &hook.allowed_env_vars),
+        );
+    }
+
+    let response = match request.send() {
+        Ok(response) => response,
+        Err(e) => {
+            return HookRun {
+                status: if e.is_timeout() { 124 } else { 1 },
+                stdout: String::new(),
+                stderr: e.to_string(),
+            };
+        }
+    };
+    let status = response.status();
+    let body = match response.text() {
+        Ok(body) => body.trim().to_string(),
+        Err(e) => {
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("reading HTTP hook response: {e}"),
+            };
+        }
+    };
+    HookRun {
+        status: if status.is_success() {
+            0
+        } else {
+            i32::from(status.as_u16())
+        },
+        stdout: body,
+        stderr: if status.is_success() {
+            String::new()
+        } else {
+            format!("HTTP hook returned {status}")
+        },
+    }
+}
+
+fn expand_allowed_env_vars(value: &str, allowed_env_vars: &[String]) -> String {
+    let mut out = value.to_string();
+    for name in allowed_env_vars {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if let Ok(env_value) = std::env::var(name) {
+            out = out.replace(&format!("${name}"), &env_value);
+            out = out.replace(&format!("${{{name}}}"), &env_value);
+        }
+    }
+    out
 }
 
 fn run_shell_hook(
@@ -754,6 +887,101 @@ mod tests {
         assert_eq!(run.status, 0);
         assert!(run.stdout.starts_with("PostToolUse|"));
         assert!(run.stdout.contains("\"event\":\"PostToolUse\""));
+    }
+
+    #[test]
+    fn http_hook_posts_json_payload_and_headers() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let received = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let received_thread = received.clone();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 4096];
+            let mut text = String::new();
+            loop {
+                let n = std::io::Read::read(&mut stream, &mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if let Some(header_end) = text.find("\r\n\r\n") {
+                    let headers = &text[..header_end];
+                    let content_len = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    let body_len = text.len().saturating_sub(header_end + 4);
+                    if body_len >= content_len {
+                        break;
+                    }
+                }
+            }
+            *received_thread.lock().unwrap() = text;
+            std::io::Write::write_all(
+                &mut stream,
+                b"HTTP/1.1 200 OK\r\ncontent-length: 41\r\nconnection: close\r\n\r\n{\"additionalContext\":\"http hook context\"}",
+            )
+            .unwrap();
+        });
+
+        std::env::set_var("LIBERTAI_HOOK_TOKEN", "secret");
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("x-test-token".to_string(), "token-$LIBERTAI_HOOK_TOKEN".to_string());
+        let hook = HookCommandConfig {
+            hook_type: "http".to_string(),
+            url: format!("http://{addr}/hook"),
+            headers,
+            allowed_env_vars: vec!["LIBERTAI_HOOK_TOKEN".to_string()],
+            ..HookCommandConfig::default()
+        };
+        let run = run_configured_hook(
+            &hook,
+            std::path::Path::new("."),
+            &json!({"event":"UserPromptSubmit","prompt":"review"}),
+            "UserPromptSubmit",
+        );
+        assert_eq!(run.status, 0);
+        assert_eq!(run.stdout, r#"{"additionalContext":"http hook context"}"#);
+        let request = received.lock().unwrap().clone();
+        assert!(request.contains("POST /hook HTTP/1.1"));
+        assert!(request.contains("x-libertai-hook-event: UserPromptSubmit"));
+        assert!(request.contains("x-test-token: token-secret"));
+        assert!(request.contains("\"prompt\":\"review\""));
+    }
+
+    #[test]
+    fn http_hook_reports_non_success_status() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _ = std::io::Write::write_all(
+                &mut stream,
+                b"HTTP/1.1 403 Forbidden\r\ncontent-length: 7\r\nconnection: close\r\n\r\ndenied\n",
+            );
+        });
+        let hook = HookCommandConfig {
+            hook_type: "http".to_string(),
+            url: format!("http://{addr}/hook"),
+            ..HookCommandConfig::default()
+        };
+        let run = run_configured_hook(
+            &hook,
+            std::path::Path::new("."),
+            &json!({"event":"PreToolUse"}),
+            "PreToolUse",
+        );
+        assert_eq!(run.status, 403);
+        assert_eq!(run.stdout, "denied");
+        assert!(run.stderr.contains("HTTP hook returned"));
     }
 
     #[test]
