@@ -895,6 +895,10 @@ async fn repl_loop(
                 print_init_project(None);
                 continue;
             }
+            "/onboarding" => {
+                write_onboarding_guide(None);
+                continue;
+            }
             "/agents" => {
                 print_agents();
                 continue;
@@ -1174,6 +1178,10 @@ async fn repl_loop(
         }
         if let Some(rest) = trimmed.strip_prefix("/share ") {
             share_transcript(&handle, Some(rest.trim())).await;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/onboarding ") {
+            write_onboarding_guide(Some(rest.trim()));
             continue;
         }
         if let Some((command, rest)) = image_command_arg(trimmed) {
@@ -1937,6 +1945,7 @@ fn print_help() {
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
     println!("{DIM}  /skills [list|enable <name>|disable <name>] — manage active code-agent skills for new sessions{RESET}");
     println!("{DIM}  /init [--agent] [notes] — create or draft AGENTS.md guidance{RESET}");
+    println!("{DIM}  /onboarding [path] — write a local project onboarding guide{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
     println!("{DIM}  /agent [--worktree] <name> <task> — run a named sub-agent task{RESET}");
     println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
@@ -3117,6 +3126,44 @@ fn print_init_project(notes: Option<&str>) {
             println!();
         }
         Err(e) => eprintln!("{DIM}  /init: failed: {e:#}{RESET}"),
+    }
+}
+
+fn write_onboarding_guide(path: Option<&str>) {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /onboarding: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let path = path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("libertai-onboarding.md"));
+    let guide = match crate::commands::code_init::onboarding_guide(&cwd) {
+        Ok(guide) => guide,
+        Err(e) => {
+            eprintln!("{DIM}  /onboarding: failed: {e:#}{RESET}");
+            return;
+        }
+    };
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!(
+                "{DIM}  /onboarding: could not create {}: {e}{RESET}",
+                parent.display()
+            );
+            return;
+        }
+    }
+    match std::fs::write(&path, guide) {
+        Ok(()) => println!("{DIM}  onboarding guide written: {}{RESET}", path.display()),
+        Err(e) => eprintln!(
+            "{DIM}  /onboarding: could not write {}: {e}{RESET}",
+            path.display()
+        ),
     }
 }
 

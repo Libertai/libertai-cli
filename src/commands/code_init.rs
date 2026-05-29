@@ -43,6 +43,55 @@ pub fn agents_md_candidate(cwd: &Path, notes: Option<&str>) -> Result<String> {
     build_agents_md(cwd, notes)
 }
 
+pub fn onboarding_guide(cwd: &Path) -> Result<String> {
+    let project = cwd
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("project");
+    let mut lines = vec![
+        format!("# {project} onboarding guide"),
+        String::new(),
+        "Share this local guide with a teammate or a future agent session. It is generated from repository files already present on disk.".to_string(),
+        String::new(),
+        "## Project snapshot".to_string(),
+    ];
+    let facts = project_fact_lines(cwd);
+    if facts.is_empty() {
+        lines.push("- Inspect the repository before making changes.".to_string());
+    } else {
+        lines.extend(facts);
+    }
+
+    lines.extend([String::new(), "## First commands to know".to_string()]);
+    lines.extend(command_lines(cwd));
+
+    lines.extend([String::new(), "## Important paths".to_string()]);
+    let structure = structure_lines(cwd);
+    if structure.is_empty() {
+        lines.push("- Inspect the repository tree before choosing files to edit.".to_string());
+    } else {
+        lines.extend(structure);
+    }
+
+    let guidance = existing_guidance_summary(cwd);
+    if !guidance.is_empty() {
+        lines.extend([String::new(), "## Existing agent guidance".to_string()]);
+        lines.extend(guidance);
+    }
+
+    lines.extend([
+        String::new(),
+        "## Working rules".to_string(),
+        "- Keep changes scoped to the requested task.".to_string(),
+        "- Prefer existing project commands and conventions over new tooling.".to_string(),
+        "- Run the smallest relevant verification before handing work back.".to_string(),
+        "- Cite changed files with line numbers when summarizing work.".to_string(),
+        String::new(),
+    ]);
+    Ok(lines.join("\n"))
+}
+
 pub fn init_agent_prompt(notes: Option<&str>) -> String {
     const INIT_PROMPT: &str = r#"Initialize project context for this repository by creating or
 updating AGENTS.md at the project root. AGENTS.md is the agent's
@@ -149,6 +198,28 @@ fn clean_user_note(notes: Option<&str>) -> Option<String> {
         .map(|note| note.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|note| !note.is_empty())
         .map(|note| truncate_sentence(&note))
+}
+
+fn existing_guidance_summary(cwd: &Path) -> Vec<String> {
+    ["AGENTS.md", "CLAUDE.md"]
+        .into_iter()
+        .filter_map(|name| {
+            let path = cwd.join(name);
+            let raw = std::fs::read_to_string(&path).ok()?;
+            let excerpt = raw
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .take(8)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if excerpt.is_empty() {
+                Some(format!("- `{name}` exists but is empty."))
+            } else {
+                Some(format!("- `{name}`: {}", truncate_sentence(&excerpt)))
+            }
+        })
+        .collect()
 }
 
 fn command_lines(cwd: &Path) -> Vec<String> {
@@ -490,6 +561,23 @@ mod tests {
         assert!(result.content.contains("build: `pnpm run build` (script: `vite build`)"));
         assert!(result.content.contains("test: `pnpm test` (script: `vitest`)"));
         assert!(result.content.contains("lint: `pnpm run lint` (script: `eslint .`)"));
+    }
+
+    #[test]
+    fn onboarding_guide_uses_repo_facts_and_existing_guidance() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+        std::fs::write(temp.path().join("README.md"), "# Demo\n\nA test project.\n").unwrap();
+        std::fs::write(temp.path().join("AGENTS.md"), "# Demo agents\n\nUse cargo test.\n").unwrap();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
+
+        let guide = onboarding_guide(temp.path()).unwrap();
+
+        assert!(guide.contains("Rust project: `demo`"));
+        assert!(guide.contains("README title: `Demo`"));
+        assert!(guide.contains("cargo test --locked"));
+        assert!(guide.contains("`src/`"));
+        assert!(guide.contains("`AGENTS.md`: # Demo agents Use cargo test."));
     }
 
     #[test]

@@ -76,6 +76,9 @@ SDK; those are flagged **(upstream)**.
   plus `/think` and `/t` aliases.
 - **CLI `/share` command** — REPL users can write a self-contained
   HTML transcript with `/share [path]` for local sharing/review.
+- **CLI `/onboarding` command** — REPL users can generate a local
+  Markdown onboarding guide from repo facts, commands, structure, and
+  existing AGENTS/CLAUDE guidance.
 - **CLI `/compact` command** — REPL users can trigger pi's explicit
   compaction pass from the REPL, with optional user notes threaded
   into the summarization prompt.
