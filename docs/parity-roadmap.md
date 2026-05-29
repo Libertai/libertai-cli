@@ -619,7 +619,9 @@ after native `task` tool subagents finish. Lifecycle hooks run around
 native CLI sessions/turn stops and warn on nonzero exit. Tool hook matchers
 support case-sensitive exact names, `*` globs, `|` alternatives,
 `regex:<pattern>`, and slash-delimited regex patterns that can contain
-alternation pipes. Rows can set `async = true` (or imported `asyncHook =
+alternation pipes. Tool hook rows can also set handler `if` filters such
+as `Bash(rm *)` to match a tool name plus argument glob. Rows can set
+`async = true` (or imported `asyncHook =
 true`) to launch a command or HTTP hook without waiting for completion;
 async hook output is discarded and cannot affect prompt/tool decisions.
 CLI HTTP hook rows use `type = "http"`, `url`, optional `headers`,

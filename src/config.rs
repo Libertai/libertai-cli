@@ -232,6 +232,8 @@ pub struct HookCommandConfig {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub matcher: String,
+    #[serde(default, rename = "if", skip_serializing_if = "String::is_empty")]
+    pub if_condition: String,
     #[serde(
         default = "default_hook_type",
         rename = "type",
@@ -274,6 +276,7 @@ impl Default for HookCommandConfig {
         Self {
             enabled: true,
             matcher: String::new(),
+            if_condition: String::new(),
             hook_type: default_hook_type(),
             command: String::new(),
             url: String::new(),

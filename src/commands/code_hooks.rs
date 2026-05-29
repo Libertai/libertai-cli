@@ -210,7 +210,10 @@ impl ToolPolicy for ConfiguredHookPolicy {
         let mut deny_reason: Option<String> = None;
 
         for hook in &self.cfg.hooks.pre_tool_use {
-            if !is_runnable_hook(hook) || !hook_matches_tool(hook, tool_name) {
+            if !is_runnable_hook(hook)
+                || !hook_matches_tool(hook, tool_name)
+                || !hook_condition_matches(hook, &payload)
+            {
                 continue;
             }
             if hook.async_hook {
@@ -331,7 +334,10 @@ fn run_tool_completion_hooks(
     }
 
     for hook in hooks {
-        if !is_runnable_hook(hook) || !hook_matches_tool(hook, tool_name) {
+        if !is_runnable_hook(hook)
+            || !hook_matches_tool(hook, tool_name)
+            || !hook_condition_matches(hook, payload)
+        {
             continue;
         }
         if hook.async_hook {
@@ -758,6 +764,103 @@ fn hook_matches_tool(hook: &HookCommandConfig, tool_name: &str) -> bool {
     matcher_alternatives(matcher)
         .into_iter()
         .any(|part| matcher_part_matches(&part, tool_name))
+}
+
+fn hook_condition_matches(hook: &HookCommandConfig, payload: &serde_json::Value) -> bool {
+    let condition = hook.if_condition.trim();
+    if condition.is_empty() {
+        return true;
+    }
+
+    let tool_name = payload
+        .get("toolName")
+        .or_else(|| payload.get("tool_name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let Some((tool_pattern, arg_pattern)) = parse_tool_condition(condition) else {
+        return false;
+    };
+    if !tool_name_matches(tool_pattern, tool_name) {
+        return false;
+    }
+    let Some(arg_pattern) = arg_pattern else {
+        return true;
+    };
+    let Some(value) = condition_input_value(tool_name, payload) else {
+        return false;
+    };
+    wildcard_match(arg_pattern, &value)
+}
+
+fn parse_tool_condition(condition: &str) -> Option<(&str, Option<&str>)> {
+    if let Some(open) = condition.find('(') {
+        if condition.ends_with(')') && open > 0 {
+            let tool = condition[..open].trim();
+            let args = condition[open + 1..condition.len() - 1].trim();
+            if !tool.is_empty() {
+                return Some((tool, Some(args)));
+            }
+        }
+        return None;
+    }
+    Some((condition.trim(), None)).filter(|(tool, _)| !tool.is_empty())
+}
+
+fn tool_name_matches(pattern: &str, tool_name: &str) -> bool {
+    matcher_alternatives(pattern).into_iter().any(|part| {
+        let native = claude_tool_alias(&part).unwrap_or(part.as_str());
+        native.eq_ignore_ascii_case(tool_name) || matcher_part_matches(&part, tool_name)
+    })
+}
+
+fn claude_tool_alias(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "bash" => Some("bash"),
+        "read" => Some("read"),
+        "write" => Some("write"),
+        "edit" | "multiedit" => Some("edit"),
+        "grep" => Some("grep"),
+        "glob" | "find" => Some("find"),
+        "ls" => Some("ls"),
+        _ => None,
+    }
+}
+
+fn condition_input_value(tool_name: &str, payload: &serde_json::Value) -> Option<String> {
+    if let Some(input) = payload.get("tool_input").or_else(|| payload.get("toolInput")) {
+        let tool = tool_name.to_ascii_lowercase();
+        for key in condition_input_keys(&tool) {
+            if let Some(value) = input.get(key).and_then(serde_json::Value::as_str) {
+                return Some(value.to_string());
+            }
+        }
+        return Some(input.to_string());
+    }
+    let args_json = payload
+        .get("argsJson")
+        .or_else(|| payload.get("args_json"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)?;
+    if let Ok(input) = serde_json::from_str::<serde_json::Value>(&args_json) {
+        let tool = tool_name.to_ascii_lowercase();
+        for key in condition_input_keys(&tool) {
+            if let Some(value) = input.get(key).and_then(serde_json::Value::as_str) {
+                return Some(value.to_string());
+            }
+        }
+    }
+    Some(args_json)
+}
+
+fn condition_input_keys(tool_name: &str) -> &'static [&'static str] {
+    match tool_name {
+        "bash" => &["command"],
+        "read" | "write" | "edit" | "hashline_edit" | "notebook_read" | "notebook_edit"
+        | "notebook_execute" => &["path", "file_path", "filePath", "notebook_path"],
+        "grep" => &["pattern"],
+        "find" => &["pattern", "path"],
+        _ => &["path", "command", "pattern"],
+    }
 }
 
 fn matcher_part_matches(part: &str, tool_name: &str) -> bool {
@@ -1205,6 +1308,88 @@ mod tests {
     }
 
     #[test]
+    fn hook_condition_matches_claude_tool_argument_rules() {
+        let hook = HookCommandConfig {
+            if_condition: "Bash(rm *)".to_string(),
+            ..HookCommandConfig::default()
+        };
+        assert!(hook_condition_matches(
+            &hook,
+            &json!({
+                "toolName": "bash",
+                "tool_input": { "command": "rm -rf target" }
+            })
+        ));
+        assert!(hook_condition_matches(
+            &hook,
+            &json!({
+                "tool_name": "bash",
+                "argsJson": "{\"command\":\"rm -rf tmp\"}"
+            })
+        ));
+        assert!(!hook_condition_matches(
+            &hook,
+            &json!({
+                "toolName": "bash",
+                "tool_input": { "command": "cargo test" }
+            })
+        ));
+        assert!(!hook_condition_matches(
+            &hook,
+            &json!({
+                "toolName": "write",
+                "tool_input": { "path": "README.md" }
+            })
+        ));
+
+        let empty = HookCommandConfig::default();
+        assert!(hook_condition_matches(&empty, &json!({})));
+
+        let malformed = HookCommandConfig {
+            if_condition: "Bash(rm *".to_string(),
+            ..HookCommandConfig::default()
+        };
+        assert!(!hook_condition_matches(
+            &malformed,
+            &json!({
+                "toolName": "bash",
+                "tool_input": { "command": "rm -rf target" }
+            })
+        ));
+
+        let edit_hook = HookCommandConfig {
+            if_condition: "Edit(*.ts)".to_string(),
+            ..HookCommandConfig::default()
+        };
+        assert!(hook_condition_matches(
+            &edit_hook,
+            &json!({
+                "toolName": "edit",
+                "tool_input": { "path": "src/app.ts" }
+            })
+        ));
+        assert!(!hook_condition_matches(
+            &edit_hook,
+            &json!({
+                "toolName": "edit",
+                "tool_input": { "path": "src/app.rs" }
+            })
+        ));
+
+        let tool_only = HookCommandConfig {
+            if_condition: "Bash|Write".to_string(),
+            ..HookCommandConfig::default()
+        };
+        assert!(hook_condition_matches(
+            &tool_only,
+            &json!({
+                "toolName": "write",
+                "tool_input": { "path": "README.md" }
+            })
+        ));
+    }
+
+    #[test]
     fn config_policy_denies_from_matching_hook() {
         let cfg = Arc::new(Config {
             hooks: HooksConfig {
@@ -1228,6 +1413,34 @@ mod tests {
         assert_eq!(
             policy.decide("call-2", "read", &json!({"path":"secret.txt"})),
             ToolPolicyDecision::NoDecision
+        );
+    }
+
+    #[test]
+    fn config_policy_filters_by_hook_condition() {
+        let cfg = Arc::new(Config {
+            hooks: HooksConfig {
+                pre_tool_use: vec![HookCommandConfig {
+                    matcher: "bash".to_string(),
+                    if_condition: "Bash(rm *)".to_string(),
+                    command: "printf '{\"permissionDecision\":\"deny\",\"reason\":\"blocked\"}'"
+                        .to_string(),
+                    ..HookCommandConfig::default()
+                }],
+                ..HooksConfig::default()
+            },
+            ..Config::default()
+        });
+        let policy = tool_policy_from_config(cfg).unwrap();
+        assert_eq!(
+            policy.decide("call-1", "bash", &json!({"command":"cargo test"})),
+            ToolPolicyDecision::NoDecision
+        );
+        assert_eq!(
+            policy.decide("call-2", "bash", &json!({"command":"rm -rf target"})),
+            ToolPolicyDecision::Deny {
+                reason: Some("blocked".to_string())
+            }
         );
     }
 

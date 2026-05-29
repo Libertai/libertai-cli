@@ -5318,6 +5318,11 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
             format!(", shell={}", hook.shell.trim())
         };
         let async_flag = if hook.async_hook { ", async" } else { "" };
+        let if_condition = if hook.if_condition.trim().is_empty() {
+            String::new()
+        } else {
+            format!(", if={}", hook.if_condition.trim())
+        };
         let continue_on_block = if hook.continue_on_block {
             ", continueOnBlock"
         } else {
@@ -5348,7 +5353,7 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
             hook.command.trim()
         };
         println!(
-            "{DIM}  {}. {} [{}] type={} matcher={}{}{}{}{}:{RESET} {}",
+            "{DIM}  {}. {} [{}] type={} matcher={}{}{}{}{}{}:{RESET} {}",
             idx + 1,
             event,
             marker,
@@ -5357,6 +5362,7 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
             timeout,
             shell,
             async_flag,
+            if_condition,
             continue_on_block,
             target
         );
