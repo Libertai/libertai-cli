@@ -40,6 +40,17 @@ pub fn run() -> Result<()> {
             String::new()
         }
     );
+    println!(
+        "  {:<22} {} (reserve={}, keep_recent={})",
+        "Auto compaction:".dimmed(),
+        if cfg.code_auto_compaction_enabled {
+            "enabled".green().to_string()
+        } else {
+            "disabled".dimmed().to_string()
+        },
+        cfg.code_compaction_reserve_tokens,
+        cfg.code_compaction_keep_recent_tokens
+    );
 
     println!("  {}", "Launcher defaults:".dimmed());
     println!(

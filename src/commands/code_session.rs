@@ -76,6 +76,12 @@ pub struct CodeSessionConfig {
     /// "--"]`) — `code_sandbox::build_command_wrapper` is the canonical
     /// builder for CLI/desktop callers.
     pub bash_command_wrapper: Option<Vec<String>>,
+    /// Whether pi should auto-compact long code sessions.
+    pub auto_compaction_enabled: bool,
+    /// Token reserve before auto-compaction triggers.
+    pub compaction_reserve_tokens: u32,
+    /// Recent context retained after compaction.
+    pub compaction_keep_recent_tokens: u32,
 }
 
 /// Sensible per-prompt token cap for code-style agents. 32k is enough
@@ -122,6 +128,9 @@ pub fn build_session_options(cfg: CodeSessionConfig) -> SessionOptions {
         enabled_tools: cfg.enabled_tools,
         append_system_prompt: cfg.append_system_prompt,
         bash_command_wrapper: cfg.bash_command_wrapper,
+        compaction_enabled: Some(cfg.auto_compaction_enabled),
+        compaction_reserve_tokens: Some(cfg.compaction_reserve_tokens),
+        compaction_keep_recent_tokens: Some(cfg.compaction_keep_recent_tokens),
         ..SessionOptions::default()
     }
 }

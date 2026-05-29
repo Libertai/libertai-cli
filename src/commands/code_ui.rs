@@ -1454,7 +1454,7 @@ async fn build_handle(
         approvals,
         ui,
         FactoryFeatures::cli_defaults(),
-        Some(cfg),
+        Some(Arc::clone(&cfg)),
     ));
     let persistence = match resume_path {
         Some(p) => SessionPersistence::Resume(p),
@@ -1482,6 +1482,9 @@ async fn build_handle(
         append_system_prompt,
         max_tokens,
         bash_command_wrapper,
+        auto_compaction_enabled: cfg.code_auto_compaction_enabled,
+        compaction_reserve_tokens: cfg.code_compaction_reserve_tokens,
+        compaction_keep_recent_tokens: cfg.code_compaction_keep_recent_tokens,
     });
     let mut handle = create_agent_session(options)
         .await
@@ -3928,6 +3931,16 @@ fn print_config_status(cfg: &LibertaiConfig) {
     } else {
         println!("{DIM}  smart approvals:{RESET} disabled");
     }
+    println!(
+        "{DIM}  auto compaction:{RESET} {} (reserve={}, keep_recent={})",
+        if cfg.code_auto_compaction_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        cfg.code_compaction_reserve_tokens,
+        cfg.code_compaction_keep_recent_tokens
+    );
     match cfg.auth.api_key.as_deref() {
         Some(key) => println!("{DIM}  auth:{RESET} {}", mask_key(key)),
         None => println!("{DIM}  auth:{RESET} not logged in"),

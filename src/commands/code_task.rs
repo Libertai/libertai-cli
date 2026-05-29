@@ -298,6 +298,9 @@ impl Tool for TaskTool {
             // the outer agent already wraps the nested calls too. No
             // need to plumb the argv a second time.
             bash_command_wrapper: None,
+            auto_compaction_enabled: cfg.code_auto_compaction_enabled,
+            compaction_reserve_tokens: cfg.code_compaction_reserve_tokens,
+            compaction_keep_recent_tokens: cfg.code_compaction_keep_recent_tokens,
         });
 
         if let Some(agent) = agent.as_ref() {

@@ -26,7 +26,7 @@ use crate::commands::code_session::{
 use crate::commands::code_skills::{self, SkillPillar};
 use crate::commands::code_term::TerminalApprovalUi;
 use crate::commands::{code_models, code_ui};
-use crate::config;
+use crate::config::{self, Config as LibertaiConfig};
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -134,12 +134,13 @@ pub fn run(
         crate::config::allow_rules_path()?,
     )?);
     let ui = Arc::new(TerminalApprovalUi);
+    let cfg = Arc::new(cfg);
     let factory = Arc::new(LibertaiToolFactory::new_with_features(
         ModeFlag::new(mode),
         approvals,
         ui,
         FactoryFeatures::cli_defaults(),
-        Some(Arc::new(cfg)),
+        Some(Arc::clone(&cfg)),
     ));
 
     runtime.block_on(async move {
@@ -151,6 +152,7 @@ pub fn run(
             resume_path,
             bash_command_wrapper,
             mode,
+            cfg,
         )
         .await
     })
@@ -164,6 +166,7 @@ async fn run_async(
     resume_path: Option<PathBuf>,
     bash_command_wrapper: Option<Vec<String>>,
     mode: Mode,
+    cfg: Arc<LibertaiConfig>,
 ) -> Result<()> {
     // One-shots are typically piped — print only the agent's response,
     // never replay prior history (it would corrupt downstream output).
@@ -195,6 +198,9 @@ async fn run_async(
         append_system_prompt,
         max_tokens,
         bash_command_wrapper,
+        auto_compaction_enabled: cfg.code_auto_compaction_enabled,
+        compaction_reserve_tokens: cfg.code_compaction_reserve_tokens,
+        compaction_keep_recent_tokens: cfg.code_compaction_keep_recent_tokens,
     });
 
     // anyhow::Error::new preserves the underlying pi::sdk::Error so

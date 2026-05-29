@@ -198,13 +198,13 @@ partial states.
 
 ## Open questions (resolve before starting affected phases)
 
-1. **Does pi auto-compact?** Parity doc says "pi auto-compacts via
-   context-window threshold but explicit user-driven compaction isn't
-   surfaced" (line 59). Our internal inventory of `code_session.rs` says
-   `ResolvedCompactionSettings` is never set, and `SessionOptions.thinking`
-   is always `None`. Need to grep `pi_agent_rust`'s session module to
-   confirm whether auto-compaction is on by SDK default or requires explicit
-   config. Gates **Phase 4C**.
+1. **Resolved: pi auto-compacts by default.** `pi_agent_rust` has a
+   background compaction worker, explicit `/compact`, force-mode SDK
+   compaction, lifecycle events, and extension hooks. LibertAI now pins
+   a fork commit whose `SessionOptions` exposes per-session compaction
+   overrides, and CLI/desktop share `code_auto_compaction_enabled`,
+   `code_compaction_reserve_tokens`, and
+   `code_compaction_keep_recent_tokens`.
 
 2. **Where to land per-tool usage notes** — patch `pi_agent_rust`'s `Tool::description`
    strings (gives the desktop the same notes for free), or append a
@@ -485,19 +485,18 @@ have ~50 agent-created skills.
 "review proposed skills" tray UI before this hits prod, otherwise
 skills appear silently.
 
-### 4C. Compaction wiring + SUMMARY_PREFIX framing
+### 4C. Compaction Wiring + SUMMARY_PREFIX Framing
 
-Gated on open question 1. Two cases:
+Shipped: `pi_agent_rust` SDK sessions accept per-session compaction
+overrides; `libertai-cli` stores shared code compaction settings and
+threads them into one-shot, REPL, and Task subagent sessions; desktop
+Advanced settings mirrors those fields and native sessions inherit them.
 
-- **If pi auto-compacts already**: just override the summary prefix
-  to use Hermes's "REFERENCE ONLY / Active Task" framing
-  (`/tmp/hermes-agent/agent/context_compressor.py:37-51`).
-- **If not**: configure `ResolvedCompactionSettings`, set
-  threshold to ~75% of context window, wire the prefix.
+Remaining optional polish: decide whether to override pi's compaction
+summary prefix with Hermes-style "reference only / active task" framing.
 
-**Files**: `pi_agent_rust/src/agent/compaction.rs` (upstream, prefix),
-`src/commands/code_session.rs` (settings).
-**Effort**: M (1-2 days).
+**Files**: `pi_agent_rust/src/session.rs` (prefix, optional),
+`src/commands/code_session.rs` (settings, shipped).
 
 ### 4D. Named sub-agent registry
 

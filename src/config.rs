@@ -21,6 +21,9 @@ pub const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 600;
 pub const DEFAULT_CHECK_FOR_UPDATES: bool = true;
 pub const DEFAULT_SMART_APPROVAL_ENABLED: bool = false;
 pub const DEFAULT_SMART_APPROVAL_MODEL: &str = DEFAULT_FAST_MODEL;
+pub const DEFAULT_CODE_AUTO_COMPACTION_ENABLED: bool = true;
+pub const DEFAULT_CODE_COMPACTION_RESERVE_TOKENS: u32 = 16_384;
+pub const DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS: u32 = 20_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -78,6 +81,21 @@ pub struct Config {
         skip_serializing_if = "is_default_smart_approval_model"
     )]
     pub smart_approval_model: String,
+    #[serde(
+        default = "default_code_auto_compaction_enabled",
+        skip_serializing_if = "is_default_code_auto_compaction_enabled"
+    )]
+    pub code_auto_compaction_enabled: bool,
+    #[serde(
+        default = "default_code_compaction_reserve_tokens",
+        skip_serializing_if = "is_default_code_compaction_reserve_tokens"
+    )]
+    pub code_compaction_reserve_tokens: u32,
+    #[serde(
+        default = "default_code_compaction_keep_recent_tokens",
+        skip_serializing_if = "is_default_code_compaction_keep_recent_tokens"
+    )]
+    pub code_compaction_keep_recent_tokens: u32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub status_line_template: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -155,6 +173,15 @@ fn is_default_smart_approval_enabled(v: &bool) -> bool {
 fn is_default_smart_approval_model(s: &str) -> bool {
     s == DEFAULT_SMART_APPROVAL_MODEL
 }
+fn is_default_code_auto_compaction_enabled(v: &bool) -> bool {
+    *v == DEFAULT_CODE_AUTO_COMPACTION_ENABLED
+}
+fn is_default_code_compaction_reserve_tokens(v: &u32) -> bool {
+    *v == DEFAULT_CODE_COMPACTION_RESERVE_TOKENS
+}
+fn is_default_code_compaction_keep_recent_tokens(v: &u32) -> bool {
+    *v == DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS
+}
 
 impl Default for LauncherDefaults {
     fn default() -> Self {
@@ -215,6 +242,15 @@ fn default_smart_approval_enabled() -> bool {
 fn default_smart_approval_model_s() -> String {
     DEFAULT_SMART_APPROVAL_MODEL.into()
 }
+fn default_code_auto_compaction_enabled() -> bool {
+    DEFAULT_CODE_AUTO_COMPACTION_ENABLED
+}
+fn default_code_compaction_reserve_tokens() -> u32 {
+    DEFAULT_CODE_COMPACTION_RESERVE_TOKENS
+}
+fn default_code_compaction_keep_recent_tokens() -> u32 {
+    DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -231,6 +267,9 @@ impl Default for Config {
             check_for_updates: DEFAULT_CHECK_FOR_UPDATES,
             smart_approval_enabled: DEFAULT_SMART_APPROVAL_ENABLED,
             smart_approval_model: default_smart_approval_model_s(),
+            code_auto_compaction_enabled: DEFAULT_CODE_AUTO_COMPACTION_ENABLED,
+            code_compaction_reserve_tokens: DEFAULT_CODE_COMPACTION_RESERVE_TOKENS,
+            code_compaction_keep_recent_tokens: DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS,
             status_line_template: String::new(),
             status_line_command: String::new(),
             auth: Auth::default(),
