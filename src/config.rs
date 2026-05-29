@@ -258,11 +258,15 @@ pub struct HookCommandConfig {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub server: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<serde_json::Value>,
+    #[serde(default, rename = "statusMessage", skip_serializing_if = "String::is_empty")]
+    pub status_message: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub shell: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -302,9 +306,11 @@ impl Default for HookCommandConfig {
             allowed_env_vars: Vec::new(),
             prompt: String::new(),
             model: String::new(),
+            source: String::new(),
             server: String::new(),
             tool: String::new(),
             input: None,
+            status_message: String::new(),
             shell: String::new(),
             timeout: None,
             async_hook: false,

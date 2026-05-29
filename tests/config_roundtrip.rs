@@ -54,12 +54,11 @@ fn save_then_load_preserves_fields() {
                     server: "policy".into(),
                     tool: "check_prompt".into(),
                     input: Some(json!({ "level": "strict" })),
+                    source: "project".into(),
+                    status_message: "checking policy".into(),
                     once: true,
                     async_rewake: true,
-                    extra: BTreeMap::from([
-                        ("source".to_string(), json!("project")),
-                        ("customFlag".to_string(), json!(true)),
-                    ]),
+                    extra: BTreeMap::from([("customFlag".to_string(), json!(true))]),
                     ..HookCommandConfig::default()
                 },
             ],
@@ -133,9 +132,10 @@ fn save_then_load_preserves_fields() {
     );
     assert!(round.hooks.user_prompt_submit[1].once);
     assert!(round.hooks.user_prompt_submit[1].async_rewake);
+    assert_eq!(round.hooks.user_prompt_submit[1].source, "project");
     assert_eq!(
-        round.hooks.user_prompt_submit[1].extra.get("source"),
-        Some(&json!("project"))
+        round.hooks.user_prompt_submit[1].status_message,
+        "checking policy"
     );
     assert_eq!(
         round.hooks.user_prompt_submit[1].extra.get("customFlag"),
