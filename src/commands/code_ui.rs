@@ -1273,10 +1273,12 @@ async fn repl_loop(
         set_current_abort(abort_handle);
         let render = {
             let tool_activity = Arc::clone(&tool_activity);
+            let hook_cfg = Arc::clone(&cfg);
             move |event: AgentEvent| {
                 if let Ok(mut tracker) = tool_activity.lock() {
                     tracker.observe(&event);
                 }
+                crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
                 render_event(event);
             }
         };
@@ -1813,7 +1815,7 @@ fn print_help() {
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
     println!("{DIM}  /config   — show active configuration summary (/settings is an alias){RESET}");
-    println!("{DIM}  /hooks    — show configured command-only PreToolUse hooks{RESET}");
+    println!("{DIM}  /hooks    — show configured command hooks{RESET}");
     println!(
         "{DIM}  /statusline <template|command <shell>|reset> — customize the input-bar status line{RESET}"
     );
@@ -3949,13 +3951,20 @@ fn print_config_status(cfg: &LibertaiConfig) {
         cfg.code_compaction_reserve_tokens,
         cfg.code_compaction_keep_recent_tokens
     );
+    let pre_tool_hooks = cfg
+        .hooks
+        .pre_tool_use
+        .iter()
+        .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
+        .count();
+    let post_tool_hooks = cfg
+        .hooks
+        .post_tool_use
+        .iter()
+        .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
+        .count();
     println!(
-        "{DIM}  hooks:{RESET} {} PreToolUse command hook(s)",
-        cfg.hooks
-            .pre_tool_use
-            .iter()
-            .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
-            .count()
+        "{DIM}  hooks:{RESET} {pre_tool_hooks} PreToolUse, {post_tool_hooks} PostToolUse command hook(s)"
     );
     match cfg.auth.api_key.as_deref() {
         Some(key) => println!("{DIM}  auth:{RESET} {}", mask_key(key)),
@@ -3969,46 +3978,55 @@ fn print_config_status(cfg: &LibertaiConfig) {
 
 fn print_hooks_status(cfg: &LibertaiConfig) {
     println!("{BOLD}hooks{RESET}");
-    if cfg.hooks.pre_tool_use.is_empty() {
-        println!("{DIM}  no PreToolUse hooks configured{RESET}");
-    } else {
-        for (idx, hook) in cfg.hooks.pre_tool_use.iter().enumerate() {
-            let marker = if hook.enabled { "on" } else { "off" };
-            let matcher = if hook.matcher.trim().is_empty() {
-                "*"
-            } else {
-                hook.matcher.trim()
-            };
-            let timeout = hook
-                .timeout
-                .map(|secs| format!(", timeout={secs}s"))
-                .unwrap_or_default();
-            let shell = if hook.shell.trim().is_empty() {
-                String::new()
-            } else {
-                format!(", shell={}", hook.shell.trim())
-            };
-            let command = if hook.command.trim().is_empty() {
-                "(no command)"
-            } else {
-                hook.command.trim()
-            };
-            println!(
-                "{DIM}  {}. PreToolUse [{}] matcher={}{}{}:{RESET} {}",
-                idx + 1,
-                marker,
-                matcher,
-                timeout,
-                shell,
-                command
-            );
-        }
-    }
+    print_hook_section("PreToolUse", &cfg.hooks.pre_tool_use);
+    print_hook_section("PostToolUse", &cfg.hooks.post_tool_use);
     println!(
-        "{DIM}  command hooks receive JSON on stdin and may return permissionDecision allow|ask|defer|deny.{RESET}"
+        "{DIM}  PreToolUse hooks may return permissionDecision allow|ask|defer|deny.{RESET}"
+    );
+    println!(
+        "{DIM}  PostToolUse hooks run after tool execution and cannot alter the result.{RESET}"
     );
     println!("{DIM}  non-command hook handlers are not executed natively.{RESET}");
     println!();
+}
+
+fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
+    if hooks.is_empty() {
+        println!("{DIM}  no {event} hooks configured{RESET}");
+        return;
+    }
+    for (idx, hook) in hooks.iter().enumerate() {
+        let marker = if hook.enabled { "on" } else { "off" };
+        let matcher = if hook.matcher.trim().is_empty() {
+            "*"
+        } else {
+            hook.matcher.trim()
+        };
+        let timeout = hook
+            .timeout
+            .map(|secs| format!(", timeout={secs}s"))
+            .unwrap_or_default();
+        let shell = if hook.shell.trim().is_empty() {
+            String::new()
+        } else {
+            format!(", shell={}", hook.shell.trim())
+        };
+        let command = if hook.command.trim().is_empty() {
+            "(no command)"
+        } else {
+            hook.command.trim()
+        };
+        println!(
+            "{DIM}  {}. {} [{}] matcher={}{}{}:{RESET} {}",
+            idx + 1,
+            event,
+            marker,
+            matcher,
+            timeout,
+            shell,
+            command
+        );
+    }
 }
 
 fn print_status_line_status(cfg: &LibertaiConfig) {

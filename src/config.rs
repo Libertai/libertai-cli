@@ -199,11 +199,13 @@ impl Default for LauncherDefaults {
 pub struct HooksConfig {
     #[serde(default, rename = "PreToolUse", skip_serializing_if = "Vec::is_empty")]
     pub pre_tool_use: Vec<HookCommandConfig>,
+    #[serde(default, rename = "PostToolUse", skip_serializing_if = "Vec::is_empty")]
+    pub post_tool_use: Vec<HookCommandConfig>,
 }
 
 impl HooksConfig {
     fn is_default(&self) -> bool {
-        self.pre_tool_use.is_empty()
+        self.pre_tool_use.is_empty() && self.post_tool_use.is_empty()
     }
 }
 

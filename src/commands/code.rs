@@ -213,7 +213,14 @@ async fn run_async(
         .map_err(|e| anyhow::Error::new(e).context("create_agent_session"))?;
     handle.set_max_tokens(max_tokens);
 
-    let msg = handle.prompt(prompt, render).await.map_err(anyhow::Error::new)?;
+    let hook_cfg = Arc::clone(&cfg);
+    let msg = handle
+        .prompt(prompt, move |event| {
+            crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
+            render(event);
+        })
+        .await
+        .map_err(anyhow::Error::new)?;
 
     // Make sure we end on a newline regardless of whether the last event
     // was a TextDelta (which never emits one) or AgentEnd (which does).

@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use pi::sdk::{AgentEvent, ToolOutput};
 use serde_json::json;
 
 use crate::commands::code_approvals::{ToolPolicy, ToolPolicyDecision};
@@ -62,7 +63,7 @@ impl ToolPolicy for ConfiguredHookPolicy {
                 continue;
             }
 
-            let run = run_shell_hook(hook, &cwd, &payload);
+            let run = run_shell_hook(hook, &cwd, &payload, "PreToolUse");
             if run.status == 2 {
                 deny_reason = Some(first_non_empty(&run.stderr, &run.stdout).unwrap_or_else(|| {
                     "PreToolUse hook denied this tool call".to_string()
@@ -132,6 +133,63 @@ impl ToolPolicy for ConfiguredHookPolicy {
     }
 }
 
+pub fn run_post_tool_hooks(cfg: &Config, event: &AgentEvent) {
+    let AgentEvent::ToolExecutionEnd {
+        tool_call_id,
+        tool_name,
+        result,
+        is_error,
+    } = event
+    else {
+        return;
+    };
+
+    if !cfg.hooks.post_tool_use.iter().any(is_runnable_hook) {
+        return;
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let payload = post_tool_payload(&cwd, tool_call_id, tool_name, result, *is_error);
+
+    for hook in &cfg.hooks.post_tool_use {
+        if !is_runnable_hook(hook) || !hook_matches_tool(hook, tool_name) {
+            continue;
+        }
+        let run = run_shell_hook(hook, &cwd, &payload, "PostToolUse");
+        if run.status != 0 {
+            let detail = first_non_empty(&run.stderr, &run.stdout).unwrap_or_else(|| {
+                format!("hook exited with status {}", run.status)
+            });
+            eprintln!(
+                "  \x1b[2m[hook PostToolUse] {}: {}\x1b[0m",
+                hook.command.trim(),
+                detail
+            );
+        }
+    }
+}
+
+fn post_tool_payload(
+    cwd: &std::path::Path,
+    tool_call_id: &str,
+    tool_name: &str,
+    result: &ToolOutput,
+    is_error: bool,
+) -> serde_json::Value {
+    json!({
+        "event": "PostToolUse",
+        "cwd": cwd,
+        "toolCallId": tool_call_id,
+        "toolName": tool_name,
+        "result": result,
+        "isError": is_error,
+        "tool_use_id": tool_call_id,
+        "tool_name": tool_name,
+        "tool_response": result,
+        "is_error": is_error,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HookRun {
     status: i32,
@@ -143,11 +201,12 @@ fn run_shell_hook(
     hook: &HookCommandConfig,
     cwd: &std::path::Path,
     payload: &serde_json::Value,
+    event_name: &str,
 ) -> HookRun {
     let mut cmd = shell_command(&hook.command, hook.shell.trim());
     let spawn = cmd
         .current_dir(cwd)
-        .env("LIBERTAI_HOOK_EVENT", "PreToolUse")
+        .env("LIBERTAI_HOOK_EVENT", event_name)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -391,10 +450,15 @@ mod tests {
             command: "printf '%s|' \"$LIBERTAI_HOOK_EVENT\"; cat".to_string(),
             ..HookCommandConfig::default()
         };
-        let run = run_shell_hook(&hook, cwd.path(), &json!({"event":"PreToolUse"}));
+        let run = run_shell_hook(
+            &hook,
+            cwd.path(),
+            &json!({"event":"PostToolUse"}),
+            "PostToolUse",
+        );
         assert_eq!(run.status, 0);
-        assert!(run.stdout.starts_with("PreToolUse|"));
-        assert!(run.stdout.contains("\"event\":\"PreToolUse\""));
+        assert!(run.stdout.starts_with("PostToolUse|"));
+        assert!(run.stdout.contains("\"event\":\"PostToolUse\""));
     }
 
     #[test]
@@ -407,6 +471,7 @@ mod tests {
                         .to_string(),
                     ..HookCommandConfig::default()
                 }],
+                ..HooksConfig::default()
             },
             ..Config::default()
         });
@@ -421,5 +486,29 @@ mod tests {
             policy.decide("call-2", "read", &json!({"path":"secret.txt"})),
             ToolPolicyDecision::NoDecision
         );
+    }
+
+    #[test]
+    fn post_tool_payload_includes_compatibility_fields() {
+        let result = ToolOutput {
+            content: Vec::new(),
+            details: Some(json!({"ok": true})),
+            is_error: false,
+        };
+        let payload = post_tool_payload(
+            std::path::Path::new("/tmp/project"),
+            "call-1",
+            "bash",
+            &result,
+            false,
+        );
+
+        assert_eq!(payload["event"], "PostToolUse");
+        assert_eq!(payload["toolName"], "bash");
+        assert_eq!(payload["tool_name"], "bash");
+        assert_eq!(payload["isError"], false);
+        assert_eq!(payload["is_error"], false);
+        assert_eq!(payload["result"]["details"], json!({"ok": true}));
+        assert_eq!(payload["tool_response"]["details"], json!({"ok": true}));
     }
 }

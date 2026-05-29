@@ -99,13 +99,19 @@ matcher = "bash|write|edit"
 command = "scripts/pre-tool-use.sh"
 timeout = 5
 
+[[hooks.PostToolUse]]
+matcher = "bash|write|edit"
+command = "scripts/post-tool-use.sh"
+timeout = 5
+
 [auth]
 api_key = "LTAI_..."
 # wallet_address / chain are only written when you log in via wallet.
 ```
 
-`PreToolUse` hooks are command-only in the native CLI. They receive a JSON
-payload on stdin and may print Claude-style JSON such as
+`PreToolUse` and `PostToolUse` hooks are command-only in the native CLI.
+They receive a JSON payload on stdin. `PreToolUse` hooks may print
+Claude-style JSON such as
 `{"permissionDecision":"deny","permissionDecisionReason":"no writes"}`.
 Native non-command hook handlers are intentionally not executed.
 

@@ -14,6 +14,7 @@ fn empty_toml_parses_as_defaults() {
     assert_eq!(cfg.launcher_defaults.haiku_model, "qwen3.6-35b-a3b");
     assert!(cfg.status_line_template.is_empty());
     assert!(cfg.hooks.pre_tool_use.is_empty());
+    assert!(cfg.hooks.post_tool_use.is_empty());
     assert!(cfg.auth.api_key.is_none());
 }
 
@@ -38,6 +39,12 @@ fn save_then_load_preserves_fields() {
                 timeout: Some(5),
                 ..HookCommandConfig::default()
             }],
+            post_tool_use: vec![HookCommandConfig {
+                matcher: "bash".into(),
+                command: "scripts/post-tool-use.sh".into(),
+                timeout: Some(3),
+                ..HookCommandConfig::default()
+            }],
         },
         ..Default::default()
     };
@@ -58,6 +65,10 @@ fn save_then_load_preserves_fields() {
     assert_eq!(round.hooks.pre_tool_use[0].matcher, "bash|write");
     assert_eq!(round.hooks.pre_tool_use[0].command, "scripts/pre-tool-use.sh");
     assert_eq!(round.hooks.pre_tool_use[0].timeout, Some(5));
+    assert_eq!(round.hooks.post_tool_use.len(), 1);
+    assert_eq!(round.hooks.post_tool_use[0].matcher, "bash");
+    assert_eq!(round.hooks.post_tool_use[0].command, "scripts/post-tool-use.sh");
+    assert_eq!(round.hooks.post_tool_use[0].timeout, Some(3));
 }
 
 #[test]

@@ -60,6 +60,15 @@ pub fn run() -> Result<()> {
             .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
             .count()
     );
+    println!(
+        "  {:<22} {}",
+        "PostToolUse hooks:".dimmed(),
+        cfg.hooks
+            .post_tool_use
+            .iter()
+            .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
+            .count()
+    );
 
     println!("  {}", "Launcher defaults:".dimmed());
     println!(
