@@ -539,8 +539,8 @@ Shipped: CLI and desktop discover project `.claude/commands`,
 `.libertai/commands`, and legacy `.liberclaw/commands`, plus user
 `~/.claude/commands` and `~/.config/libertai/commands`. Each Markdown
 file becomes a prompt template; frontmatter may define `description:`
-and `argHint:`. CLI supports `/template <name> [args]` and direct
-`/<name> [args]` dispatch with `{{args}}` substitution.
+and `argHint:`. CLI and desktop support `/template <name> [args]` and
+direct `/<name> [args]` dispatch with `{{args}}` substitution.
 
 **Files**: `src/commands/code_slash_registry.rs`, `src/commands/code_ui.rs`.
 
