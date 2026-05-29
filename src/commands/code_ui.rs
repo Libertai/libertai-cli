@@ -65,6 +65,7 @@ const LOOP_DEFAULT_TURNS: usize = 3;
 const LOOP_MAX_TURNS: usize = 10;
 const AUTO_DEFAULT_TURNS: usize = 10;
 const AUTO_MAX_TURNS: usize = 25;
+const SCHEDULE_MAX_DELAY: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const STATUS_LINE_TEMPLATE_MAX_CHARS: usize = 240;
 const STATUS_LINE_COMMAND_MAX_CHARS: usize = 240;
 const STATUS_LINE_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
@@ -129,6 +130,22 @@ struct ToolAttribution {
     total_duration: Duration,
     estimated_tokens: u64,
     estimated_cost: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScheduledRun {
+    id: String,
+    prompt: String,
+    due_at: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScheduleCommand {
+    Status,
+    Cancel(String),
+    Clear,
+    Add { delay: Duration, prompt: String },
+    Usage,
 }
 
 #[derive(Debug, Default)]
@@ -573,10 +590,14 @@ async fn repl_loop(
     let mut session_name: Option<String> = None;
     let mut autonomous_queue: VecDeque<String> = VecDeque::new();
     let mut auto_run: Option<AutoRun> = None;
+    let mut scheduled_runs: Vec<ScheduledRun> = Vec::new();
+    let mut next_scheduled_run_id = 1usize;
     let mut last_shell_command: Option<String> = None;
 
     loop {
-        let autonomous_turn = if let Some(prompt) = autonomous_queue.pop_front() {
+        let autonomous_turn = if let Some(prompt) = pop_due_scheduled_prompt(&mut scheduled_runs) {
+            Some(prompt)
+        } else if let Some(prompt) = autonomous_queue.pop_front() {
             Some(prompt)
         } else if let Some(run) = auto_run.as_ref() {
             if run.completed < run.limit {
@@ -590,7 +611,9 @@ async fn repl_loop(
         let is_autonomous = autonomous_turn.is_some();
         let mut line = match autonomous_turn {
             Some(prompt) => {
-                if let Some(run) = auto_run.as_ref() {
+                if prompt.starts_with("Scheduled follow-up (") {
+                    println!("{DIM}  /schedule: running due follow-up.{RESET}");
+                } else if let Some(run) = auto_run.as_ref() {
                     println!(
                         "{DIM}  /auto: running turn {}/{}.{RESET}",
                         run.completed + 1,
@@ -1092,6 +1115,46 @@ async fn repl_loop(
                         run.limit,
                         if run.goal.is_empty() { "" } else { " with a goal" }
                     );
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = schedule_command_arg(trimmed) {
+            match parse_schedule_command(rest) {
+                ScheduleCommand::Status => print_schedule_status(&scheduled_runs),
+                ScheduleCommand::Cancel(id) => {
+                    let before = scheduled_runs.len();
+                    scheduled_runs.retain(|run| run.id != id);
+                    if scheduled_runs.len() < before {
+                        println!("{DIM}  /schedule: cancelled {id}.{RESET}");
+                    } else {
+                        println!("{DIM}  /schedule: no scheduled prompt found for {id}.{RESET}");
+                    }
+                }
+                ScheduleCommand::Clear => {
+                    let count = scheduled_runs.len();
+                    scheduled_runs.clear();
+                    println!(
+                        "{DIM}  /schedule: cleared {count} scheduled prompt{}.{RESET}",
+                        if count == 1 { "" } else { "s" }
+                    );
+                }
+                ScheduleCommand::Add { delay, prompt } => {
+                    let id = format!("sch_{next_scheduled_run_id}");
+                    next_scheduled_run_id += 1;
+                    scheduled_runs.push(ScheduledRun {
+                        id: id.clone(),
+                        prompt: prompt.clone(),
+                        due_at: Instant::now() + delay,
+                    });
+                    scheduled_runs.sort_by_key(|run| run.due_at);
+                    println!(
+                        "{DIM}  /schedule: scheduled {id} in {}.{RESET}",
+                        format_schedule_delay(delay)
+                    );
+                }
+                ScheduleCommand::Usage => {
+                    eprintln!("{DIM}  usage: /schedule in 10m follow up, /schedule list, /schedule cancel <id>, or /schedule clear{RESET}");
                 }
             }
             continue;
@@ -1976,6 +2039,7 @@ fn print_help() {
     println!("{DIM}  /compact — compact older conversation history now{RESET}");
     println!("{DIM}  /loop [turns] [goal] — run bounded autonomous follow-up turns{RESET}");
     println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|status){RESET}");
+    println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|cancel|clear){RESET}");
     println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
     println!("{DIM}  /attach <path> [prompt] — alias for /image{RESET}");
     println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
@@ -2838,6 +2902,140 @@ fn auto_command_arg(trimmed: &str) -> Option<&str> {
             .or_else(|| trimmed.strip_prefix("/autorun "))
             .or_else(|| trimmed.strip_prefix("/continuous "))
             .map(str::trim),
+    }
+}
+
+fn schedule_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/schedule" | "/cron" => Some(""),
+        _ => trimmed
+            .strip_prefix("/schedule ")
+            .or_else(|| trimmed.strip_prefix("/cron "))
+            .map(str::trim),
+    }
+}
+
+fn parse_schedule_command(input: &str) -> ScheduleCommand {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return ScheduleCommand::Status;
+    }
+    let mut parts = raw.splitn(2, char::is_whitespace);
+    let head = parts.next().unwrap_or("").trim();
+    let rest = parts.next().unwrap_or("").trim();
+    match head {
+        "list" | "status" | "state" => ScheduleCommand::Status,
+        "clear" | "stop" => ScheduleCommand::Clear,
+        "cancel" | "delete" | "rm" => {
+            if rest.is_empty() || rest.split_whitespace().nth(1).is_some() {
+                ScheduleCommand::Usage
+            } else {
+                ScheduleCommand::Cancel(rest.to_string())
+            }
+        }
+        "in" => parse_schedule_add(rest),
+        _ => parse_schedule_add(raw),
+    }
+}
+
+fn parse_schedule_add(input: &str) -> ScheduleCommand {
+    let raw = input.trim();
+    let mut parts = raw.splitn(2, char::is_whitespace);
+    let Some(delay_token) = parts.next().filter(|value| !value.trim().is_empty()) else {
+        return ScheduleCommand::Usage;
+    };
+    let prompt = parts.next().unwrap_or("").trim();
+    let Some(delay) = parse_schedule_delay(delay_token) else {
+        return ScheduleCommand::Usage;
+    };
+    if prompt.is_empty() {
+        return ScheduleCommand::Usage;
+    }
+    ScheduleCommand::Add {
+        delay,
+        prompt: prompt.to_string(),
+    }
+}
+
+fn parse_schedule_delay(value: &str) -> Option<Duration> {
+    let raw = value.trim().to_ascii_lowercase();
+    let split_at = raw
+        .find(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .filter(|idx| *idx > 0)?;
+    let (amount, unit) = raw.split_at(split_at);
+    if amount.matches('.').count() > 1 || unit.is_empty() {
+        return None;
+    }
+    let amount = amount.parse::<f64>().ok()?;
+    if !amount.is_finite() || amount <= 0.0 {
+        return None;
+    }
+    let scale_ms = match unit {
+        "ms" => 1.0,
+        "s" | "sec" | "secs" | "second" | "seconds" => 1_000.0,
+        "m" | "min" | "mins" | "minute" | "minutes" => 60_000.0,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 3_600_000.0,
+        "d" | "day" | "days" => 86_400_000.0,
+        _ => return None,
+    };
+    let ms = (amount * scale_ms).round();
+    if !ms.is_finite() || ms <= 0.0 {
+        return None;
+    }
+    Some(Duration::from_millis(ms as u64).min(SCHEDULE_MAX_DELAY))
+}
+
+fn format_schedule_delay(delay: Duration) -> String {
+    let ms = delay.as_millis();
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{}s", (ms + 500) / 1_000)
+    } else if ms < 3_600_000 {
+        format!("{}m", (ms + 30_000) / 60_000)
+    } else if ms < 86_400_000 {
+        format!("{}h", (ms + 1_800_000) / 3_600_000)
+    } else {
+        format!("{}d", (ms + 43_200_000) / 86_400_000)
+    }
+}
+
+fn print_schedule_status(scheduled_runs: &[ScheduledRun]) {
+    if scheduled_runs.is_empty() {
+        println!("{DIM}  /schedule: no scheduled prompts.{RESET}");
+        return;
+    }
+    println!("{BOLD}schedule{RESET}");
+    let now = Instant::now();
+    for run in scheduled_runs {
+        let remaining = run.due_at.saturating_duration_since(now);
+        println!(
+            "{DIM}  - {}: in {} - {}{RESET}",
+            run.id,
+            format_schedule_delay(remaining),
+            run.prompt
+        );
+    }
+}
+
+fn pop_due_scheduled_prompt(scheduled_runs: &mut Vec<ScheduledRun>) -> Option<String> {
+    let now = Instant::now();
+    let idx = scheduled_runs
+        .iter()
+        .enumerate()
+        .filter(|(_, run)| run.due_at <= now)
+        .min_by_key(|(_, run)| run.due_at)
+        .map(|(idx, _)| idx)?;
+    let run = scheduled_runs.remove(idx);
+    Some(format!("Scheduled follow-up ({}).\n\n{}", run.id, run.prompt))
+}
+
+#[cfg(test)]
+fn scheduled_run_for_test(id: &str, prompt: &str, due_at: Instant) -> ScheduledRun {
+    ScheduledRun {
+        id: id.to_string(),
+        prompt: prompt.to_string(),
+        due_at,
     }
 }
 
@@ -6190,6 +6388,73 @@ mod tests {
         assert_eq!(auto_command_arg("/autorun status"), Some("status"));
         assert_eq!(auto_command_arg("/continuous off"), Some("off"));
         assert_eq!(auto_command_arg("/automatic"), None);
+    }
+
+    #[test]
+    fn schedule_command_arg_accepts_schedule_and_cron() {
+        assert_eq!(schedule_command_arg("/schedule"), Some(""));
+        assert_eq!(
+            schedule_command_arg("/schedule in 10m check tests"),
+            Some("in 10m check tests")
+        );
+        assert_eq!(schedule_command_arg("/cron list"), Some("list"));
+        assert_eq!(schedule_command_arg("/scheduler"), None);
+    }
+
+    #[test]
+    fn parse_schedule_command_matches_desktop_contract() {
+        assert_eq!(parse_schedule_command(""), ScheduleCommand::Status);
+        assert_eq!(parse_schedule_command("list"), ScheduleCommand::Status);
+        assert_eq!(
+            parse_schedule_command("cancel sch_2"),
+            ScheduleCommand::Cancel("sch_2".to_string())
+        );
+        assert_eq!(parse_schedule_command("clear"), ScheduleCommand::Clear);
+        assert!(matches!(
+            parse_schedule_command("cancel sch_2 extra"),
+            ScheduleCommand::Usage
+        ));
+        assert_eq!(
+            parse_schedule_command("in 1.5s check tests"),
+            ScheduleCommand::Add {
+                delay: Duration::from_millis(1500),
+                prompt: "check tests".to_string()
+            }
+        );
+        assert_eq!(
+            parse_schedule_command("10m check tests"),
+            ScheduleCommand::Add {
+                delay: Duration::from_secs(600),
+                prompt: "check tests".to_string()
+            }
+        );
+        assert!(matches!(parse_schedule_command("10m"), ScheduleCommand::Usage));
+    }
+
+    #[test]
+    fn schedule_delay_formats_and_clamps() {
+        assert_eq!(parse_schedule_delay("250ms"), Some(Duration::from_millis(250)));
+        assert_eq!(parse_schedule_delay("2h"), Some(Duration::from_secs(7200)));
+        assert_eq!(format_schedule_delay(Duration::from_millis(250)), "250ms");
+        assert_eq!(format_schedule_delay(Duration::from_secs(90)), "2m");
+        assert_eq!(parse_schedule_delay("31d"), Some(SCHEDULE_MAX_DELAY));
+        assert_eq!(parse_schedule_delay("0s"), None);
+        assert_eq!(parse_schedule_delay("soon"), None);
+    }
+
+    #[test]
+    fn pop_due_scheduled_prompt_returns_earliest_due() {
+        let now = Instant::now();
+        let mut runs = vec![
+            scheduled_run_for_test("sch_2", "later", now + Duration::from_secs(5)),
+            scheduled_run_for_test("sch_1", "now", now - Duration::from_millis(1)),
+        ];
+        let prompt = pop_due_scheduled_prompt(&mut runs).unwrap();
+        assert!(prompt.contains("Scheduled follow-up (sch_1)."));
+        assert!(prompt.contains("now"));
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, "sch_2");
+        assert!(pop_due_scheduled_prompt(&mut runs).is_none());
     }
 
     #[test]
