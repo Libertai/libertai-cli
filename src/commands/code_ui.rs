@@ -212,6 +212,13 @@ enum AutoCommand {
     On { turns: usize, goal: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SkillsCommand {
+    List,
+    Enable(String),
+    Disable(String),
+}
+
 /// Process-global because the Ctrl-C handler (spawned by the `ctrlc`
 /// crate on a separate thread) needs to reach both pieces of state
 /// without a reference chain.
@@ -877,6 +884,12 @@ async fn repl_loop(
                 print_memory("show");
                 continue;
             }
+            "/skills" => {
+                if let Err(e) = handle_skills_slash("") {
+                    eprintln!("{DIM}  /skills: {e:#}{RESET}");
+                }
+                continue;
+            }
             "/init" => {
                 print_init_project(None);
                 continue;
@@ -1090,6 +1103,12 @@ async fn repl_loop(
         }
         if let Some(rest) = trimmed.strip_prefix("/memory ") {
             print_memory(rest.trim());
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/skills ") {
+            if let Err(e) = handle_skills_slash(rest.trim()) {
+                eprintln!("{DIM}  /skills: {e:#}{RESET}");
+            }
             continue;
         }
         if let Some((_command, rest)) = mode_command_arg(trimmed) {
@@ -1915,6 +1934,7 @@ fn print_help() {
     println!("{DIM}  /login    — run libertai login, then reload this REPL session{RESET}");
     println!("{DIM}  /logout   — run libertai logout, then reload this REPL session{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
+    println!("{DIM}  /skills [list|enable <name>|disable <name>] — manage active code-agent skills for new sessions{RESET}");
     println!("{DIM}  /init [--agent] [notes] — create or draft AGENTS.md guidance{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
     println!("{DIM}  /agent [--worktree] <name> <task> — run a named sub-agent task{RESET}");
@@ -3389,6 +3409,89 @@ fn print_templates() {
             println!("- /{}: {}{}", t.name, desc, hint);
         }
         println!("{DIM}  run /template <name> [args], or /<name> [args].{RESET}");
+    }
+    println!();
+}
+
+fn handle_skills_slash(query: &str) -> Result<()> {
+    match parse_skills_command(query)? {
+        SkillsCommand::List => print_code_skills(),
+        SkillsCommand::Enable(name) => {
+            code_skills::set_skill_enabled(&name, true)?;
+            println!("{DIM}  enabled skill for new sessions: {name}{RESET}");
+            print_code_skills();
+        }
+        SkillsCommand::Disable(name) => {
+            code_skills::set_skill_enabled(&name, false)?;
+            println!("{DIM}  disabled skill for new sessions: {name}{RESET}");
+            print_code_skills();
+        }
+    }
+    Ok(())
+}
+
+fn parse_skills_command(query: &str) -> Result<SkillsCommand> {
+    let raw = query.trim();
+    if raw.is_empty()
+        || raw.eq_ignore_ascii_case("list")
+        || raw.eq_ignore_ascii_case("status")
+        || raw.eq_ignore_ascii_case("show")
+    {
+        return Ok(SkillsCommand::List);
+    }
+    let Some((head, tail)) = split_first_word(raw) else {
+        return Ok(SkillsCommand::List);
+    };
+    let name = tail.trim();
+    match head.to_ascii_lowercase().as_str() {
+        "enable" | "on" => {
+            if name.is_empty() {
+                anyhow::bail!("usage: /skills enable <name>");
+            }
+            Ok(SkillsCommand::Enable(name.to_string()))
+        }
+        "disable" | "off" => {
+            if name.is_empty() {
+                anyhow::bail!("usage: /skills disable <name>");
+            }
+            Ok(SkillsCommand::Disable(name.to_string()))
+        }
+        _ => anyhow::bail!("usage: /skills [list|enable <name>|disable <name>]"),
+    }
+}
+
+fn print_code_skills() {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /skills: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let skills = match code_skills::skill_inventory(SkillPillar::Code, Some(&cwd)) {
+        Ok(skills) => skills,
+        Err(e) => {
+            eprintln!("{DIM}  /skills: failed: {e:#}{RESET}");
+            return;
+        }
+    };
+    println!("{BOLD}skills{RESET}");
+    if skills.is_empty() {
+        println!("{DIM}  no built-in, project, or user skills match the code pillar.{RESET}");
+    } else {
+        for skill in skills {
+            let marker = if skill.enabled { "on" } else { "off" };
+            let tools = skill
+                .allowed_tools
+                .as_ref()
+                .filter(|tools| !tools.trim().is_empty())
+                .map(|tools| format!(" · tools: {tools}"))
+                .unwrap_or_default();
+            println!("- [{}] {}: {}", marker, skill.name, skill.description);
+            println!("{DIM}  {}{}{RESET}", skill.source, tools);
+        }
+        println!("{DIM}  changes apply to new sessions; use /reload to start a fresh session now.{RESET}");
+        println!("{DIM}  run /skills disable <name> or /skills enable <name>.{RESET}");
     }
     println!();
 }
@@ -5837,6 +5940,22 @@ mod tests {
         assert_eq!(parse_template_query("review src/lib.rs").unwrap(), ("review", "src/lib.rs"));
         assert_eq!(parse_template_query("review").unwrap(), ("review", ""));
         assert!(parse_template_query("").is_err());
+    }
+
+    #[test]
+    fn parse_skills_command_accepts_list_and_toggles() {
+        assert_eq!(parse_skills_command("").unwrap(), SkillsCommand::List);
+        assert_eq!(parse_skills_command("status").unwrap(), SkillsCommand::List);
+        assert_eq!(
+            parse_skills_command("enable libertai-harness").unwrap(),
+            SkillsCommand::Enable("libertai-harness".to_string())
+        );
+        assert_eq!(
+            parse_skills_command("off project-review").unwrap(),
+            SkillsCommand::Disable("project-review".to_string())
+        );
+        assert!(parse_skills_command("enable").is_err());
+        assert!(parse_skills_command("remove foo").is_err());
     }
 
     #[test]
