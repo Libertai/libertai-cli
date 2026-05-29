@@ -2,6 +2,7 @@
 
 use libertai_cli::config::{mask_key, Auth, Config, HookCommandConfig, HooksConfig, LauncherDefaults};
 use serde_json::json;
+use std::collections::BTreeMap;
 
 #[test]
 fn empty_toml_parses_as_defaults() {
@@ -53,6 +54,10 @@ fn save_then_load_preserves_fields() {
                     server: "policy".into(),
                     tool: "check_prompt".into(),
                     input: Some(json!({ "level": "strict" })),
+                    extra: BTreeMap::from([
+                        ("source".to_string(), json!("project")),
+                        ("customFlag".to_string(), json!(true)),
+                    ]),
                     ..HookCommandConfig::default()
                 },
             ],
@@ -123,6 +128,14 @@ fn save_then_load_preserves_fields() {
     assert_eq!(
         round.hooks.user_prompt_submit[1].input,
         Some(json!({ "level": "strict" }))
+    );
+    assert_eq!(
+        round.hooks.user_prompt_submit[1].extra.get("source"),
+        Some(&json!("project"))
+    );
+    assert_eq!(
+        round.hooks.user_prompt_submit[1].extra.get("customFlag"),
+        Some(&json!(true))
     );
     assert_eq!(round.hooks.pre_tool_use.len(), 1);
     assert_eq!(round.hooks.pre_tool_use[0].matcher, "bash|write");

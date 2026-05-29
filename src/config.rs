@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 pub const DEFAULT_API_BASE: &str = "https://api.libertai.io";
@@ -280,6 +280,8 @@ pub struct HookCommandConfig {
         skip_serializing_if = "is_false"
     )]
     pub continue_on_block: bool,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for HookCommandConfig {
@@ -303,6 +305,7 @@ impl Default for HookCommandConfig {
             timeout: None,
             async_hook: false,
             continue_on_block: false,
+            extra: BTreeMap::new(),
         }
     }
 }
