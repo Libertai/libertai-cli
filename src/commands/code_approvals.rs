@@ -7,8 +7,8 @@
 //! or deny (with optional reason fed back to the agent so it can
 //! course-correct).
 //!
-//! Read-only tools (`read`, `grep`, `find`, `ls`) are auto-allowed — the
-//! approval UI for them would be pure noise.
+//! Read-only tools (`read`, `grep`, `find`, `ls`, `bash_output`) are
+//! auto-allowed — the approval UI for them would be pure noise.
 //!
 //! [`ApprovalState`] can be session-scoped or backed by an on-disk
 //! allow-rule store. The UI is supplied separately (see [`ApprovalUi`])
@@ -232,6 +232,30 @@ pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubjec
                 format!("bash({s})"),
             )
         }
+        "bash_output" => {
+            let path = field(input, "logPath")
+                .or_else(|| field(input, "log_path"))
+                .unwrap_or("<missing log path>");
+            let pid = input_pid(input)
+                .map(|pid| format!(" pid {pid}"))
+                .unwrap_or_default();
+            let s = format!("{path}{pid}");
+            (
+                s.clone(),
+                AllowRule::exact(tool, s.clone()),
+                format!("bash_output({s})"),
+            )
+        }
+        "kill_bash" => {
+            let s = input_pid(input)
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "<missing pid>".to_string());
+            (
+                s.clone(),
+                AllowRule::exact(tool, s.clone()),
+                format!("kill_bash({s})"),
+            )
+        }
         "write" => {
             let path = input
                 .get("path")
@@ -427,7 +451,7 @@ impl ApprovalState {
     pub fn new() -> Self {
         Self {
             always_allow: Mutex::new(Vec::new()),
-            auto_allow: ["read", "grep", "find", "ls"]
+            auto_allow: ["read", "grep", "find", "ls", "bash_output"]
                 .into_iter()
                 .map(String::from)
                 .collect(),
@@ -439,7 +463,7 @@ impl ApprovalState {
         let rules = load_allow_rules(&path)?;
         Ok(Self {
             always_allow: Mutex::new(rules),
-            auto_allow: ["read", "grep", "find", "ls"]
+            auto_allow: ["read", "grep", "find", "ls", "bash_output"]
                 .into_iter()
                 .map(String::from)
                 .collect(),
@@ -869,6 +893,23 @@ pub fn preview_call(tool: &str, input: &serde_json::Value) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or("<missing command>"),
         ),
+        "bash_output" => {
+            let path = sanitize(
+                field(input, "logPath")
+                    .or_else(|| field(input, "log_path"))
+                    .unwrap_or("<missing log path>"),
+            );
+            match input_pid(input) {
+                Some(pid) => format!("bash_output {path} (pid {pid})"),
+                None => format!("bash_output {path}"),
+            }
+        }
+        "kill_bash" => {
+            let pid = input_pid(input)
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "<missing pid>".to_string());
+            format!("kill_bash {pid}")
+        }
         "write" => {
             let path = sanitize(field(input, "path").unwrap_or("<missing path>"));
             let len = input
@@ -925,6 +966,15 @@ fn with_diff(header: String, tool: &str, input: &serde_json::Value) -> String {
 
 fn field<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(|v| v.as_str())
+}
+
+fn input_pid(input: &serde_json::Value) -> Option<i64> {
+    input.get("pid").and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|pid| i64::try_from(pid).ok()))
+            .or_else(|| value.as_str().and_then(|pid| pid.parse().ok()))
+    })
 }
 
 /// Defang a model-supplied string so it can't rewrite the terminal
@@ -1232,6 +1282,21 @@ mod tests {
         assert!(preview.contains("1. append 10#AA with 1 line"));
     }
 
+    #[test]
+    fn preview_background_bash_companions() {
+        assert_eq!(
+            preview_call(
+                "bash_output",
+                &serde_json::json!({"logPath":"/tmp/pi-bash-bg-123.log","pid":1234})
+            ),
+            "bash_output /tmp/pi-bash-bg-123.log (pid 1234)"
+        );
+        assert_eq!(
+            preview_call("kill_bash", &serde_json::json!({"pid":"1234"})),
+            "kill_bash 1234"
+        );
+    }
+
     // ── approval_subject ────────────────────────────────────────────
 
     #[test]
@@ -1271,6 +1336,25 @@ mod tests {
     }
 
     #[test]
+    fn subject_background_bash_companions_extract_primary_args() {
+        let output = approval_subject(
+            "bash_output",
+            &serde_json::json!({"log_path":"/tmp/pi-bash-bg-123.log","pid":1234}),
+        );
+        assert_eq!(output.value, "/tmp/pi-bash-bg-123.log pid 1234");
+        assert_eq!(output.suggested_rule.tool, "bash_output");
+        assert_eq!(
+            output.suggested_label,
+            "bash_output(/tmp/pi-bash-bg-123.log pid 1234)"
+        );
+
+        let kill = approval_subject("kill_bash", &serde_json::json!({"pid":1234}));
+        assert_eq!(kill.value, "1234");
+        assert_eq!(kill.suggested_rule.tool, "kill_bash");
+        assert_eq!(kill.suggested_label, "kill_bash(1234)");
+    }
+
+    #[test]
     fn subject_unknown_tool_uses_tool_name() {
         let input = serde_json::json!({"url": "https://example.com"});
         let subj = approval_subject("WebFetch", &input);
@@ -1289,7 +1373,9 @@ mod tests {
         assert!(state.is_pre_allowed("grep", ""));
         assert!(state.is_pre_allowed("find", ""));
         assert!(state.is_pre_allowed("ls", ""));
+        assert!(state.is_pre_allowed("bash_output", ""));
         assert!(!state.is_pre_allowed("bash", "anything"));
+        assert!(!state.is_pre_allowed("kill_bash", "1234"));
     }
 
     #[test]

@@ -7,6 +7,8 @@ pub(crate) fn tool_preview(tool_name: &str, args: &Value) -> String {
     let detail = match tool_name {
         "read" => read_preview(args),
         "bash" => str_arg(args, "command").map(short),
+        "bash_output" => bash_output_preview(args),
+        "kill_bash" => pid_arg(args, "pid").map(|pid| pid.to_string()),
         "edit" => str_arg(args, "path").map(str::to_string),
         "write" => write_preview(args),
         "grep" => grep_preview(args),
@@ -51,6 +53,16 @@ fn write_preview(args: &Value) -> Option<String> {
     let path = str_arg(args, "path")?;
     let bytes = str_arg(args, "content").map(str::len).unwrap_or(0);
     Some(format!("{path} ({bytes}B)"))
+}
+
+fn bash_output_preview(args: &Value) -> Option<String> {
+    let path = str_arg(args, "logPath").or_else(|| str_arg(args, "log_path"))?;
+    let mut out = short(path);
+    if let Some(pid) = pid_arg(args, "pid") {
+        out.push_str(" pid ");
+        out.push_str(&pid.to_string());
+    }
+    Some(out)
 }
 
 fn grep_preview(args: &Value) -> Option<String> {
@@ -157,6 +169,15 @@ fn int_arg(args: &Value, key: &str) -> Option<i64> {
     args.get(key).and_then(Value::as_i64)
 }
 
+fn pid_arg(args: &Value, key: &str) -> Option<i64> {
+    args.get(key).and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|pid| i64::try_from(pid).ok()))
+            .or_else(|| value.as_str().and_then(|pid| pid.parse().ok()))
+    })
+}
+
 fn bool_arg(args: &Value, key: &str) -> bool {
     args.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
@@ -227,6 +248,17 @@ mod tests {
         assert_eq!(
             tool_preview("bash", &json!({"command":"cargo test --lib"})),
             "bash cargo test --lib"
+        );
+        assert_eq!(
+            tool_preview(
+                "bash_output",
+                &json!({"logPath":"/tmp/pi-bash-bg-123.log","pid":1234})
+            ),
+            "bash_output /tmp/pi-bash-bg-123.log pid 1234"
+        );
+        assert_eq!(
+            tool_preview("kill_bash", &json!({"pid":1234})),
+            "kill_bash 1234"
         );
         assert_eq!(
             tool_preview(
