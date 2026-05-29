@@ -76,6 +76,9 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/loop` command** — REPL users can queue a bounded foreground
   autonomous follow-up loop with `/loop [turns] [goal]` or `/autoloop`,
   capped at 10 turns.
+- **Bash background execution** — the upstream `bash` tool accepts
+  Claude-style `run_in_background: true` for long-running servers and
+  watchers, returning immediately with a PID and temp log path.
 - **CLI `/doctor` command** — REPL users can print a local diagnostic
   report for session state, auth/config, memory/templates/agents, git,
   and usage.

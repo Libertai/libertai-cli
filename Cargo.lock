@@ -3570,7 +3570,7 @@ dependencies = [
 [[package]]
 name = "pi_agent_rust"
 version = "0.1.14"
-source = "git+https://github.com/Libertai/pi_agent_rust?rev=b4ddc8ce#b4ddc8ce7e9601fade8e5be55cc526817ad1124a"
+source = "git+https://github.com/Libertai/pi_agent_rust?rev=4cf7dcd3#4cf7dcd30415248372b94dd9ded2a1b11d2856d2"
 dependencies = [
  "anyhow",
  "ast-grep-core",

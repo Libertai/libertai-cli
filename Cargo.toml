@@ -63,7 +63,8 @@ zeroize = { version = "1", features = ["derive"] }
 # - `hashline_edit` op defaulting to "replace" when omitted by the model
 # - `AgentSessionHandle::prompt_with_content[_with_abort]` (multimodal SDK)
 # - `AgentSessionHandle::{get_fork_messages,fork}` (desktop /fork integration)
-pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "b4ddc8ce", default-features = false }
+# - bash `run_in_background` support for long-running servers/watchers
+pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "4cf7dcd3", default-features = false }
 asupersync = { version = "=0.3.1", default-features = false, features = ["tls-native-roots"] }
 async-trait = "0.1"
 futures = "0.3"
