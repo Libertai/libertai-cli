@@ -12,6 +12,7 @@ const REQUIRED_PHRASES: &[&str] = &[
     "/agent <name>",
     "<task>",
     "/send",
+    "/init --agent <notes>",
     "/memory",
     "/remember <kind>: <fact>",
     "/mcp",

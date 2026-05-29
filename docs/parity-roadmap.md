@@ -184,10 +184,17 @@ SDK; those are flagged **(upstream)**.
   `src/commands/code_memory.rs`; the harness now carries the
   Claude-style auto-memory save/avoid/verify protocol for the typed
   memory categories.
+- **Review/verification discipline**: the built-in harness now tells
+  the model to treat review requests as findings-first audits, cite
+  `file_path:line_number`, avoid modifying files during review-only
+  tasks, run checks that exercise the changed behavior, and report
+  blocked verification honestly instead of overclaiming from unrelated
+  tests.
 
 After this sprint, parity-doc Sections A–G are all shipped, including
-the model-facing memory guidance. Section H (per-subagent prompts)
-remains gated on Phase 4D named-agent registry.
+the model-facing memory guidance plus the review/verification posture
+expected from Claude Code-style coding agents. Section H
+(per-subagent prompts) remains gated on Phase 4D named-agent registry.
 
 `../libertai-code-desktop/docs/claude-code-parity.md` has been refreshed
 to move AcceptEdits, `libertai-harness`, desktop `!cmd`, custom slash
@@ -242,6 +249,10 @@ Port the meat of parity-doc Section A into the existing
     results instead of pasting logs.*
 12. *Don't create planning docs, status reports, TODO files, docstrings,
     or module comments unless the user asked for a durable artifact.*
+13. *Review requests are findings-first audits. Do not edit files
+    during review-only work.*
+14. *Claim completion only from checks that exercise the changed
+    behavior; report missing gates honestly.*
 
 **Status**: shipped in `src/agent_skills/libertai-harness/SKILL.md`.
 
