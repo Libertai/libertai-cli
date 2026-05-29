@@ -1,6 +1,7 @@
 //! Guards the on-disk config shape and the key-masking helper.
 
 use libertai_cli::config::{mask_key, Auth, Config, HookCommandConfig, HooksConfig, LauncherDefaults};
+use serde_json::json;
 
 #[test]
 fn empty_toml_parses_as_defaults() {
@@ -20,6 +21,7 @@ fn empty_toml_parses_as_defaults() {
     assert!(cfg.hooks.session_start.is_empty());
     assert!(cfg.hooks.stop.is_empty());
     assert!(cfg.hooks.session_end.is_empty());
+    assert!(cfg.hooks.notification.is_empty());
     assert!(cfg.auth.api_key.is_none());
 }
 
@@ -38,12 +40,21 @@ fn save_then_load_preserves_fields() {
         },
         status_line_template: "{model} {ctx}".into(),
         hooks: HooksConfig {
-            user_prompt_submit: vec![HookCommandConfig {
-                command: "scripts/user-prompt-submit.sh".into(),
-                timeout: Some(2),
-                continue_on_block: true,
-                ..HookCommandConfig::default()
-            }],
+            user_prompt_submit: vec![
+                HookCommandConfig {
+                    command: "scripts/user-prompt-submit.sh".into(),
+                    timeout: Some(2),
+                    continue_on_block: true,
+                    ..HookCommandConfig::default()
+                },
+                HookCommandConfig {
+                    hook_type: "mcp_tool".into(),
+                    server: "policy".into(),
+                    tool: "check_prompt".into(),
+                    input: Some(json!({ "level": "strict" })),
+                    ..HookCommandConfig::default()
+                },
+            ],
             pre_tool_use: vec![HookCommandConfig {
                 matcher: "bash|write".into(),
                 command: "scripts/pre-tool-use.sh".into(),
@@ -94,13 +105,20 @@ fn save_then_load_preserves_fields() {
     assert_eq!(round.auth.chain.as_deref(), Some("base"));
     assert_eq!(round.launcher_defaults.opus_model, "opus-x");
     assert_eq!(round.status_line_template, "{model} {ctx}");
-    assert_eq!(round.hooks.user_prompt_submit.len(), 1);
+    assert_eq!(round.hooks.user_prompt_submit.len(), 2);
     assert_eq!(
         round.hooks.user_prompt_submit[0].command,
         "scripts/user-prompt-submit.sh"
     );
     assert_eq!(round.hooks.user_prompt_submit[0].timeout, Some(2));
     assert!(round.hooks.user_prompt_submit[0].continue_on_block);
+    assert_eq!(round.hooks.user_prompt_submit[1].hook_type, "mcp_tool");
+    assert_eq!(round.hooks.user_prompt_submit[1].server, "policy");
+    assert_eq!(round.hooks.user_prompt_submit[1].tool, "check_prompt");
+    assert_eq!(
+        round.hooks.user_prompt_submit[1].input,
+        Some(json!({ "level": "strict" }))
+    );
     assert_eq!(round.hooks.pre_tool_use.len(), 1);
     assert_eq!(round.hooks.pre_tool_use[0].matcher, "bash|write");
     assert_eq!(round.hooks.pre_tool_use[0].command, "scripts/pre-tool-use.sh");
@@ -122,6 +140,8 @@ fn save_then_load_preserves_fields() {
     assert_eq!(round.hooks.stop[0].command, "scripts/stop.sh");
     assert_eq!(round.hooks.session_end.len(), 1);
     assert_eq!(round.hooks.session_end[0].command, "scripts/session-end.sh");
+    assert_eq!(round.hooks.notification.len(), 1);
+    assert_eq!(round.hooks.notification[0].command, "scripts/notification.sh");
 }
 
 #[test]

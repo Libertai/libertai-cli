@@ -633,8 +633,10 @@ payloads as command hooks, and can return the same JSON decision/context
 fields for UserPromptSubmit and PreToolUse. CLI prompt/agent hook rows
 use `type = "prompt"` or `type = "agent"`, `prompt`, optional `model`,
 and the configured LibertAI chat endpoint, returning the model message as
-hook output. `/hooks` and `libertai status` report configured runnable
-hooks.
+hook output. CLI MCP-tool hook rows preserve `type = "mcp_tool"`,
+`server`, `tool`, and optional JSON `input` metadata in config and `/hooks`
+output, but are not executed yet. `/hooks` and `libertai status` report
+configured runnable hooks.
 
 Remaining work: any pi-level typed hook dispatcher.
 Native MCP-tool hook handlers remain intentionally unexecuted in the CLI.

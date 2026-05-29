@@ -5317,6 +5317,8 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
             || hook.hook_type.trim().eq_ignore_ascii_case("http")
             || hook.hook_type.trim().eq_ignore_ascii_case("prompt")
             || hook.hook_type.trim().eq_ignore_ascii_case("agent")
+            || hook.hook_type.trim().eq_ignore_ascii_case("mcp_tool")
+            || hook.hook_type.trim().eq_ignore_ascii_case("mcptool")
         {
             String::new()
         } else {
@@ -5340,22 +5342,30 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
         };
         let target = if hook.hook_type.trim().eq_ignore_ascii_case("http") {
             if hook.url.trim().is_empty() {
-                "(no url)"
+                "(no url)".to_string()
             } else {
-                hook.url.trim()
+                hook.url.trim().to_string()
             }
         } else if hook.hook_type.trim().eq_ignore_ascii_case("prompt")
             || hook.hook_type.trim().eq_ignore_ascii_case("agent")
         {
             if hook.prompt.trim().is_empty() {
-                "(no prompt)"
+                "(no prompt)".to_string()
             } else {
-                hook.prompt.trim()
+                hook.prompt.trim().to_string()
+            }
+        } else if hook.hook_type.trim().eq_ignore_ascii_case("mcp_tool")
+            || hook.hook_type.trim().eq_ignore_ascii_case("mcptool")
+        {
+            if hook.server.trim().is_empty() || hook.tool.trim().is_empty() {
+                "(no mcp tool)".to_string()
+            } else {
+                format!("{}:{}", hook.server.trim(), hook.tool.trim())
             }
         } else if hook.command.trim().is_empty() {
-            "(no command)"
+            "(no command)".to_string()
         } else {
-            hook.command.trim()
+            hook.command.trim().to_string()
         };
         println!(
             "{DIM}  {}. {} [{}] type={} matcher={}{}{}{}{}{}:{RESET} {}",
