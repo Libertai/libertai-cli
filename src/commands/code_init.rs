@@ -69,6 +69,12 @@ fn build_agents_md(cwd: &Path) -> Result<String> {
     }
     lines.push(String::new());
     lines.push("## Conventions".to_string());
+    if cwd.join("CONTRIBUTING.md").exists() {
+        lines.push("- Read `CONTRIBUTING.md` before changing project conventions.".to_string());
+    }
+    if cwd.join(".editorconfig").exists() {
+        lines.push("- Respect `.editorconfig` formatting rules.".to_string());
+    }
     lines.push("- Keep changes scoped to the requested task.".to_string());
     lines.push("- Prefer existing project patterns and commands over new tooling.".to_string());
     lines.push("- Run the relevant checks before handing work back.".to_string());
@@ -87,13 +93,13 @@ fn command_lines(cwd: &Path) -> Vec<String> {
         let scripts = package_scripts(cwd);
         let mut lines = vec![format!("- install: `{manager} install`")];
         if scripts.contains(&"build".to_string()) {
-            lines.push(format!("- build: `{manager} run build`"));
+            lines.push(package_command_line(cwd, manager, "build"));
         }
         if scripts.contains(&"test".to_string()) {
-            lines.push(format!("- test: `{manager} test`"));
+            lines.push(package_command_line(cwd, manager, "test"));
         }
         if scripts.contains(&"lint".to_string()) {
-            lines.push(format!("- lint: `{manager} run lint`"));
+            lines.push(package_command_line(cwd, manager, "lint"));
         }
         if lines.len() == 1 {
             lines.push(format!("- test: inspect `package.json` scripts before choosing a `{manager}` command"));
@@ -117,6 +123,12 @@ fn command_lines(cwd: &Path) -> Vec<String> {
 
 fn project_fact_lines(cwd: &Path) -> Vec<String> {
     let mut facts = Vec::new();
+    if let Some(title) = markdown_title(&cwd.join("README.md")) {
+        facts.push(format!("- README title: `{title}`."));
+    }
+    if let Some(summary) = markdown_summary(&cwd.join("README.md")) {
+        facts.push(format!("- README summary: {summary}"));
+    }
     if let Some(name) = cargo_project_name(cwd) {
         facts.push(format!("- Rust project: `{name}`."));
     }
@@ -138,6 +150,11 @@ fn project_fact_lines(cwd: &Path) -> Vec<String> {
     ] {
         if cwd.join(path).exists() {
             facts.push(format!("- Uses {label}: `{path}`."));
+        }
+    }
+    for path in ["CONTRIBUTING.md", ".editorconfig", "rust-toolchain.toml", "mise.toml"] {
+        if cwd.join(path).exists() {
+            facts.push(format!("- Project guidance/config: `{path}`."));
         }
     }
     facts
@@ -163,6 +180,65 @@ fn package_scripts(cwd: &Path) -> Vec<String> {
         return Vec::new();
     };
     obj.keys().cloned().collect()
+}
+
+fn package_script(cwd: &Path, name: &str) -> Option<String> {
+    package_json(cwd)?
+        .get("scripts")?
+        .get(name)?
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())
+}
+
+fn package_command_line(cwd: &Path, manager: &str, name: &str) -> String {
+    let command = if name == "test" {
+        format!("{manager} test")
+    } else {
+        format!("{manager} run {name}")
+    };
+    match package_script(cwd, name) {
+        Some(script) => format!("- {name}: `{command}` (script: `{script}`)"),
+        None => format!("- {name}: `{command}`"),
+    }
+}
+
+fn markdown_title(path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    raw.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("# "))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(truncate_sentence)
+}
+
+fn markdown_summary(path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with('#')
+                && !line.starts_with("```")
+                && !line.starts_with('!')
+        })
+        .find(|line| line.chars().any(char::is_alphabetic))
+        .map(truncate_sentence)
+}
+
+fn truncate_sentence(value: &str) -> String {
+    const MAX_CHARS: usize = 140;
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::new();
+    for (idx, ch) in collapsed.chars().enumerate() {
+        if idx >= MAX_CHARS {
+            out.push_str("...");
+            return out;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn cargo_project_name(cwd: &Path) -> Option<String> {
@@ -224,6 +300,9 @@ fn structure_lines(cwd: &Path) -> Vec<String> {
         ("src-tauri", "Tauri/Rust backend"),
         ("tests", "tests"),
         ("test", "tests"),
+        ("scripts", "project scripts"),
+        ("bin", "executables"),
+        (".github/workflows", "GitHub Actions workflows"),
         ("docs", "documentation"),
         ("crates", "Rust workspace crates"),
         ("packages", "workspace packages"),
@@ -287,9 +366,9 @@ mod tests {
         let result = init_project(temp.path()).unwrap();
 
         assert!(result.content.contains("JavaScript package: `web-app`"));
-        assert!(result.content.contains("build: `pnpm run build`"));
-        assert!(result.content.contains("test: `pnpm test`"));
-        assert!(result.content.contains("lint: `pnpm run lint`"));
+        assert!(result.content.contains("build: `pnpm run build` (script: `vite build`)"));
+        assert!(result.content.contains("test: `pnpm test` (script: `vitest`)"));
+        assert!(result.content.contains("lint: `pnpm run lint` (script: `eslint .`)"));
     }
 
     #[test]
@@ -305,5 +384,29 @@ mod tests {
         assert!(result.content.contains("Python project: `worker`"));
         assert!(result.content.contains("Go module: `example.com/service`"));
         assert!(result.content.contains("Uses Docker: `Dockerfile`"));
+    }
+
+    #[test]
+    fn init_project_uses_readme_and_contributing_context() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("README.md"),
+            "# Demo App\n\nA focused app for testing initializer context.\n",
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("CONTRIBUTING.md"), "Run checks.\n").unwrap();
+        std::fs::write(temp.path().join(".editorconfig"), "root = true\n").unwrap();
+        std::fs::create_dir(temp.path().join("scripts")).unwrap();
+        std::fs::create_dir_all(temp.path().join(".github/workflows")).unwrap();
+
+        let result = init_project(temp.path()).unwrap();
+
+        assert!(result.content.contains("README title: `Demo App`"));
+        assert!(result.content.contains("README summary: A focused app"));
+        assert!(result.content.contains("Project guidance/config: `CONTRIBUTING.md`"));
+        assert!(result.content.contains("Read `CONTRIBUTING.md`"));
+        assert!(result.content.contains("Respect `.editorconfig`"));
+        assert!(result.content.contains("`scripts/` - project scripts"));
+        assert!(result.content.contains("`.github/workflows/`"));
     }
 }
