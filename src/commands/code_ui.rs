@@ -4061,19 +4061,21 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
         } else {
             format!(", shell={}", hook.shell.trim())
         };
+        let async_flag = if hook.async_hook { ", async" } else { "" };
         let command = if hook.command.trim().is_empty() {
             "(no command)"
         } else {
             hook.command.trim()
         };
         println!(
-            "{DIM}  {}. {} [{}] matcher={}{}{}:{RESET} {}",
+            "{DIM}  {}. {} [{}] matcher={}{}{}{}:{RESET} {}",
             idx + 1,
             event,
             marker,
             matcher,
             timeout,
             shell,
+            async_flag,
             command
         );
     }

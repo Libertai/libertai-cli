@@ -49,6 +49,10 @@ pub fn run_user_prompt_submit_hooks(cfg: &Config, prompt: &str) -> anyhow::Resul
         if !is_runnable_hook(hook) {
             continue;
         }
+        if hook.async_hook {
+            spawn_async_hook(hook, &cwd, &payload, "UserPromptSubmit");
+            continue;
+        }
         let run = run_shell_hook(hook, &cwd, &payload, "UserPromptSubmit");
         if run.status != 0 {
             let detail = first_non_empty(&run.stderr, &run.stdout)
@@ -92,6 +96,10 @@ fn run_lifecycle_hooks(cfg: &Config, event_name: &str, hooks: &[HookCommandConfi
 
     for hook in hooks {
         if !is_runnable_hook(hook) {
+            continue;
+        }
+        if hook.async_hook {
+            spawn_async_hook(hook, &cwd, &payload, event_name);
             continue;
         }
         let run = run_shell_hook(hook, &cwd, &payload, event_name);
@@ -165,6 +173,10 @@ impl ToolPolicy for ConfiguredHookPolicy {
 
         for hook in &self.cfg.hooks.pre_tool_use {
             if !is_runnable_hook(hook) || !hook_matches_tool(hook, tool_name) {
+                continue;
+            }
+            if hook.async_hook {
+                spawn_async_hook(hook, &cwd, &payload, "PreToolUse");
                 continue;
             }
 
@@ -260,6 +272,10 @@ pub fn run_post_tool_hooks(cfg: &Config, event: &AgentEvent) {
         if !is_runnable_hook(hook) || !hook_matches_tool(hook, tool_name) {
             continue;
         }
+        if hook.async_hook {
+            spawn_async_hook(hook, &cwd, &payload, "PostToolUse");
+            continue;
+        }
         let run = run_shell_hook(hook, &cwd, &payload, "PostToolUse");
         if run.status != 0 {
             let detail = first_non_empty(&run.stderr, &run.stdout).unwrap_or_else(|| {
@@ -300,6 +316,61 @@ struct HookRun {
     status: i32,
     stdout: String,
     stderr: String,
+}
+
+fn spawn_async_hook(
+    hook: &HookCommandConfig,
+    cwd: &std::path::Path,
+    payload: &serde_json::Value,
+    event_name: &str,
+) {
+    let hook = hook.clone();
+    let cwd = cwd.to_path_buf();
+    let payload = payload.clone();
+    let event_name = event_name.to_string();
+    std::thread::spawn(move || {
+        let run = run_detached_shell_hook(&hook, &cwd, &payload, &event_name);
+        if run.status != 0 {
+            let detail = first_non_empty(&run.stderr, &run.stdout)
+                .unwrap_or_else(|| format!("hook exited with status {}", run.status));
+            eprintln!(
+                "  \x1b[2m[hook {event_name} async] {}: {}\x1b[0m",
+                hook.command.trim(),
+                detail
+            );
+        }
+    });
+}
+
+fn run_detached_shell_hook(
+    hook: &HookCommandConfig,
+    cwd: &std::path::Path,
+    payload: &serde_json::Value,
+    event_name: &str,
+) -> HookRun {
+    let mut cmd = shell_command(&hook.command, hook.shell.trim());
+    let spawn = cmd
+        .current_dir(cwd)
+        .env("LIBERTAI_HOOK_EVENT", event_name)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = spawn else {
+        return HookRun {
+            status: 127,
+            stdout: String::new(),
+            stderr: "failed to spawn hook command".to_string(),
+        };
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(payload.to_string().as_bytes());
+    }
+    HookRun {
+        status: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+    }
 }
 
 fn run_shell_hook(
@@ -652,6 +723,41 @@ mod tests {
         assert_eq!(run.status, 0);
         assert!(run.stdout.starts_with("PostToolUse|"));
         assert!(run.stdout.contains("\"event\":\"PostToolUse\""));
+    }
+
+    #[test]
+    fn detached_hook_receives_payload_and_event_env() {
+        let cwd = tempfile::tempdir().unwrap();
+        let hook = HookCommandConfig {
+            command: "printf '%s' \"$LIBERTAI_HOOK_EVENT\" > async-event.txt; \
+                      cat > async-payload.json"
+                .to_string(),
+            async_hook: true,
+            ..HookCommandConfig::default()
+        };
+
+        let run = run_detached_shell_hook(
+            &hook,
+            cwd.path(),
+            &json!({"event":"PostToolUse"}),
+            "PostToolUse",
+        );
+        assert_eq!(run.status, 0);
+
+        let event_path = cwd.path().join("async-event.txt");
+        let payload_path = cwd.path().join("async-payload.json");
+        for _ in 0..100 {
+            if event_path.exists() && payload_path.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read_to_string(event_path).unwrap(), "PostToolUse");
+        assert!(
+            std::fs::read_to_string(payload_path)
+                .unwrap()
+                .contains("\"event\":\"PostToolUse\"")
+        );
     }
 
     #[test]

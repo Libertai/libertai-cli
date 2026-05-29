@@ -560,10 +560,12 @@ tool execution and cannot alter the result. Lifecycle hooks run around
 native CLI sessions/turn stops and warn on nonzero exit. Tool hook matchers
 support case-sensitive exact names, `*` globs, `|` alternatives,
 `regex:<pattern>`, and slash-delimited regex patterns that can contain
-alternation pipes. `/hooks` and `libertai status` report configured command
-hooks.
+alternation pipes. Rows can set `async = true` (or imported `asyncHook =
+true`) to launch a command hook without waiting for completion; async hook
+output is discarded and cannot affect prompt/tool decisions. `/hooks` and
+`libertai status` report configured command hooks.
 
-Remaining work: async rows and any pi-level typed hook dispatcher.
+Remaining work: any pi-level typed hook dispatcher.
 Native non-command hook handlers remain intentionally unexecuted.
 
 **Files**: `src/config.rs`,

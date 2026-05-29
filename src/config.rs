@@ -234,6 +234,13 @@ pub struct HookCommandConfig {
     pub shell: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+    #[serde(
+        default,
+        rename = "async",
+        alias = "asyncHook",
+        skip_serializing_if = "is_false"
+    )]
+    pub async_hook: bool,
 }
 
 impl Default for HookCommandConfig {
@@ -244,12 +251,17 @@ impl Default for HookCommandConfig {
             command: String::new(),
             shell: String::new(),
             timeout: None,
+            async_hook: false,
         }
     }
 }
 
 fn default_hook_enabled() -> bool {
     true
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -52,6 +52,7 @@ fn save_then_load_preserves_fields() {
                 matcher: "bash".into(),
                 command: "scripts/post-tool-use.sh".into(),
                 timeout: Some(3),
+                async_hook: true,
                 ..HookCommandConfig::default()
             }],
             session_start: vec![HookCommandConfig {
@@ -96,6 +97,7 @@ fn save_then_load_preserves_fields() {
     assert_eq!(round.hooks.post_tool_use[0].matcher, "bash");
     assert_eq!(round.hooks.post_tool_use[0].command, "scripts/post-tool-use.sh");
     assert_eq!(round.hooks.post_tool_use[0].timeout, Some(3));
+    assert!(round.hooks.post_tool_use[0].async_hook);
     assert_eq!(round.hooks.session_start.len(), 1);
     assert_eq!(
         round.hooks.session_start[0].command,
@@ -105,6 +107,23 @@ fn save_then_load_preserves_fields() {
     assert_eq!(round.hooks.stop[0].command, "scripts/stop.sh");
     assert_eq!(round.hooks.session_end.len(), 1);
     assert_eq!(round.hooks.session_end[0].command, "scripts/session-end.sh");
+}
+
+#[test]
+fn async_hook_alias_roundtrips_to_async_field() {
+    let cfg: Config = toml::from_str(
+        r#"
+[[hooks.PostToolUse]]
+matcher = "bash"
+command = "scripts/post-tool-use.sh"
+asyncHook = true
+"#,
+    )
+    .unwrap();
+
+    assert!(cfg.hooks.post_tool_use[0].async_hook);
+    let rendered = toml::to_string_pretty(&cfg).unwrap();
+    assert!(rendered.contains("async = true"));
 }
 
 #[test]
