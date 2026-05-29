@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
@@ -233,7 +233,11 @@ impl HooksConfig {
 pub struct HookCommandConfig {
     #[serde(default = "default_hook_enabled")]
     pub enabled: bool,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_matcher",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub matcher: String,
     #[serde(default, rename = "if", skip_serializing_if = "String::is_empty")]
     pub if_condition: String,
@@ -332,6 +336,29 @@ fn default_hook_type() -> String {
 
 fn is_default_hook_type(value: &str) -> bool {
     value == "command"
+}
+
+fn deserialize_matcher<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum MatcherValue {
+        String(String),
+        Array(Vec<String>),
+    }
+
+    match Option::<MatcherValue>::deserialize(deserializer)? {
+        Some(MatcherValue::String(value)) => Ok(value),
+        Some(MatcherValue::Array(values)) => Ok(values
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join("|")),
+        None => Ok(String::new()),
+    }
 }
 
 fn is_false(value: &bool) -> bool {

@@ -622,7 +622,8 @@ hooks run after the `push_notification` tool requests a user notification.
 Tool hook matchers
 support case-sensitive exact names, `*` globs, `|` alternatives,
 `regex:<pattern>`, and slash-delimited regex patterns that can contain
-alternation pipes. Tool hook rows can also set handler `if` filters such
+alternation pipes. Imported matcher arrays also deserialize to the same
+pipe-separated matcher form. Tool hook rows can also set handler `if` filters such
 as `Bash(rm *)` to match a tool name plus argument glob. Rows can set
 `async = true` (or imported `asyncHook =
 true`) to launch a command or HTTP hook without waiting for completion;

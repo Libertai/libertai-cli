@@ -184,6 +184,25 @@ asyncHook = true
 }
 
 #[test]
+fn hook_matcher_array_deserializes_to_pipe_matcher() {
+    let cfg: Config = toml::from_str(
+        r#"
+[[hooks.PreToolUse]]
+matcher = ["bash", "write", "  ", "mcp__github__*"]
+command = "scripts/pre-tool-use.sh"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        cfg.hooks.pre_tool_use[0].matcher,
+        "bash|write|mcp__github__*"
+    );
+    let rendered = toml::to_string_pretty(&cfg).unwrap();
+    assert!(rendered.contains(r#"matcher = "bash|write|mcp__github__*""#));
+}
+
+#[test]
 fn mask_key_hides_middle() {
     let masked = mask_key("LTAI_sk_abcdefgh12345678");
     assert!(masked.starts_with("LTAI"));
