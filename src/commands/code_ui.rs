@@ -684,6 +684,7 @@ async fn repl_loop(
                     mode.get(),
                     output_style.as_deref(),
                     &cfg,
+                    &approvals,
                     usage_summary(&usage_history),
                 )
                 .await;
@@ -3918,6 +3919,7 @@ async fn print_doctor(
     mode: Mode,
     output_style: Option<&str>,
     cfg: &LibertaiConfig,
+    approvals: &ApprovalState,
     usage: Option<UsageSummary>,
 ) {
     let cwd = std::env::current_dir();
@@ -3979,6 +3981,42 @@ async fn print_doctor(
             true,
             "defaults",
             format!("{}/{}", cfg.default_code_provider, cfg.default_code_model)
+        )
+    );
+    println!(
+        "{}",
+        doctor_line(
+            true,
+            "smart approvals",
+            if cfg.smart_approval_enabled {
+                format!("enabled ({})", cfg.smart_approval_model)
+            } else {
+                "disabled".to_string()
+            }
+        )
+    );
+    println!(
+        "{}",
+        doctor_line(
+            true,
+            "remembered approvals",
+            format!("{} saved rule(s)", approvals.always_rules().len())
+        )
+    );
+    println!(
+        "{}",
+        doctor_line(
+            true,
+            "hooks",
+            format_hook_event_breakdown(cfg)
+        )
+    );
+    println!(
+        "{}",
+        doctor_line(
+            false,
+            "mcp registry",
+            "not persisted in CLI config; desktop owns MCP server discovery/cache"
         )
     );
     match crate::config::config_path() {
@@ -4054,6 +4092,24 @@ fn doctor_line(ok: bool, label: &str, detail: impl AsRef<str>) -> String {
     } else {
         format!("{DIM}  [{status}]{RESET} {label}: {detail}")
     }
+}
+
+fn format_hook_event_breakdown(cfg: &LibertaiConfig) -> String {
+    let rows = [
+        ("UserPromptSubmit", count_runnable_hooks(&cfg.hooks.user_prompt_submit)),
+        ("PreToolUse", count_runnable_hooks(&cfg.hooks.pre_tool_use)),
+        ("PostToolUse", count_runnable_hooks(&cfg.hooks.post_tool_use)),
+        ("SessionStart", count_runnable_hooks(&cfg.hooks.session_start)),
+        ("Stop", count_runnable_hooks(&cfg.hooks.stop)),
+        ("SessionEnd", count_runnable_hooks(&cfg.hooks.session_end)),
+    ];
+    let total: usize = rows.iter().map(|(_, count)| *count).sum();
+    let events = rows
+        .iter()
+        .map(|(event, count)| format!("{event} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{total} runnable command hook(s); {events}")
 }
 
 fn usage_summary(records: &[UsageRecord]) -> Option<UsageSummary> {
@@ -5262,6 +5318,34 @@ mod tests {
         let warn = doctor_line(false, "auth", "");
         assert!(warn.contains("[warn]"));
         assert!(warn.ends_with("auth"));
+    }
+
+    #[test]
+    fn doctor_hook_breakdown_counts_runnable_events() {
+        let mut cfg = LibertaiConfig::default();
+        cfg.hooks.user_prompt_submit.push(crate::config::HookCommandConfig {
+            command: "scripts/prompt.sh".to_string(),
+            ..Default::default()
+        });
+        cfg.hooks.pre_tool_use.push(crate::config::HookCommandConfig {
+            command: "scripts/pre.sh".to_string(),
+            ..Default::default()
+        });
+        cfg.hooks.pre_tool_use.push(crate::config::HookCommandConfig {
+            enabled: false,
+            command: "scripts/pre-disabled.sh".to_string(),
+            ..Default::default()
+        });
+        cfg.hooks.stop.push(crate::config::HookCommandConfig {
+            command: "   ".to_string(),
+            ..Default::default()
+        });
+
+        let breakdown = format_hook_event_breakdown(&cfg);
+        assert!(breakdown.contains("2 runnable command hook(s)"));
+        assert!(breakdown.contains("UserPromptSubmit 1"));
+        assert!(breakdown.contains("PreToolUse 1"));
+        assert!(breakdown.contains("Stop 0"));
     }
 
     #[test]
