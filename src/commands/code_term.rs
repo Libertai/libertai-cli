@@ -60,7 +60,7 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
     eprintln!("  \x1b[33;1m⎯ tool approval ⎯\x1b[0m");
     eprintln!("  \x1b[1m{tool_name}\x1b[0m");
     for line in preview.lines() {
-        eprintln!("  \x1b[2m│\x1b[0m {line}");
+        eprintln!("  \x1b[2m│\x1b[0m {}", style_preview_line(line));
     }
     eprint!("  \x1b[2m[a]\x1b[0m allow once  \x1b[2m[A]\x1b[0m always allow ({always_rule})  \x1b[2m[d]\x1b[0m deny: ");
     let _ = stderr.flush();
@@ -112,5 +112,39 @@ fn parse_cooked_choice(line: &str) -> PromptChoice {
         'a' => PromptChoice::Allow,
         'A' => PromptChoice::AlwaysAllow,
         _ => PromptChoice::Deny,
+    }
+}
+
+fn style_preview_line(line: &str) -> String {
+    if line.starts_with("--- ") || line.starts_with("+++ ") {
+        return format!("\x1b[36;1m{line}\x1b[0m");
+    }
+    if line.starts_with('+') {
+        return format!("\x1b[32m{line}\x1b[0m");
+    }
+    if line.starts_with('-') {
+        return format!("\x1b[31m{line}\x1b[0m");
+    }
+    if line.starts_with("... ") && line.ends_with(" lines omitted") {
+        return format!("\x1b[2m{line}\x1b[0m");
+    }
+    line.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_line_styling_highlights_diff_lines() {
+        assert_eq!(style_preview_line("--- src/lib.rs"), "\x1b[36;1m--- src/lib.rs\x1b[0m");
+        assert_eq!(style_preview_line("+++ proposed/src/lib.rs"), "\x1b[36;1m+++ proposed/src/lib.rs\x1b[0m");
+        assert_eq!(style_preview_line("+new"), "\x1b[32m+new\x1b[0m");
+        assert_eq!(style_preview_line("-old"), "\x1b[31m-old\x1b[0m");
+        assert_eq!(
+            style_preview_line("... 12 lines omitted"),
+            "\x1b[2m... 12 lines omitted\x1b[0m"
+        );
+        assert_eq!(style_preview_line(" context"), " context");
     }
 }

@@ -290,8 +290,9 @@ finish with a numbered plan for the user to approve."
 Shipped first pass for CLI approval prompts: `write` and `edit` compare
 against current files when readable, fall back to payload-only previews
 for new/unreadable files, and `hashline_edit` summarizes requested
-operations before the user approves. Remaining work is colored rendering
-and post-exec rendering for exact file-system deltas.
+operations before the user approves. Terminal approval prompts color
+diff headers, additions, removals, and truncation markers. Remaining
+work is post-exec rendering for exact file-system deltas.
 
 **Files**: `src/commands/code_approvals.rs` (snapshot trigger),
 `src/commands/code_diff.rs` (renderer).
