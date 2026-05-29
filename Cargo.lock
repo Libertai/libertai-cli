@@ -3044,6 +3044,7 @@ dependencies = [
  "owo-colors",
  "pi_agent_rust",
  "predicates",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

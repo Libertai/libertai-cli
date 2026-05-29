@@ -416,24 +416,86 @@ fn hook_matches_tool(hook: &HookCommandConfig, tool_name: &str) -> bool {
     if matcher.is_empty() || matcher == "*" {
         return true;
     }
-    matcher
-        .split('|')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .any(|part| {
-            part == "*"
-                || part.eq_ignore_ascii_case(tool_name)
-                || (part.contains('*') && wildcard_match(part, tool_name))
-        })
+    matcher_alternatives(matcher)
+        .into_iter()
+        .any(|part| matcher_part_matches(&part, tool_name))
+}
+
+fn matcher_part_matches(part: &str, tool_name: &str) -> bool {
+    let part = part.trim();
+    if part.is_empty() {
+        return false;
+    }
+    if part == "*" {
+        return true;
+    }
+    if let Some(pattern) = part.strip_prefix("regex:") {
+        return regex_matches(pattern, tool_name);
+    }
+    if let Some(pattern) = slash_regex_pattern(part) {
+        return regex_matches(pattern, tool_name);
+    }
+    part == tool_name || (part.contains('*') && wildcard_match(part, tool_name))
+}
+
+fn matcher_alternatives(matcher: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_slash_regex = false;
+    let mut escaped = false;
+
+    for ch in matcher.chars() {
+        if ch == '|' && !in_slash_regex {
+            let part = current.trim();
+            if !part.is_empty() {
+                parts.push(part.to_string());
+            }
+            current.clear();
+            escaped = false;
+            continue;
+        }
+
+        if ch == '/' && !escaped {
+            if in_slash_regex {
+                in_slash_regex = false;
+            } else if current.trim().is_empty() {
+                in_slash_regex = true;
+            }
+        }
+
+        escaped = ch == '\\' && !escaped;
+        if ch != '\\' {
+            escaped = false;
+        }
+        current.push(ch);
+    }
+
+    let part = current.trim();
+    if !part.is_empty() {
+        parts.push(part.to_string());
+    }
+    parts
+}
+
+fn slash_regex_pattern(part: &str) -> Option<&str> {
+    let part = part.trim();
+    if !part.starts_with('/') || !part.ends_with('/') || part.len() < 2 {
+        return None;
+    }
+    Some(&part[1..part.len() - 1])
+}
+
+fn regex_matches(pattern: &str, tool_name: &str) -> bool {
+    regex::Regex::new(pattern)
+        .map(|regex| regex.is_match(tool_name))
+        .unwrap_or(false)
 }
 
 fn wildcard_match(pattern: &str, value: &str) -> bool {
     if pattern == "*" {
         return true;
     }
-    let pattern = pattern.to_ascii_lowercase();
-    let value = value.to_ascii_lowercase();
-    let mut rest = value.as_str();
+    let mut rest = value;
     let mut first = true;
     for part in pattern.split('*') {
         if part.is_empty() {
@@ -534,15 +596,29 @@ mod tests {
     use crate::config::HooksConfig;
 
     #[test]
-    fn matcher_accepts_exact_alternative_and_glob() {
+    fn matcher_accepts_case_sensitive_exact_alternative_and_glob() {
         let hook = HookCommandConfig {
-            matcher: "Read|Bash|mcp__github__*".to_string(),
+            matcher: "Read|bash|mcp__github__*".to_string(),
             command: "true".to_string(),
             ..HookCommandConfig::default()
         };
         assert!(hook_matches_tool(&hook, "bash"));
         assert!(hook_matches_tool(&hook, "mcp__github__issue"));
+        assert!(!hook_matches_tool(&hook, "read"));
         assert!(!hook_matches_tool(&hook, "write"));
+    }
+
+    #[test]
+    fn matcher_accepts_regex_forms_and_regex_alternation_pipes() {
+        let hook = HookCommandConfig {
+            matcher: "regex:^mcp__[a-z]+__issue$|/^(bash|write)$/".to_string(),
+            command: "true".to_string(),
+            ..HookCommandConfig::default()
+        };
+        assert!(hook_matches_tool(&hook, "mcp__github__issue"));
+        assert!(hook_matches_tool(&hook, "bash"));
+        assert!(hook_matches_tool(&hook, "write"));
+        assert!(!hook_matches_tool(&hook, "read"));
     }
 
     #[test]

@@ -128,6 +128,9 @@ JSON payload on stdin. `UserPromptSubmit` hooks run before the prompt
 reaches the agent and may add `additionalContext` or block on nonzero exit.
 `PreToolUse` hooks may print Claude-style JSON such as
 `{"permissionDecision":"deny","permissionDecisionReason":"no writes"}`.
+Tool hook `matcher` values support case-sensitive exact names, `*` globs,
+`|` alternatives, `regex:<pattern>`, and slash-delimited regex patterns
+such as `/^(bash|write)$/`.
 Native non-command hook handlers are intentionally not executed.
 
 Set values with:

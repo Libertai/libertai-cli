@@ -557,11 +557,13 @@ append `additionalContext`. `PreToolUse` stdout JSON can `allow`, `ask`,
 `defer`, `deny`, rewrite `updatedInput`, or attach `additionalContext`
 through the existing approval-policy path. `PostToolUse` hooks run after
 tool execution and cannot alter the result. Lifecycle hooks run around
-native CLI sessions/turn stops and warn on nonzero exit. `/hooks` and
-`libertai status` report configured command hooks.
+native CLI sessions/turn stops and warn on nonzero exit. Tool hook matchers
+support case-sensitive exact names, `*` globs, `|` alternatives,
+`regex:<pattern>`, and slash-delimited regex patterns that can contain
+alternation pipes. `/hooks` and `libertai status` report configured command
+hooks.
 
-Remaining work: deeper matcher syntax, async rows, and any pi-level typed
-hook dispatcher.
+Remaining work: async rows and any pi-level typed hook dispatcher.
 Native non-command hook handlers remain intentionally unexecuted.
 
 **Files**: `src/config.rs`,
