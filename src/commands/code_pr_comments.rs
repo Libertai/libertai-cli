@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use serde_json::Value as JsonValue;
+
 const MAX_CAPTURE_CHARS: usize = 24_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +24,7 @@ impl CommandCapture {
 pub struct PrCommentsSnapshot {
     pub pr_view: CommandCapture,
     pub checks: Option<CommandCapture>,
+    pub review_threads: Option<CommandCapture>,
 }
 
 pub fn build_pr_comments_prompt(scope: &str, snapshot: Option<&PrCommentsSnapshot>) -> String {
@@ -45,11 +48,12 @@ Rules:
 - Do not modify files or make commits.
 - Start from the native PR snapshot above when it contains data; use git state only to verify whether comments are already addressed.
 - If the snapshot is missing or failed, inspect git state: git status --short, git branch --show-current, git remote -v, and git diff --stat.
-- If needed, use GitHub CLI to fill gaps: gh pr view --json number,url,headRefName,baseRefName,reviewDecision,comments,reviews,files and gh pr checks.
+- If needed, use GitHub CLI to fill gaps: gh pr view --json number,url,headRefName,baseRefName,reviewDecision,comments,reviews,files, gh pr checks, and GitHub GraphQL reviewThreads.
 - If the user supplied a PR number or URL, use that exact PR. Otherwise infer the PR for the current branch.
 - Summarize unresolved review comments first, grouped by file and reviewer when possible.
 - For each actionable comment, cite file:line when available, explain the requested change, and propose the minimal fix.
 - Call out comments that appear already addressed by the current diff.
+- When GitHub review thread IDs are present, identify which threads are safe to resolve after code changes land.
 - If PR data cannot be loaded, report the exact command/error and suggest the next concrete command the user can run."#
     )
 }
@@ -63,7 +67,35 @@ pub fn collect_pr_comments_snapshot(cwd: &Path, scope: &str) -> PrCommentsSnapsh
     } else {
         None
     };
-    PrCommentsSnapshot { pr_view, checks }
+    let review_threads = pr_reference_from_view(&pr_view)
+        .map(|pr| run_gh(cwd, &pr_review_threads_args(&pr)));
+    PrCommentsSnapshot {
+        pr_view,
+        checks,
+        review_threads,
+    }
+}
+
+pub fn resolve_review_thread(cwd: &Path, thread_id: &str) -> CommandCapture {
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return CommandCapture {
+            command: "gh api graphql".to_string(),
+            status: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("review thread id is required".to_string()),
+        };
+    }
+    let args = vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        "query=mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}".to_string(),
+        "-f".to_string(),
+        format!("threadId={thread_id}"),
+    ];
+    run_gh(cwd, &args)
 }
 
 fn pr_selector(scope: &str) -> Option<String> {
@@ -99,6 +131,50 @@ fn pr_checks_args(selector: Option<&str>) -> Vec<String> {
     args
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrReference {
+    owner: String,
+    repo: String,
+    number: u64,
+}
+
+fn pr_reference_from_view(capture: &CommandCapture) -> Option<PrReference> {
+    if !capture.success() {
+        return None;
+    }
+    let value: JsonValue = serde_json::from_str(capture.stdout.trim()).ok()?;
+    let number = value.get("number")?.as_u64()?;
+    let url = value.get("url")?.as_str()?;
+    let marker = "github.com/";
+    let rest = url.split_once(marker)?.1;
+    let mut parts = rest.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(PrReference {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        number,
+    })
+}
+
+fn pr_review_threads_args(pr: &PrReference) -> Vec<String> {
+    vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        "query=query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved comments(first:20){nodes{id body path line author{login} createdAt}}}}}}}".to_string(),
+        "-f".to_string(),
+        format!("owner={}", pr.owner),
+        "-f".to_string(),
+        format!("name={}", pr.repo),
+        "-F".to_string(),
+        format!("number={}", pr.number),
+    ]
+}
+
 fn run_gh(cwd: &Path, args: &[String]) -> CommandCapture {
     let command = format!("gh {}", shell_join(args));
     match Command::new("gh").args(args).current_dir(cwd).output() {
@@ -125,6 +201,10 @@ fn render_snapshot_block(snapshot: &PrCommentsSnapshot) -> String {
     if let Some(checks) = &snapshot.checks {
         out.push('\n');
         render_capture(&mut out, "gh pr checks", checks);
+    }
+    if let Some(review_threads) = &snapshot.review_threads {
+        out.push('\n');
+        render_capture(&mut out, "gh pr review threads", review_threads);
     }
     out
 }
@@ -218,12 +298,20 @@ mod tests {
                 stderr: "no checks".to_string(),
                 error: None,
             }),
+            review_threads: Some(CommandCapture {
+                command: "gh api graphql".to_string(),
+                status: Some(0),
+                stdout: r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"PRRT_1","isResolved":false}]}}}}}"#.to_string(),
+                stderr: String::new(),
+                error: None,
+            }),
         };
         let prompt = build_pr_comments_prompt("42", Some(&snapshot));
         assert!(prompt.contains("User-requested PR scope: 42"));
         assert!(prompt.contains("Native PR snapshot:"));
         assert!(prompt.contains(r#"{"number":42}"#));
         assert!(prompt.contains("no checks"));
+        assert!(prompt.contains("PRRT_1"));
     }
 
     #[test]
@@ -232,5 +320,40 @@ mod tests {
         assert!(prompt.contains("Native PR snapshot: not collected."));
         assert!(prompt.contains("infer the current branch"));
         assert!(prompt.contains("gh pr view"));
+    }
+
+    #[test]
+    fn pr_reference_reads_github_url_from_pr_view() {
+        let capture = CommandCapture {
+            command: "gh pr view".to_string(),
+            status: Some(0),
+            stdout: r#"{"number":42,"url":"https://github.com/Libertai/libertai-code-desktop/pull/42"}"#.to_string(),
+            stderr: String::new(),
+            error: None,
+        };
+        let pr = pr_reference_from_view(&capture).unwrap();
+        assert_eq!(pr.owner, "Libertai");
+        assert_eq!(pr.repo, "libertai-code-desktop");
+        assert_eq!(pr.number, 42);
+    }
+
+    #[test]
+    fn review_threads_args_query_pr_threads() {
+        let args = pr_review_threads_args(&PrReference {
+            owner: "Libertai".to_string(),
+            repo: "libertai-code-desktop".to_string(),
+            number: 42,
+        });
+        let joined = args.join(" ");
+        assert!(joined.contains("reviewThreads"));
+        assert!(joined.contains("owner=Libertai"));
+        assert!(joined.contains("name=libertai-code-desktop"));
+        assert!(joined.contains("number=42"));
+    }
+
+    #[test]
+    fn resolve_review_thread_uses_github_graphql_mutation() {
+        let capture = resolve_review_thread(Path::new("."), "");
+        assert_eq!(capture.error.as_deref(), Some("review thread id is required"));
     }
 }
