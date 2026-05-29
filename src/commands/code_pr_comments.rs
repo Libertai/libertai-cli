@@ -77,25 +77,11 @@ pub fn collect_pr_comments_snapshot(cwd: &Path, scope: &str) -> PrCommentsSnapsh
 }
 
 pub fn resolve_review_thread(cwd: &Path, thread_id: &str) -> CommandCapture {
-    let thread_id = thread_id.trim();
-    if thread_id.is_empty() {
-        return CommandCapture {
-            command: "gh api graphql".to_string(),
-            status: None,
-            stdout: String::new(),
-            stderr: String::new(),
-            error: Some("review thread id is required".to_string()),
-        };
-    }
-    let args = vec![
-        "api".to_string(),
-        "graphql".to_string(),
-        "-f".to_string(),
-        "query=mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}".to_string(),
-        "-f".to_string(),
-        format!("threadId={thread_id}"),
-    ];
-    run_gh(cwd, &args)
+    review_thread_resolution_mutation(cwd, thread_id, true)
+}
+
+pub fn unresolve_review_thread(cwd: &Path, thread_id: &str) -> CommandCapture {
+    review_thread_resolution_mutation(cwd, thread_id, false)
 }
 
 pub fn reply_review_thread(cwd: &Path, thread_id: &str, body: &str) -> CommandCapture {
@@ -177,6 +163,39 @@ fn pr_selector(scope: &str) -> Option<String> {
         || first.starts_with("https://")
         || first.contains("/pull/");
     looks_like_pr.then(|| first.to_string())
+}
+
+fn review_thread_resolution_mutation(
+    cwd: &Path,
+    thread_id: &str,
+    resolved: bool,
+) -> CommandCapture {
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return CommandCapture {
+            command: "gh api graphql".to_string(),
+            status: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("review thread id is required".to_string()),
+        };
+    }
+    let mutation = if resolved {
+        "resolveReviewThread"
+    } else {
+        "unresolveReviewThread"
+    };
+    let args = vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        format!(
+            "query=mutation($threadId:ID!){{{mutation}(input:{{threadId:$threadId}}){{thread{{id isResolved}}}}}}"
+        ),
+        "-f".to_string(),
+        format!("threadId={thread_id}"),
+    ];
+    run_gh(cwd, &args)
 }
 
 fn pr_view_args(selector: Option<&str>) -> Vec<String> {
@@ -422,6 +441,12 @@ mod tests {
     #[test]
     fn resolve_review_thread_uses_github_graphql_mutation() {
         let capture = resolve_review_thread(Path::new("."), "");
+        assert_eq!(capture.error.as_deref(), Some("review thread id is required"));
+    }
+
+    #[test]
+    fn unresolve_review_thread_uses_github_graphql_mutation() {
+        let capture = unresolve_review_thread(Path::new("."), "");
         assert_eq!(capture.error.as_deref(), Some("review thread id is required"));
     }
 
