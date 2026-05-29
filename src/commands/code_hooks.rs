@@ -5,9 +5,10 @@
 //! prompt/agent handlers are executed, while imported MCP handlers are not
 //! run natively.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use pi::sdk::{AgentEvent, ToolOutput};
@@ -23,6 +24,7 @@ pub struct SessionHookGuard {
 
 impl SessionHookGuard {
     pub fn start(cfg: Arc<Config>) -> Self {
+        reset_once_hook_state();
         run_lifecycle_hooks(cfg.as_ref(), "SessionStart", &cfg.hooks.session_start);
         Self { cfg }
     }
@@ -61,8 +63,11 @@ pub fn run_user_prompt_submit_hooks(cfg: &Config, prompt: &str) -> anyhow::Resul
     let payload = user_prompt_submit_payload(&cwd, prompt);
     let mut contexts: Vec<String> = Vec::new();
 
-    for hook in &cfg.hooks.user_prompt_submit {
+    for (idx, hook) in cfg.hooks.user_prompt_submit.iter().enumerate() {
         if !is_runnable_hook(hook) {
+            continue;
+        }
+        if should_skip_once_hook("UserPromptSubmit", idx, hook) {
             continue;
         }
         if hook.async_hook {
@@ -118,8 +123,11 @@ fn run_nonblocking_event_hooks(
     cwd: &std::path::Path,
     payload: &serde_json::Value,
 ) {
-    for hook in hooks {
+    for (idx, hook) in hooks.iter().enumerate() {
         if !is_runnable_hook(hook) {
+            continue;
+        }
+        if should_skip_once_hook(event_name, idx, hook) {
             continue;
         }
         if hook.async_hook {
@@ -197,6 +205,26 @@ fn is_runnable_hook(hook: &HookCommandConfig) -> bool {
         }
 }
 
+fn should_skip_once_hook(event_name: &str, idx: usize, hook: &HookCommandConfig) -> bool {
+    if !hook.once {
+        return false;
+    }
+    let key = format!("{event_name}:{idx}");
+    !once_hook_keys().lock().expect("once hook lock").insert(key)
+}
+
+fn once_hook_keys() -> &'static Mutex<HashSet<String>> {
+    static KEYS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    KEYS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn reset_once_hook_state() {
+    once_hook_keys()
+        .lock()
+        .expect("once hook lock")
+        .clear();
+}
+
 fn hook_is_http(hook: &HookCommandConfig) -> bool {
     hook.hook_type.trim().eq_ignore_ascii_case("http")
 }
@@ -255,11 +283,14 @@ impl ToolPolicy for ConfiguredHookPolicy {
         let mut contexts: Vec<String> = Vec::new();
         let mut deny_reason: Option<String> = None;
 
-        for hook in &self.cfg.hooks.pre_tool_use {
+        for (idx, hook) in self.cfg.hooks.pre_tool_use.iter().enumerate() {
             if !is_runnable_hook(hook)
                 || !hook_matches_tool(hook, tool_name)
                 || !hook_condition_matches(hook, &payload)
             {
+                continue;
+            }
+            if should_skip_once_hook("PreToolUse", idx, hook) {
                 continue;
             }
             if hook.async_hook {
@@ -379,11 +410,14 @@ fn run_tool_completion_hooks(
         return;
     }
 
-    for hook in hooks {
+    for (idx, hook) in hooks.iter().enumerate() {
         if !is_runnable_hook(hook)
             || !hook_matches_tool(hook, tool_name)
             || !hook_condition_matches(hook, payload)
         {
+            continue;
+        }
+        if should_skip_once_hook(event_name, idx, hook) {
             continue;
         }
         if hook.async_hook {
@@ -1594,6 +1628,28 @@ mod tests {
 
         let prompt = run_user_prompt_submit_hooks(&cfg, "review this").unwrap();
         assert_eq!(prompt, "review this");
+    }
+
+    #[test]
+    fn once_user_prompt_hook_runs_only_once() {
+        reset_once_hook_state();
+        let cfg = Config {
+            hooks: HooksConfig {
+                user_prompt_submit: vec![HookCommandConfig {
+                    command: "printf '{\"additionalContext\":\"run once\"}'".to_string(),
+                    once: true,
+                    ..HookCommandConfig::default()
+                }],
+                ..HooksConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let first = run_user_prompt_submit_hooks(&cfg, "review this").unwrap();
+        let second = run_user_prompt_submit_hooks(&cfg, "review this").unwrap();
+
+        assert!(first.contains("run once"));
+        assert_eq!(second, "review this");
     }
 
     #[test]

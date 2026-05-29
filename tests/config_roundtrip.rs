@@ -54,6 +54,8 @@ fn save_then_load_preserves_fields() {
                     server: "policy".into(),
                     tool: "check_prompt".into(),
                     input: Some(json!({ "level": "strict" })),
+                    once: true,
+                    async_rewake: true,
                     extra: BTreeMap::from([
                         ("source".to_string(), json!("project")),
                         ("customFlag".to_string(), json!(true)),
@@ -129,6 +131,8 @@ fn save_then_load_preserves_fields() {
         round.hooks.user_prompt_submit[1].input,
         Some(json!({ "level": "strict" }))
     );
+    assert!(round.hooks.user_prompt_submit[1].once);
+    assert!(round.hooks.user_prompt_submit[1].async_rewake);
     assert_eq!(
         round.hooks.user_prompt_submit[1].extra.get("source"),
         Some(&json!("project"))

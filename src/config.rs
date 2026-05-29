@@ -280,6 +280,10 @@ pub struct HookCommandConfig {
         skip_serializing_if = "is_false"
     )]
     pub continue_on_block: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub once: bool,
+    #[serde(default, rename = "asyncRewake", skip_serializing_if = "is_false")]
+    pub async_rewake: bool,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -305,6 +309,8 @@ impl Default for HookCommandConfig {
             timeout: None,
             async_hook: false,
             continue_on_block: false,
+            once: false,
+            async_rewake: false,
             extra: BTreeMap::new(),
         }
     }
