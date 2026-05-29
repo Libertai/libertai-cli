@@ -210,6 +210,34 @@ pub fn submit_pull_request_review(
     run_gh(cwd, &args)
 }
 
+pub fn mark_file_viewed(cwd: &Path, scope: &str, path: &str, viewed: bool) -> CommandCapture {
+    let path = path.trim();
+    if path.is_empty() {
+        return CommandCapture {
+            command: "gh api graphql".to_string(),
+            status: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("file path is required".to_string()),
+        };
+    }
+    let selector = pr_selector(scope);
+    let pr_view = run_gh(cwd, &pr_review_target_args(selector.as_deref()));
+    if !pr_view.success() {
+        return pr_view;
+    }
+    let Some(pr_id) = pr_id_from_view(&pr_view) else {
+        return CommandCapture {
+            command: pr_view.command,
+            status: pr_view.status,
+            stdout: pr_view.stdout,
+            stderr: pr_view.stderr,
+            error: Some("pull request node id was not returned by gh pr view".to_string()),
+        };
+    };
+    run_gh(cwd, &pr_file_viewed_args(&pr_id, path, viewed))
+}
+
 fn normalize_review_event(event: &str) -> Result<&'static str, String> {
     let normalized = event.trim().to_ascii_lowercase().replace('-', "_");
     match normalized.as_str() {
@@ -347,6 +375,26 @@ fn pr_review_threads_args(pr: &PrReference) -> Vec<String> {
         format!("name={}", pr.repo),
         "-F".to_string(),
         format!("number={}", pr.number),
+    ]
+}
+
+fn pr_file_viewed_args(pull_request_id: &str, path: &str, viewed: bool) -> Vec<String> {
+    let mutation = if viewed {
+        "markFileAsViewed"
+    } else {
+        "unmarkFileAsViewed"
+    };
+    vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        format!(
+            "query=mutation($pullRequestId:ID!,$path:String!){{{mutation}(input:{{pullRequestId:$pullRequestId,path:$path}}){{pullRequest{{id}}}}}}"
+        ),
+        "-f".to_string(),
+        format!("pullRequestId={pull_request_id}"),
+        "-f".to_string(),
+        format!("path={path}"),
     ]
 }
 
@@ -558,6 +606,23 @@ mod tests {
             error: None,
         };
         assert_eq!(pr_id_from_view(&capture).as_deref(), Some("PR_kwDOABC123"));
+    }
+
+    #[test]
+    fn mark_file_viewed_validates_path() {
+        let capture = mark_file_viewed(Path::new("."), "", "", true);
+        assert_eq!(capture.error.as_deref(), Some("file path is required"));
+    }
+
+    #[test]
+    fn pr_file_viewed_args_use_github_graphql_mutations() {
+        let viewed = pr_file_viewed_args("PR_kwDOABC123", "src/lib.rs", true).join(" ");
+        assert!(viewed.contains("markFileAsViewed"));
+        assert!(viewed.contains("pullRequestId=PR_kwDOABC123"));
+        assert!(viewed.contains("path=src/lib.rs"));
+
+        let unviewed = pr_file_viewed_args("PR_kwDOABC123", "src/lib.rs", false).join(" ");
+        assert!(unviewed.contains("unmarkFileAsViewed"));
     }
 
     #[test]

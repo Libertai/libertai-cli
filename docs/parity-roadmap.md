@@ -131,7 +131,10 @@ SDK; those are flagged **(upstream)**.
   supports reopening mistakenly resolved threads with
   `unresolveReviewThread`. CLI and desktop can also submit summary PR
   reviews with `/pr_comments review <event> <body>` using GitHub's
-  `addPullRequestReview` mutation.
+  `addPullRequestReview` mutation, and mark changed PR files viewed or
+  unviewed with `/pr_comments viewed <path>` and
+  `/pr_comments unviewed <path>` through `markFileAsViewed` /
+  `unmarkFileAsViewed`.
 - **CLI `/sandbox` command** — REPL users can inspect the effective
   strict bash sandbox profile with `/sandbox [info]`; `/sandbox reload`
   explains the CLI restart requirement.

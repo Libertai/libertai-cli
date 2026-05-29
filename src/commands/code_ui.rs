@@ -1259,6 +1259,14 @@ async fn repl_loop(
             resolve_pr_comment_thread(rest, false);
             continue;
         }
+        if let Some(rest) = pr_comments_viewed_arg(trimmed) {
+            mark_pr_comment_file(rest, true);
+            continue;
+        }
+        if let Some(rest) = pr_comments_unviewed_arg(trimmed) {
+            mark_pr_comment_file(rest, false);
+            continue;
+        }
         if let Some(rest) = pr_comments_edit_arg(trimmed) {
             edit_pr_comment(rest);
             continue;
@@ -2013,6 +2021,12 @@ fn print_help() {
     );
     println!(
         "{DIM}  /pr_comments unresolve <thread_id> — reopen a GitHub PR review thread{RESET}"
+    );
+    println!(
+        "{DIM}  /pr_comments viewed <path> — mark a pull request file as viewed{RESET}"
+    );
+    println!(
+        "{DIM}  /pr_comments unviewed <path> — mark a pull request file as unviewed{RESET}"
     );
     println!(
         "{DIM}  /pr_comments edit <comment_id> <body> — edit a GitHub PR review comment{RESET}"
@@ -4012,6 +4026,34 @@ fn pr_comments_unresolve_arg(trimmed: &str) -> Option<&str> {
     None
 }
 
+fn pr_comments_viewed_arg(trimmed: &str) -> Option<&str> {
+    for prefix in [
+        "/pr_comments viewed ",
+        "/pr-comments viewed ",
+        "/pr_comments view ",
+        "/pr-comments view ",
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
+fn pr_comments_unviewed_arg(trimmed: &str) -> Option<&str> {
+    for prefix in [
+        "/pr_comments unviewed ",
+        "/pr-comments unviewed ",
+        "/pr_comments unview ",
+        "/pr-comments unview ",
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
 fn parse_pr_comments_reply(input: &str) -> Result<(&str, &str)> {
     let raw = input.trim();
     let Some((thread_id, body)) = raw.split_once(char::is_whitespace) else {
@@ -4055,6 +4097,14 @@ fn parse_pr_comments_review(input: &str) -> Result<(&str, &str)> {
         anyhow::bail!("usage: /pr_comments review <approve|comment|request_changes> <body>");
     }
     Ok((event.trim(), body))
+}
+
+fn parse_pr_comments_file_path(input: &str) -> Result<&str> {
+    let path = input.trim();
+    if path.is_empty() {
+        anyhow::bail!("usage: /pr_comments viewed <path>");
+    }
+    Ok(path)
 }
 
 fn reply_to_pr_comment_thread(input: &str) {
@@ -4203,6 +4253,43 @@ fn submit_pr_review(input: &str) {
         })
         .unwrap_or("unknown error");
     eprintln!("{DIM}  /pr_comments: review submit failed: {detail}{RESET}");
+}
+
+fn mark_pr_comment_file(input: &str, viewed: bool) {
+    let path = match parse_pr_comments_file_path(input) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("{DIM}  /pr_comments: {e:#}{RESET}");
+            return;
+        }
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /pr_comments: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let capture = crate::commands::code_pr_comments::mark_file_viewed(&cwd, "", path, viewed);
+    if capture.error.is_none() && capture.status == Some(0) {
+        let label = if viewed { "viewed" } else { "unviewed" };
+        println!("{DIM}  marked file {label}: {path}{RESET}");
+        return;
+    }
+    let detail = capture
+        .error
+        .as_deref()
+        .or_else(|| {
+            let stderr = capture.stderr.trim();
+            (!stderr.is_empty()).then_some(stderr)
+        })
+        .or_else(|| {
+            let stdout = capture.stdout.trim();
+            (!stdout.is_empty()).then_some(stdout)
+        })
+        .unwrap_or("unknown error");
+    let action = if viewed { "mark viewed" } else { "mark unviewed" };
+    eprintln!("{DIM}  /pr_comments: {action} failed: {detail}{RESET}");
 }
 
 fn parse_direct_custom_slash(trimmed: &str) -> Option<(&str, &str)> {
@@ -7045,6 +7132,28 @@ mod tests {
         assert_eq!(parse_pr_comments_resolve("PRRT_1").unwrap(), "PRRT_1");
         assert!(parse_pr_comments_resolve("").is_err());
         assert!(parse_pr_comments_resolve("PRRT_1 extra").is_err());
+    }
+
+    #[test]
+    fn parse_pr_comments_file_viewed_requires_path() {
+        assert_eq!(
+            pr_comments_viewed_arg("/pr_comments viewed src/lib.rs"),
+            Some("src/lib.rs")
+        );
+        assert_eq!(
+            pr_comments_viewed_arg("/pr_comments view js/app.js"),
+            Some("js/app.js")
+        );
+        assert_eq!(
+            pr_comments_unviewed_arg("/pr_comments unviewed src/lib.rs"),
+            Some("src/lib.rs")
+        );
+        assert_eq!(
+            pr_comments_unviewed_arg("/pr_comments unview js/app.js"),
+            Some("js/app.js")
+        );
+        assert_eq!(parse_pr_comments_file_path("src/lib.rs").unwrap(), "src/lib.rs");
+        assert!(parse_pr_comments_file_path("").is_err());
     }
 
     #[test]
