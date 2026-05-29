@@ -231,18 +231,24 @@ Port the meat of parity-doc Section A into the existing
    internal thinking.*
 9. *End-of-turn = one or two sentences, not a recap.*
 10. *Make independent tool calls in parallel.*
+11. *Users cannot see most raw tool calls; summarize decisive command
+    results instead of pasting logs.*
+12. *Don't create planning docs, status reports, TODO files, docstrings,
+    or module comments unless the user asked for a durable artifact.*
 
 **Status**: shipped in `src/agent_skills/libertai-harness/SKILL.md`.
 
 ### 1B. Per-tool usage notes (upstream)
 
-Pi's tool descriptions are one-liners. Claude Code's Read tool description
-alone spells out: absolute-path requirement, 2000-line default cap, PDF
-page-range protocol, "do NOT re-read a file you just edited", notebook
-handling, image handling.
+Pi's built-in tool descriptions now carry model-facing guidance for
+read/edit/write/bash/grep/find/ls/hashline_edit plus background bash
+companions, including cwd scoping, truncation behavior, hashline flows,
+and destructive-shell caution. `libertai-harness` also keeps concise
+per-tool usage notes in the appended prompt.
 
-**Decision required** (see open question 3): upstream to `pi_agent_rust`
-`Tool::description` strings vs. append as a section in `libertai-harness`.
+**Status**: shipped across `pi_agent_rust/src/tools.rs` and
+`src/agent_skills/libertai-harness/SKILL.md`; remaining depth belongs
+to future tools that do not exist yet.
 
 If upstream: edit `pi_agent_rust/src/tools.rs` per-tool `description()`
 methods; PR; bump rev in our `Cargo.toml`.
