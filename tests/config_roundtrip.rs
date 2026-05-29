@@ -16,6 +16,9 @@ fn empty_toml_parses_as_defaults() {
     assert!(cfg.hooks.user_prompt_submit.is_empty());
     assert!(cfg.hooks.pre_tool_use.is_empty());
     assert!(cfg.hooks.post_tool_use.is_empty());
+    assert!(cfg.hooks.session_start.is_empty());
+    assert!(cfg.hooks.stop.is_empty());
+    assert!(cfg.hooks.session_end.is_empty());
     assert!(cfg.auth.api_key.is_none());
 }
 
@@ -51,6 +54,18 @@ fn save_then_load_preserves_fields() {
                 timeout: Some(3),
                 ..HookCommandConfig::default()
             }],
+            session_start: vec![HookCommandConfig {
+                command: "scripts/session-start.sh".into(),
+                ..HookCommandConfig::default()
+            }],
+            stop: vec![HookCommandConfig {
+                command: "scripts/stop.sh".into(),
+                ..HookCommandConfig::default()
+            }],
+            session_end: vec![HookCommandConfig {
+                command: "scripts/session-end.sh".into(),
+                ..HookCommandConfig::default()
+            }],
         },
         ..Default::default()
     };
@@ -81,6 +96,15 @@ fn save_then_load_preserves_fields() {
     assert_eq!(round.hooks.post_tool_use[0].matcher, "bash");
     assert_eq!(round.hooks.post_tool_use[0].command, "scripts/post-tool-use.sh");
     assert_eq!(round.hooks.post_tool_use[0].timeout, Some(3));
+    assert_eq!(round.hooks.session_start.len(), 1);
+    assert_eq!(
+        round.hooks.session_start[0].command,
+        "scripts/session-start.sh"
+    );
+    assert_eq!(round.hooks.stop.len(), 1);
+    assert_eq!(round.hooks.stop[0].command, "scripts/stop.sh");
+    assert_eq!(round.hooks.session_end.len(), 1);
+    assert_eq!(round.hooks.session_end[0].command, "scripts/session-end.sh");
 }
 
 #[test]

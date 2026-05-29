@@ -15,6 +15,27 @@ use serde_json::json;
 use crate::commands::code_approvals::{ToolPolicy, ToolPolicyDecision};
 use crate::config::{Config, HookCommandConfig};
 
+pub struct SessionHookGuard {
+    cfg: Arc<Config>,
+}
+
+impl SessionHookGuard {
+    pub fn start(cfg: Arc<Config>) -> Self {
+        run_lifecycle_hooks(cfg.as_ref(), "SessionStart", &cfg.hooks.session_start);
+        Self { cfg }
+    }
+}
+
+impl Drop for SessionHookGuard {
+    fn drop(&mut self) {
+        run_lifecycle_hooks(self.cfg.as_ref(), "SessionEnd", &self.cfg.hooks.session_end);
+    }
+}
+
+pub fn run_stop_hooks(cfg: &Config) {
+    run_lifecycle_hooks(cfg, "Stop", &cfg.hooks.stop);
+}
+
 pub fn run_user_prompt_submit_hooks(cfg: &Config, prompt: &str) -> anyhow::Result<String> {
     if !cfg.hooks.user_prompt_submit.iter().any(is_runnable_hook) {
         return Ok(prompt.to_string());
@@ -59,6 +80,43 @@ fn user_prompt_submit_payload(cwd: &std::path::Path, prompt: &str) -> serde_json
         "prompt": prompt,
         "userPrompt": prompt,
         "user_prompt": prompt,
+    })
+}
+
+fn run_lifecycle_hooks(cfg: &Config, event_name: &str, hooks: &[HookCommandConfig]) {
+    if !hooks.iter().any(is_runnable_hook) {
+        return;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let payload = lifecycle_payload(&cwd, cfg, event_name);
+
+    for hook in hooks {
+        if !is_runnable_hook(hook) {
+            continue;
+        }
+        let run = run_shell_hook(hook, &cwd, &payload, event_name);
+        if run.status != 0 {
+            let detail = first_non_empty(&run.stderr, &run.stdout)
+                .unwrap_or_else(|| format!("hook exited with status {}", run.status));
+            eprintln!(
+                "  \x1b[2m[hook {event_name}] {}: {}\x1b[0m",
+                hook.command.trim(),
+                detail
+            );
+        }
+    }
+}
+
+fn lifecycle_payload(cwd: &std::path::Path, cfg: &Config, event_name: &str) -> serde_json::Value {
+    json!({
+        "event": event_name,
+        "cwd": cwd,
+        "provider": cfg.default_code_provider,
+        "model": cfg.default_code_model,
+        "defaultCodeProvider": cfg.default_code_provider,
+        "defaultCodeModel": cfg.default_code_model,
+        "default_code_provider": cfg.default_code_provider,
+        "default_code_model": cfg.default_code_model,
     })
 }
 
@@ -582,6 +640,23 @@ mod tests {
         let err = run_user_prompt_submit_hooks(&cfg, "review this").unwrap_err();
         assert!(err.to_string().contains("blocked the prompt"));
         assert!(err.to_string().contains("blocked"));
+    }
+
+    #[test]
+    fn lifecycle_payload_includes_event_and_model_fields() {
+        let cfg = Config {
+            default_code_provider: "libertai".to_string(),
+            default_code_model: "test-code-model".to_string(),
+            ..Config::default()
+        };
+        let payload =
+            lifecycle_payload(std::path::Path::new("/tmp/project"), &cfg, "SessionStart");
+
+        assert_eq!(payload["event"], "SessionStart");
+        assert_eq!(payload["provider"], "libertai");
+        assert_eq!(payload["model"], "test-code-model");
+        assert_eq!(payload["defaultCodeProvider"], "libertai");
+        assert_eq!(payload["default_code_model"], "test-code-model");
     }
 
     #[test]

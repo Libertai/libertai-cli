@@ -537,6 +537,8 @@ async fn repl_loop(
         Arc::clone(&cfg),
     )
     .await?;
+    let mut session_hooks =
+        crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(&cfg));
 
     // If we resumed, print the rehydrated transcript so the user has
     // visual context before the input bar takes over. Skipped for fresh
@@ -731,7 +733,12 @@ async fn repl_loop(
                 .await
                 {
                     Ok(next) => {
+                        drop(session_hooks);
                         handle = next;
+                        session_hooks =
+                            crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(
+                                &cfg,
+                            ));
                         usage_history.clear();
                         update_bar_status(|status| status.output_style = output_style.clone());
                     }
@@ -754,7 +761,12 @@ async fn repl_loop(
                         .await
                         {
                             Ok(next) => {
+                                drop(session_hooks);
                                 handle = next;
+                                session_hooks =
+                                    crate::commands::code_hooks::SessionHookGuard::start(
+                                        Arc::clone(&cfg),
+                                    );
                                 usage_history.clear();
                                 update_bar_status(|status| {
                                     status.output_style = output_style.clone()
@@ -782,7 +794,12 @@ async fn repl_loop(
                         .await
                         {
                             Ok(next) => {
+                                drop(session_hooks);
                                 handle = next;
+                                session_hooks =
+                                    crate::commands::code_hooks::SessionHookGuard::start(
+                                        Arc::clone(&cfg),
+                                    );
                                 usage_history.clear();
                                 update_bar_status(|status| {
                                     status.output_style = output_style.clone()
@@ -810,7 +827,12 @@ async fn repl_loop(
                         .await
                         {
                             Ok(next) => {
+                                drop(session_hooks);
                                 handle = next;
+                                session_hooks =
+                                    crate::commands::code_hooks::SessionHookGuard::start(
+                                        Arc::clone(&cfg),
+                                    );
                                 usage_history.clear();
                                 update_bar_status(|status| {
                                     status.output_style = output_style.clone()
@@ -980,7 +1002,12 @@ async fn repl_loop(
                     .await
                     {
                         Ok(next) => {
+                            drop(session_hooks);
                             handle = next;
+                            session_hooks =
+                                crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(
+                                    &cfg,
+                                ));
                             usage_history.clear();
                             update_bar_status(|status| status.output_style = output_style.clone());
                         }
@@ -1307,6 +1334,7 @@ async fn repl_loop(
         // leave a gap between the response and the usage/status line.
         match result {
             Ok(msg) => {
+                crate::commands::code_hooks::run_stop_hooks(cfg.as_ref());
                 if let Some(run) = auto_run.as_mut() {
                     run.completed += 1;
                 }
@@ -3961,27 +3989,17 @@ fn print_config_status(cfg: &LibertaiConfig) {
         cfg.code_compaction_reserve_tokens,
         cfg.code_compaction_keep_recent_tokens
     );
-    let pre_tool_hooks = cfg
-        .hooks
-        .pre_tool_use
-        .iter()
-        .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
-        .count();
-    let post_tool_hooks = cfg
-        .hooks
-        .post_tool_use
-        .iter()
-        .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
-        .count();
-    let user_prompt_hooks = cfg
-        .hooks
-        .user_prompt_submit
-        .iter()
-        .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
-        .count();
+    let user_prompt_hooks = count_runnable_hooks(&cfg.hooks.user_prompt_submit);
+    let pre_tool_hooks = count_runnable_hooks(&cfg.hooks.pre_tool_use);
+    let post_tool_hooks = count_runnable_hooks(&cfg.hooks.post_tool_use);
+    let session_start_hooks = count_runnable_hooks(&cfg.hooks.session_start);
+    let stop_hooks = count_runnable_hooks(&cfg.hooks.stop);
+    let session_end_hooks = count_runnable_hooks(&cfg.hooks.session_end);
     println!(
         "{DIM}  hooks:{RESET} {user_prompt_hooks} UserPromptSubmit, \
-         {pre_tool_hooks} PreToolUse, {post_tool_hooks} PostToolUse command hook(s)"
+         {pre_tool_hooks} PreToolUse, {post_tool_hooks} PostToolUse, \
+         {session_start_hooks} SessionStart, {stop_hooks} Stop, \
+         {session_end_hooks} SessionEnd command hook(s)"
     );
     match cfg.auth.api_key.as_deref() {
         Some(key) => println!("{DIM}  auth:{RESET} {}", mask_key(key)),
@@ -3998,6 +4016,9 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     print_hook_section("UserPromptSubmit", &cfg.hooks.user_prompt_submit);
     print_hook_section("PreToolUse", &cfg.hooks.pre_tool_use);
     print_hook_section("PostToolUse", &cfg.hooks.post_tool_use);
+    print_hook_section("SessionStart", &cfg.hooks.session_start);
+    print_hook_section("Stop", &cfg.hooks.stop);
+    print_hook_section("SessionEnd", &cfg.hooks.session_end);
     println!(
         "{DIM}  UserPromptSubmit hooks run before the prompt reaches the agent and may block it.{RESET}"
     );
@@ -4007,8 +4028,16 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     println!(
         "{DIM}  PostToolUse hooks run after tool execution and cannot alter the result.{RESET}"
     );
+    println!("{DIM}  lifecycle hooks warn on nonzero exit and do not block the session.{RESET}");
     println!("{DIM}  non-command hook handlers are not executed natively.{RESET}");
     println!();
+}
+
+fn count_runnable_hooks(hooks: &[crate::config::HookCommandConfig]) -> usize {
+    hooks
+        .iter()
+        .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
+        .count()
 }
 
 fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {

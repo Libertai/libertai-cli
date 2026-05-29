@@ -78,6 +78,21 @@ pub fn run() -> Result<()> {
             .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
             .count()
     );
+    println!(
+        "  {:<22} {}",
+        "SessionStart hooks:".dimmed(),
+        runnable_hook_count(&cfg.hooks.session_start)
+    );
+    println!(
+        "  {:<22} {}",
+        "Stop hooks:".dimmed(),
+        runnable_hook_count(&cfg.hooks.stop)
+    );
+    println!(
+        "  {:<22} {}",
+        "SessionEnd hooks:".dimmed(),
+        runnable_hook_count(&cfg.hooks.session_end)
+    );
 
     println!("  {}", "Launcher defaults:".dimmed());
     println!(
@@ -120,4 +135,11 @@ pub fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn runnable_hook_count(hooks: &[crate::config::HookCommandConfig]) -> usize {
+    hooks
+        .iter()
+        .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
+        .count()
 }

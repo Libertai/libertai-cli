@@ -108,16 +108,25 @@ matcher = "bash|write|edit"
 command = "scripts/post-tool-use.sh"
 timeout = 5
 
+[[hooks.SessionStart]]
+command = "scripts/session-start.sh"
+
+[[hooks.Stop]]
+command = "scripts/stop.sh"
+
+[[hooks.SessionEnd]]
+command = "scripts/session-end.sh"
+
 [auth]
 api_key = "LTAI_..."
 # wallet_address / chain are only written when you log in via wallet.
 ```
 
-`UserPromptSubmit`, `PreToolUse`, and `PostToolUse` hooks are command-only
-in the native CLI. They receive a JSON payload on stdin. `UserPromptSubmit`
-hooks run before the prompt reaches the agent and may add
-`additionalContext` or block on nonzero exit. `PreToolUse` hooks may print
-Claude-style JSON such as
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SessionStart`, `Stop`,
+and `SessionEnd` hooks are command-only in the native CLI. They receive a
+JSON payload on stdin. `UserPromptSubmit` hooks run before the prompt
+reaches the agent and may add `additionalContext` or block on nonzero exit.
+`PreToolUse` hooks may print Claude-style JSON such as
 `{"permissionDecision":"deny","permissionDecisionReason":"no writes"}`.
 Native non-command hook handlers are intentionally not executed.
 
