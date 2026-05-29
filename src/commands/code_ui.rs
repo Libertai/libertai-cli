@@ -3141,7 +3141,16 @@ fn print_init_project(notes: Option<&str>) {
             println!("{DIM}  AGENTS.md already exists: {}{RESET}", result.path.display());
             println!("{DIM}  left existing content unchanged.{RESET}");
             match crate::commands::code_init::agents_md_candidate(&cwd, notes) {
-                Ok(candidate) => print!("{}", init_candidate_preview(&candidate)),
+                Ok(candidate) => {
+                    print!(
+                        "{}",
+                        init_candidate_preview(
+                            &result.path.display().to_string(),
+                            &result.content,
+                            &candidate
+                        )
+                    )
+                }
                 Err(e) => eprintln!("{DIM}  could not build merge candidate: {e:#}{RESET}"),
             }
             println!();
@@ -3188,15 +3197,44 @@ fn write_onboarding_guide(path: Option<&str>) {
     }
 }
 
-fn init_candidate_preview(candidate: &str) -> String {
+fn init_candidate_preview(path: &str, existing: &str, candidate: &str) -> String {
     let mut out = String::new();
     out.push_str("  generated merge candidate (not written):\n\n");
     out.push_str(candidate);
     if !candidate.ends_with('\n') {
         out.push('\n');
     }
+    out.push_str("\n  diff against existing AGENTS.md:\n\n");
+    out.push_str(&crate::commands::code_diff::render_line_diff(
+        path, existing, candidate,
+    ));
+    out.push('\n');
+    let sections = init_candidate_sections(candidate);
+    if !sections.is_empty() {
+        out.push_str("\n  candidate sections:\n");
+        for (idx, section) in sections.iter().enumerate() {
+            out.push_str(&format!("  {}. {section}\n", idx + 1));
+        }
+    }
     out.push_str("\n  Review the candidate against the existing AGENTS.md and merge only verified repo facts.\n");
     out
+}
+
+fn init_candidate_sections(candidate: &str) -> Vec<String> {
+    let mut sections = Vec::new();
+    let mut has_preamble = false;
+    for line in candidate.replace("\r\n", "\n").lines() {
+        if let Some(title) = line.trim().strip_prefix("## ") {
+            let title = title.trim();
+            if !title.is_empty() {
+                sections.push(title.to_string());
+            }
+        } else if !line.trim().is_empty() && sections.is_empty() && !has_preamble {
+            sections.push("Preamble".to_string());
+            has_preamble = true;
+        }
+    }
+    sections
 }
 
 fn print_memory(action: &str) {
@@ -5197,9 +5235,20 @@ mod tests {
 
     #[test]
     fn init_candidate_preview_marks_candidate_as_not_written() {
-        let preview = init_candidate_preview("# demo\n\n## Build & test\n- test: cargo test\n");
+        let preview = init_candidate_preview(
+            "AGENTS.md",
+            "custom guidance\n",
+            "# demo\n\n## Build & test\n- test: cargo test\n",
+        );
         assert!(preview.contains("generated merge candidate (not written)"));
         assert!(preview.contains("- test: cargo test"));
+        assert!(preview.contains("diff against existing AGENTS.md"));
+        assert!(preview.contains("--- AGENTS.md"));
+        assert!(preview.contains("-custom guidance"));
+        assert!(preview.contains("+## Build & test"));
+        assert!(preview.contains("candidate sections:"));
+        assert!(preview.contains("1. Preamble"));
+        assert!(preview.contains("2. Build & test"));
         assert!(preview.contains("merge only verified repo facts"));
     }
 

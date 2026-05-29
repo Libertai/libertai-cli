@@ -393,14 +393,15 @@ model-written initialization prompt through the active session for
 inspect/propose/write flows. The initializer also exposes a no-write
 candidate generator so desktop can show a merge candidate when
 guidance already exists, and CLI `/init` prints that same no-write
-candidate when it leaves an existing `AGENTS.md` unchanged. The generated file
+candidate with a diff against the existing file and a numbered section
+index when it leaves an existing `AGENTS.md` unchanged. The generated file
 is deterministic and based on visible repo docs/manifests
 (`README.md`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`)
 plus common directory names. It now parses README title/summary,
 manifest names, exact package script bodies, Go modules, common config
 files such as Dockerfile / GitHub Actions / Makefile, and
 CONTRIBUTING/EditorConfig guidance. Remaining work is richer interactive
-merge UI around agent-written prose.
+merge application around agent-written prose.
 
 ### 2E. `!` shell prefix in REPL
 

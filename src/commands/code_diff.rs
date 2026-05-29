@@ -121,7 +121,7 @@ fn hashline_summary(input: &Value) -> Option<String> {
     Some(cap_lines(lines))
 }
 
-fn render_line_diff(path: &str, before: &str, after: &str) -> String {
+pub(crate) fn render_line_diff(path: &str, before: &str, after: &str) -> String {
     let before_lines: Vec<&str> = before.lines().collect();
     let after_lines: Vec<&str> = after.lines().collect();
     if before_lines == after_lines {
