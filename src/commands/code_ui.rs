@@ -3080,10 +3080,25 @@ fn print_init_project(notes: Option<&str>) {
             println!("{BOLD}init{RESET}");
             println!("{DIM}  AGENTS.md already exists: {}{RESET}", result.path.display());
             println!("{DIM}  left existing content unchanged.{RESET}");
+            match crate::commands::code_init::agents_md_candidate(&cwd, notes) {
+                Ok(candidate) => print!("{}", init_candidate_preview(&candidate)),
+                Err(e) => eprintln!("{DIM}  could not build merge candidate: {e:#}{RESET}"),
+            }
             println!();
         }
         Err(e) => eprintln!("{DIM}  /init: failed: {e:#}{RESET}"),
     }
+}
+
+fn init_candidate_preview(candidate: &str) -> String {
+    let mut out = String::new();
+    out.push_str("  generated merge candidate (not written):\n\n");
+    out.push_str(candidate);
+    if !candidate.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("\n  Review the candidate against the existing AGENTS.md and merge only verified repo facts.\n");
+    out
 }
 
 fn print_memory(action: &str) {
@@ -4660,6 +4675,14 @@ mod tests {
             Some(Some("keep CONTRIBUTING guidance"))
         );
         assert_eq!(parse_init_agent_notes("project notes"), None);
+    }
+
+    #[test]
+    fn init_candidate_preview_marks_candidate_as_not_written() {
+        let preview = init_candidate_preview("# demo\n\n## Build & test\n- test: cargo test\n");
+        assert!(preview.contains("generated merge candidate (not written)"));
+        assert!(preview.contains("- test: cargo test"));
+        assert!(preview.contains("merge only verified repo facts"));
     }
 
     #[test]
