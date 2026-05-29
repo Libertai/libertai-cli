@@ -141,7 +141,10 @@ pub fn run(
         ui,
         FactoryFeatures::cli_defaults(),
         Some(Arc::clone(&cfg)),
-    ));
+    )
+    .with_tool_policy(crate::commands::code_hooks::tool_policy_from_config(
+        Arc::clone(&cfg),
+    )));
 
     runtime.block_on(async move {
         run_async(

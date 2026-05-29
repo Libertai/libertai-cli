@@ -100,6 +100,8 @@ pub struct Config {
     pub status_line_template: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub status_line_command: String,
+    #[serde(default, skip_serializing_if = "HooksConfig::is_default")]
+    pub hooks: HooksConfig,
     #[serde(default)]
     pub auth: Auth,
 }
@@ -194,6 +196,48 @@ impl Default for LauncherDefaults {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HooksConfig {
+    #[serde(default, rename = "PreToolUse", skip_serializing_if = "Vec::is_empty")]
+    pub pre_tool_use: Vec<HookCommandConfig>,
+}
+
+impl HooksConfig {
+    fn is_default(&self) -> bool {
+        self.pre_tool_use.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookCommandConfig {
+    #[serde(default = "default_hook_enabled")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub matcher: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub command: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub shell: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+}
+
+impl Default for HookCommandConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            matcher: String::new(),
+            command: String::new(),
+            shell: String::new(),
+            timeout: None,
+        }
+    }
+}
+
+fn default_hook_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Auth {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
@@ -272,6 +316,7 @@ impl Default for Config {
             code_compaction_keep_recent_tokens: DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS,
             status_line_template: String::new(),
             status_line_command: String::new(),
+            hooks: HooksConfig::default(),
             auth: Auth::default(),
         }
     }

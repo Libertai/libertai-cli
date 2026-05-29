@@ -1,6 +1,6 @@
 //! Guards the on-disk config shape and the key-masking helper.
 
-use libertai_cli::config::{mask_key, Auth, Config, LauncherDefaults};
+use libertai_cli::config::{mask_key, Auth, Config, HookCommandConfig, HooksConfig, LauncherDefaults};
 
 #[test]
 fn empty_toml_parses_as_defaults() {
@@ -13,6 +13,7 @@ fn empty_toml_parses_as_defaults() {
     assert_eq!(cfg.launcher_defaults.sonnet_model, "qwen3.6-35b-a3b");
     assert_eq!(cfg.launcher_defaults.haiku_model, "qwen3.6-35b-a3b");
     assert!(cfg.status_line_template.is_empty());
+    assert!(cfg.hooks.pre_tool_use.is_empty());
     assert!(cfg.auth.api_key.is_none());
 }
 
@@ -30,6 +31,14 @@ fn save_then_load_preserves_fields() {
             ..Default::default()
         },
         status_line_template: "{model} {ctx}".into(),
+        hooks: HooksConfig {
+            pre_tool_use: vec![HookCommandConfig {
+                matcher: "bash|write".into(),
+                command: "scripts/pre-tool-use.sh".into(),
+                timeout: Some(5),
+                ..HookCommandConfig::default()
+            }],
+        },
         ..Default::default()
     };
 
@@ -45,6 +54,10 @@ fn save_then_load_preserves_fields() {
     assert_eq!(round.auth.chain.as_deref(), Some("base"));
     assert_eq!(round.launcher_defaults.opus_model, "opus-x");
     assert_eq!(round.status_line_template, "{model} {ctx}");
+    assert_eq!(round.hooks.pre_tool_use.len(), 1);
+    assert_eq!(round.hooks.pre_tool_use[0].matcher, "bash|write");
+    assert_eq!(round.hooks.pre_tool_use[0].command, "scripts/pre-tool-use.sh");
+    assert_eq!(round.hooks.pre_tool_use[0].timeout, Some(5));
 }
 
 #[test]

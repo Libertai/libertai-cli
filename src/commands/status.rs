@@ -51,6 +51,15 @@ pub fn run() -> Result<()> {
         cfg.code_compaction_reserve_tokens,
         cfg.code_compaction_keep_recent_tokens
     );
+    println!(
+        "  {:<22} {}",
+        "PreToolUse hooks:".dimmed(),
+        cfg.hooks
+            .pre_tool_use
+            .iter()
+            .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
+            .count()
+    );
 
     println!("  {}", "Launcher defaults:".dimmed());
     println!(

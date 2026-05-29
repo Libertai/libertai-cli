@@ -698,6 +698,10 @@ async fn repl_loop(
                 print_config_status(&cfg);
                 continue;
             }
+            "/hooks" => {
+                print_hooks_status(&cfg);
+                continue;
+            }
             "/statusline" | "/status-line" => {
                 print_status_line_status(&cfg);
                 continue;
@@ -1455,7 +1459,10 @@ async fn build_handle(
         ui,
         FactoryFeatures::cli_defaults(),
         Some(Arc::clone(&cfg)),
-    ));
+    )
+    .with_tool_policy(crate::commands::code_hooks::tool_policy_from_config(
+        Arc::clone(&cfg),
+    )));
     let persistence = match resume_path {
         Some(p) => SessionPersistence::Resume(p),
         None => SessionPersistence::Fresh,
@@ -1806,6 +1813,7 @@ fn print_help() {
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
     println!("{DIM}  /config   — show active configuration summary (/settings is an alias){RESET}");
+    println!("{DIM}  /hooks    — show configured command-only PreToolUse hooks{RESET}");
     println!(
         "{DIM}  /statusline <template|command <shell>|reset> — customize the input-bar status line{RESET}"
     );
@@ -3941,6 +3949,14 @@ fn print_config_status(cfg: &LibertaiConfig) {
         cfg.code_compaction_reserve_tokens,
         cfg.code_compaction_keep_recent_tokens
     );
+    println!(
+        "{DIM}  hooks:{RESET} {} PreToolUse command hook(s)",
+        cfg.hooks
+            .pre_tool_use
+            .iter()
+            .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
+            .count()
+    );
     match cfg.auth.api_key.as_deref() {
         Some(key) => println!("{DIM}  auth:{RESET} {}", mask_key(key)),
         None => println!("{DIM}  auth:{RESET} not logged in"),
@@ -3948,6 +3964,50 @@ fn print_config_status(cfg: &LibertaiConfig) {
     println!(
         "{DIM}  edit:{RESET} libertai config show|path|set|unset, or use the desktop settings UI"
     );
+    println!();
+}
+
+fn print_hooks_status(cfg: &LibertaiConfig) {
+    println!("{BOLD}hooks{RESET}");
+    if cfg.hooks.pre_tool_use.is_empty() {
+        println!("{DIM}  no PreToolUse hooks configured{RESET}");
+    } else {
+        for (idx, hook) in cfg.hooks.pre_tool_use.iter().enumerate() {
+            let marker = if hook.enabled { "on" } else { "off" };
+            let matcher = if hook.matcher.trim().is_empty() {
+                "*"
+            } else {
+                hook.matcher.trim()
+            };
+            let timeout = hook
+                .timeout
+                .map(|secs| format!(", timeout={secs}s"))
+                .unwrap_or_default();
+            let shell = if hook.shell.trim().is_empty() {
+                String::new()
+            } else {
+                format!(", shell={}", hook.shell.trim())
+            };
+            let command = if hook.command.trim().is_empty() {
+                "(no command)"
+            } else {
+                hook.command.trim()
+            };
+            println!(
+                "{DIM}  {}. PreToolUse [{}] matcher={}{}{}:{RESET} {}",
+                idx + 1,
+                marker,
+                matcher,
+                timeout,
+                shell,
+                command
+            );
+        }
+    }
+    println!(
+        "{DIM}  command hooks receive JSON on stdin and may return permissionDecision allow|ask|defer|deny.{RESET}"
+    );
+    println!("{DIM}  non-command hook handlers are not executed natively.{RESET}");
     println!();
 }
 

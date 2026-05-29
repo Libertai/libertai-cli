@@ -118,6 +118,7 @@ fn unset(key: &str) -> Result<()> {
             cfg.code_auto_compaction_enabled = DEFAULT_CODE_AUTO_COMPACTION_ENABLED;
             cfg.code_compaction_reserve_tokens = DEFAULT_CODE_COMPACTION_RESERVE_TOKENS;
             cfg.code_compaction_keep_recent_tokens = DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS;
+            cfg.hooks = Default::default();
         }
         "api_base" => cfg.api_base = DEFAULT_API_BASE.into(),
         "account_base" => cfg.account_base = DEFAULT_API_BASE.into(),
@@ -148,6 +149,7 @@ fn unset(key: &str) -> Result<()> {
         "code_compaction_keep_recent_tokens" => {
             cfg.code_compaction_keep_recent_tokens = DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS
         }
+        "hooks" => cfg.hooks = Default::default(),
         k if k.starts_with("auth.") => bail!(
             "'{k}' is managed by `libertai login`/`libertai logout`; unset is not supported"
         ),

@@ -547,16 +547,21 @@ and `argHint:`. CLI supports `/template <name> [args]` and direct
 
 ### 5A. Hooks config schema
 
-Expose `pi_agent_rust`'s typed hooks (`on_tool_start`, `on_tool_end`,
-`on_stream_event`) via `~/.config/libertai/config.toml`
-`[hooks.PreToolUse]` etc. Each hook is a shell command receiving JSON
-on stdin; output JSON controls decisions (approve/deny/transform).
-Mirrors Claude Code's hook contract.
+First CLI slice shipped: `~/.config/libertai/config.toml` accepts
+`[[hooks.PreToolUse]]` command rows. Matching hooks receive a Claude-style
+JSON payload on stdin before native tool execution, and stdout JSON can
+`allow`, `ask`, `defer`, `deny`, rewrite `updatedInput`, or attach
+`additionalContext` through the existing approval-policy path. `/hooks`
+and `libertai status` report configured command hooks.
+
+Remaining work: PostToolUse/UserPromptSubmit/lifecycle command hooks,
+deeper matcher syntax, async rows, and any pi-level typed hook dispatcher.
+Native non-command hook handlers remain intentionally unexecuted.
 
 **Files**: `src/config.rs`,
-new `src/commands/code_hooks.rs`,
+`src/commands/code_hooks.rs`,
 `pi_agent_rust/src/sdk.rs` (hook dispatcher; may need upstream).
-**Effort**: L (4-5 days).
+**Effort remaining**: M-L.
 
 ### 5B. MCP support
 
