@@ -5281,20 +5281,25 @@ fn count_runnable_hooks(hooks: &[crate::config::HookCommandConfig]) -> usize {
     hooks
         .iter()
         .filter(|hook| {
+            let hook_type = normalized_hook_type(&hook.hook_type);
             hook.enabled
-                && if hook.hook_type.trim().eq_ignore_ascii_case("http") {
+                && if hook_type == "http" {
                     !hook.url.trim().is_empty()
-                } else if hook.hook_type.trim().eq_ignore_ascii_case("prompt")
-                    || hook.hook_type.trim().eq_ignore_ascii_case("agent")
-                {
+                } else if hook_type == "prompt" || hook_type == "agent" {
                     !hook.prompt.trim().is_empty()
                 } else {
-                    let hook_type = hook.hook_type.trim();
-                    (hook_type.is_empty() || hook_type.eq_ignore_ascii_case("command"))
+                    (hook_type.is_empty() || hook_type == "command")
                         && !hook.command.trim().is_empty()
                 }
         })
         .count()
+}
+
+fn normalized_hook_type(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "mcp-tool" | "mcptool" => "mcp_tool".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
@@ -5313,12 +5318,12 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
             .timeout
             .map(|secs| format!(", timeout={secs}s"))
             .unwrap_or_default();
+        let hook_type_key = normalized_hook_type(&hook.hook_type);
         let shell = if hook.shell.trim().is_empty()
-            || hook.hook_type.trim().eq_ignore_ascii_case("http")
-            || hook.hook_type.trim().eq_ignore_ascii_case("prompt")
-            || hook.hook_type.trim().eq_ignore_ascii_case("agent")
-            || hook.hook_type.trim().eq_ignore_ascii_case("mcp_tool")
-            || hook.hook_type.trim().eq_ignore_ascii_case("mcptool")
+            || hook_type_key == "http"
+            || hook_type_key == "prompt"
+            || hook_type_key == "agent"
+            || hook_type_key == "mcp_tool"
         {
             String::new()
         } else {
@@ -5349,25 +5354,21 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
         let hook_type = if hook.hook_type.trim().is_empty() {
             "command"
         } else {
-            hook.hook_type.trim()
+            hook_type_key.as_str()
         };
-        let target = if hook.hook_type.trim().eq_ignore_ascii_case("http") {
+        let target = if hook_type_key == "http" {
             if hook.url.trim().is_empty() {
                 "(no url)".to_string()
             } else {
                 hook.url.trim().to_string()
             }
-        } else if hook.hook_type.trim().eq_ignore_ascii_case("prompt")
-            || hook.hook_type.trim().eq_ignore_ascii_case("agent")
-        {
+        } else if hook_type_key == "prompt" || hook_type_key == "agent" {
             if hook.prompt.trim().is_empty() {
                 "(no prompt)".to_string()
             } else {
                 hook.prompt.trim().to_string()
             }
-        } else if hook.hook_type.trim().eq_ignore_ascii_case("mcp_tool")
-            || hook.hook_type.trim().eq_ignore_ascii_case("mcptool")
-        {
+        } else if hook_type_key == "mcp_tool" {
             if hook.server.trim().is_empty() || hook.tool.trim().is_empty() {
                 "(no mcp tool)".to_string()
             } else {
@@ -6348,6 +6349,22 @@ mod tests {
         assert!(breakdown.contains("SubagentStop 0"));
         assert!(breakdown.contains("Stop 0"));
         assert!(breakdown.contains("Notification 1"));
+    }
+
+    #[test]
+    fn hook_type_normalization_accepts_claude_mcp_spellings() {
+        assert_eq!(normalized_hook_type("mcp-tool"), "mcp_tool");
+        assert_eq!(normalized_hook_type("mcptool"), "mcp_tool");
+        assert_eq!(normalized_hook_type("MCP_TOOL"), "mcp_tool");
+        assert_eq!(normalized_hook_type("Prompt"), "prompt");
+
+        let hooks = vec![crate::config::HookCommandConfig {
+            hook_type: "mcp-tool".to_string(),
+            server: "policy".to_string(),
+            tool: "check".to_string(),
+            ..Default::default()
+        }];
+        assert_eq!(count_runnable_hooks(&hooks), 0);
     }
 
     #[test]
