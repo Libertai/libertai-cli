@@ -1288,7 +1288,17 @@ async fn repl_loop(
                 .await
         } else {
             let agent_line = apply_output_style(output_style.as_deref(), &line);
-            handle.prompt_with_abort(agent_line, abort_signal, render).await
+            match crate::commands::code_hooks::run_user_prompt_submit_hooks(
+                cfg.as_ref(),
+                &agent_line,
+            ) {
+                Ok(agent_line) => handle.prompt_with_abort(agent_line, abort_signal, render).await,
+                Err(e) => {
+                    clear_current_abort();
+                    eprintln!("{DIM}  {e:#}{RESET}");
+                    continue;
+                }
+            }
         };
         clear_current_abort();
 
@@ -3963,8 +3973,15 @@ fn print_config_status(cfg: &LibertaiConfig) {
         .iter()
         .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
         .count();
+    let user_prompt_hooks = cfg
+        .hooks
+        .user_prompt_submit
+        .iter()
+        .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
+        .count();
     println!(
-        "{DIM}  hooks:{RESET} {pre_tool_hooks} PreToolUse, {post_tool_hooks} PostToolUse command hook(s)"
+        "{DIM}  hooks:{RESET} {user_prompt_hooks} UserPromptSubmit, \
+         {pre_tool_hooks} PreToolUse, {post_tool_hooks} PostToolUse command hook(s)"
     );
     match cfg.auth.api_key.as_deref() {
         Some(key) => println!("{DIM}  auth:{RESET} {}", mask_key(key)),
@@ -3978,8 +3995,12 @@ fn print_config_status(cfg: &LibertaiConfig) {
 
 fn print_hooks_status(cfg: &LibertaiConfig) {
     println!("{BOLD}hooks{RESET}");
+    print_hook_section("UserPromptSubmit", &cfg.hooks.user_prompt_submit);
     print_hook_section("PreToolUse", &cfg.hooks.pre_tool_use);
     print_hook_section("PostToolUse", &cfg.hooks.post_tool_use);
+    println!(
+        "{DIM}  UserPromptSubmit hooks run before the prompt reaches the agent and may block it.{RESET}"
+    );
     println!(
         "{DIM}  PreToolUse hooks may return permissionDecision allow|ask|defer|deny.{RESET}"
     );

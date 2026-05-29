@@ -214,6 +214,8 @@ async fn run_async(
     handle.set_max_tokens(max_tokens);
 
     let hook_cfg = Arc::clone(&cfg);
+    let prompt =
+        crate::commands::code_hooks::run_user_prompt_submit_hooks(cfg.as_ref(), &prompt)?;
     let msg = handle
         .prompt(prompt, move |event| {
             crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);

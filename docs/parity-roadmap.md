@@ -548,15 +548,18 @@ and `argHint:`. CLI supports `/template <name> [args]` and direct
 ### 5A. Hooks config schema
 
 First CLI slices shipped: `~/.config/libertai/config.toml` accepts
-`[[hooks.PreToolUse]]` and `[[hooks.PostToolUse]]` command rows. Matching
-hooks receive Claude-style JSON payloads on stdin. `PreToolUse` stdout JSON
-can `allow`, `ask`, `defer`, `deny`, rewrite `updatedInput`, or attach
-`additionalContext` through the existing approval-policy path. `PostToolUse`
-hooks run after tool execution and cannot alter the result. `/hooks` and
-`libertai status` report configured command hooks.
+`[[hooks.UserPromptSubmit]]`, `[[hooks.PreToolUse]]`, and
+`[[hooks.PostToolUse]]` command rows. Matching hooks receive Claude-style
+JSON payloads on stdin. `UserPromptSubmit` hooks run before the prompt
+reaches the agent, can block on nonzero exit, and can append
+`additionalContext`. `PreToolUse` stdout JSON can `allow`, `ask`, `defer`,
+`deny`, rewrite `updatedInput`, or attach `additionalContext` through the
+existing approval-policy path. `PostToolUse` hooks run after tool execution
+and cannot alter the result. `/hooks` and `libertai status` report
+configured command hooks.
 
-Remaining work: UserPromptSubmit/lifecycle command hooks, deeper matcher
-syntax, async rows, and any pi-level typed hook dispatcher.
+Remaining work: lifecycle command hooks, deeper matcher syntax, async rows,
+and any pi-level typed hook dispatcher.
 Native non-command hook handlers remain intentionally unexecuted.
 
 **Files**: `src/config.rs`,

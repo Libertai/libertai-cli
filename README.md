@@ -94,6 +94,10 @@ opus_model   = "gemma-4-31b-it"
 sonnet_model = "qwen3.6-35b-a3b"
 haiku_model  = "qwen3.6-35b-a3b"
 
+[[hooks.UserPromptSubmit]]
+command = "scripts/user-prompt-submit.sh"
+timeout = 5
+
 [[hooks.PreToolUse]]
 matcher = "bash|write|edit"
 command = "scripts/pre-tool-use.sh"
@@ -109,8 +113,10 @@ api_key = "LTAI_..."
 # wallet_address / chain are only written when you log in via wallet.
 ```
 
-`PreToolUse` and `PostToolUse` hooks are command-only in the native CLI.
-They receive a JSON payload on stdin. `PreToolUse` hooks may print
+`UserPromptSubmit`, `PreToolUse`, and `PostToolUse` hooks are command-only
+in the native CLI. They receive a JSON payload on stdin. `UserPromptSubmit`
+hooks run before the prompt reaches the agent and may add
+`additionalContext` or block on nonzero exit. `PreToolUse` hooks may print
 Claude-style JSON such as
 `{"permissionDecision":"deny","permissionDecisionReason":"no writes"}`.
 Native non-command hook handlers are intentionally not executed.

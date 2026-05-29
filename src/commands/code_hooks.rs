@@ -15,6 +15,53 @@ use serde_json::json;
 use crate::commands::code_approvals::{ToolPolicy, ToolPolicyDecision};
 use crate::config::{Config, HookCommandConfig};
 
+pub fn run_user_prompt_submit_hooks(cfg: &Config, prompt: &str) -> anyhow::Result<String> {
+    if !cfg.hooks.user_prompt_submit.iter().any(is_runnable_hook) {
+        return Ok(prompt.to_string());
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let payload = user_prompt_submit_payload(&cwd, prompt);
+    let mut contexts: Vec<String> = Vec::new();
+
+    for hook in &cfg.hooks.user_prompt_submit {
+        if !is_runnable_hook(hook) {
+            continue;
+        }
+        let run = run_shell_hook(hook, &cwd, &payload, "UserPromptSubmit");
+        if run.status != 0 {
+            let detail = first_non_empty(&run.stderr, &run.stdout)
+                .unwrap_or_else(|| format!("hook exited with status {}", run.status));
+            anyhow::bail!(
+                "UserPromptSubmit hook `{}` blocked the prompt: {detail}",
+                hook.command.trim()
+            );
+        }
+        if let Some(context) = user_prompt_additional_context(&run.stdout) {
+            contexts.push(context);
+        }
+    }
+
+    if contexts.is_empty() {
+        Ok(prompt.to_string())
+    } else {
+        Ok(format!(
+            "{prompt}\n\nAdditional context from UserPromptSubmit hook:\n\n{}",
+            contexts.join("\n\n")
+        ))
+    }
+}
+
+fn user_prompt_submit_payload(cwd: &std::path::Path, prompt: &str) -> serde_json::Value {
+    json!({
+        "event": "UserPromptSubmit",
+        "cwd": cwd,
+        "prompt": prompt,
+        "userPrompt": prompt,
+        "user_prompt": prompt,
+    })
+}
+
 pub fn tool_policy_from_config(cfg: Arc<Config>) -> Option<Arc<dyn ToolPolicy>> {
     if cfg.hooks.pre_tool_use.iter().any(is_runnable_hook) {
         Some(Arc::new(ConfiguredHookPolicy { cfg }))
@@ -387,6 +434,18 @@ fn pre_tool_decision_from_stdout(stdout: &str) -> ToolPolicyDecision {
     }
 }
 
+fn user_prompt_additional_context(stdout: &str) -> Option<String> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return None;
+    };
+    let specific = value.get("hookSpecificOutput").unwrap_or(&value);
+    non_empty(string_field(specific, &value, "additionalContext"))
+}
+
 fn string_field(
     specific: &serde_json::Value,
     value: &serde_json::Value,
@@ -486,6 +545,43 @@ mod tests {
             policy.decide("call-2", "read", &json!({"path":"secret.txt"})),
             ToolPolicyDecision::NoDecision
         );
+    }
+
+    #[test]
+    fn user_prompt_hook_appends_additional_context() {
+        let cfg = Config {
+            hooks: HooksConfig {
+                user_prompt_submit: vec![HookCommandConfig {
+                    command: "printf '{\"additionalContext\":\"repo policy\"}'".to_string(),
+                    ..HookCommandConfig::default()
+                }],
+                ..HooksConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let prompt = run_user_prompt_submit_hooks(&cfg, "review this").unwrap();
+        assert!(prompt.starts_with("review this"));
+        assert!(prompt.contains("Additional context from UserPromptSubmit hook"));
+        assert!(prompt.contains("repo policy"));
+    }
+
+    #[test]
+    fn user_prompt_hook_blocks_on_nonzero_exit() {
+        let cfg = Config {
+            hooks: HooksConfig {
+                user_prompt_submit: vec![HookCommandConfig {
+                    command: "printf 'blocked'; exit 2".to_string(),
+                    ..HookCommandConfig::default()
+                }],
+                ..HooksConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let err = run_user_prompt_submit_hooks(&cfg, "review this").unwrap_err();
+        assert!(err.to_string().contains("blocked the prompt"));
+        assert!(err.to_string().contains("blocked"));
     }
 
     #[test]

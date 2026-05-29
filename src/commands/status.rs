@@ -53,6 +53,15 @@ pub fn run() -> Result<()> {
     );
     println!(
         "  {:<22} {}",
+        "UserPrompt hooks:".dimmed(),
+        cfg.hooks
+            .user_prompt_submit
+            .iter()
+            .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
+            .count()
+    );
+    println!(
+        "  {:<22} {}",
         "PreToolUse hooks:".dimmed(),
         cfg.hooks
             .pre_tool_use

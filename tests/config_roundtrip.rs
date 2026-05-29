@@ -13,6 +13,7 @@ fn empty_toml_parses_as_defaults() {
     assert_eq!(cfg.launcher_defaults.sonnet_model, "qwen3.6-35b-a3b");
     assert_eq!(cfg.launcher_defaults.haiku_model, "qwen3.6-35b-a3b");
     assert!(cfg.status_line_template.is_empty());
+    assert!(cfg.hooks.user_prompt_submit.is_empty());
     assert!(cfg.hooks.pre_tool_use.is_empty());
     assert!(cfg.hooks.post_tool_use.is_empty());
     assert!(cfg.auth.api_key.is_none());
@@ -33,6 +34,11 @@ fn save_then_load_preserves_fields() {
         },
         status_line_template: "{model} {ctx}".into(),
         hooks: HooksConfig {
+            user_prompt_submit: vec![HookCommandConfig {
+                command: "scripts/user-prompt-submit.sh".into(),
+                timeout: Some(2),
+                ..HookCommandConfig::default()
+            }],
             pre_tool_use: vec![HookCommandConfig {
                 matcher: "bash|write".into(),
                 command: "scripts/pre-tool-use.sh".into(),
@@ -61,6 +67,12 @@ fn save_then_load_preserves_fields() {
     assert_eq!(round.auth.chain.as_deref(), Some("base"));
     assert_eq!(round.launcher_defaults.opus_model, "opus-x");
     assert_eq!(round.status_line_template, "{model} {ctx}");
+    assert_eq!(round.hooks.user_prompt_submit.len(), 1);
+    assert_eq!(
+        round.hooks.user_prompt_submit[0].command,
+        "scripts/user-prompt-submit.sh"
+    );
+    assert_eq!(round.hooks.user_prompt_submit[0].timeout, Some(2));
     assert_eq!(round.hooks.pre_tool_use.len(), 1);
     assert_eq!(round.hooks.pre_tool_use[0].matcher, "bash|write");
     assert_eq!(round.hooks.pre_tool_use[0].command, "scripts/pre-tool-use.sh");
