@@ -377,13 +377,14 @@ the extra turn.
 ### 2E. `!` shell prefix in REPL
 
 Prefix-`!` lines run a shell command in the current cwd and render the
-captured output locally (Claude Code muscle memory). The CLI REPL now
-matches the desktop composer escape and reuses the same bash wrapper
-argv when `--sandbox=strict` is active.
+captured output locally (Claude Code muscle memory). `!!` repeats the
+previous shell escape in the same session. The CLI REPL now matches the
+desktop composer escape and reuses the same bash wrapper argv when
+`--sandbox=strict` is active.
 
 **Files**: `src/commands/code_ui.rs`.
-**Status**: shipped for local `!cmd`; `!!` repeat and agent-history
-injection remain optional follow-ups.
+**Status**: shipped for local `!cmd` and `!!` repeat; agent-history
+injection remains an optional follow-up.
 **Desktop note**: shipped on desktop (composer commit `7029b1b`).
 
 ---

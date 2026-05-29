@@ -557,6 +557,7 @@ async fn repl_loop(
     let mut session_name: Option<String> = None;
     let mut autonomous_queue: VecDeque<String> = VecDeque::new();
     let mut auto_run: Option<AutoRun> = None;
+    let mut last_shell_command: Option<String> = None;
 
     loop {
         let autonomous_turn = if let Some(prompt) = autonomous_queue.pop_front() {
@@ -1283,11 +1284,12 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix('!') {
-            let command = rest.trim();
-            if command.is_empty() {
-                println!("{DIM}  usage: !<command> — run a local shell command in this cwd{RESET}");
-            } else {
-                run_shell_escape(command, bash_command_wrapper.as_deref());
+            match shell_escape_command(rest, last_shell_command.as_deref()) {
+                ShellEscapeAction::Run(command) => {
+                    last_shell_command = Some(command.clone());
+                    run_shell_escape(&command, bash_command_wrapper.as_deref());
+                }
+                ShellEscapeAction::Usage(message) => println!("{DIM}  {message}{RESET}"),
             }
             continue;
         }
@@ -3616,6 +3618,28 @@ struct ShellEscapeResult {
     exit_code: Option<i32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellEscapeAction {
+    Run(String),
+    Usage(&'static str),
+}
+
+fn shell_escape_command(rest: &str, last: Option<&str>) -> ShellEscapeAction {
+    let command = rest.trim();
+    if command.is_empty() {
+        return ShellEscapeAction::Usage(
+            "usage: !<command> — run a local shell command in this cwd; !! repeats the last shell command",
+        );
+    }
+    if command == "!" {
+        return match last {
+            Some(last) if !last.trim().is_empty() => ShellEscapeAction::Run(last.to_string()),
+            _ => ShellEscapeAction::Usage("no previous shell command to repeat"),
+        };
+    }
+    ShellEscapeAction::Run(command.to_string())
+}
+
 fn run_shell_escape(command: &str, wrapper: Option<&[String]>) {
     println!("{BOLD}$ {command}{RESET}");
     let cwd = match std::env::current_dir() {
@@ -4618,6 +4642,32 @@ mod tests {
                 "/bin/sh".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn shell_escape_command_repeats_previous_command() {
+        assert_eq!(
+            shell_escape_command("!", Some("git status --short")),
+            ShellEscapeAction::Run("git status --short".to_string())
+        );
+    }
+
+    #[test]
+    fn shell_escape_command_requires_previous_command_for_repeat() {
+        assert_eq!(
+            shell_escape_command("!", None),
+            ShellEscapeAction::Usage("no previous shell command to repeat")
+        );
+    }
+
+    #[test]
+    fn shell_escape_command_reports_usage_for_empty_command() {
+        match shell_escape_command("  ", Some("pwd")) {
+            ShellEscapeAction::Usage(message) => {
+                assert!(message.contains("!! repeats the last shell command"));
+            }
+            action => panic!("expected usage, got {action:?}"),
+        }
     }
 
     #[test]
