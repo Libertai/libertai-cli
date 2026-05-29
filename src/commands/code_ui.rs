@@ -4335,10 +4335,24 @@ async fn print_doctor(
             }
             Err(e) => println!("{}", doctor_line(false, "project memory", e.to_string())),
         }
+        match crate::commands::code_memory::list_memory_files(cwd) {
+            Ok(files) => println!(
+                "{}",
+                doctor_line(true, "memory sidecars", format!("{} file(s)", files.len()))
+            ),
+            Err(e) => println!("{}", doctor_line(false, "memory sidecars", e.to_string())),
+        }
+        match crate::commands::code_memory::verify_memory_references(cwd) {
+            Ok(refs) => println!(
+                "{}",
+                doctor_line(true, "memory references", format_memory_reference_summary(&refs))
+            ),
+            Err(e) => println!("{}", doctor_line(false, "memory references", e.to_string())),
+        }
         match crate::commands::code_agents::discover_agents(cwd) {
             Ok(agents) => println!(
                 "{}",
-                doctor_line(true, "named agents", format!("{} loaded", agents.len()))
+                doctor_line(true, "named agents", format_agent_doctor_summary(&agents))
             ),
             Err(e) => println!("{}", doctor_line(false, "named agents", e.to_string())),
         }
@@ -4348,9 +4362,16 @@ async fn print_doctor(
             doctor_line(
                 true,
                 "custom slash commands",
-                format!("{} loaded", templates.len())
+                format_custom_slash_doctor_summary(&templates)
             )
         );
+        match code_skills::skill_inventory(SkillPillar::Code, Some(cwd)) {
+            Ok(skills) => println!(
+                "{}",
+                doctor_line(true, "skills", format_skill_doctor_summary(&skills))
+            ),
+            Err(e) => println!("{}", doctor_line(false, "skills", e.to_string())),
+        }
         match git_status_short_in(cwd) {
             Ok(lines) if lines.len() <= 1 => println!("{}", doctor_line(true, "git status", "clean")),
             Ok(lines) => println!(
@@ -4410,6 +4431,57 @@ fn format_hook_event_breakdown(cfg: &LibertaiConfig) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("{total} runnable command hook(s); {events}")
+}
+
+fn format_agent_doctor_summary(
+    agents: &[crate::commands::code_agents::AgentDefinition],
+) -> String {
+    let worktree = agents.iter().filter(|agent| agent.worktree).count();
+    format!("{} loaded ({worktree} worktree default)", agents.len())
+}
+
+fn format_custom_slash_doctor_summary(
+    commands: &[crate::commands::code_slash_registry::CustomCommand],
+) -> String {
+    let project = commands
+        .iter()
+        .filter(|cmd| {
+            matches!(
+                cmd.source,
+                crate::commands::code_slash_registry::CommandSource::Project
+            )
+        })
+        .count();
+    let user = commands.len().saturating_sub(project);
+    format!("{} loaded ({project} project, {user} user)", commands.len())
+}
+
+fn format_skill_doctor_summary(
+    skills: &[crate::commands::code_skills::SkillInventoryEntry],
+) -> String {
+    let enabled = skills.iter().filter(|skill| skill.enabled).count();
+    format!("{enabled}/{} enabled", skills.len())
+}
+
+fn format_memory_reference_summary(
+    refs: &[crate::commands::code_memory::MemoryReference],
+) -> String {
+    let mut ok = 0usize;
+    let mut missing = 0usize;
+    let mut external = 0usize;
+    let mut unparsed = 0usize;
+    for reference in refs {
+        match reference.status {
+            crate::commands::code_memory::MemoryReferenceStatus::Ok => ok += 1,
+            crate::commands::code_memory::MemoryReferenceStatus::Missing => missing += 1,
+            crate::commands::code_memory::MemoryReferenceStatus::External => external += 1,
+            crate::commands::code_memory::MemoryReferenceStatus::Unparsed => unparsed += 1,
+        }
+    }
+    format!(
+        "{} total (ok {ok}, missing {missing}, external {external}, unparsed {unparsed})",
+        refs.len()
+    )
 }
 
 fn usage_summary(records: &[UsageRecord]) -> Option<UsageSummary> {
@@ -5668,6 +5740,117 @@ mod tests {
         assert!(breakdown.contains("PreToolUse 1"));
         assert!(breakdown.contains("SubagentStop 0"));
         assert!(breakdown.contains("Stop 0"));
+    }
+
+    #[test]
+    fn doctor_summaries_count_local_registries() {
+        let agents = vec![
+            crate::commands::code_agents::AgentDefinition {
+                name: "reviewer".to_string(),
+                description: "Reviews changes".to_string(),
+                tools: None,
+                model: None,
+                worktree: true,
+                system_prompt: "Review carefully.".to_string(),
+                source: crate::commands::code_agents::AgentSource::Project(PathBuf::from(
+                    ".claude/agents",
+                )),
+            },
+            crate::commands::code_agents::AgentDefinition {
+                name: "tester".to_string(),
+                description: "Runs tests".to_string(),
+                tools: None,
+                model: None,
+                worktree: false,
+                system_prompt: "Test carefully.".to_string(),
+                source: crate::commands::code_agents::AgentSource::User(PathBuf::from(
+                    "~/.claude/agents",
+                )),
+            },
+        ];
+        assert_eq!(
+            format_agent_doctor_summary(&agents),
+            "2 loaded (1 worktree default)"
+        );
+
+        let commands = vec![
+            crate::commands::code_slash_registry::CustomCommand {
+                name: "triage".to_string(),
+                description: None,
+                arg_hint: None,
+                body: "Triage {{args}}".to_string(),
+                source: crate::commands::code_slash_registry::CommandSource::Project,
+                path: PathBuf::from(".claude/commands/triage.md"),
+            },
+            crate::commands::code_slash_registry::CustomCommand {
+                name: "summarize".to_string(),
+                description: None,
+                arg_hint: None,
+                body: "Summarize {{args}}".to_string(),
+                source: crate::commands::code_slash_registry::CommandSource::User,
+                path: PathBuf::from("~/.claude/commands/summarize.md"),
+            },
+        ];
+        assert_eq!(
+            format_custom_slash_doctor_summary(&commands),
+            "2 loaded (1 project, 1 user)"
+        );
+
+        let skills = vec![
+            crate::commands::code_skills::SkillInventoryEntry {
+                name: "libertai-harness".to_string(),
+                description: String::new(),
+                allowed_tools: None,
+                source: "builtin".to_string(),
+                enabled: true,
+            },
+            crate::commands::code_skills::SkillInventoryEntry {
+                name: "project-review".to_string(),
+                description: String::new(),
+                allowed_tools: None,
+                source: "project".to_string(),
+                enabled: false,
+            },
+        ];
+        assert_eq!(format_skill_doctor_summary(&skills), "1/2 enabled");
+    }
+
+    #[test]
+    fn doctor_memory_reference_summary_counts_statuses() {
+        let refs = vec![
+            crate::commands::code_memory::MemoryReference {
+                line_number: 1,
+                text: "docs".to_string(),
+                target: Some("docs".to_string()),
+                status: crate::commands::code_memory::MemoryReferenceStatus::Ok,
+                detail: "docs".to_string(),
+            },
+            crate::commands::code_memory::MemoryReference {
+                line_number: 2,
+                text: "missing".to_string(),
+                target: Some("missing".to_string()),
+                status: crate::commands::code_memory::MemoryReferenceStatus::Missing,
+                detail: "missing".to_string(),
+            },
+            crate::commands::code_memory::MemoryReference {
+                line_number: 3,
+                text: "https://example.com".to_string(),
+                target: Some("https://example.com".to_string()),
+                status: crate::commands::code_memory::MemoryReferenceStatus::External,
+                detail: "external".to_string(),
+            },
+            crate::commands::code_memory::MemoryReference {
+                line_number: 4,
+                text: "unknown".to_string(),
+                target: None,
+                status: crate::commands::code_memory::MemoryReferenceStatus::Unparsed,
+                detail: "unparsed".to_string(),
+            },
+        ];
+        assert_eq!(
+            format_memory_reference_summary(&refs),
+            "4 total (ok 1, missing 1, external 1, unparsed 1)"
+        );
     }
 
     #[test]

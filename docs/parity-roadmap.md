@@ -67,6 +67,11 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/reload`, `/login`, and `/logout` commands** — REPL users can
   refresh config/auth state and rebuild the active agent session without
   leaving `libertai code`.
+- **CLI `/doctor` diagnostics** — REPL users get a local health report
+  for pi-session state, auth/defaults, smart approvals, remembered
+  approvals, hook event counts, project memory plus sidecar/reference
+  health, named-agent worktree defaults, custom slash source counts,
+  active code-agent skills, git status, and usage.
 - **CLI `/resume` command** — REPL users can switch to the latest saved
   session for the current cwd or an explicit session JSONL path.
 - **CLI `/fork` command** — REPL users can list forkable user messages
