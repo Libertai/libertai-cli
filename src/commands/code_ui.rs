@@ -868,7 +868,7 @@ async fn repl_loop(
                 continue;
             }
             "/init" => {
-                print_init_project();
+                print_init_project(None);
                 continue;
             }
             "/agents" => {
@@ -1231,6 +1231,15 @@ async fn repl_loop(
         if let Some(rest) = trimmed.strip_prefix("/output-style ") {
             handle_output_style(rest, &mut output_style);
             update_bar_status(|status| status.output_style = output_style.clone());
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/init ") {
+            let notes = rest.trim();
+            if notes.is_empty() {
+                println!("{DIM}  usage: /init [project notes]{RESET}");
+            } else {
+                print_init_project(Some(notes));
+            }
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/remember") {
@@ -1873,7 +1882,7 @@ fn print_help() {
     println!("{DIM}  /login    — run libertai login, then reload this REPL session{RESET}");
     println!("{DIM}  /logout   — run libertai logout, then reload this REPL session{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
-    println!("{DIM}  /init     — create AGENTS.md for this project if missing{RESET}");
+    println!("{DIM}  /init [notes] — create AGENTS.md for this project if missing{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
     println!("{DIM}  /agent [--worktree] <name> <task> — run a named sub-agent task{RESET}");
     println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
@@ -3028,7 +3037,7 @@ fn escape_html(text: &str) -> String {
     out
 }
 
-fn print_init_project() {
+fn print_init_project(notes: Option<&str>) {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(e) => {
@@ -3036,7 +3045,7 @@ fn print_init_project() {
             return;
         }
     };
-    match crate::commands::code_init::init_project(&cwd) {
+    match crate::commands::code_init::init_project_with_notes(&cwd, notes) {
         Ok(result) if result.created => {
             println!("{BOLD}init{RESET}");
             println!("{DIM}  created: {}{RESET}", result.path.display());

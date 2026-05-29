@@ -17,6 +17,10 @@ pub struct InitResult {
 }
 
 pub fn init_project(cwd: &Path) -> Result<InitResult> {
+    init_project_with_notes(cwd, None)
+}
+
+pub fn init_project_with_notes(cwd: &Path, notes: Option<&str>) -> Result<InitResult> {
     let path = cwd.join("AGENTS.md");
     if path.exists() {
         let content = std::fs::read_to_string(&path).unwrap_or_default();
@@ -26,7 +30,7 @@ pub fn init_project(cwd: &Path) -> Result<InitResult> {
             content,
         });
     }
-    let content = build_agents_md(cwd)?;
+    let content = build_agents_md(cwd, notes)?;
     std::fs::write(&path, &content).with_context(|| format!("writing {}", path.display()))?;
     Ok(InitResult {
         path,
@@ -35,7 +39,7 @@ pub fn init_project(cwd: &Path) -> Result<InitResult> {
     })
 }
 
-fn build_agents_md(cwd: &Path) -> Result<String> {
+fn build_agents_md(cwd: &Path, notes: Option<&str>) -> Result<String> {
     let project = cwd
         .file_name()
         .and_then(|s| s.to_str())
@@ -75,11 +79,21 @@ fn build_agents_md(cwd: &Path) -> Result<String> {
     if cwd.join(".editorconfig").exists() {
         lines.push("- Respect `.editorconfig` formatting rules.".to_string());
     }
+    if let Some(note) = clean_user_note(notes) {
+        lines.push(format!("- User-provided project note: {note}"));
+    }
     lines.push("- Keep changes scoped to the requested task.".to_string());
     lines.push("- Prefer existing project patterns and commands over new tooling.".to_string());
     lines.push("- Run the relevant checks before handing work back.".to_string());
     lines.push(String::new());
     Ok(lines.join("\n"))
+}
+
+fn clean_user_note(notes: Option<&str>) -> Option<String> {
+    notes
+        .map(|note| note.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|note| !note.is_empty())
+        .map(|note| truncate_sentence(&note))
 }
 
 fn command_lines(cwd: &Path) -> Vec<String> {
@@ -344,6 +358,25 @@ mod tests {
         assert!(!result.created);
         assert_eq!(result.content, "custom\n");
         assert_eq!(std::fs::read_to_string(path).unwrap(), "custom\n");
+    }
+
+    #[test]
+    fn init_project_with_notes_adds_user_project_note() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+
+        let result = init_project_with_notes(
+            temp.path(),
+            Some(" prefer snapshot tests and document public APIs "),
+        )
+        .unwrap();
+
+        assert!(result.created);
+        assert!(
+            result
+                .content
+                .contains("User-provided project note: prefer snapshot tests and document public APIs")
+        );
     }
 
     #[test]

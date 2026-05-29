@@ -362,15 +362,17 @@ plumbing are still TODO.
 ### 2F. Native `/init`
 
 Shipped: CLI and desktop `/init` call `code_init::init_project`, which
-creates `AGENTS.md` when missing and preserves existing files. The
-generated file is deterministic and based on visible repo docs/manifests
+creates `AGENTS.md` when missing and preserves existing files. CLI
+`/init <project notes>` can add one user-provided project note to the
+generated file without overwriting existing guidance. The generated file
+is deterministic and based on visible repo docs/manifests
 (`README.md`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`)
 plus common directory names. It now parses README title/summary,
 manifest names, exact package script bodies, Go modules, common config
 files such as Dockerfile / GitHub Actions / Makefile, and
-CONTRIBUTING/EditorConfig guidance. Remaining work is optional editing/merge UI and any
-model-assisted project-specific prose we later decide is worth the
-extra turn.
+CONTRIBUTING/EditorConfig guidance. Remaining work is optional editing/merge
+UI and any model-assisted project-specific prose we later decide is worth
+the extra turn.
 
 ### 2E. `!` shell prefix in REPL
 
