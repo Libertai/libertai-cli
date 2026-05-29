@@ -378,7 +378,9 @@ creates `AGENTS.md` when missing and preserves existing files. CLI
 generated file without overwriting existing guidance, and CLI
 `/init --agent <project notes>` now sends the same Claude-style
 model-written initialization prompt through the active session for
-inspect/propose/write flows. The generated file
+inspect/propose/write flows. The initializer also exposes a no-write
+candidate generator so desktop can show a merge candidate when
+guidance already exists. The generated file
 is deterministic and based on visible repo docs/manifests
 (`README.md`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`)
 plus common directory names. It now parses README title/summary,

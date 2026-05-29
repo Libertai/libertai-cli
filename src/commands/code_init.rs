@@ -39,6 +39,10 @@ pub fn init_project_with_notes(cwd: &Path, notes: Option<&str>) -> Result<InitRe
     })
 }
 
+pub fn agents_md_candidate(cwd: &Path, notes: Option<&str>) -> Result<String> {
+    build_agents_md(cwd, notes)
+}
+
 pub fn init_agent_prompt(notes: Option<&str>) -> String {
     const INIT_PROMPT: &str = r#"Initialize project context for this repository by creating or
 updating AGENTS.md at the project root. AGENTS.md is the agent's
@@ -408,6 +412,20 @@ mod tests {
 
         assert!(!result.created);
         assert_eq!(result.content, "custom\n");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "custom\n");
+    }
+
+    #[test]
+    fn agents_md_candidate_builds_without_overwriting_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("AGENTS.md");
+        std::fs::write(&path, "custom\n").unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+
+        let candidate = agents_md_candidate(temp.path(), Some(" prefer fast checks ")).unwrap();
+
+        assert!(candidate.contains("Rust project: `demo`"));
+        assert!(candidate.contains("User-provided project note: prefer fast checks"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "custom\n");
     }
 
