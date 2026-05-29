@@ -122,6 +122,15 @@ struct ToolActivitySummary {
     total_duration: Duration,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ToolAttribution {
+    tool_name: String,
+    count: u64,
+    total_duration: Duration,
+    estimated_tokens: u64,
+    estimated_cost: Option<f64>,
+}
+
 #[derive(Debug, Default)]
 struct ToolActivityTracker {
     active: HashMap<String, (String, Instant)>,
@@ -3960,7 +3969,7 @@ fn usage_summary(records: &[UsageRecord]) -> Option<UsageSummary> {
 
 fn print_usage_summary(summary: Option<UsageSummary>, tool_activity: &[ToolActivitySummary]) {
     println!("{BOLD}usage{RESET}");
-    match summary {
+    match summary.as_ref() {
         Some(summary) => {
             println!("{DIM}  provider/model:{RESET} {}/{}", summary.provider, summary.model);
             println!("{DIM}  turns:{RESET} {}", summary.turns);
@@ -3993,29 +4002,134 @@ fn print_usage_summary(summary: Option<UsageSummary>, tool_activity: &[ToolActiv
             println!(
                 "{DIM}  note:{RESET} input is cumulative context; output is summed across completed turns."
             );
-            print_tool_activity(tool_activity);
+            print_tool_activity(tool_activity, Some(summary));
         }
         None => {
             println!("{DIM}  no usage recorded yet — send a prompt first.{RESET}");
-            print_tool_activity(tool_activity);
+            print_tool_activity(tool_activity, None);
         }
     }
     println!();
 }
 
-fn print_tool_activity(tool_activity: &[ToolActivitySummary]) {
+fn print_tool_activity(tool_activity: &[ToolActivitySummary], usage: Option<&UsageSummary>) {
     if tool_activity.is_empty() {
         return;
     }
-    println!("{DIM}  tool activity:{RESET}");
-    for tool in tool_activity {
+    let attribution = usage.map(|summary| estimate_tool_attribution(summary, tool_activity));
+    if let Some(rows) = attribution.filter(|rows| !rows.is_empty()) {
+        println!("{DIM}  tool activity · estimated attribution:{RESET}");
+        for row in rows {
+            let estimate = match row.estimated_cost {
+                Some(cost) if cost > 0.0 => {
+                    format!("{} est · ~{}", dollar(cost), human_tokens(row.estimated_tokens))
+                }
+                _ => format!("~{}", human_tokens(row.estimated_tokens)),
+            };
+            println!(
+                "{DIM}    -{RESET} {}: {} call(s), {} observed, {estimate}",
+                row.tool_name,
+                row.count,
+                format_duration(row.total_duration)
+            );
+        }
         println!(
-            "{DIM}    -{RESET} {}: {} call(s), {} observed",
-            tool.tool_name,
-            tool.count,
-            format_duration(tool.total_duration)
+            "{DIM}  note:{RESET} tool attribution is estimated from session tokens/cost and weighted by observed tool duration."
         );
+    } else {
+        println!("{DIM}  tool activity:{RESET}");
+        for tool in tool_activity {
+            println!(
+                "{DIM}    -{RESET} {}: {} call(s), {} observed",
+                tool.tool_name,
+                tool.count,
+                format_duration(tool.total_duration)
+            );
+        }
     }
+}
+
+fn estimate_tool_attribution(
+    summary: &UsageSummary,
+    tool_activity: &[ToolActivitySummary],
+) -> Vec<ToolAttribution> {
+    let estimated_tokens = summary.context_high_water.saturating_add(summary.output_total);
+    if estimated_tokens == 0 || tool_activity.is_empty() {
+        return Vec::new();
+    }
+    let weights: Vec<f64> = tool_activity
+        .iter()
+        .map(|tool| {
+            let millis = tool.total_duration.as_millis() as f64;
+            if millis > 0.0 { millis } else { tool.count.max(1) as f64 }
+        })
+        .collect();
+    let total_weight: f64 = weights.iter().sum();
+    if total_weight <= 0.0 {
+        return Vec::new();
+    }
+    let estimated_total_cost = model_token_cost(
+        &summary.model,
+        summary.context_high_water,
+        summary.output_total,
+    );
+    tool_activity
+        .iter()
+        .zip(weights)
+        .map(|(tool, weight)| {
+            let share = weight / total_weight;
+            ToolAttribution {
+                tool_name: tool.tool_name.clone(),
+                count: tool.count,
+                total_duration: tool.total_duration,
+                estimated_tokens: (estimated_tokens as f64 * share).round() as u64,
+                estimated_cost: estimated_total_cost.map(|cost| cost * share),
+            }
+        })
+        .collect()
+}
+
+fn model_token_cost(model: &str, input_tokens: u64, output_tokens: u64) -> Option<f64> {
+    let (input_per_million, output_per_million) = model_token_rates(model)?;
+    Some(
+        ((input_tokens as f64) * input_per_million
+            + (output_tokens as f64) * output_per_million)
+            / 1_000_000.0,
+    )
+}
+
+fn model_token_rates(model: &str) -> Option<(f64, f64)> {
+    let m = model.to_ascii_lowercase();
+    const TABLE: &[(&[&str], f64, f64)] = &[
+        (&["opus-4.7", "opus 4.7"], 15.00, 75.00),
+        (&["opus-4", "opus 4"], 15.00, 75.00),
+        (&["sonnet-4.6", "sonnet 4.6"], 3.00, 15.00),
+        (&["sonnet-4.5", "sonnet 4.5"], 3.00, 15.00),
+        (&["sonnet-4", "sonnet 4"], 3.00, 15.00),
+        (&["haiku-4.5", "haiku 4.5"], 1.00, 5.00),
+        (&["haiku-4", "haiku 4"], 1.00, 5.00),
+        (&["gpt-4o-mini"], 0.15, 0.60),
+        (&["gpt-4o"], 2.50, 10.00),
+        (&["gpt-4.1-mini"], 0.40, 1.60),
+        (&["gpt-4.1"], 2.00, 8.00),
+        (&["o1-mini"], 1.10, 4.40),
+        (&["o1"], 15.00, 60.00),
+        (&["qwen3-coder-480b", "qwen3-coder"], 1.00, 3.00),
+        (&["deepseek-v3"], 0.50, 1.50),
+        (&["glm-4.6"], 0.40, 1.20),
+        (&["llama-3.3", "llama 3.3"], 0.30, 0.90),
+        (&["mixtral"], 0.50, 1.50),
+    ];
+    for (keys, input, output) in TABLE {
+        if keys.iter().any(|key| m.contains(key)) {
+            return Some((*input, *output));
+        }
+    }
+    None
+}
+
+fn dollar(value: f64) -> String {
+    format!("${:.2}", value.max(0.0))
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -4807,6 +4921,64 @@ mod tests {
         assert_eq!(summary[0].count, 1);
         assert_eq!(summary[1].tool_name, "read");
         assert_eq!(summary[1].count, 1);
+    }
+
+    #[test]
+    fn estimate_tool_attribution_weights_by_duration() {
+        let usage = UsageSummary {
+            turns: 2,
+            last_input: 600,
+            last_output: 100,
+            output_total: 400,
+            context_high_water: 600,
+            context_window: 10_000,
+            provider: "libertai".to_string(),
+            model: "qwen3-coder-480b".to_string(),
+        };
+        let tools = vec![
+            ToolActivitySummary {
+                tool_name: "bash".to_string(),
+                count: 1,
+                total_duration: Duration::from_millis(300),
+            },
+            ToolActivitySummary {
+                tool_name: "read".to_string(),
+                count: 1,
+                total_duration: Duration::from_millis(100),
+            },
+        ];
+        let rows = estimate_tool_attribution(&usage, &tools);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].tool_name, "bash");
+        assert_eq!(rows[0].estimated_tokens, 750);
+        assert_eq!(rows[1].estimated_tokens, 250);
+        let total_cost: f64 = rows.iter().filter_map(|row| row.estimated_cost).sum();
+        let expected = model_token_cost("qwen3-coder-480b", 600, 400).unwrap();
+        assert!((total_cost - expected).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn estimate_tool_attribution_omits_cost_for_unknown_model() {
+        let usage = UsageSummary {
+            turns: 1,
+            last_input: 10,
+            last_output: 5,
+            output_total: 5,
+            context_high_water: 10,
+            context_window: 1_000,
+            provider: "custom".to_string(),
+            model: "local-model".to_string(),
+        };
+        let rows = estimate_tool_attribution(
+            &usage,
+            &[ToolActivitySummary {
+                tool_name: "read".to_string(),
+                count: 1,
+                total_duration: Duration::ZERO,
+            }],
+        );
+        assert_eq!(rows[0].estimated_tokens, 15);
+        assert_eq!(rows[0].estimated_cost, None);
     }
 
     #[test]

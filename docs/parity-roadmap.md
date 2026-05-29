@@ -93,7 +93,9 @@ SDK; those are flagged **(upstream)**.
   and usage.
 - **CLI `/usage` / `/cost` tool activity** — REPL usage summaries show
   turn counts, token high-water/output totals, and observed per-tool
-  call counts/durations for the current session. True per-tool
+  call counts/durations for the current session, plus clearly labeled
+  estimated per-tool token/cost attribution weighted by observed tool
+  duration when model rates are known. True provider-measured per-tool
   token/cost attribution remains deferred.
 - **Typed project memory** — `/remember` accepts `user:`, `feedback:`,
   `project:`, `reference:`, or `--type <kind>` prefixes and stores
