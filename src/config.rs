@@ -247,6 +247,10 @@ pub struct HookCommandConfig {
     #[serde(default, rename = "allowedEnvVars", skip_serializing_if = "Vec::is_empty")]
     pub allowed_env_vars: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub shell: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
@@ -275,6 +279,8 @@ impl Default for HookCommandConfig {
             url: String::new(),
             headers: HashMap::new(),
             allowed_env_vars: Vec::new(),
+            prompt: String::new(),
+            model: String::new(),
             shell: String::new(),
             timeout: None,
             async_hook: false,

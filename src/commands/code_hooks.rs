@@ -1,8 +1,9 @@
 //! Claude Code-style hooks for native CLI sessions.
 //!
 //! The desktop has a richer hook registry. The CLI intentionally keeps
-//! this surface narrow: configured shell commands and HTTP handlers are
-//! executed, while imported prompt/agent/MCP handlers are not run natively.
+//! this surface narrow: configured shell commands, HTTP handlers, and
+//! prompt/agent handlers are executed, while imported MCP handlers are not
+//! run natively.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -14,6 +15,7 @@ use serde_json::json;
 
 use crate::commands::code_approvals::{ToolPolicy, ToolPolicyDecision};
 use crate::config::{Config, HookCommandConfig};
+use crate::client::{post_chat_blocking, ChatMessage, ChatRequest};
 
 pub struct SessionHookGuard {
     cfg: Arc<Config>,
@@ -140,6 +142,8 @@ fn is_runnable_hook(hook: &HookCommandConfig) -> bool {
     hook.enabled
         && if hook_is_http(hook) {
             !hook.url.trim().is_empty()
+        } else if hook_is_prompt(hook) || hook_is_agent(hook) {
+            !hook.prompt.trim().is_empty()
         } else if hook_is_command(hook) {
             !hook.command.trim().is_empty()
         } else {
@@ -156,9 +160,19 @@ fn hook_is_command(hook: &HookCommandConfig) -> bool {
     hook_type.is_empty() || hook_type.eq_ignore_ascii_case("command")
 }
 
+fn hook_is_prompt(hook: &HookCommandConfig) -> bool {
+    hook.hook_type.trim().eq_ignore_ascii_case("prompt")
+}
+
+fn hook_is_agent(hook: &HookCommandConfig) -> bool {
+    hook.hook_type.trim().eq_ignore_ascii_case("agent")
+}
+
 fn hook_target(hook: &HookCommandConfig) -> &str {
     if hook_is_http(hook) {
         hook.url.trim()
+    } else if hook_is_prompt(hook) || hook_is_agent(hook) {
+        hook.prompt.trim()
     } else {
         hook.command.trim()
     }
@@ -436,6 +450,8 @@ fn run_detached_hook(
 ) -> HookRun {
     if hook_is_http(hook) {
         run_http_hook(hook, payload, event_name)
+    } else if hook_is_prompt(hook) || hook_is_agent(hook) {
+        run_prompt_hook(hook, payload)
     } else {
         run_detached_shell_hook(hook, cwd, payload, event_name)
     }
@@ -449,6 +465,8 @@ fn run_configured_hook(
 ) -> HookRun {
     if hook_is_http(hook) {
         run_http_hook(hook, payload, event_name)
+    } else if hook_is_prompt(hook) || hook_is_agent(hook) {
+        run_prompt_hook(hook, payload)
     } else {
         run_shell_hook(hook, cwd, payload, event_name)
     }
@@ -535,6 +553,92 @@ fn expand_allowed_env_vars(value: &str, allowed_env_vars: &[String]) -> String {
         }
     }
     out
+}
+
+fn run_prompt_hook(hook: &HookCommandConfig, payload: &serde_json::Value) -> HookRun {
+    let cfg = match crate::config::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("loading prompt hook config: {e:#}"),
+            };
+        }
+    };
+    let model = hook
+        .model
+        .trim()
+        .is_empty()
+        .then(|| cfg.default_code_model.clone())
+        .unwrap_or_else(|| hook.model.trim().to_string());
+    let req = ChatRequest {
+        model,
+        messages: prompt_hook_messages(&hook.prompt, payload),
+        stream: Some(false),
+        max_tokens: None,
+    };
+    let resp = match post_chat_blocking(&cfg, &req) {
+        Ok(resp) => resp,
+        Err(e) => {
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("prompt hook request failed: {e:#}"),
+            };
+        }
+    };
+    let body = match resp.json::<serde_json::Value>() {
+        Ok(body) => body,
+        Err(e) => {
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("parsing prompt hook response: {e}"),
+            };
+        }
+    };
+    match prompt_hook_content(&body) {
+        Some(content) => HookRun {
+            status: 0,
+            stdout: content,
+            stderr: String::new(),
+        },
+        None => HookRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: "prompt hook response missing choices[0].message.content".to_string(),
+        },
+    }
+}
+
+fn prompt_hook_messages(prompt: &str, payload: &serde_json::Value) -> Vec<ChatMessage> {
+    let payload = serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string());
+    vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: "You are running as a Claude Code-style hook handler. Return only the hook output. For PreToolUse decisions, return valid JSON using permissionDecision and optional permissionDecisionReason, updatedInput, and additionalContext fields.".to_string(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: format!(
+                "{}\n\nHook event payload:\n```json\n{}\n```",
+                prompt.trim(),
+                payload
+            ),
+        },
+    ]
+}
+
+fn prompt_hook_content(body: &serde_json::Value) -> Option<String> {
+    body.get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .map(str::to_string)
 }
 
 fn run_shell_hook(
@@ -982,6 +1086,34 @@ mod tests {
         assert_eq!(run.status, 403);
         assert_eq!(run.stdout, "denied");
         assert!(run.stderr.contains("HTTP hook returned"));
+    }
+
+    #[test]
+    fn prompt_hook_messages_include_prompt_and_payload() {
+        let messages = prompt_hook_messages(
+            "Review this payload.",
+            &json!({"event":"PreToolUse","toolName":"bash"}),
+        );
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].content.contains("Claude Code-style hook handler"));
+        assert!(messages[1].content.contains("Review this payload."));
+        assert!(messages[1].content.contains("\"toolName\": \"bash\""));
+    }
+
+    #[test]
+    fn prompt_hook_content_reads_chat_completion() {
+        let body = json!({
+            "choices": [{
+                "message": {
+                    "content": "  {\"permissionDecision\":\"allow\"}  "
+                }
+            }]
+        });
+        assert_eq!(
+            prompt_hook_content(&body).as_deref(),
+            Some(r#"{"permissionDecision":"allow"}"#)
+        );
+        assert_eq!(prompt_hook_content(&json!({"choices":[]})), None);
     }
 
     #[test]

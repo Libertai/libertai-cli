@@ -5279,6 +5279,10 @@ fn count_runnable_hooks(hooks: &[crate::config::HookCommandConfig]) -> usize {
             hook.enabled
                 && if hook.hook_type.trim().eq_ignore_ascii_case("http") {
                     !hook.url.trim().is_empty()
+                } else if hook.hook_type.trim().eq_ignore_ascii_case("prompt")
+                    || hook.hook_type.trim().eq_ignore_ascii_case("agent")
+                {
+                    !hook.prompt.trim().is_empty()
                 } else {
                     let hook_type = hook.hook_type.trim();
                     (hook_type.is_empty() || hook_type.eq_ignore_ascii_case("command"))
@@ -5304,7 +5308,11 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
             .timeout
             .map(|secs| format!(", timeout={secs}s"))
             .unwrap_or_default();
-        let shell = if hook.shell.trim().is_empty() || hook.hook_type.trim().eq_ignore_ascii_case("http") {
+        let shell = if hook.shell.trim().is_empty()
+            || hook.hook_type.trim().eq_ignore_ascii_case("http")
+            || hook.hook_type.trim().eq_ignore_ascii_case("prompt")
+            || hook.hook_type.trim().eq_ignore_ascii_case("agent")
+        {
             String::new()
         } else {
             format!(", shell={}", hook.shell.trim())
@@ -5325,6 +5333,14 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
                 "(no url)"
             } else {
                 hook.url.trim()
+            }
+        } else if hook.hook_type.trim().eq_ignore_ascii_case("prompt")
+            || hook.hook_type.trim().eq_ignore_ascii_case("agent")
+        {
+            if hook.prompt.trim().is_empty() {
+                "(no prompt)"
+            } else {
+                hook.prompt.trim()
             }
         } else if hook.command.trim().is_empty() {
             "(no command)"
@@ -6270,6 +6286,11 @@ mod tests {
             url: "http://127.0.0.1/hook".to_string(),
             ..Default::default()
         });
+        cfg.hooks.post_tool_use.push(crate::config::HookCommandConfig {
+            hook_type: "prompt".to_string(),
+            prompt: "Summarize this hook.".to_string(),
+            ..Default::default()
+        });
         cfg.hooks.pre_tool_use.push(crate::config::HookCommandConfig {
             enabled: false,
             command: "scripts/pre-disabled.sh".to_string(),
@@ -6281,9 +6302,10 @@ mod tests {
         });
 
         let breakdown = format_hook_event_breakdown(&cfg);
-        assert!(breakdown.contains("3 runnable hook(s)"));
+        assert!(breakdown.contains("4 runnable hook(s)"));
         assert!(breakdown.contains("UserPromptSubmit 1"));
         assert!(breakdown.contains("PreToolUse 2"));
+        assert!(breakdown.contains("PostToolUse 1"));
         assert!(breakdown.contains("SubagentStop 0"));
         assert!(breakdown.contains("Stop 0"));
     }

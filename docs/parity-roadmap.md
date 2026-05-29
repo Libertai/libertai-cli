@@ -625,12 +625,14 @@ async hook output is discarded and cannot affect prompt/tool decisions.
 CLI HTTP hook rows use `type = "http"`, `url`, optional `headers`,
 `allowedEnvVars`, timeout, and `continueOnBlock`, POST the same JSON
 payloads as command hooks, and can return the same JSON decision/context
-fields for UserPromptSubmit and PreToolUse. `/hooks` and `libertai
-status` report configured runnable hooks.
+fields for UserPromptSubmit and PreToolUse. CLI prompt/agent hook rows
+use `type = "prompt"` or `type = "agent"`, `prompt`, optional `model`,
+and the configured LibertAI chat endpoint, returning the model message as
+hook output. `/hooks` and `libertai status` report configured runnable
+hooks.
 
 Remaining work: any pi-level typed hook dispatcher.
-Native prompt/agent/MCP-tool hook handlers remain intentionally
-unexecuted in the CLI.
+Native MCP-tool hook handlers remain intentionally unexecuted in the CLI.
 
 **Files**: `src/config.rs`,
 `src/commands/code_hooks.rs`,
