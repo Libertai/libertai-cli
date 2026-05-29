@@ -227,6 +227,7 @@ fn call_summarizer(
             ChatMessage { role: "user".to_string(), content: user.to_string() },
         ],
         stream: Some(false),
+        max_tokens: None,
     };
     let resp = post_chat_blocking(cfg, &req)?;
     let body: serde_json::Value =

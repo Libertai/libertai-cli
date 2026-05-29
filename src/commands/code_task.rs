@@ -220,14 +220,16 @@ impl Tool for TaskTool {
         // fetch stay on; both are read-only and useful for lookup.
         let mut features = crate::commands::code_factory::FactoryFeatures::cli_defaults();
         features.image = false;
+        let cfg = Arc::new(cfg.clone());
         let factory = LibertaiToolFactory {
             mode: self.mode.clone(),
             approvals: Arc::clone(&self.approvals),
             ui: Arc::clone(&self.ui),
             depth: self.parent_depth,
             features,
-            libertai_cfg: Some(Arc::new(cfg.clone())),
+            libertai_cfg: Some(Arc::clone(&cfg)),
             tool_policy: None,
+            smart_approval: crate::commands::code_aux::smart_approval_from_config(Arc::clone(&cfg)),
             safe_root_override: None,
         }
         .child();

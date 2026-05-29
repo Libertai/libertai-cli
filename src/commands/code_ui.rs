@@ -3920,6 +3920,14 @@ fn print_config_status(cfg: &LibertaiConfig) {
     println!("{DIM}  default code provider:{RESET} {}", cfg.default_code_provider);
     println!("{DIM}  default code model:{RESET} {}", cfg.default_code_model);
     println!("{DIM}  default image model:{RESET} {}", cfg.default_image_model);
+    if cfg.smart_approval_enabled {
+        println!(
+            "{DIM}  smart approvals:{RESET} enabled ({})",
+            cfg.smart_approval_model
+        );
+    } else {
+        println!("{DIM}  smart approvals:{RESET} disabled");
+    }
     match cfg.auth.api_key.as_deref() {
         Some(key) => println!("{DIM}  auth:{RESET} {}", mask_key(key)),
         None => println!("{DIM}  auth:{RESET} not logged in"),

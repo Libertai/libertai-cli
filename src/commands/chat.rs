@@ -51,6 +51,7 @@ pub fn run(model: Option<String>, system: Option<String>) -> Result<()> {
             model: model.clone(),
             messages: history.clone(),
             stream: Some(true),
+            max_tokens: None,
         };
 
         let resp = match post_chat_blocking(&cfg, &req) {

@@ -39,6 +39,11 @@ SDK; those are flagged **(upstream)**.
 - **CLI approval diff previews** — file-mutation approval prompts now
   compare proposed `write`/`edit` changes against current files when
   available and show structured `hashline_edit` operation summaries.
+- **Opt-in smart approvals** — `smart_approval_enabled = true` asks a
+  bounded auxiliary LibertAI model before manual mutating-tool prompts;
+  exact `APPROVE` runs, exact `DENY` returns a tool error, and any
+  error, malformed answer, or `ESCALATE` falls back to the existing
+  approval UI.
 - **CLI `/model` command** — REPL users can inspect the active
   provider/model and switch with `/model <model|provider/model>` without
   rebuilding the session.
@@ -447,16 +452,19 @@ hook in `src/commands/code_factory.rs` (wrap every tool).
 
 ### 4A. Smart-approval auxiliary LLM tier
 
-When a flagged command would normally interactive-prompt, first ask a
-cheap aux LLM with `max_tokens=16` for APPROVE/DENY/ESCALATE. Only
-ESCALATE reaches the user. Falls back gracefully if no aux model
-configured.
+Shipped as an opt-in CLI/SDK feature: when `smart_approval_enabled =
+true`, a flagged mutating tool call first asks
+`smart_approval_model` with `max_tokens=16` for
+APPROVE/DENY/ESCALATE. APPROVE runs without the manual prompt, DENY
+returns a tool error, and ESCALATE/errors/malformed responses fall back
+to the existing UI. The auxiliary request is capped to a 10-second
+timeout and inherits the normal LibertAI API config.
 (`/tmp/hermes-agent/tools/approval.py:841-885`)
 
 **Files**: `src/commands/code_approvals.rs`,
-new `src/commands/code_aux.rs` (aux client wrapper around our existing
-provider config).
-**Effort**: M (1.5 days).
+`src/commands/code_aux.rs`, `src/config.rs`.
+**Status**: shipped for CLI/native sessions; desktop visibility polish
+remains a handoff item.
 
 ### 4B. Background skill-review fork (learning loop)
 

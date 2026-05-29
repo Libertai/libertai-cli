@@ -104,6 +104,8 @@ pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 pub fn post_chat_blocking(cfg: &Config, req: &ChatRequest) -> Result<reqwest::blocking::Response> {

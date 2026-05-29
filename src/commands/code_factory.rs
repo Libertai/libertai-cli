@@ -24,6 +24,7 @@ use std::sync::Arc;
 use pi::sdk::{default_tool_registry, Config as PiConfig, Tool, ToolFactory, ToolRegistry};
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi, ToolPolicy};
+use crate::commands::code_aux::{smart_approval_from_config, SmartApproval};
 use crate::commands::code_ask_user::AskUserTool;
 use crate::commands::code_guardrail::{GuardrailTool, ToolGuardrailState};
 use crate::commands::code_notification::PushNotificationTool;
@@ -176,6 +177,7 @@ pub struct LibertaiToolFactory {
     /// into each tool's per-instance state.
     pub libertai_cfg: Option<Arc<LibertaiConfig>>,
     pub tool_policy: Option<Arc<dyn ToolPolicy>>,
+    pub smart_approval: Option<Arc<dyn SmartApproval>>,
     /// Optional per-session safe root for mutating path tools. When
     /// unset, the factory falls back to `LIBERTAI_WRITE_SAFE_ROOT` so
     /// the CLI env-var behavior stays unchanged.
@@ -193,6 +195,7 @@ impl LibertaiToolFactory {
             features: FactoryFeatures::cli_defaults(),
             libertai_cfg: None,
             tool_policy: None,
+            smart_approval: None,
             safe_root_override: None,
         }
     }
@@ -206,6 +209,9 @@ impl LibertaiToolFactory {
         features: FactoryFeatures,
         libertai_cfg: Option<Arc<LibertaiConfig>>,
     ) -> Self {
+        let smart_approval = libertai_cfg.as_ref().and_then(|cfg| {
+            smart_approval_from_config(Arc::clone(cfg))
+        });
         Self {
             mode,
             approvals,
@@ -214,6 +220,7 @@ impl LibertaiToolFactory {
             features,
             libertai_cfg,
             tool_policy: None,
+            smart_approval,
             safe_root_override: None,
         }
     }
@@ -242,6 +249,7 @@ impl LibertaiToolFactory {
             features: self.features.clone(),
             libertai_cfg: self.libertai_cfg.clone(),
             tool_policy: self.tool_policy.clone(),
+            smart_approval: self.smart_approval.clone(),
             safe_root_override: self.safe_root_override.clone(),
         }
     }
@@ -270,7 +278,8 @@ impl ToolFactory for LibertaiToolFactory {
                 self.mode.clone(),
                 Arc::clone(&self.ui),
             )
-            .with_policy(self.tool_policy.clone());
+            .with_policy(self.tool_policy.clone())
+            .with_smart_approval(self.smart_approval.clone());
             wrapped.push(Box::new(approval_tool));
         }
 
@@ -325,7 +334,8 @@ impl ToolFactory for LibertaiToolFactory {
                 self.mode.clone(),
                 Arc::clone(&self.ui),
             )
-            .with_policy(self.tool_policy.clone());
+            .with_policy(self.tool_policy.clone())
+            .with_smart_approval(self.smart_approval.clone());
             wrapped.push(Box::new(notebook_edit));
             let notebook_execute = ApprovalTool::new(
                 self.wrap_path_safety(Box::new(NotebookExecuteTool::new()), cwd, safe_root.as_ref()),
@@ -333,7 +343,8 @@ impl ToolFactory for LibertaiToolFactory {
                 self.mode.clone(),
                 Arc::clone(&self.ui),
             )
-            .with_policy(self.tool_policy.clone());
+            .with_policy(self.tool_policy.clone())
+            .with_smart_approval(self.smart_approval.clone());
             wrapped.push(Box::new(notebook_execute));
         }
 

@@ -19,6 +19,8 @@ pub const DEFAULT_FAST_MODEL: &str = "qwen3.6-35b-a3b";
 /// stuck connections.
 pub const DEFAULT_HTTP_TIMEOUT_SECS: u64 = 600;
 pub const DEFAULT_CHECK_FOR_UPDATES: bool = true;
+pub const DEFAULT_SMART_APPROVAL_ENABLED: bool = false;
+pub const DEFAULT_SMART_APPROVAL_MODEL: &str = DEFAULT_FAST_MODEL;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -66,6 +68,16 @@ pub struct Config {
         skip_serializing_if = "is_default_check_for_updates"
     )]
     pub check_for_updates: bool,
+    #[serde(
+        default = "default_smart_approval_enabled",
+        skip_serializing_if = "is_default_smart_approval_enabled"
+    )]
+    pub smart_approval_enabled: bool,
+    #[serde(
+        default = "default_smart_approval_model_s",
+        skip_serializing_if = "is_default_smart_approval_model"
+    )]
+    pub smart_approval_model: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub status_line_template: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -137,6 +149,12 @@ fn is_default_http_timeout_secs(v: &u64) -> bool {
 fn is_default_check_for_updates(v: &bool) -> bool {
     *v == DEFAULT_CHECK_FOR_UPDATES
 }
+fn is_default_smart_approval_enabled(v: &bool) -> bool {
+    *v == DEFAULT_SMART_APPROVAL_ENABLED
+}
+fn is_default_smart_approval_model(s: &str) -> bool {
+    s == DEFAULT_SMART_APPROVAL_MODEL
+}
 
 impl Default for LauncherDefaults {
     fn default() -> Self {
@@ -191,6 +209,12 @@ fn default_http_timeout_secs() -> u64 {
 fn default_check_for_updates() -> bool {
     DEFAULT_CHECK_FOR_UPDATES
 }
+fn default_smart_approval_enabled() -> bool {
+    DEFAULT_SMART_APPROVAL_ENABLED
+}
+fn default_smart_approval_model_s() -> String {
+    DEFAULT_SMART_APPROVAL_MODEL.into()
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -205,6 +229,8 @@ impl Default for Config {
             launcher_defaults: LauncherDefaults::default(),
             http_timeout_secs: DEFAULT_HTTP_TIMEOUT_SECS,
             check_for_updates: DEFAULT_CHECK_FOR_UPDATES,
+            smart_approval_enabled: DEFAULT_SMART_APPROVAL_ENABLED,
+            smart_approval_model: default_smart_approval_model_s(),
             status_line_template: String::new(),
             status_line_command: String::new(),
             auth: Auth::default(),

@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
 
+use crate::commands::code_aux::{SmartApproval, SmartApprovalVerdict};
 use crate::commands::code_factory::{is_path_edit_tool, Mode, ModeFlag};
 
 /// User decision for a single approval prompt.
@@ -586,6 +587,7 @@ pub struct ApprovalTool {
     mode: ModeFlag,
     ui: Arc<dyn ApprovalUi>,
     policy: Option<Arc<dyn ToolPolicy>>,
+    smart_approval: Option<Arc<dyn SmartApproval>>,
 }
 
 impl ApprovalTool {
@@ -601,11 +603,17 @@ impl ApprovalTool {
             mode,
             ui,
             policy: None,
+            smart_approval: None,
         }
     }
 
     pub fn with_policy(mut self, policy: Option<Arc<dyn ToolPolicy>>) -> Self {
         self.policy = policy;
+        self
+    }
+
+    pub fn with_smart_approval(mut self, smart: Option<Arc<dyn SmartApproval>>) -> Self {
+        self.smart_approval = smart;
         self
     }
 
@@ -710,6 +718,23 @@ impl Tool for ApprovalTool {
         } = &policy_decision
         {
             preview = format!("{preview}\n\nPreToolUse hook requested confirmation: {reason}");
+        }
+        if !matches!(policy_decision, ToolPolicyDecision::Ask { .. }) {
+            if let Some(smart) = self.smart_approval.as_ref() {
+                match smart.decide(name, &preview, &effective_input).await {
+                    SmartApprovalVerdict::Approve => {
+                        return with_policy_context(
+                            self.execute_inner(tool_call_id, effective_input, on_update)
+                                .await,
+                            &policy_decision,
+                        );
+                    }
+                    SmartApprovalVerdict::Deny { reason } => {
+                        return Ok(denial_output(smart_denial_reason(reason)).into());
+                    }
+                    SmartApprovalVerdict::Escalate { .. } => {}
+                }
+            }
         }
         let always_label = sanitize_inline(&subject.suggested_label);
         match self.ui.decide(name, &preview, &always_label).await {
@@ -884,6 +909,15 @@ pub fn denial_output(reason: Option<String>) -> ToolOutput {
         details: None,
         is_error: true,
     }
+}
+
+fn smart_denial_reason(reason: Option<String>) -> Option<String> {
+    Some(match reason {
+        Some(reason) if !reason.trim().is_empty() => {
+            format!("smart approval denied this tool call: {}", reason.trim())
+        }
+        _ => "smart approval denied this tool call".to_string(),
+    })
 }
 
 fn plan_denial_output(tool_name: &str) -> ToolOutput {
@@ -1072,6 +1106,89 @@ pub fn sanitize_inline(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FakeTool;
+
+    #[async_trait]
+    impl Tool for FakeTool {
+        fn name(&self) -> &str {
+            "bash"
+        }
+
+        fn label(&self) -> &str {
+            "Bash"
+        }
+
+        fn description(&self) -> &str {
+            "fake mutating shell tool"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+
+        fn is_read_only(&self) -> bool {
+            false
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            _input: serde_json::Value,
+            _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+        ) -> PiResult<ToolExecution> {
+            Ok(ToolOutput {
+                content: vec![ContentBlock::Text(TextContent::new("ran"))],
+                details: None,
+                is_error: false,
+            }
+            .into())
+        }
+    }
+
+    struct CountingUi {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ApprovalUi for CountingUi {
+        async fn decide(
+            &self,
+            _tool_name: &str,
+            _preview: &str,
+            _always_rule: &str,
+        ) -> PromptChoice {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            PromptChoice::Deny
+        }
+    }
+
+    struct StaticSmartApproval(SmartApprovalVerdict);
+
+    #[async_trait]
+    impl SmartApproval for StaticSmartApproval {
+        async fn decide(
+            &self,
+            _tool_name: &str,
+            _preview: &str,
+            _input: &serde_json::Value,
+        ) -> SmartApprovalVerdict {
+            self.0.clone()
+        }
+    }
+
+    fn approval_text(output: ToolOutput) -> String {
+        output
+            .content
+            .into_iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn sanitize_strips_clear_screen_spoof() {
@@ -1198,6 +1315,67 @@ mod tests {
         assert!(text.contains("Filesystem delta after execution"));
         assert!(text.contains("-before"));
         assert!(text.contains("+after"));
+    }
+
+    #[test]
+    fn smart_approval_approve_bypasses_manual_prompt() {
+        let ui_calls = Arc::new(AtomicUsize::new(0));
+        let tool = ApprovalTool::new(
+            Box::new(FakeTool),
+            Arc::new(ApprovalState::new()),
+            ModeFlag::new(Mode::Normal),
+            Arc::new(CountingUi {
+                calls: Arc::clone(&ui_calls),
+            }),
+        )
+        .with_smart_approval(Some(Arc::new(StaticSmartApproval(
+            SmartApprovalVerdict::Approve,
+        ))));
+
+        let execution = futures::executor::block_on(tool.execute(
+            "call-1",
+            serde_json::json!({"command":"cargo test"}),
+            None,
+        ))
+        .unwrap();
+
+        let ToolExecution::Done(output) = execution else {
+            panic!("expected done output");
+        };
+        assert_eq!(approval_text(output), "ran");
+        assert_eq!(ui_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn smart_approval_deny_returns_tool_error_without_prompt() {
+        let ui_calls = Arc::new(AtomicUsize::new(0));
+        let tool = ApprovalTool::new(
+            Box::new(FakeTool),
+            Arc::new(ApprovalState::new()),
+            ModeFlag::new(Mode::Normal),
+            Arc::new(CountingUi {
+                calls: Arc::clone(&ui_calls),
+            }),
+        )
+        .with_smart_approval(Some(Arc::new(StaticSmartApproval(
+            SmartApprovalVerdict::Deny {
+                reason: Some("dangerous command".to_string()),
+            },
+        ))));
+
+        let execution = futures::executor::block_on(tool.execute(
+            "call-1",
+            serde_json::json!({"command":"rm -rf target"}),
+            None,
+        ))
+        .unwrap();
+
+        let ToolExecution::Done(output) = execution else {
+            panic!("expected done output");
+        };
+        assert!(output.is_error);
+        assert!(approval_text(output).contains("smart approval denied"));
+        assert_eq!(ui_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]

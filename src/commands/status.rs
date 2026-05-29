@@ -26,6 +26,20 @@ pub fn run() -> Result<()> {
         "Default image model:".dimmed(),
         cfg.default_image_model
     );
+    println!(
+        "  {:<22} {}{}",
+        "Smart approvals:".dimmed(),
+        if cfg.smart_approval_enabled {
+            "enabled".green().to_string()
+        } else {
+            "disabled".dimmed().to_string()
+        },
+        if cfg.smart_approval_enabled {
+            format!(" ({})", cfg.smart_approval_model)
+        } else {
+            String::new()
+        }
+    );
 
     println!("  {}", "Launcher defaults:".dimmed());
     println!(
