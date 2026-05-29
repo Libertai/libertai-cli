@@ -74,6 +74,10 @@ fn save_then_load_preserves_fields() {
                 command: "scripts/session-end.sh".into(),
                 ..HookCommandConfig::default()
             }],
+            notification: vec![HookCommandConfig {
+                command: "scripts/notification.sh".into(),
+                ..HookCommandConfig::default()
+            }],
         },
         ..Default::default()
     };

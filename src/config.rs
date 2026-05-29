@@ -212,6 +212,8 @@ pub struct HooksConfig {
     pub stop: Vec<HookCommandConfig>,
     #[serde(default, rename = "SessionEnd", skip_serializing_if = "Vec::is_empty")]
     pub session_end: Vec<HookCommandConfig>,
+    #[serde(default, rename = "Notification", skip_serializing_if = "Vec::is_empty")]
+    pub notification: Vec<HookCommandConfig>,
 }
 
 impl HooksConfig {
@@ -223,6 +225,7 @@ impl HooksConfig {
             && self.session_start.is_empty()
             && self.stop.is_empty()
             && self.session_end.is_empty()
+            && self.notification.is_empty()
     }
 }
 

@@ -10,6 +10,7 @@ use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
 
 use crate::commands::code_approvals::{ApprovalUi, NotifyOutcome};
+use crate::config::Config as LibertaiConfig;
 
 const NAME: &str = "push_notification";
 const LABEL: &str = "Push notification";
@@ -23,11 +24,17 @@ struct NotificationInput {
 
 pub struct PushNotificationTool {
     ui: Arc<dyn ApprovalUi>,
+    cfg: Option<Arc<LibertaiConfig>>,
 }
 
 impl PushNotificationTool {
     pub fn new(ui: Arc<dyn ApprovalUi>) -> Self {
-        Self { ui }
+        Self { ui, cfg: None }
+    }
+
+    pub fn with_config(mut self, cfg: Option<Arc<LibertaiConfig>>) -> Self {
+        self.cfg = cfg;
+        self
     }
 }
 
@@ -78,12 +85,16 @@ impl Tool for PushNotificationTool {
             return Ok(err_output("push_notification requires non-empty title and body"));
         }
 
-        match self.ui.notify(title, body).await {
+        let outcome = self.ui.notify(title, body).await;
+        if let Some(cfg) = self.cfg.as_deref() {
+            crate::commands::code_hooks::run_notification_hooks(cfg, title, body, &outcome);
+        }
+
+        match outcome {
             NotifyOutcome::Sent => Ok(text_output("notification sent", false)),
-            NotifyOutcome::Skipped(reason) => Ok(text_output(
-                &format!("notification skipped: {reason}"),
-                false,
-            )),
+            NotifyOutcome::Skipped(reason) => {
+                Ok(text_output(&format!("notification skipped: {reason}"), false))
+            }
         }
     }
 
@@ -163,6 +174,42 @@ mod tests {
                 ui.sent.lock().unwrap().as_slice(),
                 &[("Done".to_string(), "Build finished".to_string())]
             );
+        });
+    }
+
+    #[test]
+    fn runs_notification_hooks_after_notify() {
+        asupersync::test_utils::run_test(|| async {
+            let cwd = tempfile::tempdir().unwrap();
+            let output = cwd.path().join("notification.txt");
+            let ui = Arc::new(RecordingUi {
+                sent: Mutex::new(Vec::new()),
+            });
+            let cfg = Arc::new(LibertaiConfig {
+                hooks: crate::config::HooksConfig {
+                    notification: vec![crate::config::HookCommandConfig {
+                        command: format!("printf \"$LIBERTAI_HOOK_EVENT\" > {}", output.display()),
+                        ..crate::config::HookCommandConfig::default()
+                    }],
+                    ..crate::config::HooksConfig::default()
+                },
+                ..LibertaiConfig::default()
+            });
+            let tool = PushNotificationTool::new(ui).with_config(Some(cfg));
+            let out = match tool
+                .execute(
+                    "call",
+                    json!({ "title": "Done", "body": "Build finished" }),
+                    None,
+                )
+                .await
+                .unwrap()
+            {
+                ToolExecution::Done(o) => o,
+                _ => panic!("expected done"),
+            };
+            assert!(!out.is_error);
+            assert_eq!(std::fs::read_to_string(output).unwrap(), "Notification");
         });
     }
 }

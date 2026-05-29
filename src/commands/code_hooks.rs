@@ -38,6 +38,20 @@ pub fn run_stop_hooks(cfg: &Config) {
     run_lifecycle_hooks(cfg, "Stop", &cfg.hooks.stop);
 }
 
+pub fn run_notification_hooks(
+    cfg: &Config,
+    title: &str,
+    body: &str,
+    outcome: &crate::commands::code_approvals::NotifyOutcome,
+) {
+    if !cfg.hooks.notification.iter().any(is_runnable_hook) {
+        return;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let payload = notification_payload(&cwd, title, body, outcome);
+    run_nonblocking_event_hooks("Notification", &cfg.hooks.notification, &cwd, &payload);
+}
+
 pub fn run_user_prompt_submit_hooks(cfg: &Config, prompt: &str) -> anyhow::Result<String> {
     if !cfg.hooks.user_prompt_submit.iter().any(is_runnable_hook) {
         return Ok(prompt.to_string());
@@ -95,7 +109,15 @@ fn run_lifecycle_hooks(cfg: &Config, event_name: &str, hooks: &[HookCommandConfi
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let payload = lifecycle_payload(&cwd, cfg, event_name);
+    run_nonblocking_event_hooks(event_name, hooks, &cwd, &payload);
+}
 
+fn run_nonblocking_event_hooks(
+    event_name: &str,
+    hooks: &[HookCommandConfig],
+    cwd: &std::path::Path,
+    payload: &serde_json::Value,
+) {
     for hook in hooks {
         if !is_runnable_hook(hook) {
             continue;
@@ -115,6 +137,30 @@ fn run_lifecycle_hooks(cfg: &Config, event_name: &str, hooks: &[HookCommandConfi
             );
         }
     }
+}
+
+fn notification_payload(
+    cwd: &std::path::Path,
+    title: &str,
+    body: &str,
+    outcome: &crate::commands::code_approvals::NotifyOutcome,
+) -> serde_json::Value {
+    let (status, reason) = match outcome {
+        crate::commands::code_approvals::NotifyOutcome::Sent => ("sent", None),
+        crate::commands::code_approvals::NotifyOutcome::Skipped(reason) => {
+            ("skipped", Some(reason.as_str()))
+        }
+    };
+    json!({
+        "event": "Notification",
+        "cwd": cwd,
+        "title": title,
+        "body": body,
+        "message": body,
+        "status": status,
+        "outcome": status,
+        "reason": reason,
+    })
 }
 
 fn lifecycle_payload(cwd: &std::path::Path, cfg: &Config, event_name: &str) -> serde_json::Value {

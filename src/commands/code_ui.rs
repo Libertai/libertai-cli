@@ -4943,6 +4943,7 @@ fn format_hook_event_breakdown(cfg: &LibertaiConfig) -> String {
         ("SessionStart", count_runnable_hooks(&cfg.hooks.session_start)),
         ("Stop", count_runnable_hooks(&cfg.hooks.stop)),
         ("SessionEnd", count_runnable_hooks(&cfg.hooks.session_end)),
+        ("Notification", count_runnable_hooks(&cfg.hooks.notification)),
     ];
     let total: usize = rows.iter().map(|(_, count)| *count).sum();
     let events = rows
@@ -5231,12 +5232,14 @@ fn print_config_status(cfg: &LibertaiConfig) {
     let session_start_hooks = count_runnable_hooks(&cfg.hooks.session_start);
     let stop_hooks = count_runnable_hooks(&cfg.hooks.stop);
     let session_end_hooks = count_runnable_hooks(&cfg.hooks.session_end);
+    let notification_hooks = count_runnable_hooks(&cfg.hooks.notification);
     println!(
         "{DIM}  hooks:{RESET} {user_prompt_hooks} UserPromptSubmit, \
          {pre_tool_hooks} PreToolUse, {post_tool_hooks} PostToolUse, \
          {subagent_stop_hooks} SubagentStop, \
          {session_start_hooks} SessionStart, {stop_hooks} Stop, \
-         {session_end_hooks} SessionEnd hook(s)"
+         {session_end_hooks} SessionEnd, \
+         {notification_hooks} Notification hook(s)"
     );
     match cfg.auth.api_key.as_deref() {
         Some(key) => println!("{DIM}  auth:{RESET} {}", mask_key(key)),
@@ -5257,6 +5260,7 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     print_hook_section("SessionStart", &cfg.hooks.session_start);
     print_hook_section("Stop", &cfg.hooks.stop);
     print_hook_section("SessionEnd", &cfg.hooks.session_end);
+    print_hook_section("Notification", &cfg.hooks.notification);
     println!(
         "{DIM}  UserPromptSubmit hooks run before the prompt reaches the agent and may block it.{RESET}"
     );
@@ -5267,8 +5271,9 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
         "{DIM}  PostToolUse hooks run after tool execution and cannot alter the result.{RESET}"
     );
     println!("{DIM}  SubagentStop hooks run after task-tool subagents finish.{RESET}");
+    println!("{DIM}  Notification hooks run after agent-requested push notifications.{RESET}");
     println!("{DIM}  lifecycle hooks warn on nonzero exit and do not block the session.{RESET}");
-    println!("{DIM}  command and HTTP hook handlers are executed natively; prompt, agent, and MCP-tool handlers are not.{RESET}");
+    println!("{DIM}  command, HTTP, prompt, and agent hook handlers are executed natively; MCP-tool handlers are not.{RESET}");
     println!();
 }
 
@@ -6306,14 +6311,19 @@ mod tests {
             command: "   ".to_string(),
             ..Default::default()
         });
+        cfg.hooks.notification.push(crate::config::HookCommandConfig {
+            command: "scripts/notify.sh".to_string(),
+            ..Default::default()
+        });
 
         let breakdown = format_hook_event_breakdown(&cfg);
-        assert!(breakdown.contains("4 runnable hook(s)"));
+        assert!(breakdown.contains("5 runnable hook(s)"));
         assert!(breakdown.contains("UserPromptSubmit 1"));
         assert!(breakdown.contains("PreToolUse 2"));
         assert!(breakdown.contains("PostToolUse 1"));
         assert!(breakdown.contains("SubagentStop 0"));
         assert!(breakdown.contains("Stop 0"));
+        assert!(breakdown.contains("Notification 1"));
     }
 
     #[test]

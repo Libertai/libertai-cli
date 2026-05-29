@@ -319,7 +319,10 @@ impl ToolFactory for LibertaiToolFactory {
         }
 
         if self.features.notifications {
-            wrapped.push(Box::new(PushNotificationTool::new(Arc::clone(&self.ui))));
+            wrapped.push(Box::new(
+                PushNotificationTool::new(Arc::clone(&self.ui))
+                    .with_config(self.libertai_cfg.clone()),
+            ));
         }
 
         //    - `notebook_read` / `notebook_edit` / `notebook_execute`:
