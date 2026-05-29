@@ -491,12 +491,12 @@ Shipped: `pi_agent_rust` SDK sessions accept per-session compaction
 overrides; `libertai-cli` stores shared code compaction settings and
 threads them into one-shot, REPL, and Task subagent sessions; desktop
 Advanced settings mirrors those fields and native sessions inherit them.
+The compaction summary injected into model context is now framed as
+reference-only background, with the recent conversation called out as
+the authoritative active task.
 
-Remaining optional polish: decide whether to override pi's compaction
-summary prefix with Hermes-style "reference only / active task" framing.
-
-**Files**: `pi_agent_rust/src/session.rs` (prefix, optional),
-`src/commands/code_session.rs` (settings, shipped).
+**Files**: `pi_agent_rust/src/session.rs`,
+`src/commands/code_session.rs`.
 
 ### 4D. Named sub-agent registry
 
