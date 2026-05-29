@@ -27,6 +27,41 @@ pub(crate) fn approval_diff_preview_with_cwd(
     }
 }
 
+pub(crate) struct FileSnapshot {
+    path: String,
+    resolved: PathBuf,
+    before: Option<String>,
+}
+
+pub(crate) fn file_snapshot_before_tool(
+    tool: &str,
+    input: &Value,
+    cwd: &Path,
+) -> Option<FileSnapshot> {
+    if !matches!(tool, "edit" | "write" | "hashline_edit") {
+        return None;
+    }
+    let path = input.get("path").and_then(Value::as_str)?;
+    let resolved = resolve_under_cwd(path, cwd)?;
+    Some(FileSnapshot {
+        path: path.to_string(),
+        before: read_preview_file(&resolved),
+        resolved,
+    })
+}
+
+pub(crate) fn post_execution_diff(snapshot: &FileSnapshot) -> Option<String> {
+    let after = read_preview_file(&snapshot.resolved);
+    match (&snapshot.before, after) {
+        (Some(before), Some(after)) if before != &after => {
+            Some(render_line_diff(&snapshot.path, before, &after))
+        }
+        (None, Some(after)) => Some(render_new_file_diff(&snapshot.path, &after)),
+        (Some(before), None) => Some(render_deleted_file_diff(&snapshot.path, before)),
+        _ => None,
+    }
+}
+
 fn edit_diff(input: &Value) -> Option<String> {
     let old_text = input.get("oldText").and_then(Value::as_str)?;
     let new_text = input.get("newText").and_then(Value::as_str)?;
@@ -124,6 +159,22 @@ fn render_line_diff(path: &str, before: &str, after: &str) -> String {
     let context_end = (before_lines.len() - suffix + 3).min(before_lines.len());
     for line in &before_lines[before_lines.len() - suffix..context_end] {
         lines.push(format!(" {line}"));
+    }
+    cap_lines(lines)
+}
+
+fn render_new_file_diff(path: &str, content: &str) -> String {
+    let mut lines = vec!["--- /dev/null".to_string(), format!("+++ {path}")];
+    for line in content.lines() {
+        lines.push(format!("+{line}"));
+    }
+    cap_lines(lines)
+}
+
+fn render_deleted_file_diff(path: &str, content: &str) -> String {
+    let mut lines = vec![format!("--- {path}"), "+++ /dev/null".to_string()];
+    for line in content.lines() {
+        lines.push(format!("-{line}"));
     }
     cap_lines(lines)
 }
@@ -291,5 +342,33 @@ mod tests {
         let preview = approval_diff_preview("write", &json!({"content": content})).unwrap();
         assert!(preview.contains("lines omitted"));
         assert!(preview.lines().count() <= MAX_DIFF_LINES + 1);
+    }
+
+    #[test]
+    fn post_execution_diff_compares_snapshot_to_final_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("notes.txt");
+        std::fs::write(&path, "alpha\nbeta\n").unwrap();
+        let snapshot = file_snapshot_before_tool("write", &json!({"path":"notes.txt"}), temp.path())
+            .unwrap();
+
+        std::fs::write(&path, "alpha\ngamma\n").unwrap();
+        let diff = post_execution_diff(&snapshot).unwrap();
+
+        assert!(diff.contains("--- notes.txt"));
+        assert!(diff.contains("-beta"));
+        assert!(diff.contains("+gamma"));
+    }
+
+    #[test]
+    fn post_execution_diff_renders_new_file_from_missing_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let snapshot = file_snapshot_before_tool("write", &json!({"path":"new.txt"}), temp.path())
+            .unwrap();
+
+        std::fs::write(temp.path().join("new.txt"), "hello\n").unwrap();
+        let diff = post_execution_diff(&snapshot).unwrap();
+
+        assert_eq!(diff, "--- /dev/null\n+++ new.txt\n+hello");
     }
 }

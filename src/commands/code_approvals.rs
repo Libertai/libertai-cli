@@ -608,6 +608,19 @@ impl ApprovalTool {
         self.policy = policy;
         self
     }
+
+    async fn execute_inner(
+        &self,
+        tool_call_id: &str,
+        input: serde_json::Value,
+        on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+    ) -> PiResult<ToolExecution> {
+        let snapshot = std::env::current_dir().ok().and_then(|cwd| {
+            crate::commands::code_diff::file_snapshot_before_tool(self.inner.name(), &input, &cwd)
+        });
+        let result = self.inner.execute(tool_call_id, input, on_update).await;
+        with_post_execution_diff(result, snapshot.as_ref())
+    }
 }
 
 #[async_trait]
@@ -664,8 +677,7 @@ impl Tool for ApprovalTool {
         // `acceptEdits` permission tier.
         if matches!(self.mode.get(), Mode::AcceptEdits) && is_path_edit_tool(name) {
             return with_policy_context(
-                self.inner
-                    .execute(tool_call_id, effective_input, on_update)
+                self.execute_inner(tool_call_id, effective_input, on_update)
                     .await,
                 &policy_decision,
             );
@@ -675,16 +687,14 @@ impl Tool for ApprovalTool {
             && self.state.is_pre_allowed(name, &subject.value)
         {
             return with_policy_context(
-                self.inner
-                    .execute(tool_call_id, effective_input, on_update)
+                self.execute_inner(tool_call_id, effective_input, on_update)
                     .await,
                 &policy_decision,
             );
         }
         if matches!(policy_decision, ToolPolicyDecision::Allow { .. }) {
             return with_policy_context(
-                self.inner
-                    .execute(tool_call_id, effective_input, on_update)
+                self.execute_inner(tool_call_id, effective_input, on_update)
                     .await,
                 &policy_decision,
             );
@@ -705,8 +715,7 @@ impl Tool for ApprovalTool {
         match self.ui.decide(name, &preview, &always_label).await {
             PromptChoice::Allow => {
                 with_policy_context(
-                    self.inner
-                        .execute(tool_call_id, effective_input, on_update)
+                    self.execute_inner(tool_call_id, effective_input, on_update)
                         .await,
                     &policy_decision,
                 )
@@ -714,8 +723,7 @@ impl Tool for ApprovalTool {
             PromptChoice::AlwaysAllow => {
                 self.state.record_always(subject.suggested_rule);
                 with_policy_context(
-                    self.inner
-                        .execute(tool_call_id, effective_input, on_update)
+                    self.execute_inner(tool_call_id, effective_input, on_update)
                         .await,
                     &policy_decision,
                 )
@@ -738,11 +746,11 @@ impl Tool for ApprovalTool {
         // We need tool_input to re-run the inner tool on Allow.
         let (ui_payload, tool_input) = unwrap_paused_approval(payload);
         match self.ui.resume_decide(request_id, ui_payload).await {
-            PromptChoice::Allow => self.inner.execute(tool_call_id, tool_input, None).await,
+            PromptChoice::Allow => self.execute_inner(tool_call_id, tool_input, None).await,
             PromptChoice::AlwaysAllow => {
                 let subject = approval_subject(self.inner.name(), &tool_input);
                 self.state.record_always(subject.suggested_rule);
-                self.inner.execute(tool_call_id, tool_input, None).await
+                self.execute_inner(tool_call_id, tool_input, None).await
             }
             PromptChoice::Deny => Ok(denial_output(None).into()),
             PromptChoice::Paused {
@@ -785,6 +793,27 @@ fn with_policy_context(
             ToolExecution::Done(output)
         }
         paused => paused,
+    })
+}
+
+fn with_post_execution_diff(
+    result: PiResult<ToolExecution>,
+    snapshot: Option<&crate::commands::code_diff::FileSnapshot>,
+) -> PiResult<ToolExecution> {
+    let Some(snapshot) = snapshot else {
+        return result;
+    };
+    let Some(diff) = crate::commands::code_diff::post_execution_diff(snapshot) else {
+        return result;
+    };
+    result.map(|execution| match execution {
+        ToolExecution::Done(mut output) if !output.is_error => {
+            output.content.push(ContentBlock::Text(TextContent::new(format!(
+                "Filesystem delta after execution:\n{diff}"
+            ))));
+            ToolExecution::Done(output)
+        }
+        other => other,
     })
 }
 
@@ -1132,6 +1161,43 @@ mod tests {
             .join("\n");
         assert!(text.contains("ok"));
         assert!(text.contains("remember to cite files"));
+    }
+
+    #[test]
+    fn post_execution_diff_appends_to_successful_tool_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("notes.txt");
+        std::fs::write(&path, "before\n").unwrap();
+        let snapshot = crate::commands::code_diff::file_snapshot_before_tool(
+            "write",
+            &serde_json::json!({"path":"notes.txt"}),
+            temp.path(),
+        )
+        .unwrap();
+        std::fs::write(&path, "after\n").unwrap();
+        let output = ToolOutput {
+            content: vec![ContentBlock::Text(TextContent::new("ok"))],
+            details: None,
+            is_error: false,
+        };
+
+        let wrapped = with_post_execution_diff(Ok(output.into()), Some(&snapshot)).unwrap();
+        let ToolExecution::Done(output) = wrapped else {
+            panic!("expected done output");
+        };
+        let text = output
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Filesystem delta after execution"));
+        assert!(text.contains("-before"));
+        assert!(text.contains("+after"));
     }
 
     #[test]
