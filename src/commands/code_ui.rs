@@ -1188,6 +1188,10 @@ async fn repl_loop(
             reply_to_pr_comment_thread(rest);
             continue;
         }
+        if let Some(rest) = pr_comments_edit_arg(trimmed) {
+            edit_pr_comment(rest);
+            continue;
+        }
         if let Some((command, rest)) = image_command_arg(trimmed) {
             match build_image_prompt_content(rest, output_style.as_deref()) {
                 Ok(content) => {
@@ -1924,6 +1928,9 @@ fn print_help() {
     println!("{DIM}  /pr_comments [scope] — ask the agent to inspect PR review comments{RESET}");
     println!(
         "{DIM}  /pr_comments reply <thread_id> <body> — reply to a GitHub PR review thread{RESET}"
+    );
+    println!(
+        "{DIM}  /pr_comments edit <comment_id> <body> — edit a GitHub PR review comment{RESET}"
     );
     println!("{DIM}  /sandbox [info|reload] — inspect the bash sandbox profile{RESET}");
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
@@ -3654,6 +3661,15 @@ fn pr_comments_reply_arg(trimmed: &str) -> Option<&str> {
     None
 }
 
+fn pr_comments_edit_arg(trimmed: &str) -> Option<&str> {
+    for prefix in ["/pr_comments edit ", "/pr-comments edit "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
 fn parse_pr_comments_reply(input: &str) -> Result<(&str, &str)> {
     let raw = input.trim();
     let Some((thread_id, body)) = raw.split_once(char::is_whitespace) else {
@@ -3665,6 +3681,19 @@ fn parse_pr_comments_reply(input: &str) -> Result<(&str, &str)> {
         anyhow::bail!("usage: /pr_comments reply <thread_id> <body>");
     }
     Ok((thread_id, body))
+}
+
+fn parse_pr_comments_edit(input: &str) -> Result<(&str, &str)> {
+    let raw = input.trim();
+    let Some((comment_id, body)) = raw.split_once(char::is_whitespace) else {
+        anyhow::bail!("usage: /pr_comments edit <comment_id> <body>");
+    };
+    let comment_id = comment_id.trim();
+    let body = body.trim();
+    if comment_id.is_empty() || body.is_empty() {
+        anyhow::bail!("usage: /pr_comments edit <comment_id> <body>");
+    }
+    Ok((comment_id, body))
 }
 
 fn reply_to_pr_comment_thread(input: &str) {
@@ -3700,6 +3729,41 @@ fn reply_to_pr_comment_thread(input: &str) {
         })
         .unwrap_or("unknown error");
     eprintln!("{DIM}  /pr_comments: reply failed: {detail}{RESET}");
+}
+
+fn edit_pr_comment(input: &str) {
+    let (comment_id, body) = match parse_pr_comments_edit(input) {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!("{DIM}  /pr_comments: {e:#}{RESET}");
+            return;
+        }
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /pr_comments: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let capture = crate::commands::code_pr_comments::edit_review_comment(&cwd, comment_id, body);
+    if capture.error.is_none() && capture.status == Some(0) {
+        println!("{DIM}  edited review comment: {comment_id}{RESET}");
+        return;
+    }
+    let detail = capture
+        .error
+        .as_deref()
+        .or_else(|| {
+            let stderr = capture.stderr.trim();
+            (!stderr.is_empty()).then_some(stderr)
+        })
+        .or_else(|| {
+            let stdout = capture.stdout.trim();
+            (!stdout.is_empty()).then_some(stdout)
+        })
+        .unwrap_or("unknown error");
+    eprintln!("{DIM}  /pr_comments: edit failed: {detail}{RESET}");
 }
 
 fn parse_direct_custom_slash(trimmed: &str) -> Option<(&str, &str)> {
@@ -6191,6 +6255,19 @@ mod tests {
             ("PRRT_1", "Fixed in the next commit.")
         );
         assert!(parse_pr_comments_reply("PRRT_1").is_err());
+    }
+
+    #[test]
+    fn parse_pr_comments_edit_requires_comment_and_body() {
+        assert_eq!(
+            pr_comments_edit_arg("/pr_comments edit PRRC_1 Reworded comment."),
+            Some("PRRC_1 Reworded comment.")
+        );
+        assert_eq!(
+            parse_pr_comments_edit("PRRC_1 Reworded comment.").unwrap(),
+            ("PRRC_1", "Reworded comment.")
+        );
+        assert!(parse_pr_comments_edit("PRRC_1").is_err());
     }
 
     #[test]

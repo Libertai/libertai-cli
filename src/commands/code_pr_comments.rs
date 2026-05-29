@@ -132,6 +132,40 @@ pub fn reply_review_thread(cwd: &Path, thread_id: &str, body: &str) -> CommandCa
     run_gh(cwd, &args)
 }
 
+pub fn edit_review_comment(cwd: &Path, comment_id: &str, body: &str) -> CommandCapture {
+    let comment_id = comment_id.trim();
+    let body = body.trim();
+    if comment_id.is_empty() {
+        return CommandCapture {
+            command: "gh api graphql".to_string(),
+            status: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("review comment id is required".to_string()),
+        };
+    }
+    if body.is_empty() {
+        return CommandCapture {
+            command: "gh api graphql".to_string(),
+            status: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("review comment body is required".to_string()),
+        };
+    }
+    let args = vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        "query=mutation($commentId:ID!,$body:String!){updatePullRequestReviewComment(input:{pullRequestReviewCommentId:$commentId,body:$body}){pullRequestReviewComment{id body url}}}".to_string(),
+        "-f".to_string(),
+        format!("commentId={comment_id}"),
+        "-f".to_string(),
+        format!("body={body}"),
+    ];
+    run_gh(cwd, &args)
+}
+
 fn pr_selector(scope: &str) -> Option<String> {
     let trimmed = scope.trim();
     if trimmed.is_empty() {
@@ -399,6 +433,17 @@ mod tests {
         assert_eq!(
             capture.error.as_deref(),
             Some("review thread reply body is required")
+        );
+    }
+
+    #[test]
+    fn edit_review_comment_validates_required_fields() {
+        let capture = edit_review_comment(Path::new("."), "", "updated");
+        assert_eq!(capture.error.as_deref(), Some("review comment id is required"));
+        let capture = edit_review_comment(Path::new("."), "PRRC_1", "");
+        assert_eq!(
+            capture.error.as_deref(),
+            Some("review comment body is required")
         );
     }
 }
