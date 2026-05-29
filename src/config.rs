@@ -235,6 +235,7 @@ pub struct HookCommandConfig {
     pub enabled: bool,
     #[serde(
         default,
+        alias = "matchers",
         deserialize_with = "deserialize_matcher",
         skip_serializing_if = "String::is_empty"
     )]
@@ -309,7 +310,7 @@ impl<'de> Deserialize<'de> for HookCommandConfig {
         struct RawHookCommandConfig {
             #[serde(default = "default_hook_enabled")]
             enabled: bool,
-            #[serde(default, deserialize_with = "deserialize_matcher")]
+            #[serde(default, alias = "matchers", deserialize_with = "deserialize_matcher")]
             matcher: String,
             #[serde(default, rename = "if")]
             if_condition: String,

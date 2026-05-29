@@ -203,6 +203,23 @@ command = "scripts/pre-tool-use.sh"
 }
 
 #[test]
+fn hook_matchers_alias_deserializes_to_matcher() {
+    let cfg: Config = toml::from_str(
+        r#"
+[[hooks.PreToolUse]]
+matchers = ["bash", "write"]
+command = "scripts/pre-tool-use.sh"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(cfg.hooks.pre_tool_use[0].matcher, "bash|write");
+    let rendered = toml::to_string_pretty(&cfg).unwrap();
+    assert!(rendered.contains(r#"matcher = "bash|write""#));
+    assert!(!rendered.contains("matchers"));
+}
+
+#[test]
 fn hook_command_array_deserializes_to_command_and_args() {
     let cfg: Config = toml::from_str(
         r#"
