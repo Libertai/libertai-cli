@@ -54,7 +54,7 @@ pub fn run_user_prompt_submit_hooks(cfg: &Config, prompt: &str) -> anyhow::Resul
             continue;
         }
         let run = run_shell_hook(hook, &cwd, &payload, "UserPromptSubmit");
-        if run.status != 0 {
+        if run.status != 0 && !hook.continue_on_block {
             let detail = first_non_empty(&run.stderr, &run.stdout)
                 .unwrap_or_else(|| format!("hook exited with status {}", run.status));
             anyhow::bail!(
@@ -822,6 +822,24 @@ mod tests {
         let err = run_user_prompt_submit_hooks(&cfg, "review this").unwrap_err();
         assert!(err.to_string().contains("blocked the prompt"));
         assert!(err.to_string().contains("blocked"));
+    }
+
+    #[test]
+    fn user_prompt_hook_continue_on_block_keeps_prompt() {
+        let cfg = Config {
+            hooks: HooksConfig {
+                user_prompt_submit: vec![HookCommandConfig {
+                    command: "printf 'blocked'; exit 2".to_string(),
+                    continue_on_block: true,
+                    ..HookCommandConfig::default()
+                }],
+                ..HooksConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let prompt = run_user_prompt_submit_hooks(&cfg, "review this").unwrap();
+        assert_eq!(prompt, "review this");
     }
 
     #[test]

@@ -4405,13 +4405,18 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
             format!(", shell={}", hook.shell.trim())
         };
         let async_flag = if hook.async_hook { ", async" } else { "" };
+        let continue_on_block = if hook.continue_on_block {
+            ", continueOnBlock"
+        } else {
+            ""
+        };
         let command = if hook.command.trim().is_empty() {
             "(no command)"
         } else {
             hook.command.trim()
         };
         println!(
-            "{DIM}  {}. {} [{}] matcher={}{}{}{}:{RESET} {}",
+            "{DIM}  {}. {} [{}] matcher={}{}{}{}{}:{RESET} {}",
             idx + 1,
             event,
             marker,
@@ -4419,6 +4424,7 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
             timeout,
             shell,
             async_flag,
+            continue_on_block,
             command
         );
     }

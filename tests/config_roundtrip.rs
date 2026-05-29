@@ -40,6 +40,7 @@ fn save_then_load_preserves_fields() {
             user_prompt_submit: vec![HookCommandConfig {
                 command: "scripts/user-prompt-submit.sh".into(),
                 timeout: Some(2),
+                continue_on_block: true,
                 ..HookCommandConfig::default()
             }],
             pre_tool_use: vec![HookCommandConfig {
@@ -89,6 +90,7 @@ fn save_then_load_preserves_fields() {
         "scripts/user-prompt-submit.sh"
     );
     assert_eq!(round.hooks.user_prompt_submit[0].timeout, Some(2));
+    assert!(round.hooks.user_prompt_submit[0].continue_on_block);
     assert_eq!(round.hooks.pre_tool_use.len(), 1);
     assert_eq!(round.hooks.pre_tool_use[0].matcher, "bash|write");
     assert_eq!(round.hooks.pre_tool_use[0].command, "scripts/pre-tool-use.sh");

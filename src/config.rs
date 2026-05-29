@@ -241,6 +241,12 @@ pub struct HookCommandConfig {
         skip_serializing_if = "is_false"
     )]
     pub async_hook: bool,
+    #[serde(
+        default,
+        rename = "continueOnBlock",
+        skip_serializing_if = "is_false"
+    )]
+    pub continue_on_block: bool,
 }
 
 impl Default for HookCommandConfig {
@@ -252,6 +258,7 @@ impl Default for HookCommandConfig {
             shell: String::new(),
             timeout: None,
             async_hook: false,
+            continue_on_block: false,
         }
     }
 }
