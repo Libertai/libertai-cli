@@ -261,28 +261,52 @@ pub fn run_post_tool_hooks(cfg: &Config, event: &AgentEvent) {
         return;
     };
 
-    if !cfg.hooks.post_tool_use.iter().any(is_runnable_hook) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let base_payload = tool_completion_payload(&cwd, tool_call_id, tool_name, result, *is_error);
+    run_tool_completion_hooks(
+        "PostToolUse",
+        &cfg.hooks.post_tool_use,
+        &cwd,
+        tool_name,
+        &payload_with_event(&base_payload, "PostToolUse"),
+    );
+    if tool_name == "task" {
+        run_tool_completion_hooks(
+            "SubagentStop",
+            &cfg.hooks.subagent_stop,
+            &cwd,
+            tool_name,
+            &payload_with_event(&base_payload, "SubagentStop"),
+        );
+    }
+}
+
+fn run_tool_completion_hooks(
+    event_name: &str,
+    hooks: &[HookCommandConfig],
+    cwd: &std::path::Path,
+    tool_name: &str,
+    payload: &serde_json::Value,
+) {
+    if !hooks.iter().any(is_runnable_hook) {
         return;
     }
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let payload = post_tool_payload(&cwd, tool_call_id, tool_name, result, *is_error);
-
-    for hook in &cfg.hooks.post_tool_use {
+    for hook in hooks {
         if !is_runnable_hook(hook) || !hook_matches_tool(hook, tool_name) {
             continue;
         }
         if hook.async_hook {
-            spawn_async_hook(hook, &cwd, &payload, "PostToolUse");
+            spawn_async_hook(hook, cwd, payload, event_name);
             continue;
         }
-        let run = run_shell_hook(hook, &cwd, &payload, "PostToolUse");
+        let run = run_shell_hook(hook, cwd, payload, event_name);
         if run.status != 0 {
             let detail = first_non_empty(&run.stderr, &run.stdout).unwrap_or_else(|| {
                 format!("hook exited with status {}", run.status)
             });
             eprintln!(
-                "  \x1b[2m[hook PostToolUse] {}: {}\x1b[0m",
+                "  \x1b[2m[hook {event_name}] {}: {}\x1b[0m",
                 hook.command.trim(),
                 detail
             );
@@ -290,7 +314,7 @@ pub fn run_post_tool_hooks(cfg: &Config, event: &AgentEvent) {
     }
 }
 
-fn post_tool_payload(
+fn tool_completion_payload(
     cwd: &std::path::Path,
     tool_call_id: &str,
     tool_name: &str,
@@ -298,7 +322,6 @@ fn post_tool_payload(
     is_error: bool,
 ) -> serde_json::Value {
     json!({
-        "event": "PostToolUse",
         "cwd": cwd,
         "toolCallId": tool_call_id,
         "toolName": tool_name,
@@ -309,6 +332,14 @@ fn post_tool_payload(
         "tool_response": result,
         "is_error": is_error,
     })
+}
+
+fn payload_with_event(base: &serde_json::Value, event_name: &str) -> serde_json::Value {
+    let mut payload = base.clone();
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("event".to_string(), json!(event_name));
+    }
+    payload
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -761,6 +792,59 @@ mod tests {
     }
 
     #[test]
+    fn subagent_stop_hook_receives_task_payload_and_event_env() {
+        let cwd = tempfile::tempdir().unwrap();
+        let hook = HookCommandConfig {
+            matcher: "task".to_string(),
+            command: "printf '%s|' \"$LIBERTAI_HOOK_EVENT\"; cat".to_string(),
+            ..HookCommandConfig::default()
+        };
+        let output = ToolOutput {
+            content: Vec::new(),
+            details: None,
+            is_error: false,
+        };
+        let payload = payload_with_event(
+            &tool_completion_payload(cwd.path(), "toolu_1", "task", &output, false),
+            "SubagentStop",
+        );
+
+        let run = run_shell_hook(&hook, cwd.path(), &payload, "SubagentStop");
+        assert_eq!(run.status, 0);
+        assert!(run.stdout.starts_with("SubagentStop|"));
+        assert!(run.stdout.contains("\"event\":\"SubagentStop\""));
+        assert!(run.stdout.contains("\"toolName\":\"task\""));
+    }
+
+    #[test]
+    fn subagent_stop_hooks_reuse_tool_matchers() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut hooks = vec![
+            HookCommandConfig {
+                matcher: "read".to_string(),
+                command: "printf bad > ran.txt".to_string(),
+                ..HookCommandConfig::default()
+            },
+            HookCommandConfig {
+                matcher: "task".to_string(),
+                command: "printf ok > ran.txt".to_string(),
+                ..HookCommandConfig::default()
+            },
+        ];
+        let payload = json!({"event": "SubagentStop", "toolName": "task"});
+        run_tool_completion_hooks("SubagentStop", &hooks, cwd.path(), "task", &payload);
+        assert_eq!(
+            std::fs::read_to_string(cwd.path().join("ran.txt")).unwrap(),
+            "ok"
+        );
+
+        hooks[1].enabled = false;
+        std::fs::remove_file(cwd.path().join("ran.txt")).unwrap();
+        run_tool_completion_hooks("SubagentStop", &hooks, cwd.path(), "task", &payload);
+        assert!(!cwd.path().join("ran.txt").exists());
+    }
+
+    #[test]
     fn config_policy_denies_from_matching_hook() {
         let cfg = Arc::new(Config {
             hooks: HooksConfig {
@@ -860,18 +944,21 @@ mod tests {
     }
 
     #[test]
-    fn post_tool_payload_includes_compatibility_fields() {
+    fn tool_completion_payload_includes_compatibility_fields() {
         let result = ToolOutput {
             content: Vec::new(),
             details: Some(json!({"ok": true})),
             is_error: false,
         };
-        let payload = post_tool_payload(
-            std::path::Path::new("/tmp/project"),
-            "call-1",
-            "bash",
-            &result,
-            false,
+        let payload = payload_with_event(
+            &tool_completion_payload(
+                std::path::Path::new("/tmp/project"),
+                "call-1",
+                "bash",
+                &result,
+                false,
+            ),
+            "PostToolUse",
         );
 
         assert_eq!(payload["event"], "PostToolUse");

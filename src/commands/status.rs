@@ -80,6 +80,15 @@ pub fn run() -> Result<()> {
     );
     println!(
         "  {:<22} {}",
+        "SubagentStop hooks:".dimmed(),
+        cfg.hooks
+            .subagent_stop
+            .iter()
+            .filter(|hook| hook.enabled && !hook.command.trim().is_empty())
+            .count()
+    );
+    println!(
+        "  {:<22} {}",
         "SessionStart hooks:".dimmed(),
         runnable_hook_count(&cfg.hooks.session_start)
     );

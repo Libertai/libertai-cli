@@ -575,7 +575,8 @@ direct `/<name> [args]` dispatch with `{{args}}` substitution.
 
 First CLI slices shipped: `~/.config/libertai/config.toml` accepts
 `[[hooks.UserPromptSubmit]]`, `[[hooks.PreToolUse]]`, and
-`[[hooks.PostToolUse]]`, plus lifecycle `[[hooks.SessionStart]]`,
+`[[hooks.PostToolUse]]`, native task-tool `[[hooks.SubagentStop]]`,
+plus lifecycle `[[hooks.SessionStart]]`,
 `[[hooks.Stop]]`, and `[[hooks.SessionEnd]]` command rows. Matching hooks
 receive Claude-style JSON payloads on stdin. `UserPromptSubmit` hooks run
 before the prompt reaches the agent, can block on nonzero exit, and can
@@ -583,7 +584,8 @@ append `additionalContext`; rows with `continueOnBlock = true` report
 nonzero exits without blocking the prompt. `PreToolUse` stdout JSON can
 `allow`, `ask`, `defer`, `deny`, rewrite `updatedInput`, or attach
 `additionalContext` through the existing approval-policy path.
-`PostToolUse` hooks run after tool execution and cannot alter the result. Lifecycle hooks run around
+`PostToolUse` hooks run after tool execution and cannot alter the result; `SubagentStop` hooks run
+after native `task` tool subagents finish. Lifecycle hooks run around
 native CLI sessions/turn stops and warn on nonzero exit. Tool hook matchers
 support case-sensitive exact names, `*` globs, `|` alternatives,
 `regex:<pattern>`, and slash-delimited regex patterns that can contain

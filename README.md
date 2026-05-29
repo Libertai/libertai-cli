@@ -109,6 +109,10 @@ command = "scripts/post-tool-use.sh"
 timeout = 5
 async = true
 
+[[hooks.SubagentStop]]
+matcher = "task"
+command = "scripts/subagent-stop.sh"
+
 [[hooks.SessionStart]]
 command = "scripts/session-start.sh"
 
@@ -123,12 +127,13 @@ api_key = "LTAI_..."
 # wallet_address / chain are only written when you log in via wallet.
 ```
 
-`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SessionStart`, `Stop`,
-and `SessionEnd` hooks are command-only in the native CLI. They receive a
-JSON payload on stdin. `UserPromptSubmit` hooks run before the prompt
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStop`,
+`SessionStart`, `Stop`, and `SessionEnd` hooks are command-only in the
+native CLI. They receive a JSON payload on stdin. `UserPromptSubmit` hooks run before the prompt
 reaches the agent and may add `additionalContext` or block on nonzero exit.
 `PreToolUse` hooks may print Claude-style JSON such as
 `{"permissionDecision":"deny","permissionDecisionReason":"no writes"}`.
+`SubagentStop` hooks run after native `task` tool subagents finish.
 Tool hook `matcher` values support case-sensitive exact names, `*` globs,
 `|` alternatives, `regex:<pattern>`, and slash-delimited regex patterns
 such as `/^(bash|write)$/`.

@@ -203,6 +203,8 @@ pub struct HooksConfig {
     pub pre_tool_use: Vec<HookCommandConfig>,
     #[serde(default, rename = "PostToolUse", skip_serializing_if = "Vec::is_empty")]
     pub post_tool_use: Vec<HookCommandConfig>,
+    #[serde(default, rename = "SubagentStop", skip_serializing_if = "Vec::is_empty")]
+    pub subagent_stop: Vec<HookCommandConfig>,
     #[serde(default, rename = "SessionStart", skip_serializing_if = "Vec::is_empty")]
     pub session_start: Vec<HookCommandConfig>,
     #[serde(default, rename = "Stop", skip_serializing_if = "Vec::is_empty")]
@@ -216,6 +218,7 @@ impl HooksConfig {
         self.user_prompt_submit.is_empty()
             && self.pre_tool_use.is_empty()
             && self.post_tool_use.is_empty()
+            && self.subagent_stop.is_empty()
             && self.session_start.is_empty()
             && self.stop.is_empty()
             && self.session_end.is_empty()

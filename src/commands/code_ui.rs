@@ -4099,6 +4099,7 @@ fn format_hook_event_breakdown(cfg: &LibertaiConfig) -> String {
         ("UserPromptSubmit", count_runnable_hooks(&cfg.hooks.user_prompt_submit)),
         ("PreToolUse", count_runnable_hooks(&cfg.hooks.pre_tool_use)),
         ("PostToolUse", count_runnable_hooks(&cfg.hooks.post_tool_use)),
+        ("SubagentStop", count_runnable_hooks(&cfg.hooks.subagent_stop)),
         ("SessionStart", count_runnable_hooks(&cfg.hooks.session_start)),
         ("Stop", count_runnable_hooks(&cfg.hooks.stop)),
         ("SessionEnd", count_runnable_hooks(&cfg.hooks.session_end)),
@@ -4335,12 +4336,14 @@ fn print_config_status(cfg: &LibertaiConfig) {
     let user_prompt_hooks = count_runnable_hooks(&cfg.hooks.user_prompt_submit);
     let pre_tool_hooks = count_runnable_hooks(&cfg.hooks.pre_tool_use);
     let post_tool_hooks = count_runnable_hooks(&cfg.hooks.post_tool_use);
+    let subagent_stop_hooks = count_runnable_hooks(&cfg.hooks.subagent_stop);
     let session_start_hooks = count_runnable_hooks(&cfg.hooks.session_start);
     let stop_hooks = count_runnable_hooks(&cfg.hooks.stop);
     let session_end_hooks = count_runnable_hooks(&cfg.hooks.session_end);
     println!(
         "{DIM}  hooks:{RESET} {user_prompt_hooks} UserPromptSubmit, \
          {pre_tool_hooks} PreToolUse, {post_tool_hooks} PostToolUse, \
+         {subagent_stop_hooks} SubagentStop, \
          {session_start_hooks} SessionStart, {stop_hooks} Stop, \
          {session_end_hooks} SessionEnd command hook(s)"
     );
@@ -4359,6 +4362,7 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     print_hook_section("UserPromptSubmit", &cfg.hooks.user_prompt_submit);
     print_hook_section("PreToolUse", &cfg.hooks.pre_tool_use);
     print_hook_section("PostToolUse", &cfg.hooks.post_tool_use);
+    print_hook_section("SubagentStop", &cfg.hooks.subagent_stop);
     print_hook_section("SessionStart", &cfg.hooks.session_start);
     print_hook_section("Stop", &cfg.hooks.stop);
     print_hook_section("SessionEnd", &cfg.hooks.session_end);
@@ -4371,6 +4375,7 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     println!(
         "{DIM}  PostToolUse hooks run after tool execution and cannot alter the result.{RESET}"
     );
+    println!("{DIM}  SubagentStop hooks run after task-tool subagents finish.{RESET}");
     println!("{DIM}  lifecycle hooks warn on nonzero exit and do not block the session.{RESET}");
     println!("{DIM}  non-command hook handlers are not executed natively.{RESET}");
     println!();
@@ -5351,6 +5356,7 @@ mod tests {
         assert!(breakdown.contains("2 runnable command hook(s)"));
         assert!(breakdown.contains("UserPromptSubmit 1"));
         assert!(breakdown.contains("PreToolUse 1"));
+        assert!(breakdown.contains("SubagentStop 0"));
         assert!(breakdown.contains("Stop 0"));
     }
 

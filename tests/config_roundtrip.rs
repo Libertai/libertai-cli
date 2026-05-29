@@ -16,6 +16,7 @@ fn empty_toml_parses_as_defaults() {
     assert!(cfg.hooks.user_prompt_submit.is_empty());
     assert!(cfg.hooks.pre_tool_use.is_empty());
     assert!(cfg.hooks.post_tool_use.is_empty());
+    assert!(cfg.hooks.subagent_stop.is_empty());
     assert!(cfg.hooks.session_start.is_empty());
     assert!(cfg.hooks.stop.is_empty());
     assert!(cfg.hooks.session_end.is_empty());
@@ -54,6 +55,11 @@ fn save_then_load_preserves_fields() {
                 command: "scripts/post-tool-use.sh".into(),
                 timeout: Some(3),
                 async_hook: true,
+                ..HookCommandConfig::default()
+            }],
+            subagent_stop: vec![HookCommandConfig {
+                matcher: "task".into(),
+                command: "scripts/subagent-stop.sh".into(),
                 ..HookCommandConfig::default()
             }],
             session_start: vec![HookCommandConfig {
@@ -100,6 +106,9 @@ fn save_then_load_preserves_fields() {
     assert_eq!(round.hooks.post_tool_use[0].command, "scripts/post-tool-use.sh");
     assert_eq!(round.hooks.post_tool_use[0].timeout, Some(3));
     assert!(round.hooks.post_tool_use[0].async_hook);
+    assert_eq!(round.hooks.subagent_stop.len(), 1);
+    assert_eq!(round.hooks.subagent_stop[0].matcher, "task");
+    assert_eq!(round.hooks.subagent_stop[0].command, "scripts/subagent-stop.sh");
     assert_eq!(round.hooks.session_start.len(), 1);
     assert_eq!(
         round.hooks.session_start[0].command,
