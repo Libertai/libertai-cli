@@ -723,6 +723,7 @@ impl Tool for ApprovalTool {
             if let Some(smart) = self.smart_approval.as_ref() {
                 match smart.decide(name, &preview, &effective_input).await {
                     SmartApprovalVerdict::Approve => {
+                        emit_smart_approval_update(on_update.as_deref(), name, "approved", None);
                         return with_policy_context(
                             self.execute_inner(tool_call_id, effective_input, on_update)
                                 .await,
@@ -730,6 +731,12 @@ impl Tool for ApprovalTool {
                         );
                     }
                     SmartApprovalVerdict::Deny { reason } => {
+                        emit_smart_approval_update(
+                            on_update.as_deref(),
+                            name,
+                            "denied",
+                            reason.as_deref(),
+                        );
                         return Ok(denial_output(smart_denial_reason(reason)).into());
                     }
                     SmartApprovalVerdict::Escalate { .. } => {}
@@ -918,6 +925,35 @@ fn smart_denial_reason(reason: Option<String>) -> Option<String> {
         }
         _ => "smart approval denied this tool call".to_string(),
     })
+}
+
+fn emit_smart_approval_update(
+    on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>,
+    tool_name: &str,
+    decision: &str,
+    reason: Option<&str>,
+) {
+    let Some(on_update) = on_update else {
+        return;
+    };
+    let reason = reason.map(str::trim).filter(|value| !value.is_empty());
+    let text = match (decision, reason) {
+        ("approved", _) => format!("smart approval auto-approved `{tool_name}`"),
+        ("denied", Some(reason)) => {
+            format!("smart approval auto-denied `{tool_name}`: {reason}")
+        }
+        ("denied", None) => format!("smart approval auto-denied `{tool_name}`"),
+        _ => format!("smart approval {decision} `{tool_name}`"),
+    };
+    on_update(ToolUpdate {
+        content: vec![ContentBlock::Text(TextContent::new(text))],
+        details: Some(serde_json::json!({
+            "kind": "smart_approval",
+            "decision": decision,
+            "tool": tool_name,
+            "reason": reason,
+        })),
+    });
 }
 
 fn plan_denial_output(tool_name: &str) -> ToolOutput {
@@ -1190,6 +1226,18 @@ mod tests {
             .join("\n")
     }
 
+    fn update_text(update: &ToolUpdate) -> String {
+        update
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn sanitize_strips_clear_screen_spoof() {
         let evil = "\x1b[2J\x1b[H FAKE PROMPT [a]llow: echo hi\nrm -rf ~/";
@@ -1347,6 +1395,41 @@ mod tests {
     }
 
     #[test]
+    fn smart_approval_approve_emits_decision_update() {
+        let ui_calls = Arc::new(AtomicUsize::new(0));
+        let updates: Arc<Mutex<Vec<ToolUpdate>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&updates);
+        let tool = ApprovalTool::new(
+            Box::new(FakeTool),
+            Arc::new(ApprovalState::new()),
+            ModeFlag::new(Mode::Normal),
+            Arc::new(CountingUi {
+                calls: Arc::clone(&ui_calls),
+            }),
+        )
+        .with_smart_approval(Some(Arc::new(StaticSmartApproval(
+            SmartApprovalVerdict::Approve,
+        ))));
+
+        let execution = futures::executor::block_on(tool.execute(
+            "call-1",
+            serde_json::json!({"command":"cargo test"}),
+            Some(Box::new(move |update| {
+                seen.lock().unwrap().push(update);
+            })),
+        ))
+        .unwrap();
+
+        assert!(matches!(execution, ToolExecution::Done(_)));
+        let updates = updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert!(update_text(&updates[0]).contains("smart approval auto-approved `bash`"));
+        assert_eq!(updates[0].details.as_ref().unwrap()["kind"], "smart_approval");
+        assert_eq!(updates[0].details.as_ref().unwrap()["decision"], "approved");
+        assert_eq!(ui_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn smart_approval_deny_returns_tool_error_without_prompt() {
         let ui_calls = Arc::new(AtomicUsize::new(0));
         let tool = ApprovalTool::new(
@@ -1375,6 +1458,46 @@ mod tests {
         };
         assert!(output.is_error);
         assert!(approval_text(output).contains("smart approval denied"));
+        assert_eq!(ui_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn smart_approval_deny_emits_decision_update() {
+        let ui_calls = Arc::new(AtomicUsize::new(0));
+        let updates: Arc<Mutex<Vec<ToolUpdate>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&updates);
+        let tool = ApprovalTool::new(
+            Box::new(FakeTool),
+            Arc::new(ApprovalState::new()),
+            ModeFlag::new(Mode::Normal),
+            Arc::new(CountingUi {
+                calls: Arc::clone(&ui_calls),
+            }),
+        )
+        .with_smart_approval(Some(Arc::new(StaticSmartApproval(
+            SmartApprovalVerdict::Deny {
+                reason: Some("dangerous command".to_string()),
+            },
+        ))));
+
+        let execution = futures::executor::block_on(tool.execute(
+            "call-1",
+            serde_json::json!({"command":"rm -rf target"}),
+            Some(Box::new(move |update| {
+                seen.lock().unwrap().push(update);
+            })),
+        ))
+        .unwrap();
+
+        assert!(matches!(execution, ToolExecution::Done(_)));
+        let updates = updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert!(update_text(&updates[0]).contains(
+            "smart approval auto-denied `bash`: dangerous command"
+        ));
+        assert_eq!(updates[0].details.as_ref().unwrap()["kind"], "smart_approval");
+        assert_eq!(updates[0].details.as_ref().unwrap()["decision"], "denied");
+        assert_eq!(updates[0].details.as_ref().unwrap()["reason"], "dangerous command");
         assert_eq!(ui_calls.load(Ordering::Relaxed), 0);
     }
 

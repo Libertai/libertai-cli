@@ -43,7 +43,8 @@ SDK; those are flagged **(upstream)**.
   bounded auxiliary LibertAI model before manual mutating-tool prompts;
   exact `APPROVE` runs, exact `DENY` returns a tool error, and any
   error, malformed answer, or `ESCALATE` falls back to the existing
-  approval UI.
+  approval UI. Auto-approve and auto-deny decisions emit structured
+  `smart_approval` tool updates for CLI/desktop audit visibility.
 - **CLI `/model` command** — REPL users can inspect the active
   provider/model and switch with `/model <model|provider/model>` without
   rebuilding the session.
@@ -480,7 +481,9 @@ true`, a flagged mutating tool call first asks
 APPROVE/DENY/ESCALATE. APPROVE runs without the manual prompt, DENY
 returns a tool error, and ESCALATE/errors/malformed responses fall back
 to the existing UI. The auxiliary request is capped to a 10-second
-timeout and inherits the normal LibertAI API config.
+timeout and inherits the normal LibertAI API config. APPROVE and DENY
+decisions emit a structured `smart_approval` tool update before the
+tool runs or the denial result returns.
 (`/tmp/hermes-agent/tools/approval.py:841-885`)
 
 **Files**: `src/commands/code_approvals.rs`,
