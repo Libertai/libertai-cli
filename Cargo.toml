@@ -64,7 +64,8 @@ zeroize = { version = "1", features = ["derive"] }
 # - `AgentSessionHandle::prompt_with_content[_with_abort]` (multimodal SDK)
 # - `AgentSessionHandle::{get_fork_messages,fork}` (desktop /fork integration)
 # - bash `run_in_background` support for long-running servers/watchers
-pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "0fffc9ef", default-features = false }
+# - background bash follow-up tools (`bash_output`, `kill_bash`)
+pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "dcb8aa20", default-features = false }
 asupersync = { version = "=0.3.1", default-features = false, features = ["tls-native-roots"] }
 async-trait = "0.1"
 futures = "0.3"
