@@ -134,7 +134,9 @@ SDK; those are flagged **(upstream)**.
   `addPullRequestReview` mutation, and mark changed PR files viewed or
   unviewed with `/pr_comments viewed <path>` and
   `/pr_comments unviewed <path>` through `markFileAsViewed` /
-  `unmarkFileAsViewed`.
+  `unmarkFileAsViewed`. They can also create line-level pending review
+  threads with `/pr_comments thread <path>:<line> <body>` through
+  `addPullRequestReviewThread`.
 - **CLI `/sandbox` command** — REPL users can inspect the effective
   strict bash sandbox profile with `/sandbox [info]`; `/sandbox reload`
   explains the CLI restart requirement.

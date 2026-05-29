@@ -1267,6 +1267,10 @@ async fn repl_loop(
             mark_pr_comment_file(rest, false);
             continue;
         }
+        if let Some(rest) = pr_comments_thread_arg(trimmed) {
+            create_pr_comment_thread(rest);
+            continue;
+        }
         if let Some(rest) = pr_comments_edit_arg(trimmed) {
             edit_pr_comment(rest);
             continue;
@@ -2027,6 +2031,9 @@ fn print_help() {
     );
     println!(
         "{DIM}  /pr_comments unviewed <path> — mark a pull request file as unviewed{RESET}"
+    );
+    println!(
+        "{DIM}  /pr_comments thread <path>:<line> <body> — add a GitHub PR line review thread{RESET}"
     );
     println!(
         "{DIM}  /pr_comments edit <comment_id> <body> — edit a GitHub PR review comment{RESET}"
@@ -4054,6 +4061,20 @@ fn pr_comments_unviewed_arg(trimmed: &str) -> Option<&str> {
     None
 }
 
+fn pr_comments_thread_arg(trimmed: &str) -> Option<&str> {
+    for prefix in [
+        "/pr_comments thread ",
+        "/pr-comments thread ",
+        "/pr_comments comment ",
+        "/pr-comments comment ",
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
 fn parse_pr_comments_reply(input: &str) -> Result<(&str, &str)> {
     let raw = input.trim();
     let Some((thread_id, body)) = raw.split_once(char::is_whitespace) else {
@@ -4105,6 +4126,29 @@ fn parse_pr_comments_file_path(input: &str) -> Result<&str> {
         anyhow::bail!("usage: /pr_comments viewed <path>");
     }
     Ok(path)
+}
+
+fn parse_pr_comments_thread(input: &str) -> Result<(&str, u64, &str)> {
+    let raw = input.trim();
+    let Some((target, body)) = raw.split_once(char::is_whitespace) else {
+        anyhow::bail!("usage: /pr_comments thread <path>:<line> <body>");
+    };
+    let target = target.trim();
+    let body = body.trim();
+    let Some((path, line)) = target.rsplit_once(':') else {
+        anyhow::bail!("usage: /pr_comments thread <path>:<line> <body>");
+    };
+    let path = path.trim();
+    let line = line
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|line| *line > 0)
+        .ok_or_else(|| anyhow::anyhow!("line must be a positive integer"))?;
+    if path.is_empty() || body.is_empty() {
+        anyhow::bail!("usage: /pr_comments thread <path>:<line> <body>");
+    }
+    Ok((path, line, body))
 }
 
 fn reply_to_pr_comment_thread(input: &str) {
@@ -4290,6 +4334,43 @@ fn mark_pr_comment_file(input: &str, viewed: bool) {
         .unwrap_or("unknown error");
     let action = if viewed { "mark viewed" } else { "mark unviewed" };
     eprintln!("{DIM}  /pr_comments: {action} failed: {detail}{RESET}");
+}
+
+fn create_pr_comment_thread(input: &str) {
+    let (path, line, body) = match parse_pr_comments_thread(input) {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!("{DIM}  /pr_comments: {e:#}{RESET}");
+            return;
+        }
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /pr_comments: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let capture = crate::commands::code_pr_comments::create_review_thread(
+        &cwd, "", path, line, body,
+    );
+    if capture.error.is_none() && capture.status == Some(0) {
+        println!("{DIM}  created review thread: {path}:{line}{RESET}");
+        return;
+    }
+    let detail = capture
+        .error
+        .as_deref()
+        .or_else(|| {
+            let stderr = capture.stderr.trim();
+            (!stderr.is_empty()).then_some(stderr)
+        })
+        .or_else(|| {
+            let stdout = capture.stdout.trim();
+            (!stdout.is_empty()).then_some(stdout)
+        })
+        .unwrap_or("unknown error");
+    eprintln!("{DIM}  /pr_comments: thread create failed: {detail}{RESET}");
 }
 
 fn parse_direct_custom_slash(trimmed: &str) -> Option<(&str, &str)> {
@@ -7154,6 +7235,25 @@ mod tests {
         );
         assert_eq!(parse_pr_comments_file_path("src/lib.rs").unwrap(), "src/lib.rs");
         assert!(parse_pr_comments_file_path("").is_err());
+    }
+
+    #[test]
+    fn parse_pr_comments_thread_requires_target_line_and_body() {
+        assert_eq!(
+            pr_comments_thread_arg("/pr_comments thread src/lib.rs:42 Needs a test."),
+            Some("src/lib.rs:42 Needs a test.")
+        );
+        assert_eq!(
+            pr_comments_thread_arg("/pr_comments comment js/app.js:9 Check this."),
+            Some("js/app.js:9 Check this.")
+        );
+        assert_eq!(
+            parse_pr_comments_thread("src/lib.rs:42 Needs a test.").unwrap(),
+            ("src/lib.rs", 42, "Needs a test.")
+        );
+        assert!(parse_pr_comments_thread("src/lib.rs Needs a test.").is_err());
+        assert!(parse_pr_comments_thread("src/lib.rs:0 Needs a test.").is_err());
+        assert!(parse_pr_comments_thread("src/lib.rs:42").is_err());
     }
 
     #[test]

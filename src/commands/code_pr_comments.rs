@@ -238,6 +238,59 @@ pub fn mark_file_viewed(cwd: &Path, scope: &str, path: &str, viewed: bool) -> Co
     run_gh(cwd, &pr_file_viewed_args(&pr_id, path, viewed))
 }
 
+pub fn create_review_thread(
+    cwd: &Path,
+    scope: &str,
+    path: &str,
+    line: u64,
+    body: &str,
+) -> CommandCapture {
+    let path = path.trim();
+    let body = body.trim();
+    if path.is_empty() {
+        return CommandCapture {
+            command: "gh api graphql".to_string(),
+            status: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("file path is required".to_string()),
+        };
+    }
+    if line == 0 {
+        return CommandCapture {
+            command: "gh api graphql".to_string(),
+            status: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("line must be greater than zero".to_string()),
+        };
+    }
+    if body.is_empty() {
+        return CommandCapture {
+            command: "gh api graphql".to_string(),
+            status: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("review thread body is required".to_string()),
+        };
+    }
+    let selector = pr_selector(scope);
+    let pr_view = run_gh(cwd, &pr_review_target_args(selector.as_deref()));
+    if !pr_view.success() {
+        return pr_view;
+    }
+    let Some(pr_id) = pr_id_from_view(&pr_view) else {
+        return CommandCapture {
+            command: pr_view.command,
+            status: pr_view.status,
+            stdout: pr_view.stdout,
+            stderr: pr_view.stderr,
+            error: Some("pull request node id was not returned by gh pr view".to_string()),
+        };
+    };
+    run_gh(cwd, &pr_review_thread_create_args(&pr_id, path, line, body))
+}
+
 fn normalize_review_event(event: &str) -> Result<&'static str, String> {
     let normalized = event.trim().to_ascii_lowercase().replace('-', "_");
     match normalized.as_str() {
@@ -395,6 +448,30 @@ fn pr_file_viewed_args(pull_request_id: &str, path: &str, viewed: bool) -> Vec<S
         format!("pullRequestId={pull_request_id}"),
         "-f".to_string(),
         format!("path={path}"),
+    ]
+}
+
+fn pr_review_thread_create_args(
+    pull_request_id: &str,
+    path: &str,
+    line: u64,
+    body: &str,
+) -> Vec<String> {
+    vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        "query=mutation($pullRequestId:ID!,$path:String!,$line:Int!,$side:DiffSide!,$body:String!){addPullRequestReviewThread(input:{pullRequestId:$pullRequestId,path:$path,line:$line,side:$side,body:$body}){thread{id isResolved comments(first:1){nodes{id body path line url}}}}}".to_string(),
+        "-f".to_string(),
+        format!("pullRequestId={pull_request_id}"),
+        "-f".to_string(),
+        format!("path={path}"),
+        "-F".to_string(),
+        format!("line={line}"),
+        "-f".to_string(),
+        "side=RIGHT".to_string(),
+        "-f".to_string(),
+        format!("body={body}"),
     ]
 }
 
@@ -623,6 +700,34 @@ mod tests {
 
         let unviewed = pr_file_viewed_args("PR_kwDOABC123", "src/lib.rs", false).join(" ");
         assert!(unviewed.contains("unmarkFileAsViewed"));
+    }
+
+    #[test]
+    fn create_review_thread_validates_required_fields() {
+        let capture = create_review_thread(Path::new("."), "", "", 12, "body");
+        assert_eq!(capture.error.as_deref(), Some("file path is required"));
+
+        let capture = create_review_thread(Path::new("."), "", "src/lib.rs", 0, "body");
+        assert_eq!(capture.error.as_deref(), Some("line must be greater than zero"));
+
+        let capture = create_review_thread(Path::new("."), "", "src/lib.rs", 12, "");
+        assert_eq!(
+            capture.error.as_deref(),
+            Some("review thread body is required")
+        );
+    }
+
+    #[test]
+    fn pr_review_thread_create_args_use_github_graphql_mutation() {
+        let joined =
+            pr_review_thread_create_args("PR_kwDOABC123", "src/lib.rs", 42, "Needs a test.")
+                .join(" ");
+        assert!(joined.contains("addPullRequestReviewThread"));
+        assert!(joined.contains("pullRequestId=PR_kwDOABC123"));
+        assert!(joined.contains("path=src/lib.rs"));
+        assert!(joined.contains("line=42"));
+        assert!(joined.contains("side=RIGHT"));
+        assert!(joined.contains("body=Needs a test."));
     }
 
     #[test]
