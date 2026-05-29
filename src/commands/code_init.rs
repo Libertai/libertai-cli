@@ -100,9 +100,14 @@ AGENTS.md / CLAUDE.md ancestor walk and use it as part of the
 system prompt.
 
 1. Check whether AGENTS.md or CLAUDE.md already exists at the
-   project root. If one does, read it, propose specific
-   additions or corrections, and ask the user via ask_user
-   before overwriting.
+   project root. If one does, read it and do not overwrite it
+   without explicit ask_user approval. First produce a merge proposal
+   with:
+   - a fenced markdown block headed `AGENTS.md candidate` containing
+     the complete proposed AGENTS.md content
+   - a `Merge plan` section listing the exact headings/bullets to add,
+     replace, or leave untouched
+   - a unified diff against the existing file when possible
 
 2. Otherwise, inspect the repo to identify:
    - the primary language and framework (read package.json /
@@ -133,8 +138,10 @@ system prompt.
    ## Conventions
    - bullet list of code-style / process rules
 
-4. Report what you wrote, citing the file path as
-   AGENTS.md:1."#;
+4. If you write AGENTS.md, report what you wrote, citing the file path
+   as AGENTS.md:1. If you do not write it because an existing guidance
+   file needs user approval, report the candidate block, merge plan, and
+   diff instead of making changes."#;
     let trimmed = notes.unwrap_or("").trim();
     if trimmed.is_empty() {
         INIT_PROMPT.to_string()
@@ -524,7 +531,10 @@ mod tests {
         let prompt = init_agent_prompt(Some(" prefer existing Makefile targets "));
 
         assert!(prompt.contains("creating or\nupdating AGENTS.md"));
-        assert!(prompt.contains("ask the user via ask_user\n   before overwriting"));
+        assert!(prompt.contains("without explicit ask_user approval"));
+        assert!(prompt.contains("AGENTS.md candidate"));
+        assert!(prompt.contains("Merge plan"));
+        assert!(prompt.contains("unified diff"));
         assert!(prompt.contains(
             "User-provided project notes to consider:\nprefer existing Makefile targets"
         ));
@@ -534,7 +544,7 @@ mod tests {
     fn init_agent_prompt_omits_empty_notes_section() {
         let prompt = init_agent_prompt(Some("   "));
 
-        assert!(prompt.contains("Report what you wrote"));
+        assert!(prompt.contains("candidate block, merge plan, and\n   diff instead of making changes"));
         assert!(!prompt.contains("User-provided project notes"));
     }
 

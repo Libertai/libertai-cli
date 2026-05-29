@@ -404,7 +404,9 @@ creates `AGENTS.md` when missing and preserves existing files. CLI
 generated file without overwriting existing guidance, and CLI
 `/init --agent <project notes>` now sends the same Claude-style
 model-written initialization prompt through the active session for
-inspect/propose/write flows. The initializer also exposes a no-write
+inspect/propose/write flows; when existing guidance is present, that
+prompt requires a fenced `AGENTS.md candidate`, a merge plan, and a
+unified diff before any overwrite request. The initializer also exposes a no-write
 candidate generator so desktop can show a merge candidate when
 guidance already exists, and CLI `/init` prints that same no-write
 candidate with a diff against the existing file and a numbered section
