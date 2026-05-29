@@ -1188,6 +1188,10 @@ async fn repl_loop(
             reply_to_pr_comment_thread(rest);
             continue;
         }
+        if let Some(rest) = pr_comments_resolve_arg(trimmed) {
+            resolve_pr_comment_thread(rest);
+            continue;
+        }
         if let Some(rest) = pr_comments_edit_arg(trimmed) {
             edit_pr_comment(rest);
             continue;
@@ -1928,6 +1932,9 @@ fn print_help() {
     println!("{DIM}  /pr_comments [scope] — ask the agent to inspect PR review comments{RESET}");
     println!(
         "{DIM}  /pr_comments reply <thread_id> <body> — reply to a GitHub PR review thread{RESET}"
+    );
+    println!(
+        "{DIM}  /pr_comments resolve <thread_id> — resolve a GitHub PR review thread{RESET}"
     );
     println!(
         "{DIM}  /pr_comments edit <comment_id> <body> — edit a GitHub PR review comment{RESET}"
@@ -3670,6 +3677,15 @@ fn pr_comments_edit_arg(trimmed: &str) -> Option<&str> {
     None
 }
 
+fn pr_comments_resolve_arg(trimmed: &str) -> Option<&str> {
+    for prefix in ["/pr_comments resolve ", "/pr-comments resolve "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
 fn parse_pr_comments_reply(input: &str) -> Result<(&str, &str)> {
     let raw = input.trim();
     let Some((thread_id, body)) = raw.split_once(char::is_whitespace) else {
@@ -3694,6 +3710,14 @@ fn parse_pr_comments_edit(input: &str) -> Result<(&str, &str)> {
         anyhow::bail!("usage: /pr_comments edit <comment_id> <body>");
     }
     Ok((comment_id, body))
+}
+
+fn parse_pr_comments_resolve(input: &str) -> Result<&str> {
+    let thread_id = input.trim();
+    if thread_id.is_empty() || thread_id.split_whitespace().nth(1).is_some() {
+        anyhow::bail!("usage: /pr_comments resolve <thread_id>");
+    }
+    Ok(thread_id)
 }
 
 fn reply_to_pr_comment_thread(input: &str) {
@@ -3729,6 +3753,41 @@ fn reply_to_pr_comment_thread(input: &str) {
         })
         .unwrap_or("unknown error");
     eprintln!("{DIM}  /pr_comments: reply failed: {detail}{RESET}");
+}
+
+fn resolve_pr_comment_thread(input: &str) {
+    let thread_id = match parse_pr_comments_resolve(input) {
+        Ok(thread_id) => thread_id,
+        Err(e) => {
+            eprintln!("{DIM}  /pr_comments: {e:#}{RESET}");
+            return;
+        }
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /pr_comments: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let capture = crate::commands::code_pr_comments::resolve_review_thread(&cwd, thread_id);
+    if capture.error.is_none() && capture.status == Some(0) {
+        println!("{DIM}  resolved review thread: {thread_id}{RESET}");
+        return;
+    }
+    let detail = capture
+        .error
+        .as_deref()
+        .or_else(|| {
+            let stderr = capture.stderr.trim();
+            (!stderr.is_empty()).then_some(stderr)
+        })
+        .or_else(|| {
+            let stdout = capture.stdout.trim();
+            (!stdout.is_empty()).then_some(stdout)
+        })
+        .unwrap_or("unknown error");
+    eprintln!("{DIM}  /pr_comments: resolve failed: {detail}{RESET}");
 }
 
 fn edit_pr_comment(input: &str) {
@@ -6268,6 +6327,17 @@ mod tests {
             ("PRRC_1", "Reworded comment.")
         );
         assert!(parse_pr_comments_edit("PRRC_1").is_err());
+    }
+
+    #[test]
+    fn parse_pr_comments_resolve_requires_single_thread_id() {
+        assert_eq!(
+            pr_comments_resolve_arg("/pr_comments resolve PRRT_1"),
+            Some("PRRT_1")
+        );
+        assert_eq!(parse_pr_comments_resolve("PRRT_1").unwrap(), "PRRT_1");
+        assert!(parse_pr_comments_resolve("").is_err());
+        assert!(parse_pr_comments_resolve("PRRT_1 extra").is_err());
     }
 
     #[test]

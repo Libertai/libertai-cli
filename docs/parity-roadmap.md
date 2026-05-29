@@ -116,7 +116,8 @@ SDK; those are flagged **(upstream)**.
   prompts already used by the desktop slash palette, capture GitHub PR
   review-thread IDs, and explicitly reply to a review thread with
   `/pr_comments reply <thread_id> <body>` or edit a review comment with
-  `/pr_comments edit <comment_id> <body>`.
+  `/pr_comments edit <comment_id> <body>`. CLI and desktop can resolve
+  review threads by ID.
 - **CLI `/sandbox` command** — REPL users can inspect the effective
   strict bash sandbox profile with `/sandbox [info]`; `/sandbox reload`
   explains the CLI restart requirement.
