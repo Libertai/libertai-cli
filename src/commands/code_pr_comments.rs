@@ -98,6 +98,40 @@ pub fn resolve_review_thread(cwd: &Path, thread_id: &str) -> CommandCapture {
     run_gh(cwd, &args)
 }
 
+pub fn reply_review_thread(cwd: &Path, thread_id: &str, body: &str) -> CommandCapture {
+    let thread_id = thread_id.trim();
+    let body = body.trim();
+    if thread_id.is_empty() {
+        return CommandCapture {
+            command: "gh api graphql".to_string(),
+            status: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("review thread id is required".to_string()),
+        };
+    }
+    if body.is_empty() {
+        return CommandCapture {
+            command: "gh api graphql".to_string(),
+            status: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("review thread reply body is required".to_string()),
+        };
+    }
+    let args = vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        "query=mutation($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{id body url}}}".to_string(),
+        "-f".to_string(),
+        format!("threadId={thread_id}"),
+        "-f".to_string(),
+        format!("body={body}"),
+    ];
+    run_gh(cwd, &args)
+}
+
 fn pr_selector(scope: &str) -> Option<String> {
     let trimmed = scope.trim();
     if trimmed.is_empty() {
@@ -355,5 +389,16 @@ mod tests {
     fn resolve_review_thread_uses_github_graphql_mutation() {
         let capture = resolve_review_thread(Path::new("."), "");
         assert_eq!(capture.error.as_deref(), Some("review thread id is required"));
+    }
+
+    #[test]
+    fn reply_review_thread_validates_required_fields() {
+        let capture = reply_review_thread(Path::new("."), "", "fixed");
+        assert_eq!(capture.error.as_deref(), Some("review thread id is required"));
+        let capture = reply_review_thread(Path::new("."), "PRRT_1", "");
+        assert_eq!(
+            capture.error.as_deref(),
+            Some("review thread reply body is required")
+        );
     }
 }

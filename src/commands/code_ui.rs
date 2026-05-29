@@ -1184,6 +1184,10 @@ async fn repl_loop(
             write_onboarding_guide(Some(rest.trim()));
             continue;
         }
+        if let Some(rest) = pr_comments_reply_arg(trimmed) {
+            reply_to_pr_comment_thread(rest);
+            continue;
+        }
         if let Some((command, rest)) = image_command_arg(trimmed) {
             match build_image_prompt_content(rest, output_style.as_deref()) {
                 Ok(content) => {
@@ -1918,6 +1922,9 @@ fn print_help() {
     println!("{DIM}  /review [scope] — ask the agent to review current code changes{RESET}");
     println!("{DIM}  /security-review [scope] — ask for a focused security review{RESET}");
     println!("{DIM}  /pr_comments [scope] — ask the agent to inspect PR review comments{RESET}");
+    println!(
+        "{DIM}  /pr_comments reply <thread_id> <body> — reply to a GitHub PR review thread{RESET}"
+    );
     println!("{DIM}  /sandbox [info|reload] — inspect the bash sandbox profile{RESET}");
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
@@ -3636,6 +3643,63 @@ fn pr_comments_prompt(scope: &str) -> String {
         .ok()
         .map(|cwd| crate::commands::code_pr_comments::collect_pr_comments_snapshot(&cwd, scope));
     crate::commands::code_pr_comments::build_pr_comments_prompt(scope, snapshot.as_ref())
+}
+
+fn pr_comments_reply_arg(trimmed: &str) -> Option<&str> {
+    for prefix in ["/pr_comments reply ", "/pr-comments reply "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
+fn parse_pr_comments_reply(input: &str) -> Result<(&str, &str)> {
+    let raw = input.trim();
+    let Some((thread_id, body)) = raw.split_once(char::is_whitespace) else {
+        anyhow::bail!("usage: /pr_comments reply <thread_id> <body>");
+    };
+    let thread_id = thread_id.trim();
+    let body = body.trim();
+    if thread_id.is_empty() || body.is_empty() {
+        anyhow::bail!("usage: /pr_comments reply <thread_id> <body>");
+    }
+    Ok((thread_id, body))
+}
+
+fn reply_to_pr_comment_thread(input: &str) {
+    let (thread_id, body) = match parse_pr_comments_reply(input) {
+        Ok(parts) => parts,
+        Err(e) => {
+            eprintln!("{DIM}  /pr_comments: {e:#}{RESET}");
+            return;
+        }
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /pr_comments: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let capture = crate::commands::code_pr_comments::reply_review_thread(&cwd, thread_id, body);
+    if capture.error.is_none() && capture.status == Some(0) {
+        println!("{DIM}  replied to review thread: {thread_id}{RESET}");
+        return;
+    }
+    let detail = capture
+        .error
+        .as_deref()
+        .or_else(|| {
+            let stderr = capture.stderr.trim();
+            (!stderr.is_empty()).then_some(stderr)
+        })
+        .or_else(|| {
+            let stdout = capture.stdout.trim();
+            (!stdout.is_empty()).then_some(stdout)
+        })
+        .unwrap_or("unknown error");
+    eprintln!("{DIM}  /pr_comments: reply failed: {detail}{RESET}");
 }
 
 fn parse_direct_custom_slash(trimmed: &str) -> Option<(&str, &str)> {
@@ -6114,6 +6178,19 @@ mod tests {
         );
         assert_eq!(review_command_parts("/pr_comments"), Some(("/pr_comments", "")));
         assert_eq!(review_command_parts("/reviewer src"), None);
+    }
+
+    #[test]
+    fn parse_pr_comments_reply_requires_thread_and_body() {
+        assert_eq!(
+            pr_comments_reply_arg("/pr_comments reply PRRT_1 Fixed in the next commit."),
+            Some("PRRT_1 Fixed in the next commit.")
+        );
+        assert_eq!(
+            parse_pr_comments_reply("PRRT_1 Fixed in the next commit.").unwrap(),
+            ("PRRT_1", "Fixed in the next commit.")
+        );
+        assert!(parse_pr_comments_reply("PRRT_1").is_err());
     }
 
     #[test]
