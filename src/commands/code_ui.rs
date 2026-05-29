@@ -1232,6 +1232,10 @@ async fn repl_loop(
             print_sandbox_status(rest.trim());
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix("/agents ") {
+            handle_agents_command(rest.trim());
+            continue;
+        }
         if !slash_prompt_handled {
             if let Some((command, scope)) = review_command_parts(trimmed) {
                 match build_review_slash_prompt(command, scope) {
@@ -1982,6 +1986,7 @@ fn print_help() {
     println!("{DIM}  /init [--agent] [notes] — create or draft AGENTS.md guidance{RESET}");
     println!("{DIM}  /onboarding [path] — write a local project onboarding guide{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
+    println!("{DIM}  /agents create [--worktree] <name> [description] — create a project sub-agent{RESET}");
     println!("{DIM}  /agent [--worktree] <name> <task> — run a named sub-agent task{RESET}");
     println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
     println!("{DIM}  /export [path] — write this session transcript as Markdown{RESET}");
@@ -3500,7 +3505,50 @@ fn print_agents() {
         }
         println!("{DIM}  run /agent <name> <task> to dispatch a focused task.{RESET}");
     }
+    println!("{DIM}  run /agents create <name> [description] to scaffold a project sub-agent.{RESET}");
     println!();
+}
+
+fn handle_agents_command(input: &str) {
+    let raw = input.trim();
+    if raw.is_empty() || raw == "list" {
+        print_agents();
+        return;
+    }
+    if let Some(rest) = raw.strip_prefix("create ") {
+        create_agent_from_slash(rest.trim());
+        return;
+    }
+    eprintln!("{DIM}  /agents: usage: /agents [list] | /agents create [--worktree] <name> [description]{RESET}");
+}
+
+fn create_agent_from_slash(input: &str) {
+    let parsed = match parse_agents_create_query(input) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("{DIM}  /agents: {e:#}{RESET}");
+            return;
+        }
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /agents: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    match crate::commands::code_agents::create_project_agent(
+        &cwd,
+        parsed.name,
+        parsed.description,
+        parsed.worktree,
+    ) {
+        Ok(path) => {
+            println!("{DIM}  created project sub-agent: {}{RESET}", path.display());
+            println!("{DIM}  edit the prompt, then run /agent {} <task>{RESET}", parsed.name);
+        }
+        Err(e) => eprintln!("{DIM}  /agents: create failed: {e:#}{RESET}"),
+    }
 }
 
 fn print_templates() {
@@ -4000,6 +4048,43 @@ struct AgentSlashQuery<'a> {
     name: &'a str,
     task: &'a str,
     isolation: Option<AgentSlashIsolation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentsCreateQuery<'a> {
+    name: &'a str,
+    description: Option<&'a str>,
+    worktree: bool,
+}
+
+fn parse_agents_create_query(query: &str) -> Result<AgentsCreateQuery<'_>> {
+    let mut rest = query.trim();
+    let mut worktree = false;
+    loop {
+        let Some((head, tail)) = split_first_word(rest) else {
+            anyhow::bail!("usage: /agents create [--worktree] <name> [description]");
+        };
+        match head {
+            "--worktree" | "--isolation=worktree" => {
+                worktree = true;
+                rest = tail.trim_start();
+            }
+            "--same-cwd" | "--isolation=same-cwd" => {
+                worktree = false;
+                rest = tail.trim_start();
+            }
+            _ => break,
+        }
+    }
+    let Some((name, tail)) = split_first_word(rest) else {
+        anyhow::bail!("usage: /agents create [--worktree] <name> [description]");
+    };
+    let description = tail.trim();
+    Ok(AgentsCreateQuery {
+        name,
+        description: (!description.is_empty()).then_some(description),
+        worktree,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6417,6 +6502,27 @@ mod tests {
         );
         assert!(parse_agent_slash_query("reviewer").is_err());
         assert!(parse_agent_slash_query("reviewer   ").is_err());
+    }
+
+    #[test]
+    fn parse_agents_create_query_accepts_description_and_worktree() {
+        assert_eq!(
+            parse_agents_create_query("--worktree reviewer Reviews changes").unwrap(),
+            AgentsCreateQuery {
+                name: "reviewer",
+                description: Some("Reviews changes"),
+                worktree: true
+            }
+        );
+        assert_eq!(
+            parse_agents_create_query("--worktree --same-cwd qa").unwrap(),
+            AgentsCreateQuery {
+                name: "qa",
+                description: None,
+                worktree: false
+            }
+        );
+        assert!(parse_agents_create_query("").is_err());
     }
 
     #[test]

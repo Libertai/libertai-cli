@@ -56,6 +56,29 @@ pub fn agent_names(cwd: &Path) -> Result<Vec<String>> {
     Ok(discover_agents(cwd)?.into_iter().map(|a| a.name).collect())
 }
 
+pub fn create_project_agent(
+    cwd: &Path,
+    name: &str,
+    description: Option<&str>,
+    worktree: bool,
+) -> Result<PathBuf> {
+    let name = name.trim().trim_start_matches('@');
+    validate_name(name)?;
+    let dir = cwd.join(".libertai").join("agents");
+    let path = dir.join(format!("{name}.md"));
+    if path.exists() {
+        anyhow::bail!("agent `{name}` already exists at {}", path.display());
+    }
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let description = description
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Focused project sub-agent");
+    let content = render_agent_template(name, description, worktree);
+    std::fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
 fn project_agent_dirs(cwd: &Path) -> Vec<PathBuf> {
     vec![cwd.join(".claude").join("agents"), cwd.join(".libertai").join("agents")]
 }
@@ -215,6 +238,18 @@ fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn render_agent_template(name: &str, description: &str, worktree: bool) -> String {
+    let description = yaml_single_quote(description);
+    let worktree = if worktree { "true" } else { "false" };
+    format!(
+        "---\nname: {name}\ndescription: {description}\ntools: read, grep, find, ls\nworktree: {worktree}\n---\nYou are a focused project sub-agent. Inspect only the files and commands needed for the assigned task, report findings concisely, and cite file paths or commands you used.\n"
+    )
+}
+
+fn yaml_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''").replace('\n', " "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +288,36 @@ mod tests {
         )
         .expect("parse");
         assert!(agent.worktree);
+    }
+
+    #[test]
+    fn creates_project_agent_template() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = create_project_agent(
+            tmp.path(),
+            "reviewer",
+            Some("Reviews project changes"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            tmp.path().join(".libertai").join("agents").join("reviewer.md")
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("name: reviewer"));
+        assert!(text.contains("description: 'Reviews project changes'"));
+        assert!(text.contains("worktree: true"));
+
+        let agent = parse_agent_md(
+            &text,
+            Some("reviewer"),
+            AgentSource::Project(path.parent().unwrap().to_path_buf()),
+        )
+        .unwrap();
+        assert_eq!(agent.name, "reviewer");
+        assert!(agent.worktree);
+        assert!(create_project_agent(tmp.path(), "reviewer", None, false).is_err());
     }
 
     #[test]

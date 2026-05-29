@@ -550,10 +550,11 @@ Claude-compatible `.claude/agents/<name>.md`, project
 `description:`, `tools:`, and `model:` plus a body system prompt.
 CLI `/agents` lists discovered definitions and `/agent <name> <task>`
 routes through the active agent with an instruction to call the `task`
-tool for that named sub-agent. Worktree isolation now uses a detached
-git worktree when possible and a copied temp workspace snapshot outside
-git. Remaining work is richer management UI, background execution, and
-child event streaming.
+tool for that named sub-agent. CLI `/agents create [--worktree] <name>
+[description]` scaffolds project-local `.libertai/agents/<name>.md`
+definitions. Worktree isolation now uses a detached git worktree when
+possible and a copied temp workspace snapshot outside git. Remaining
+work is background execution and child event streaming.
 
 **Files**: `src/commands/code_agents.rs`, `src/commands/code_task.rs`,
 `src/commands/code_ui.rs`.
