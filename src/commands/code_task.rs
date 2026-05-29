@@ -262,10 +262,7 @@ impl Tool for TaskTool {
             append_parts.push(skills);
         }
         if let Some(agent) = agent.as_ref() {
-            append_parts.push(format!(
-                "## Named sub-agent: {}\n\n{}",
-                agent.name, agent.system_prompt
-            ));
+            append_parts.push(named_subagent_prompt(agent));
         }
         let append_system_prompt = if append_parts.is_empty() {
             None
@@ -386,6 +383,20 @@ fn task_wants_same_cwd(input: &serde_json::Value) -> bool {
             .and_then(|v| v.as_str())
             .map(|s| s.eq_ignore_ascii_case("same-cwd") || s.eq_ignore_ascii_case("same_cwd"))
             .unwrap_or(false)
+}
+
+fn named_subagent_prompt(agent: &code_agents::AgentDefinition) -> String {
+    format!(
+        "## Named sub-agent: {name}\n\n\
+You are running as the `{name}` sub-agent inside a parent LibertAI session. \
+Apply the role instructions below as your primary scope. Keep the task narrow, \
+use only the tools exposed to you, and return concise findings for the parent \
+agent to relay or act on. Do not invent follow-up work outside the delegated \
+task.\n\n\
+### Role instructions\n\n{body}",
+        name = agent.name,
+        body = agent.system_prompt.trim()
+    )
 }
 
 struct TaskWorktree {
@@ -581,8 +592,10 @@ fn err_output(text: &str) -> ToolExecution {
 #[cfg(test)]
 mod tests {
     use super::{
-        should_skip_snapshot_entry, task_wants_same_cwd, task_wants_worktree, TaskWorktree,
+        named_subagent_prompt, should_skip_snapshot_entry, task_wants_same_cwd,
+        task_wants_worktree, TaskWorktree,
     };
+    use crate::commands::code_agents::{AgentDefinition, AgentSource};
     use serde_json::json;
     use std::process::Command;
 
@@ -661,6 +674,27 @@ mod tests {
         assert!(should_skip_snapshot_entry("target"));
         assert!(should_skip_snapshot_entry("node_modules"));
         assert!(!should_skip_snapshot_entry("src"));
+    }
+
+    #[test]
+    fn named_subagent_prompt_wraps_role_with_scope_guidance() {
+        let agent = AgentDefinition {
+            name: "reviewer".to_string(),
+            description: "Reviews changes".to_string(),
+            tools: None,
+            model: None,
+            worktree: false,
+            system_prompt: "Focus on correctness.".to_string(),
+            source: AgentSource::Project(tempfile::tempdir().unwrap().path().to_path_buf()),
+        };
+
+        let prompt = named_subagent_prompt(&agent);
+        assert!(prompt.contains("## Named sub-agent: reviewer"));
+        assert!(prompt.contains("running as the `reviewer` sub-agent"));
+        assert!(prompt.contains("return concise findings for the parent"));
+        assert!(prompt.contains("Do not invent follow-up work"));
+        assert!(prompt.contains("### Role instructions"));
+        assert!(prompt.contains("Focus on correctness."));
     }
 
     fn git(cwd: &std::path::Path, args: &[&str]) {
