@@ -5346,6 +5346,7 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
         } else {
             format!(", statusMessage={}", hook.status_message.trim())
         };
+        let metadata = hook_extra_metadata_label(hook);
         let if_condition = if hook.if_condition.trim().is_empty() {
             String::new()
         } else {
@@ -5385,7 +5386,7 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
             crate::commands::code_hooks::hook_command_display(hook)
         };
         println!(
-            "{DIM}  {}. {} [{}] type={} matcher={}{}{}{}{}{}{}{}{}{}:{RESET} {}",
+            "{DIM}  {}. {} [{}] type={} matcher={}{}{}{}{}{}{}{}{}{}{}:{RESET} {}",
             idx + 1,
             event,
             marker,
@@ -5398,11 +5399,25 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
             async_rewake,
             source,
             status_message,
+            metadata,
             if_condition,
             continue_on_block,
             target
         );
     }
+}
+
+fn hook_extra_metadata_label(hook: &crate::config::HookCommandConfig) -> String {
+    if hook.extra.is_empty() {
+        return String::new();
+    }
+    let keys = hook
+        .extra
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("|");
+    format!(", metadata={keys}")
 }
 
 fn print_status_line_status(cfg: &LibertaiConfig) {
@@ -6371,6 +6386,29 @@ mod tests {
             ..Default::default()
         }];
         assert_eq!(count_runnable_hooks(&hooks), 0);
+    }
+
+    #[test]
+    fn hook_extra_metadata_label_lists_preserved_keys() {
+        let hook = crate::config::HookCommandConfig {
+            extra: std::collections::BTreeMap::from([
+                ("customFlag".to_string(), serde_json::json!(true)),
+                (
+                    "metadata".to_string(),
+                    serde_json::json!({"owner": "security"}),
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            hook_extra_metadata_label(&hook),
+            ", metadata=customFlag|metadata"
+        );
+        assert_eq!(
+            hook_extra_metadata_label(&crate::config::HookCommandConfig::default()),
+            ""
+        );
     }
 
     #[test]

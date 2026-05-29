@@ -637,7 +637,8 @@ use `type = "prompt"` or `type = "agent"`, `prompt`, optional `model`,
 and the configured LibertAI chat endpoint, returning the model message as
 hook output. Hook rows with `once = true` run at most once per native CLI
 session/event/index, and named `source`, `statusMessage`, plus
-`asyncRewake` metadata round-trip and display in `/hooks`. CLI MCP-tool hook rows preserve
+`asyncRewake` metadata round-trip and display in `/hooks`. Unknown
+preserved metadata keys are also listed in `/hooks`. CLI MCP-tool hook rows preserve
 `type = "mcp_tool"` plus Claude-imported `type = "mcp-tool"` aliases,
 `server`, `tool`, and optional JSON `input` metadata in config and
 `/hooks` output, but are not executed yet. Unknown/less-common hook fields
