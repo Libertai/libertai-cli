@@ -1237,11 +1237,14 @@ async fn repl_loop(
         if let Some(rest) = trimmed.strip_prefix("/init ") {
             let notes = rest.trim();
             if notes.is_empty() {
-                println!("{DIM}  usage: /init [project notes]{RESET}");
+                println!("{DIM}  usage: /init [--agent] [project notes]{RESET}");
+                continue;
+            } else if let Some(agent_notes) = parse_init_agent_notes(notes) {
+                line = crate::commands::code_init::init_agent_prompt(agent_notes);
             } else {
                 print_init_project(Some(notes));
+                continue;
             }
-            continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/remember") {
             let text = rest.trim();
@@ -1447,6 +1450,25 @@ fn announce_mode_change(new_mode: Mode) {
     // Trailing blank line so the next read_line's first paint doesn't
     // overwrite the status message we just emitted.
     println!();
+}
+
+fn parse_init_agent_notes(input: &str) -> Option<Option<&str>> {
+    let trimmed = input.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    for marker in ["--agent", "agent", "model"] {
+        if lower == marker {
+            return Some(None);
+        }
+        if lower.starts_with(marker)
+            && lower
+                .as_bytes()
+                .get(marker.len())
+                .is_some_and(u8::is_ascii_whitespace)
+        {
+            return Some(Some(trimmed[marker.len()..].trim()));
+        }
+    }
+    None
 }
 
 fn prompt_plan_exit_handoff() -> Result<bool> {
@@ -1884,7 +1906,7 @@ fn print_help() {
     println!("{DIM}  /login    — run libertai login, then reload this REPL session{RESET}");
     println!("{DIM}  /logout   — run libertai logout, then reload this REPL session{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
-    println!("{DIM}  /init [notes] — create AGENTS.md for this project if missing{RESET}");
+    println!("{DIM}  /init [--agent] [notes] — create or draft AGENTS.md guidance{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
     println!("{DIM}  /agent [--worktree] <name> <task> — run a named sub-agent task{RESET}");
     println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
@@ -4624,6 +4646,20 @@ mod tests {
         let prompt = apply_output_style(Some("concise"), "hello");
         assert!(prompt.starts_with("hello\n\n[Session output style: concise."));
         assert!(prompt.contains("Be concise."));
+    }
+
+    #[test]
+    fn parse_init_agent_notes_accepts_agent_markers() {
+        assert_eq!(parse_init_agent_notes("--agent"), Some(None));
+        assert_eq!(
+            parse_init_agent_notes("--agent prefer pnpm"),
+            Some(Some("prefer pnpm"))
+        );
+        assert_eq!(
+            parse_init_agent_notes("model keep CONTRIBUTING guidance"),
+            Some(Some("keep CONTRIBUTING guidance"))
+        );
+        assert_eq!(parse_init_agent_notes("project notes"), None);
     }
 
     #[test]

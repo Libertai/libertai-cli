@@ -39,6 +39,57 @@ pub fn init_project_with_notes(cwd: &Path, notes: Option<&str>) -> Result<InitRe
     })
 }
 
+pub fn init_agent_prompt(notes: Option<&str>) -> String {
+    const INIT_PROMPT: &str = r#"Initialize project context for this repository by creating or
+updating AGENTS.md at the project root. AGENTS.md is the agent's
+onboarding doc - future sessions read it automatically via pi's
+AGENTS.md / CLAUDE.md ancestor walk and use it as part of the
+system prompt.
+
+1. Check whether AGENTS.md or CLAUDE.md already exists at the
+   project root. If one does, read it, propose specific
+   additions or corrections, and ask the user via ask_user
+   before overwriting.
+
+2. Otherwise, inspect the repo to identify:
+   - the primary language and framework (read package.json /
+     Cargo.toml / pyproject.toml / go.mod / etc.)
+   - exact build / lint / test commands
+   - the project structure: which directories matter, where
+     source lives, where tests live
+   - conventions visible in CONTRIBUTING.md / README.md /
+     existing code style
+
+3. Write AGENTS.md with these sections, terse - every line
+   should carry a fact a future agent needs. Skip any section
+   you cannot fill in from inspection; do not invent.
+
+   # <project name>
+   one-line summary.
+
+   ## Build & test
+   - install: <cmd>
+   - lint:    <cmd>
+   - test:    <cmd>
+
+   ## Structure
+   - src/      - <one-line>
+   - tests/    - <one-line>
+   - <etc.>
+
+   ## Conventions
+   - bullet list of code-style / process rules
+
+4. Report what you wrote, citing the file path as
+   AGENTS.md:1."#;
+    let trimmed = notes.unwrap_or("").trim();
+    if trimmed.is_empty() {
+        INIT_PROMPT.to_string()
+    } else {
+        format!("{INIT_PROMPT}\n\nUser-provided project notes to consider:\n{trimmed}")
+    }
+}
+
 fn build_agents_md(cwd: &Path, notes: Option<&str>) -> Result<String> {
     let project = cwd
         .file_name()
@@ -377,6 +428,25 @@ mod tests {
                 .content
                 .contains("User-provided project note: prefer snapshot tests and document public APIs")
         );
+    }
+
+    #[test]
+    fn init_agent_prompt_adds_optional_notes_without_writing() {
+        let prompt = init_agent_prompt(Some(" prefer existing Makefile targets "));
+
+        assert!(prompt.contains("creating or\nupdating AGENTS.md"));
+        assert!(prompt.contains("ask the user via ask_user\n   before overwriting"));
+        assert!(prompt.contains(
+            "User-provided project notes to consider:\nprefer existing Makefile targets"
+        ));
+    }
+
+    #[test]
+    fn init_agent_prompt_omits_empty_notes_section() {
+        let prompt = init_agent_prompt(Some("   "));
+
+        assert!(prompt.contains("Report what you wrote"));
+        assert!(!prompt.contains("User-provided project notes"));
     }
 
     #[test]
