@@ -250,6 +250,55 @@ args = ["--mode", "strict mode"]
 }
 
 #[test]
+fn claude_style_nested_hook_group_expands_handlers() {
+    let cfg: Config = toml::from_str(
+        r#"
+[[hooks.PreToolUse]]
+matcher = ["bash", "write"]
+if = "Bash(rm *)"
+timeout = "11"
+source = "project"
+asyncHook = true
+teamFlag = "shared"
+
+[[hooks.PreToolUse.hooks]]
+command = ["scripts/pre-tool-use.sh", "--policy"]
+
+[[hooks.PreToolUse.hooks]]
+type = "http"
+url = "https://example.test/hook"
+timeout = 3
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(cfg.hooks.pre_tool_use.len(), 2);
+    let command = &cfg.hooks.pre_tool_use[0];
+    assert_eq!(command.matcher, "bash|write");
+    assert_eq!(command.if_condition, "Bash(rm *)");
+    assert_eq!(command.command, "scripts/pre-tool-use.sh");
+    assert_eq!(command.args, vec!["--policy".to_string()]);
+    assert_eq!(command.timeout, Some(11));
+    assert_eq!(command.source, "project");
+    assert!(command.async_hook);
+    assert_eq!(command.extra.get("teamFlag"), Some(&json!("shared")));
+
+    let http = &cfg.hooks.pre_tool_use[1];
+    assert_eq!(http.hook_type, "http");
+    assert_eq!(http.matcher, "bash|write");
+    assert_eq!(http.if_condition, "Bash(rm *)");
+    assert_eq!(http.url, "https://example.test/hook");
+    assert_eq!(http.timeout, Some(3));
+    assert_eq!(http.source, "project");
+    assert!(http.async_hook);
+
+    let rendered = toml::to_string_pretty(&cfg).unwrap();
+    assert!(rendered.contains(r#"matcher = "bash|write""#));
+    assert!(rendered.contains(r#"command = "scripts/pre-tool-use.sh""#));
+    assert!(!rendered.contains("[[hooks.PreToolUse.hooks]]"));
+}
+
+#[test]
 fn hook_timeout_string_deserializes_to_seconds() {
     let cfg: Config = toml::from_str(
         r#"

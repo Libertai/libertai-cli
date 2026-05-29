@@ -196,7 +196,7 @@ impl Default for LauncherDefaults {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct HooksConfig {
     #[serde(default, rename = "UserPromptSubmit", skip_serializing_if = "Vec::is_empty")]
     pub user_prompt_submit: Vec<HookCommandConfig>,
@@ -214,6 +214,50 @@ pub struct HooksConfig {
     pub session_end: Vec<HookCommandConfig>,
     #[serde(default, rename = "Notification", skip_serializing_if = "Vec::is_empty")]
     pub notification: Vec<HookCommandConfig>,
+}
+
+impl<'de> Deserialize<'de> for HooksConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawHooksConfig {
+            #[serde(default, rename = "UserPromptSubmit")]
+            user_prompt_submit: Vec<serde_json::Value>,
+            #[serde(default, rename = "PreToolUse")]
+            pre_tool_use: Vec<serde_json::Value>,
+            #[serde(default, rename = "PostToolUse")]
+            post_tool_use: Vec<serde_json::Value>,
+            #[serde(default, rename = "SubagentStop")]
+            subagent_stop: Vec<serde_json::Value>,
+            #[serde(default, rename = "SessionStart")]
+            session_start: Vec<serde_json::Value>,
+            #[serde(default, rename = "Stop")]
+            stop: Vec<serde_json::Value>,
+            #[serde(default, rename = "SessionEnd")]
+            session_end: Vec<serde_json::Value>,
+            #[serde(default, rename = "Notification")]
+            notification: Vec<serde_json::Value>,
+        }
+
+        let raw = RawHooksConfig::deserialize(deserializer)?;
+        Ok(Self {
+            user_prompt_submit: deserialize_hook_rows(raw.user_prompt_submit)
+                .map_err(serde::de::Error::custom)?,
+            pre_tool_use: deserialize_hook_rows(raw.pre_tool_use)
+                .map_err(serde::de::Error::custom)?,
+            post_tool_use: deserialize_hook_rows(raw.post_tool_use)
+                .map_err(serde::de::Error::custom)?,
+            subagent_stop: deserialize_hook_rows(raw.subagent_stop)
+                .map_err(serde::de::Error::custom)?,
+            session_start: deserialize_hook_rows(raw.session_start)
+                .map_err(serde::de::Error::custom)?,
+            stop: deserialize_hook_rows(raw.stop).map_err(serde::de::Error::custom)?,
+            session_end: deserialize_hook_rows(raw.session_end).map_err(serde::de::Error::custom)?,
+            notification: deserialize_hook_rows(raw.notification).map_err(serde::de::Error::custom)?,
+        })
+    }
 }
 
 impl HooksConfig {
@@ -450,6 +494,180 @@ where
             .join("|")),
         None => Ok(String::new()),
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct HookGroupDefaults {
+    matcher: String,
+    if_condition: String,
+    enabled: bool,
+    async_hook: bool,
+    timeout: Option<u64>,
+    source: String,
+    status_message: String,
+    extra: BTreeMap<String, serde_json::Value>,
+}
+
+fn deserialize_hook_rows(
+    rows: Vec<serde_json::Value>,
+) -> std::result::Result<Vec<HookCommandConfig>, String> {
+    let mut out = Vec::new();
+    for row in rows {
+        let Some(hooks) = row.get("hooks") else {
+            out.push(deserialize_hook_row(row)?);
+            continue;
+        };
+        let hooks = hooks
+            .as_array()
+            .ok_or_else(|| "Claude-style hook group `hooks` must be an array".to_string())?;
+        let defaults = hook_group_defaults(&row)?;
+        for hook in hooks {
+            let mut child = deserialize_hook_row(hook.clone())?;
+            if child.matcher.trim().is_empty() {
+                child.matcher = defaults.matcher.clone();
+            }
+            if child.if_condition.trim().is_empty() {
+                child.if_condition = defaults.if_condition.clone();
+            }
+            child.enabled = defaults.enabled && child.enabled;
+            if defaults.async_hook {
+                child.async_hook = true;
+            }
+            if child.timeout.is_none() {
+                child.timeout = defaults.timeout;
+            }
+            if child.source.trim().is_empty() {
+                child.source = defaults.source.clone();
+            }
+            if child.status_message.trim().is_empty() {
+                child.status_message = defaults.status_message.clone();
+            }
+            for (key, value) in &defaults.extra {
+                child.extra.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+            out.push(child);
+        }
+    }
+    Ok(out)
+}
+
+fn deserialize_hook_row(
+    row: serde_json::Value,
+) -> std::result::Result<HookCommandConfig, String> {
+    serde_json::from_value(row).map_err(|e| format!("invalid hook row: {e}"))
+}
+
+fn hook_group_defaults(
+    row: &serde_json::Value,
+) -> std::result::Result<HookGroupDefaults, String> {
+    let matcher = row
+        .get("matcher")
+        .or_else(|| row.get("matchers"))
+        .map(matcher_from_json_value)
+        .transpose()?
+        .unwrap_or_default();
+    Ok(HookGroupDefaults {
+        matcher,
+        if_condition: row
+            .get("if")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        enabled: row
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+        async_hook: json_bool_field(row, "async") || json_bool_field(row, "asyncHook"),
+        timeout: timeout_from_json_value(row)?,
+        source: row
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        status_message: row
+            .get("statusMessage")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        extra: hook_group_extra_fields(row),
+    })
+}
+
+fn matcher_from_json_value(value: &serde_json::Value) -> std::result::Result<String, String> {
+    match value {
+        serde_json::Value::Null => Ok(String::new()),
+        serde_json::Value::String(value) => Ok(value.clone()),
+        serde_json::Value::Array(values) => Ok(values
+            .iter()
+            .filter_map(|value| value.as_str().map(str::trim))
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+            .join("|")),
+        _ => Err("hook matcher must be a string or string array".to_string()),
+    }
+}
+
+fn timeout_from_json_value(
+    row: &serde_json::Value,
+) -> std::result::Result<Option<u64>, String> {
+    match row.get("timeout") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(value)) => value
+            .as_u64()
+            .filter(|value| *value > 0)
+            .map(Some)
+            .ok_or_else(|| "hook timeout must be a positive integer number of seconds".to_string()),
+        Some(serde_json::Value::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                trimmed
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .map(Some)
+                    .ok_or_else(|| {
+                        "hook timeout must be a positive integer number of seconds".to_string()
+                    })
+            }
+        }
+        Some(_) => Err("hook timeout must be a positive integer number of seconds".to_string()),
+    }
+}
+
+fn json_bool_field(row: &serde_json::Value, key: &str) -> bool {
+    row.get(key)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn hook_group_extra_fields(row: &serde_json::Value) -> BTreeMap<String, serde_json::Value> {
+    let Some(object) = row.as_object() else {
+        return BTreeMap::new();
+    };
+    object
+        .iter()
+        .filter(|(key, _)| !is_known_hook_group_field(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+fn is_known_hook_group_field(key: &str) -> bool {
+    matches!(
+        key,
+        "enabled"
+            | "matcher"
+            | "matchers"
+            | "if"
+            | "hooks"
+            | "async"
+            | "asyncHook"
+            | "timeout"
+            | "source"
+            | "statusMessage"
+    )
 }
 
 #[derive(Debug, Clone, Default)]

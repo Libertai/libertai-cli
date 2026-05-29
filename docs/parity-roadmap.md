@@ -624,7 +624,10 @@ support case-sensitive exact names, `*` globs, `|` alternatives,
 `regex:<pattern>`, and slash-delimited regex patterns that can contain
 alternation pipes. Imported matcher arrays and `matchers` aliases also
 deserialize to the same pipe-separated matcher form. Tool hook rows can also set handler `if` filters such
-as `Bash(rm *)` to match a tool name plus argument glob. Rows can set
+as `Bash(rm *)` to match a tool name plus argument glob. Claude-style nested
+hook groups with `hooks = [...]` expand into normal CLI hook rows while inheriting
+group matcher, filter, timeout, async, source, status, enabled, and unknown
+metadata defaults. Rows can set
 `async = true` (or imported `asyncHook =
 true`) to launch a command or HTTP hook without waiting for completion;
 async hook output is discarded and cannot affect prompt/tool decisions.
