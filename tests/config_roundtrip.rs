@@ -203,6 +203,36 @@ command = "scripts/pre-tool-use.sh"
 }
 
 #[test]
+fn hook_command_array_deserializes_to_command_and_args() {
+    let cfg: Config = toml::from_str(
+        r#"
+[[hooks.PreToolUse]]
+matcher = "bash"
+command = ["scripts/pre-tool-use.sh", "--tool", "Bash(rm *)"]
+args = ["--mode", "strict mode"]
+"#,
+    )
+    .unwrap();
+
+    let hook = &cfg.hooks.pre_tool_use[0];
+    assert_eq!(hook.command, "scripts/pre-tool-use.sh");
+    assert_eq!(
+        hook.args,
+        vec![
+            "--tool".to_string(),
+            "Bash(rm *)".to_string(),
+            "--mode".to_string(),
+            "strict mode".to_string()
+        ]
+    );
+    let rendered = toml::to_string_pretty(&cfg).unwrap();
+    assert!(rendered.contains(r#"command = "scripts/pre-tool-use.sh""#));
+    let round: Config = toml::from_str(&rendered).unwrap();
+    assert_eq!(round.hooks.pre_tool_use[0].command, "scripts/pre-tool-use.sh");
+    assert_eq!(round.hooks.pre_tool_use[0].args, hook.args);
+}
+
+#[test]
 fn mask_key_hides_middle() {
     let masked = mask_key("LTAI_sk_abcdefgh12345678");
     assert!(masked.starts_with("LTAI"));

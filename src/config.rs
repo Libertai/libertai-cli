@@ -229,7 +229,7 @@ impl HooksConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HookCommandConfig {
     #[serde(default = "default_hook_enabled")]
     pub enabled: bool,
@@ -296,6 +296,92 @@ pub struct HookCommandConfig {
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+impl<'de> Deserialize<'de> for HookCommandConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawHookCommandConfig {
+            #[serde(default = "default_hook_enabled")]
+            enabled: bool,
+            #[serde(default, deserialize_with = "deserialize_matcher")]
+            matcher: String,
+            #[serde(default, rename = "if")]
+            if_condition: String,
+            #[serde(default = "default_hook_type", rename = "type")]
+            hook_type: String,
+            #[serde(default, deserialize_with = "deserialize_command")]
+            command: CommandParts,
+            #[serde(default)]
+            args: Vec<String>,
+            #[serde(default)]
+            url: String,
+            #[serde(default)]
+            headers: HashMap<String, String>,
+            #[serde(default, rename = "allowedEnvVars")]
+            allowed_env_vars: Vec<String>,
+            #[serde(default)]
+            prompt: String,
+            #[serde(default)]
+            model: String,
+            #[serde(default)]
+            source: String,
+            #[serde(default)]
+            server: String,
+            #[serde(default)]
+            tool: String,
+            #[serde(default)]
+            input: Option<serde_json::Value>,
+            #[serde(default, rename = "statusMessage")]
+            status_message: String,
+            #[serde(default)]
+            shell: String,
+            #[serde(default)]
+            timeout: Option<u64>,
+            #[serde(default, rename = "async", alias = "asyncHook")]
+            async_hook: bool,
+            #[serde(default, rename = "continueOnBlock")]
+            continue_on_block: bool,
+            #[serde(default)]
+            once: bool,
+            #[serde(default, rename = "asyncRewake")]
+            async_rewake: bool,
+            #[serde(flatten, default)]
+            extra: BTreeMap<String, serde_json::Value>,
+        }
+
+        let mut raw = RawHookCommandConfig::deserialize(deserializer)?;
+        let mut args = raw.command.args;
+        args.append(&mut raw.args);
+        Ok(Self {
+            enabled: raw.enabled,
+            matcher: raw.matcher,
+            if_condition: raw.if_condition,
+            hook_type: raw.hook_type,
+            command: raw.command.command,
+            args,
+            url: raw.url,
+            headers: raw.headers,
+            allowed_env_vars: raw.allowed_env_vars,
+            prompt: raw.prompt,
+            model: raw.model,
+            source: raw.source,
+            server: raw.server,
+            tool: raw.tool,
+            input: raw.input,
+            status_message: raw.status_message,
+            shell: raw.shell,
+            timeout: raw.timeout,
+            async_hook: raw.async_hook,
+            continue_on_block: raw.continue_on_block,
+            once: raw.once,
+            async_rewake: raw.async_rewake,
+            extra: raw.extra,
+        })
+    }
+}
+
 impl Default for HookCommandConfig {
     fn default() -> Self {
         Self {
@@ -358,6 +444,41 @@ where
             .collect::<Vec<_>>()
             .join("|")),
         None => Ok(String::new()),
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct CommandParts {
+    command: String,
+    args: Vec<String>,
+}
+
+fn deserialize_command<'de, D>(deserializer: D) -> std::result::Result<CommandParts, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum CommandValue {
+        String(String),
+        Array(Vec<String>),
+    }
+
+    match Option::<CommandValue>::deserialize(deserializer)? {
+        Some(CommandValue::String(command)) => Ok(CommandParts {
+            command,
+            args: Vec::new(),
+        }),
+        Some(CommandValue::Array(mut values)) => {
+            let command = values.first().cloned().unwrap_or_default();
+            let args = if values.is_empty() {
+                Vec::new()
+            } else {
+                values.drain(1..).collect()
+            };
+            Ok(CommandParts { command, args })
+        }
+        None => Ok(CommandParts::default()),
     }
 }
 
