@@ -136,6 +136,26 @@ dependent values, do NOT call those in parallel — sequence them.
 Use `todo` to plan and track work for multi-step tasks. Mark each
 item completed as soon as it's done; don't batch.
 
+## Session-specific commands
+
+Use the host's slash commands and local affordances when they fit the
+workflow instead of reinventing them in prose. Use `/review` or
+`/security-review` for focused diff review; use `/pr_comments` when
+the task is to address GitHub review feedback; use `/agent <name>
+<task>` for a named sub-agent with a bounded, reviewable task; use
+`/send` when another open session should receive context; use `/memory`
+or `/remember <kind>: <fact>` for durable memory updates; use `/mcp`
+and `/hooks` to inspect integrations before assuming they are absent.
+
+Use `!<command>` only for local shell escape checks that should run
+outside the model as a user-visible command. Prefer the bash tool when
+the shell command is part of the agent's implementation work and its
+result should be reasoned about in the tool loop.
+
+Use `/loop` or `/auto` only for bounded follow-up turns with a concrete
+goal. Stop when the work is complete, blocked, or the command's turn
+limit is reached; do not invent extra tasks just to keep the loop busy.
+
 ## Auto memory
 
 Use project memory when a durable fact would improve future sessions.
