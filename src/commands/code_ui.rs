@@ -15,7 +15,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -66,6 +66,9 @@ const LOOP_MAX_TURNS: usize = 10;
 const AUTO_DEFAULT_TURNS: usize = 10;
 const AUTO_MAX_TURNS: usize = 25;
 const STATUS_LINE_TEMPLATE_MAX_CHARS: usize = 240;
+const STATUS_LINE_COMMAND_MAX_CHARS: usize = 240;
+const STATUS_LINE_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
+const STATUS_LINE_COMMAND_CACHE_TTL: Duration = Duration::from_secs(5);
 const STATUS_LINE_TOKENS: &[&str] = &[
     "project", "path", "session", "backend", "model", "mode", "style", "tokens", "ctx", "live",
 ];
@@ -80,6 +83,15 @@ struct BarStatus {
     context_window: u32,
     output_style: Option<String>,
     status_line_template: String,
+    status_line_command: String,
+}
+
+#[derive(Clone)]
+struct StatusLineCommandCache {
+    key: String,
+    value: String,
+    error: String,
+    ts: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +215,8 @@ enum AutoCommand {
 /// ever need that, add a per-invocation reset step and document the
 /// invariant more loudly.
 static BAR_STATUS: Mutex<Option<BarStatus>> = Mutex::new(None);
+static STATUS_LINE_COMMAND_CACHE: OnceLock<Mutex<Option<StatusLineCommandCache>>> =
+    OnceLock::new();
 
 /// Current in-flight abort handle, populated for the duration of each
 /// `handle.prompt_with_abort` call. The Ctrl-C handler (installed once at
@@ -254,7 +268,8 @@ fn rule_chip(cols: usize, mode: Mode) -> String {
     let status = BAR_STATUS.lock().ok().and_then(|g| g.clone());
     let inner = match status {
         Some(s) => {
-            let text = expand_status_line_template(&s.status_line_template, &s, mode)
+            let text = status_line_command_text(&s.status_line_command)
+                .or_else(|| expand_status_line_template(&s.status_line_template, &s, mode))
                 .unwrap_or_else(|| default_rule_text(&s));
             format!(" {text} ")
         }
@@ -273,6 +288,104 @@ fn rule_chip(cols: usize, mode: Mode) -> String {
         inner,
         "\u{2500}".repeat(right)
     )
+}
+
+fn status_line_command_text(command: &str) -> Option<String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+    let cwd = std::env::current_dir().ok();
+    let key = format!(
+        "{command}\n{}",
+        cwd.as_ref()
+            .map_or_else(String::new, |p| p.display().to_string())
+    );
+    let now = Instant::now();
+    let cache = STATUS_LINE_COMMAND_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some(entry) = guard.as_ref() {
+            if entry.key == key
+                && now.saturating_duration_since(entry.ts) < STATUS_LINE_COMMAND_CACHE_TTL
+            {
+                if !entry.value.is_empty() {
+                    return Some(entry.value.clone());
+                }
+                if !entry.error.is_empty() {
+                    return Some(format!("status command: {}", entry.error));
+                }
+            }
+        }
+    }
+    let (value, error) = run_status_line_command(command);
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(StatusLineCommandCache {
+            key,
+            value: value.clone(),
+            error: error.clone(),
+            ts: now,
+        });
+    }
+    if !value.is_empty() {
+        Some(value)
+    } else if !error.is_empty() {
+        Some(format!("status command: {error}"))
+    } else {
+        None
+    }
+}
+
+fn run_status_line_command(command: &str) -> (String, String) {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let mut child = match Command::new(shell)
+        .arg("-c")
+        .arg(command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => return (String::new(), e.to_string()),
+    };
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if start.elapsed() >= STATUS_LINE_COMMAND_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return (String::new(), "timed out".to_string());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => return (String::new(), e.to_string()),
+        }
+    }
+    match child.wait_with_output() {
+        Ok(output) if output.status.success() => (
+            first_status_line(&String::from_utf8_lossy(&output.stdout)),
+            String::new(),
+        ),
+        Ok(output) => {
+            let stderr = first_status_line(&String::from_utf8_lossy(&output.stderr));
+            let detail = if stderr.is_empty() {
+                format!("exit {}", output.status.code().unwrap_or(1))
+            } else {
+                stderr
+            };
+            (String::new(), detail)
+        }
+        Err(e) => (String::new(), e.to_string()),
+    }
+}
+
+fn first_status_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(STATUS_LINE_TEMPLATE_MAX_CHARS)
+        .collect()
 }
 
 fn default_rule_text(status: &BarStatus) -> String {
@@ -351,6 +464,7 @@ pub fn run_interactive(
         context_window: context_window_for(&model),
         output_style: None,
         status_line_template: cfg.status_line_template.clone(),
+        status_line_command: cfg.status_line_command.clone(),
     });
 
     // Forward Ctrl-C during streaming to pi's AbortHandle.
@@ -969,6 +1083,7 @@ async fn repl_loop(
                                 context_window: context_window_for(&model),
                                 output_style: output_style.clone(),
                                 status_line_template: cfg.status_line_template.clone(),
+                                status_line_command: cfg.status_line_command.clone(),
                             });
                             println!("{DIM}  → model set to {provider}/{model}{RESET}");
                         }
@@ -1195,6 +1310,7 @@ async fn repl_loop(
                     context_window,
                     output_style: output_style.clone(),
                     status_line_template: cfg.status_line_template.clone(),
+                    status_line_command: cfg.status_line_command.clone(),
                 });
                 eprintln!(
                     "{DIM}  {}/{}  stop: {:?}  in={} out={}{RESET}",
@@ -1405,6 +1521,7 @@ async fn reload_repl_session(
         context_window: context_window_for(model),
         output_style: None,
         status_line_template: cfg.status_line_template.clone(),
+        status_line_command: cfg.status_line_command.clone(),
     });
     println!("{DIM}  → {label}; fresh session using {provider}/{model}.{RESET}");
     Ok(handle)
@@ -1686,7 +1803,9 @@ fn print_help() {
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
     println!("{DIM}  /config   — show active configuration summary (/settings is an alias){RESET}");
-    println!("{DIM}  /statusline <template|reset> — customize the input-bar status line{RESET}");
+    println!(
+        "{DIM}  /statusline <template|command <shell>|reset> — customize the input-bar status line{RESET}"
+    );
     println!("{DIM}  /hotkeys  — show input bar keyboard controls{RESET}");
     println!("{DIM}  /tree [path] — show a bounded project tree{RESET}");
     println!("{DIM}  /changelog [count] — show recent git commits{RESET}");
@@ -2261,6 +2380,22 @@ fn normalize_status_line_template(value: &str) -> String {
         .chars()
         .take(STATUS_LINE_TEMPLATE_MAX_CHARS)
         .collect()
+}
+
+fn normalize_status_line_command(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .take(STATUS_LINE_COMMAND_MAX_CHARS)
+        .collect()
+}
+
+fn clear_status_line_command_cache() {
+    if let Some(cache) = STATUS_LINE_COMMAND_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
+    }
 }
 
 fn status_line_help() -> String {
@@ -3798,16 +3933,28 @@ fn print_config_status(cfg: &LibertaiConfig) {
 fn print_status_line_status(cfg: &LibertaiConfig) {
     println!("{BOLD}statusline{RESET}");
     println!(
-        "{DIM}  current:{RESET} {}",
+        "{DIM}  template:{RESET} {}",
         if cfg.status_line_template.trim().is_empty() {
             "(default)"
         } else {
             cfg.status_line_template.as_str()
         }
     );
+    println!(
+        "{DIM}  command:{RESET} {}",
+        if cfg.status_line_command.trim().is_empty() {
+            "(none)"
+        } else {
+            cfg.status_line_command.as_str()
+        }
+    );
     println!("{DIM}  {}{RESET}", status_line_help());
     println!(
-        "{DIM}  usage:{RESET} /statusline <template>, /statusline reset, /statusline status"
+        "{DIM}  usage:{RESET} {}",
+        concat!(
+            "/statusline <template>, /statusline command <shell>, ",
+            "/statusline command-clear, /statusline reset, /statusline status"
+        )
     );
     println!();
 }
@@ -3823,16 +3970,34 @@ fn handle_status_line_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Resul
     }
 
     let mut next = cfg.as_ref().clone();
-    if action.eq_ignore_ascii_case("reset") || action.eq_ignore_ascii_case("clear") {
+    if action.eq_ignore_ascii_case("command-clear")
+        || action.eq_ignore_ascii_case("command clear")
+        || action.eq_ignore_ascii_case("command reset")
+    {
+        next.status_line_command.clear();
+    } else if let Some(command) = action.strip_prefix("command ") {
+        next.status_line_command = normalize_status_line_command(command);
+    } else if action.eq_ignore_ascii_case("reset") || action.eq_ignore_ascii_case("clear") {
         next.status_line_template.clear();
+        next.status_line_command.clear();
     } else {
         next.status_line_template = normalize_status_line_template(action);
     }
     crate::config::save(&next).context("save config")?;
     *cfg = Arc::new(next);
     let template = cfg.status_line_template.clone();
-    update_bar_status(|status| status.status_line_template = template.clone());
-    if cfg.status_line_template.trim().is_empty() {
+    let command = cfg.status_line_command.clone();
+    update_bar_status(|status| {
+        status.status_line_template = template.clone();
+        status.status_line_command = command.clone();
+    });
+    clear_status_line_command_cache();
+    if !cfg.status_line_command.trim().is_empty() {
+        println!(
+            "{DIM}  status command updated: {}{RESET}",
+            cfg.status_line_command
+        );
+    } else if cfg.status_line_template.trim().is_empty() {
         println!("{DIM}  status line reset to the default.{RESET}");
     } else {
         println!(
@@ -4391,6 +4556,7 @@ mod tests {
             output_style: Some("review".to_string()),
             status_line_template: "{backend}/{model} {mode} {style} {tokens} {ctx} {unknown}"
                 .to_string(),
+            status_line_command: String::new(),
         };
         let expanded =
             expand_status_line_template(&status.status_line_template, &status, Mode::Plan)
@@ -4414,9 +4580,33 @@ mod tests {
             context_window: 1024,
             output_style: None,
             status_line_template: String::new(),
+            status_line_command: String::new(),
         };
         assert!(expand_status_line_template("", &status, Mode::Normal).is_none());
         assert_eq!(default_rule_text(&status), "50% · 512 / 1.0k · libertai/qwen");
+    }
+
+    #[test]
+    fn status_line_command_output_uses_first_nonempty_line() {
+        assert_eq!(
+            first_status_line(" \n  dynamic branch  \nsecond"),
+            "dynamic branch"
+        );
+    }
+
+    #[test]
+    fn status_line_command_normalizes_and_caps_input() {
+        let command = format!("  {}  ", "x".repeat(STATUS_LINE_COMMAND_MAX_CHARS + 20));
+        let normalized = normalize_status_line_command(&command);
+        assert_eq!(normalized.chars().count(), STATUS_LINE_COMMAND_MAX_CHARS);
+        assert!(normalized.chars().all(|c| c == 'x'));
+    }
+
+    #[test]
+    fn status_line_command_runs_shell_and_reads_first_output_line() {
+        let (value, error) = run_status_line_command("printf 'ready\\nsecond\\n'");
+        assert_eq!(value, "ready");
+        assert_eq!(error, "");
     }
 
     #[test]

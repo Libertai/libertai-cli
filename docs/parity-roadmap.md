@@ -154,7 +154,9 @@ SDK; those are flagged **(upstream)**.
   `.claude/output-styles` and `.libertai/output-styles` roots.
 - **CLI status line customization** — `/statusline <template>` persists
   a terminal input-bar template with Claude-style tokens for project,
-  path, backend/model, mode, output style, token count, and context use.
+  path, backend/model, mode, output style, token count, and context use;
+  `/statusline command <shell>` can instead render the first output line
+  from a dynamic shell command.
 
 **Sprint 0 + 1 (this branch — `sprint-0-1-prompt-axis`):**
 - **Sprint 0**: verification harness — `LIBERTAI_DUMP_SYSTEM_PROMPT` +
