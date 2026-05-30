@@ -430,6 +430,8 @@ pub struct HookCommandConfig {
     pub prompt: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
+    #[serde(default, rename = "reviewPolicy", skip_serializing_if = "String::is_empty")]
+    pub review_policy: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -498,6 +500,8 @@ impl<'de> Deserialize<'de> for HookCommandConfig {
             prompt: String,
             #[serde(default)]
             model: String,
+            #[serde(default, rename = "reviewPolicy")]
+            review_policy: String,
             #[serde(default)]
             source: String,
             #[serde(default)]
@@ -539,6 +543,7 @@ impl<'de> Deserialize<'de> for HookCommandConfig {
             allowed_env_vars: raw.allowed_env_vars,
             prompt: raw.prompt,
             model: raw.model,
+            review_policy: raw.review_policy,
             source: raw.source,
             server: raw.server,
             tool: raw.tool,
@@ -569,6 +574,7 @@ impl Default for HookCommandConfig {
             allowed_env_vars: Vec::new(),
             prompt: String::new(),
             model: String::new(),
+            review_policy: String::new(),
             source: String::new(),
             server: String::new(),
             tool: String::new(),
@@ -632,6 +638,7 @@ struct HookGroupDefaults {
     timeout: Option<u64>,
     source: String,
     status_message: String,
+    review_policy: String,
     shell: String,
     extra: BTreeMap<String, serde_json::Value>,
 }
@@ -678,6 +685,9 @@ fn deserialize_hook_rows(
             }
             if child.status_message.trim().is_empty() {
                 child.status_message = defaults.status_message.clone();
+            }
+            if child.review_policy.trim().is_empty() {
+                child.review_policy = defaults.review_policy.clone();
             }
             if child.shell.trim().is_empty() {
                 child.shell = defaults.shell.clone();
@@ -729,6 +739,11 @@ fn hook_group_defaults(
             .to_string(),
         status_message: row
             .get("statusMessage")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        review_policy: row
+            .get("reviewPolicy")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string(),
@@ -818,6 +833,7 @@ fn is_known_hook_group_field(key: &str) -> bool {
             | "timeout"
             | "source"
             | "statusMessage"
+            | "reviewPolicy"
             | "shell"
     )
 }

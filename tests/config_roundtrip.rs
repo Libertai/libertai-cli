@@ -59,6 +59,7 @@ fn save_then_load_preserves_fields() {
                     input: Some(json!({ "level": "strict" })),
                     source: "project".into(),
                     status_message: "checking policy".into(),
+                    review_policy: "manual-review".into(),
                     once: true,
                     async_rewake: true,
                     extra: BTreeMap::from([("customFlag".to_string(), json!(true))]),
@@ -157,6 +158,10 @@ fn save_then_load_preserves_fields() {
     assert_eq!(
         round.hooks.user_prompt_submit[1].status_message,
         "checking policy"
+    );
+    assert_eq!(
+        round.hooks.user_prompt_submit[1].review_policy,
+        "manual-review"
     );
     assert_eq!(
         round.hooks.user_prompt_submit[1].extra.get("customFlag"),
@@ -284,6 +289,27 @@ args = ["--mode", "strict mode"]
 }
 
 #[test]
+fn hook_review_policy_deserializes_as_named_field() {
+    let cfg: Config = toml::from_str(
+        r#"
+[[hooks.PreToolUse]]
+matcher = "bash"
+command = "scripts/pre-tool-use.sh"
+reviewPolicy = "strict"
+customFlag = true
+"#,
+    )
+    .unwrap();
+
+    let hook = &cfg.hooks.pre_tool_use[0];
+    assert_eq!(hook.review_policy, "strict");
+    assert_eq!(hook.extra.get("customFlag"), Some(&json!(true)));
+    assert!(!hook.extra.contains_key("reviewPolicy"));
+    let rendered = toml::to_string_pretty(&cfg).unwrap();
+    assert!(rendered.contains(r#"reviewPolicy = "strict""#));
+}
+
+#[test]
 fn claude_style_nested_hook_group_expands_handlers() {
     let cfg: Config = toml::from_str(
         r#"
@@ -292,6 +318,7 @@ matcher = ["bash", "write"]
 if = "Bash(rm *)"
 timeout = "11"
 source = "project"
+reviewPolicy = "strict"
 asyncHook = true
 continueOnBlock = true
 once = true
@@ -318,6 +345,7 @@ timeout = 3
     assert_eq!(command.args, vec!["--policy".to_string()]);
     assert_eq!(command.timeout, Some(11));
     assert_eq!(command.source, "project");
+    assert_eq!(command.review_policy, "strict");
     assert!(command.async_hook);
     assert!(command.continue_on_block);
     assert!(command.once);
@@ -332,6 +360,7 @@ timeout = 3
     assert_eq!(http.url, "https://example.test/hook");
     assert_eq!(http.timeout, Some(3));
     assert_eq!(http.source, "project");
+    assert_eq!(http.review_policy, "strict");
     assert!(http.async_hook);
     assert!(http.continue_on_block);
     assert!(http.once);
@@ -345,6 +374,7 @@ timeout = 3
     assert!(rendered.contains("once = true"));
     assert!(rendered.contains("asyncRewake = true"));
     assert!(rendered.contains(r#"shell = "bash""#));
+    assert!(rendered.contains(r#"reviewPolicy = "strict""#));
     assert!(!rendered.contains("[[hooks.PreToolUse.hooks]]"));
 }
 

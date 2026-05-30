@@ -747,7 +747,7 @@ deserialize to the same pipe-separated matcher form. Tool hook rows can also set
 as `Bash(rm *)` to match a tool name plus argument glob. Claude-style nested
 hook groups with `hooks = [...]` expand into normal CLI hook rows while inheriting
 group matcher, filter, timeout, async, continueOnBlock, once,
-asyncRewake, shell, source, status, enabled, and unknown metadata
+asyncRewake, shell, source, status, reviewPolicy, enabled, and unknown metadata
 defaults. Rows can set
 `async = true` (or imported `asyncHook =
 true`) to launch a command or HTTP hook without waiting for completion;
@@ -767,7 +767,7 @@ ephemeral read-only code-agent session with `read`, `grep`, `find`, and
 `ls`, returning the child agent's final text as hook output. Hook rows with
 `once = true` run at most once per native CLI
 session/event/index, and named `source`, `statusMessage`, plus
-`asyncRewake` metadata round-trip and display in `/hooks`. Unknown
+`reviewPolicy` and `asyncRewake` metadata round-trip and display in `/hooks`. Unknown
 preserved metadata keys are also listed in `/hooks`. CLI MCP-tool hook rows use
 `type = "mcp_tool"` plus Claude-imported `type = "mcp-tool"` aliases,
 `server`, `tool`, and optional JSON `input` metadata, launching stdio
@@ -779,7 +779,7 @@ are flattened into each hook row and round-trip through TOML config saves.
 `/hooks` and `libertai status` report configured runnable hooks, and
 `/hooks show <event>` expands one event bucket with per-row matcher,
 target, flag, timeout, source, status-message, HTTP header/env counts,
-MCP input presence, and preserved metadata keys without printing secret
+review policy, MCP input presence, and preserved metadata keys without printing secret
 header or environment values.
 
 Remaining work: any pi-level typed hook dispatcher and persistent/live CLI MCP

@@ -9858,6 +9858,11 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
         } else {
             format!(", statusMessage={}", hook.status_message.trim())
         };
+        let review_policy = if hook.review_policy.trim().is_empty() {
+            String::new()
+        } else {
+            format!(", reviewPolicy={}", hook.review_policy.trim())
+        };
         let metadata = hook_extra_metadata_label(hook);
         let if_condition = if hook.if_condition.trim().is_empty() {
             String::new()
@@ -9898,7 +9903,7 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
             crate::commands::code_hooks::hook_command_display(hook)
         };
         println!(
-            "{DIM}  {}. {} [{}] type={} matcher={}{}{}{}{}{}{}{}{}{}{}:{RESET} {}",
+            "{DIM}  {}. {} [{}] type={} matcher={}{}{}{}{}{}{}{}{}{}{}{}:{RESET} {}",
             idx + 1,
             event,
             marker,
@@ -9911,6 +9916,7 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
             async_rewake,
             source,
             status_message,
+            review_policy,
             metadata,
             if_condition,
             continue_on_block,
@@ -9992,6 +9998,9 @@ fn format_hook_event_details(event: &str, hooks: &[crate::config::HookCommandCon
         }
         if !hook.status_message.trim().is_empty() {
             out.push_str(&format!("     statusMessage: {}\n", hook.status_message.trim()));
+        }
+        if !hook.review_policy.trim().is_empty() {
+            out.push_str(&format!("     reviewPolicy: {}\n", hook.review_policy.trim()));
         }
         if hook_type_key == "http" {
             out.push_str(&format!(
@@ -12090,9 +12099,10 @@ mod tests {
                 source: "project".to_string(),
                 timeout: Some(7),
                 continue_on_block: true,
+                review_policy: "strict".to_string(),
                 extra: std::collections::BTreeMap::from([(
-                    "reviewPolicy".to_string(),
-                    serde_json::json!("strict"),
+                    "customFlag".to_string(),
+                    serde_json::json!(true),
                 )]),
                 ..Default::default()
             },
@@ -12112,7 +12122,9 @@ mod tests {
         assert!(details.contains("types: http 1, mcp_tool 1"));
         assert!(details.contains("matcher=Bash(*) target=https://hooks.example/pre"));
         assert!(details.contains("http metadata: 1 header(s), 1 allowed env var(s)"));
-        assert!(details.contains("metadata: reviewPolicy"));
+        assert!(details.contains("reviewPolicy: strict"));
+        assert!(details.contains("metadata: customFlag"));
+        assert!(!details.contains("metadata: reviewPolicy"));
         assert!(details.contains("target=policy:check"));
         assert!(details.contains("mcp input: yes"));
         assert!(!details.contains("secret-token"));
