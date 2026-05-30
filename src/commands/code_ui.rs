@@ -2318,7 +2318,7 @@ fn print_help() {
     println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
     println!("{DIM}  /skills [list|open|enable <name>|disable <name>] — manage code-agent skills for new sessions{RESET}");
     println!("{DIM}  /init [--agent|from-agent append|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}");
-    println!("{DIM}  /onboarding [path] — write a local project onboarding guide{RESET}");
+    println!("{DIM}  /onboarding [save|path] — write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
     println!("{DIM}  /agents   — list named sub-agents (/agents open shows agent paths){RESET}");
     println!("{DIM}  /agents create [--worktree] <name> [description] — create a project sub-agent{RESET}");
@@ -4596,6 +4596,7 @@ enum OnboardingTarget {
 
 fn parse_onboarding_target(path: Option<&str>) -> Result<OnboardingTarget> {
     let raw = path.unwrap_or("").trim();
+    let raw = strip_save_action(raw);
     if raw.is_empty() {
         return Ok(OnboardingTarget::File(PathBuf::from("libertai-onboarding.md")));
     }
@@ -9121,6 +9122,14 @@ mod tests {
         );
         assert_eq!(
             parse_onboarding_target(Some("docs/team.md")).unwrap(),
+            OnboardingTarget::File(PathBuf::from("docs/team.md"))
+        );
+        assert_eq!(
+            parse_onboarding_target(Some("save")).unwrap(),
+            OnboardingTarget::File(PathBuf::from("libertai-onboarding.md"))
+        );
+        assert_eq!(
+            parse_onboarding_target(Some("save docs/team.md")).unwrap(),
             OnboardingTarget::File(PathBuf::from("docs/team.md"))
         );
         assert_eq!(
