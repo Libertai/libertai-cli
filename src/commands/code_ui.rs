@@ -2616,7 +2616,7 @@ fn print_help() {
     );
     println!("{DIM}  {} — inspect the bash sandbox profile{RESET}", sandbox_usage_text());
     println!("{DIM}  {} — show token usage for this REPL session{RESET}", usage_slash_usage_text());
-    println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
+    println!("{DIM}  {} — show recent submitted prompts{RESET}", history_usage_text());
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
     println!("{DIM}  /config [status|show|current|info|path|open|advanced|set <key> <value>|unset <key>] — show or update active config{RESET}");
     println!("{DIM}  /hooks    — show configured command hooks (/hook is accepted too){RESET}");
@@ -2624,7 +2624,7 @@ fn print_help() {
     println!("{DIM}  {} — customize the input-bar status line{RESET}", status_line_usage_text());
     println!("{DIM}  /hotkeys  — show input bar keyboard controls{RESET}");
     println!("{DIM}  /tree [path] — show a bounded project tree{RESET}");
-    println!("{DIM}  /changelog [count] — show recent git commits{RESET}");
+    println!("{DIM}  {} — show recent git commits{RESET}", changelog_usage_text());
     println!("{DIM}  /reload [config|session|now|fresh] — reload config and start a fresh agent session{RESET}");
     println!("{DIM}  /resume [path] — resume the latest or specified saved session{RESET}");
     println!("{DIM}  /fork [list|index|id] — fork from a previous user message{RESET}");
@@ -2837,9 +2837,13 @@ fn parse_changelog_limit(input: &str) -> Result<usize> {
     }
     let limit = value
         .parse::<usize>()
-        .context("usage: /changelog [count]")?
+        .with_context(|| format!("usage: {}", changelog_usage_text()))?
         .clamp(1, CHANGELOG_MAX_LIMIT);
     Ok(limit)
+}
+
+fn changelog_usage_text() -> &'static str {
+    "/changelog [count|list|recent|latest|status|state|show]"
 }
 
 fn print_changelog(limit: usize) {
@@ -3081,9 +3085,13 @@ fn parse_history_limit(input: &str) -> Result<usize> {
     }
     let limit = value
         .parse::<usize>()
-        .context("usage: /history [count]")?
+        .with_context(|| format!("usage: {}", history_usage_text()))?
         .clamp(1, HISTORY_MAX_LIMIT);
     Ok(limit)
+}
+
+fn history_usage_text() -> &'static str {
+    "/history [count|list|recent|latest|status|state|show]"
 }
 
 fn is_default_list_alias(value: &str) -> bool {
@@ -11442,10 +11450,14 @@ mod tests {
         assert_eq!(parse_history_limit("recent").unwrap(), HISTORY_DEFAULT_LIMIT);
         assert_eq!(parse_history_limit("latest").unwrap(), HISTORY_DEFAULT_LIMIT);
         assert_eq!(parse_history_limit("status").unwrap(), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(parse_history_limit("state").unwrap(), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(parse_history_limit("show").unwrap(), HISTORY_DEFAULT_LIMIT);
         assert_eq!(parse_history_limit("3").unwrap(), 3);
         assert_eq!(parse_history_limit("0").unwrap(), 1);
         assert_eq!(parse_history_limit("999").unwrap(), HISTORY_MAX_LIMIT);
         assert!(parse_history_limit("open").is_err());
+        assert!(history_usage_text().contains("list|recent|latest"));
+        assert!(history_usage_text().contains("status|state|show"));
     }
 
     #[test]
@@ -11524,10 +11536,20 @@ mod tests {
             parse_changelog_limit("status").unwrap(),
             CHANGELOG_DEFAULT_LIMIT
         );
+        assert_eq!(
+            parse_changelog_limit("state").unwrap(),
+            CHANGELOG_DEFAULT_LIMIT
+        );
+        assert_eq!(
+            parse_changelog_limit("show").unwrap(),
+            CHANGELOG_DEFAULT_LIMIT
+        );
         assert_eq!(parse_changelog_limit("3").unwrap(), 3);
         assert_eq!(parse_changelog_limit("0").unwrap(), 1);
         assert_eq!(parse_changelog_limit("999").unwrap(), CHANGELOG_MAX_LIMIT);
         assert!(parse_changelog_limit("open").is_err());
+        assert!(changelog_usage_text().contains("list|recent|latest"));
+        assert!(changelog_usage_text().contains("status|state|show"));
     }
 
     #[test]
