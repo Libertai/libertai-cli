@@ -1399,6 +1399,9 @@ async fn repl_loop(
             if notes.is_empty() {
                 println!("{DIM}  usage: /init [--agent] [project notes]{RESET}");
                 continue;
+            } else if let Some(action) = parse_init_from_agent_action(notes) {
+                apply_init_from_agent(&handle, action).await;
+                continue;
             } else if let Some(agent_notes) = parse_init_agent_notes(notes) {
                 line = crate::commands::code_init::init_agent_prompt(agent_notes);
             } else {
@@ -1629,6 +1632,32 @@ fn parse_init_agent_notes(input: &str) -> Option<Option<&str>> {
         }
     }
     None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitFromAgentAction {
+    Preview,
+    Append,
+    Replace,
+}
+
+fn parse_init_from_agent_action(input: &str) -> Option<InitFromAgentAction> {
+    let trimmed = input.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("from-agent")
+        .or_else(|| lower.strip_prefix("from_agent"))
+        .or_else(|| lower.strip_prefix("apply-agent"))
+        .or_else(|| lower.strip_prefix("apply_agent"))?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    match rest.trim() {
+        "" | "preview" | "show" => Some(InitFromAgentAction::Preview),
+        "append" => Some(InitFromAgentAction::Append),
+        "replace" => Some(InitFromAgentAction::Replace),
+        _ => None,
+    }
 }
 
 fn prompt_plan_exit_handoff() -> Result<bool> {
@@ -3624,6 +3653,122 @@ fn print_init_project(notes: Option<&str>) {
         }
         Err(e) => eprintln!("{DIM}  /init: failed: {e:#}{RESET}"),
     }
+}
+
+async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgentAction) {
+    let messages = match handle.messages().await {
+        Ok(messages) => messages,
+        Err(e) => {
+            eprintln!("{DIM}  /init from-agent: could not read transcript: {e:#}{RESET}");
+            return;
+        }
+    };
+    let Some(text) = last_assistant_text(&messages) else {
+        println!("{DIM}  /init from-agent: no assistant response yet.{RESET}");
+        return;
+    };
+    let Some(candidate) = crate::commands::code_init::extract_agents_md_candidate(&text) else {
+        println!(
+            "{DIM}  /init from-agent: no fenced AGENTS.md candidate found in the latest assistant response.{RESET}"
+        );
+        return;
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /init from-agent: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let path = cwd.join("AGENTS.md");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    match action {
+        InitFromAgentAction::Preview => {
+            println!("{BOLD}init from-agent{RESET}");
+            print!(
+                "{}",
+                init_candidate_preview(&path.display().to_string(), &existing, &candidate)
+            );
+            println!();
+        }
+        InitFromAgentAction::Append | InitFromAgentAction::Replace => {
+            let mode = if action == InitFromAgentAction::Append {
+                "append"
+            } else {
+                "replace"
+            };
+            let content = match build_init_apply_content(&existing, &candidate, mode) {
+                Ok(content) => content,
+                Err(e) => {
+                    eprintln!("{DIM}  /init from-agent: {e}{RESET}");
+                    return;
+                }
+            };
+            let backup = if action == InitFromAgentAction::Replace && path.exists() {
+                let backup = path.with_file_name(format!(
+                    "AGENTS.md.bak.{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_secs())
+                        .unwrap_or(0)
+                ));
+                if let Err(e) = std::fs::write(&backup, &existing) {
+                    eprintln!(
+                        "{DIM}  /init from-agent: could not write backup {}: {e}{RESET}",
+                        backup.display()
+                    );
+                    return;
+                }
+                Some(backup)
+            } else {
+                None
+            };
+            if let Err(e) = std::fs::write(&path, content) {
+                eprintln!(
+                    "{DIM}  /init from-agent: could not write {}: {e}{RESET}",
+                    path.display()
+                );
+                return;
+            }
+            println!(
+                "{DIM}  /init from-agent: {} AGENTS.md from latest assistant candidate: {}{RESET}",
+                if action == InitFromAgentAction::Append {
+                    "appended to"
+                } else {
+                    "replaced"
+                },
+                path.display()
+            );
+            if let Some(backup) = backup {
+                println!("{DIM}  backup: {}{RESET}", backup.display());
+            }
+        }
+    }
+}
+
+fn build_init_apply_content(existing: &str, candidate: &str, mode: &str) -> Result<String, String> {
+    let candidate = ensure_trailing_newline(candidate.trim());
+    match mode {
+        "append" => {
+            let mut content = existing.trim_end().to_string();
+            if !content.trim().is_empty() {
+                content.push_str("\n\n");
+            }
+            content.push_str("## Generated /init candidate\n\n");
+            content.push_str(&candidate);
+            Ok(content)
+        }
+        "replace" => Ok(candidate),
+        _ => Err("init apply mode must be append or replace".to_string()),
+    }
+}
+
+fn ensure_trailing_newline(value: &str) -> String {
+    let mut out = value.to_string();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 fn write_onboarding_guide(path: Option<&str>) {
@@ -6415,6 +6560,35 @@ mod tests {
             Some(Some("keep CONTRIBUTING guidance"))
         );
         assert_eq!(parse_init_agent_notes("project notes"), None);
+    }
+
+    #[test]
+    fn parse_init_from_agent_accepts_preview_and_apply_modes() {
+        assert_eq!(
+            parse_init_from_agent_action("from-agent"),
+            Some(InitFromAgentAction::Preview)
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent append"),
+            Some(InitFromAgentAction::Append)
+        );
+        assert_eq!(
+            parse_init_from_agent_action("apply-agent replace"),
+            Some(InitFromAgentAction::Replace)
+        );
+        assert_eq!(parse_init_from_agent_action("from-agent nope"), None);
+    }
+
+    #[test]
+    fn build_init_apply_content_appends_or_replaces_candidate() {
+        assert_eq!(
+            build_init_apply_content("custom guidance\n", "# Demo", "append").unwrap(),
+            "custom guidance\n\n## Generated /init candidate\n\n# Demo\n"
+        );
+        assert_eq!(
+            build_init_apply_content("custom guidance\n", "# Demo", "replace").unwrap(),
+            "# Demo\n"
+        );
     }
 
     #[test]

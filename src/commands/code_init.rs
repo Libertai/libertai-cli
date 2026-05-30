@@ -150,6 +150,40 @@ system prompt.
     }
 }
 
+pub fn extract_agents_md_candidate(text: &str) -> Option<String> {
+    let normalized = text.replace("\r\n", "\n");
+    let mut saw_label = false;
+    let mut in_fence = false;
+    let mut collected = Vec::new();
+    for line in normalized.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if !in_fence
+            && lower.contains("agents.md")
+            && (lower.contains("candidate") || lower.contains("proposed"))
+        {
+            saw_label = true;
+            continue;
+        }
+        if !in_fence && trimmed.starts_with("```") {
+            let info = trimmed.trim_start_matches('`').trim().to_ascii_lowercase();
+            if saw_label || info.contains("agents.md") || info.contains("candidate") {
+                in_fence = true;
+                saw_label = false;
+                continue;
+            }
+        }
+        if in_fence {
+            if trimmed.starts_with("```") {
+                let candidate = collected.join("\n").trim().to_string();
+                return (!candidate.is_empty()).then_some(candidate);
+            }
+            collected.push(line.to_string());
+        }
+    }
+    None
+}
+
 fn build_agents_md(cwd: &Path, notes: Option<&str>) -> Result<String> {
     let project = cwd
         .file_name()
@@ -571,6 +605,28 @@ mod tests {
         assert!(result.content.contains("build: `pnpm run build` (script: `vite build`)"));
         assert!(result.content.contains("test: `pnpm test` (script: `vitest`)"));
         assert!(result.content.contains("lint: `pnpm run lint` (script: `eslint .`)"));
+    }
+
+    #[test]
+    fn extracts_fenced_agents_candidate_from_agent_response() {
+        let text = r#"Here is the merge proposal.
+
+AGENTS.md candidate
+
+```markdown
+# Demo
+
+## Build & test
+- test: cargo test
+```
+
+Merge plan:
+- append Build & test
+"#;
+        assert_eq!(
+            extract_agents_md_candidate(text).as_deref(),
+            Some("# Demo\n\n## Build & test\n- test: cargo test")
+        );
     }
 
     #[test]
