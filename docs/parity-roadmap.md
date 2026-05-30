@@ -95,7 +95,8 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/init from-agent merge-lines`** — REPL users can apply the
   latest assistant-proposed fenced `AGENTS.md candidate` by appending
   only new lines inside matching `##` sections, preserving existing
-  section text instead of replacing whole headings.
+  section text instead of replacing whole headings; `/init from-agent
+  preview merge-lines` shows that no-write result before applying.
 - **CLI `/compact` command** — REPL users can trigger pi's explicit
   compaction pass from the REPL, with optional user notes threaded
   into the summarization prompt.
@@ -444,9 +445,10 @@ files such as Dockerfile / GitHub Actions / Makefile, and
 CONTRIBUTING/EditorConfig guidance. CLI and desktop
 `/init from-agent merge-lines` can now apply an assistant-proposed
 candidate by appending only new lines inside matching `##` sections,
-which gives a finer merge path for model-written guidance without
-replacing whole headings. Remaining work is richer interactive review
-controls around agent-written prose.
+and CLI `/init from-agent preview merge-lines` plus the desktop merge
+modal's no-write preview show the resulting file before applying.
+Remaining work is richer interactive review controls around
+agent-written prose.
 
 ### 2E. `!` shell prefix in REPL
 

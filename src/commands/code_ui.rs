@@ -1857,6 +1857,7 @@ fn parse_init_agent_notes(input: &str) -> Option<Option<&str>> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InitFromAgentAction {
     Preview,
+    PreviewMergeLines,
     Append,
     Merge,
     MergeLines,
@@ -1876,6 +1877,9 @@ fn parse_init_from_agent_action(input: &str) -> Option<InitFromAgentAction> {
     }
     match rest.trim() {
         "" | "preview" | "show" => Some(InitFromAgentAction::Preview),
+        "preview merge-lines" | "preview line-merge" | "preview lines" => {
+            Some(InitFromAgentAction::PreviewMergeLines)
+        }
         "append" => Some(InitFromAgentAction::Append),
         "merge" | "apply" => Some(InitFromAgentAction::Merge),
         "merge-lines" | "line-merge" | "lines" => Some(InitFromAgentAction::MergeLines),
@@ -4484,6 +4488,21 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
             );
             println!();
         }
+        InitFromAgentAction::PreviewMergeLines => {
+            let content = match build_init_apply_content(&existing, &candidate, "merge-lines") {
+                Ok(content) => content,
+                Err(e) => {
+                    eprintln!("{DIM}  /init from-agent: {e}{RESET}");
+                    return;
+                }
+            };
+            println!("{BOLD}init from-agent merge-lines preview{RESET}");
+            print!(
+                "{}",
+                init_candidate_preview(&path.display().to_string(), &existing, &content)
+            );
+            println!();
+        }
         InitFromAgentAction::Append
         | InitFromAgentAction::Merge
         | InitFromAgentAction::MergeLines
@@ -4493,7 +4512,9 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
                 InitFromAgentAction::Merge => "merge",
                 InitFromAgentAction::MergeLines => "merge-lines",
                 InitFromAgentAction::Replace => "replace",
-                InitFromAgentAction::Preview => unreachable!(),
+                InitFromAgentAction::Preview | InitFromAgentAction::PreviewMergeLines => {
+                    unreachable!()
+                }
             };
             let content = match build_init_apply_content(&existing, &candidate, mode) {
                 Ok(content) => content,
@@ -4535,7 +4556,9 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
                     InitFromAgentAction::Merge => "merged into",
                     InitFromAgentAction::MergeLines => "line-merged into",
                     InitFromAgentAction::Replace => "replaced",
-                    InitFromAgentAction::Preview => unreachable!(),
+                    InitFromAgentAction::Preview | InitFromAgentAction::PreviewMergeLines => {
+                        unreachable!()
+                    }
                 },
                 path.display()
             );
@@ -8632,6 +8655,10 @@ mod tests {
         assert_eq!(
             parse_init_from_agent_action("from-agent merge-lines"),
             Some(InitFromAgentAction::MergeLines)
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent preview merge-lines"),
+            Some(InitFromAgentAction::PreviewMergeLines)
         );
         assert_eq!(
             parse_init_from_agent_action("apply-agent replace"),
