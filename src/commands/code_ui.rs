@@ -2566,7 +2566,7 @@ fn print_help() {
 }
 
 fn model_usage_text() -> &'static str {
-    "/model [status|list|next|prev|model|provider/model]"
+    "/model [status|show|current|list|ls|next|cycle|prev|previous|back|model|provider/model]"
 }
 
 fn scoped_models_usage_text() -> &'static str {
@@ -11171,6 +11171,26 @@ mod tests {
         assert!(parse_model_spec("libertai", "").is_err());
         assert!(parse_model_spec("libertai", "/model").is_err());
         assert!(parse_model_spec("libertai", "provider/").is_err());
+    }
+
+    #[test]
+    fn parse_model_slash_command_accepts_status_and_cycle_aliases() {
+        assert_eq!(
+            model_usage_text(),
+            "/model [status|show|current|list|ls|next|cycle|prev|previous|back|model|provider/model]"
+        );
+        assert!(matches!(parse_model_slash_command(""), ModelSlashCommand::Status));
+        assert!(matches!(parse_model_slash_command("status"), ModelSlashCommand::Status));
+        assert!(matches!(parse_model_slash_command("show"), ModelSlashCommand::Status));
+        assert!(matches!(parse_model_slash_command("current"), ModelSlashCommand::Status));
+        assert!(matches!(parse_model_slash_command("list"), ModelSlashCommand::List));
+        assert!(matches!(parse_model_slash_command("ls"), ModelSlashCommand::List));
+        assert!(matches!(parse_model_slash_command("next"), ModelSlashCommand::Next));
+        assert!(matches!(parse_model_slash_command("cycle"), ModelSlashCommand::Next));
+        assert!(matches!(parse_model_slash_command("prev"), ModelSlashCommand::Previous));
+        assert!(matches!(parse_model_slash_command("previous"), ModelSlashCommand::Previous));
+        assert!(matches!(parse_model_slash_command("back"), ModelSlashCommand::Previous));
+        assert!(matches!(parse_model_slash_command("openai/gpt-5"), ModelSlashCommand::Set("openai/gpt-5")));
     }
 
     #[test]
