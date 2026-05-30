@@ -453,9 +453,9 @@ the saved rules.
 The libertai-cli REPL handles `/help`, `/plan`, `/clear`, `/exit`,
 `/forget`, `/permissions`, `/remember`, `/memory`, `/init`, `/agents`, `/agent`,
 `/skills`, `/template`, custom `/<name>` templates, `/status`, `/usage`/`/cost`,
-`/config`, `/settings`, `/model`, `/mode`, `/name`, `/rename`, `/new`, `/export`, `/share`, `/history`, `/copy`, `/hotkeys`, `/tree`, `/changelog`, `/reload`, `/resume`, `/fork`, `/compact`, `/doctor`, `/abort`, `/review`, `/security-review`, `/pr_comments`, `/sandbox`, `/thinking`, `/login`, `/logout`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
-(`/compact`, `/resume`, `/fork`, `/export`, `/thinking`, `/theme`,
-`/scoped-models`, `/template`, `/share`, `/login`, `/logout`,
+`/config`, `/settings`, `/model`, `/mode`, `/name`, `/rename`, `/new`, `/export`, `/share`, `/history`, `/copy`, `/hotkeys`, `/tree`, `/changelog`, `/reload`, `/resume`, `/fork`, `/compact`, `/doctor`, `/abort`, `/review`, `/security-review`, `/pr_comments`, `/sandbox`, `/thinking`, `/theme`, `/scoped-models`, `/login`, `/logout`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
+(`/compact`, `/resume`, `/fork`, `/export`, `/thinking`, `/template`,
+`/share`, `/login`, `/logout`,
 `/history`, `/copy`, `/name`, `/hotkeys`, `/changelog`, `/tree`,
 `/reload`, `/settings`, `/model`, `/new`, etc.).
 

@@ -284,6 +284,12 @@ enum ScopedModelsCommand {
     Usage,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ThemeCommand {
+    Status,
+    Requested(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelSlashCommand<'a> {
     Status,
@@ -882,7 +888,7 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = theme_command_arg(trimmed) {
-            print_theme_status(rest);
+            print_theme_status(parse_theme_command(rest));
             continue;
         }
         if let Some(rest) = vim_command_arg(trimmed) {
@@ -2656,7 +2662,7 @@ fn print_help() {
     println!("{DIM}  /agent --background|--detached <name> <task> — start a detached terminal agent and write a log under ~/.config/libertai/code-background-agents{RESET}");
     println!("{DIM}  /agents background [list|show|log|kill|prune|clear] — inspect, stop, or prune terminal background agents{RESET}");
     println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
-    println!("{DIM}  /theme [system|dark|light|high-contrast] — show terminal theme status{RESET}");
+    println!("{DIM}  /theme [status|show|current|system|dark|light|high-contrast] — show terminal theme status{RESET}");
     println!("{DIM}  /export [path] — write this session transcript as Markdown{RESET}");
     println!("{DIM}  /share [path] — write this session transcript as shareable HTML{RESET}");
     println!("{DIM}  /share gist [public|secret] [filename.html] — publish the HTML transcript with gh{RESET}");
@@ -4146,6 +4152,15 @@ fn theme_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
+fn parse_theme_command(rest: &str) -> ThemeCommand {
+    let requested = rest.trim();
+    if matches!(requested, "" | "status" | "show" | "current") {
+        ThemeCommand::Status
+    } else {
+        ThemeCommand::Requested(requested.to_string())
+    }
+}
+
 fn vim_command_arg(trimmed: &str) -> Option<&str> {
     match trimmed {
         "/vim" => Some(""),
@@ -4423,8 +4438,7 @@ fn print_send_status(rest: &str) {
     );
 }
 
-fn print_theme_status(rest: &str) {
-    let requested = rest.trim();
+fn print_theme_status(command: ThemeCommand) {
     println!("{BOLD}theme{RESET}");
     println!(
         "{DIM}  desktop:{RESET} /theme system|dark|light|high-contrast updates the app appearance."
@@ -4432,8 +4446,17 @@ fn print_theme_status(rest: &str) {
     println!(
         "{DIM}  terminal:{RESET} colors are controlled by your terminal emulator; libertai code uses ANSI styling only."
     );
-    if !requested.is_empty() {
-        println!("{DIM}  requested theme:{RESET} {requested}");
+    match command {
+        ThemeCommand::Status => {
+            println!(
+                "{DIM}  status aliases:{RESET} /theme status, /theme show, /theme current"
+            );
+        }
+        ThemeCommand::Requested(requested) => {
+            if !requested.is_empty() {
+                println!("{DIM}  requested theme:{RESET} {requested}");
+            }
+        }
     }
 }
 
@@ -12495,11 +12518,22 @@ mod tests {
     fn theme_command_arg_intercepts_desktop_theme_command() {
         assert_eq!(theme_command_arg("/theme"), Some(""));
         assert_eq!(theme_command_arg("/theme dark"), Some("dark"));
+        assert_eq!(theme_command_arg("/theme status"), Some("status"));
+        assert_eq!(theme_command_arg("/theme show"), Some("show"));
+        assert_eq!(theme_command_arg("/theme current"), Some("current"));
         assert_eq!(
             theme_command_arg("/theme high-contrast"),
             Some("high-contrast")
         );
         assert_eq!(theme_command_arg("/themes dark"), None);
+        assert_eq!(parse_theme_command(""), ThemeCommand::Status);
+        assert_eq!(parse_theme_command("status"), ThemeCommand::Status);
+        assert_eq!(parse_theme_command("show"), ThemeCommand::Status);
+        assert_eq!(parse_theme_command("current"), ThemeCommand::Status);
+        assert_eq!(
+            parse_theme_command("high-contrast"),
+            ThemeCommand::Requested("high-contrast".to_string())
+        );
     }
 
     #[test]
