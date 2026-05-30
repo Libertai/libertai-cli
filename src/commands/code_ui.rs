@@ -245,6 +245,12 @@ enum DoctorCommand {
     Usage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbortCommand {
+    Status,
+    Usage,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScopedModelsCommand {
     Status,
@@ -964,6 +970,17 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some(rest) = abort_command_arg(trimmed) {
+            match parse_abort_command(rest) {
+                AbortCommand::Status => println!("{}", abort_status_message()),
+                AbortCommand::Usage => {
+                    println!(
+                        "{DIM}  usage:{RESET} /abort, /abort status, /abort cancel, or /abort stop"
+                    );
+                }
+            }
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
@@ -1000,10 +1017,6 @@ async fn repl_loop(
             }
             "/name" | "/rename" => {
                 print_name_status(session_name.as_deref());
-                continue;
-            }
-            "/abort" => {
-                println!("{}", abort_status_message());
                 continue;
             }
             "/sandbox" => {
@@ -4007,6 +4020,13 @@ fn doctor_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
+fn abort_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/abort" => Some(""),
+        _ => trimmed.strip_prefix("/abort ").map(str::trim),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HooksCommand {
     Status,
@@ -4096,6 +4116,15 @@ fn parse_doctor_command(input: &str) -> DoctorCommand {
             DoctorCommand::Run
         }
         _ => DoctorCommand::Usage,
+    }
+}
+
+fn parse_abort_command(input: &str) -> AbortCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "status" | "state" | "show" | "info" | "cancel" | "stop" | "interrupt" => {
+            AbortCommand::Status
+        }
+        _ => AbortCommand::Usage,
     }
 }
 
@@ -10619,6 +10648,20 @@ mod tests {
         assert_eq!(parse_doctor_command("diagnostics"), DoctorCommand::Run);
         assert_eq!(parse_doctor_command("diag"), DoctorCommand::Run);
         assert_eq!(parse_doctor_command("open"), DoctorCommand::Usage);
+    }
+
+    #[test]
+    fn abort_command_arg_and_parser_capture_status_aliases() {
+        assert_eq!(abort_command_arg("/abort"), Some(""));
+        assert_eq!(abort_command_arg("/abort status"), Some("status"));
+        assert_eq!(abort_command_arg("/abort cancel"), Some("cancel"));
+        assert_eq!(abort_command_arg("/aborted"), None);
+        assert_eq!(parse_abort_command(""), AbortCommand::Status);
+        assert_eq!(parse_abort_command("status"), AbortCommand::Status);
+        assert_eq!(parse_abort_command("cancel"), AbortCommand::Status);
+        assert_eq!(parse_abort_command("stop"), AbortCommand::Status);
+        assert_eq!(parse_abort_command("interrupt"), AbortCommand::Status);
+        assert_eq!(parse_abort_command("open"), AbortCommand::Usage);
     }
 
     #[test]

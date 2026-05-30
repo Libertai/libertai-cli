@@ -191,6 +191,9 @@ SDK; those are flagged **(upstream)**.
   session naming.
 - **CLI `/abort` command** — REPL users get an explicit status message
   pointing to the active-turn Ctrl+C abort path.
+- **CLI `/abort` aliases** — REPL users get explicit `/abort
+  status|cancel|stop` handling so abort requests do not fall through as
+  agent text.
 - **CLI `/image` and `/attach` commands** — REPL users can attach a
   local PNG/JPEG/GIF/WebP to a multimodal prompt using
   `/image <path> [prompt]` or the `/attach` alias.
