@@ -6715,6 +6715,7 @@ mod tests {
             Some("in 10m check tests")
         );
         assert_eq!(schedule_command_arg("/cron list"), Some("list"));
+        assert_eq!(schedule_command_arg("/cron state"), Some("state"));
         assert_eq!(schedule_command_arg("/scheduler"), None);
     }
 
@@ -6722,6 +6723,7 @@ mod tests {
     fn parse_schedule_command_matches_desktop_contract() {
         assert_eq!(parse_schedule_command(""), ScheduleCommand::Status);
         assert_eq!(parse_schedule_command("list"), ScheduleCommand::Status);
+        assert_eq!(parse_schedule_command("state"), ScheduleCommand::Status);
         assert_eq!(
             parse_schedule_command("cancel sch_2"),
             ScheduleCommand::Cancel("sch_2".to_string())
