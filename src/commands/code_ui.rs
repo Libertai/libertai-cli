@@ -2614,7 +2614,7 @@ fn print_help() {
     println!(
         "{DIM}  /pr_comments drafts submit [approve|comment|request_changes] [body] — publish queued draft threads, optionally with a review event{RESET}"
     );
-    println!("{DIM}  /sandbox [info|reload] — inspect the bash sandbox profile{RESET}");
+    println!("{DIM}  {} — inspect the bash sandbox profile{RESET}", sandbox_usage_text());
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost; /usage export [json|csv]){RESET}");
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
@@ -2874,9 +2874,13 @@ fn print_sandbox_status(action: &str) {
             );
         }
         SandboxAction::Unknown(value) => {
-            eprintln!("{DIM}  unknown /sandbox action: {value}. try \"info\" or \"reload\".{RESET}");
+            eprintln!("{DIM}  unknown /sandbox action: {value}. try \"info\", \"status\", \"diagnostics\", or \"reload\".{RESET}");
         }
     }
+}
+
+fn sandbox_usage_text() -> &'static str {
+    "/sandbox [info|status|state|show|diagnostics|diag|reload]"
 }
 
 fn abort_status_message() -> String {
@@ -11530,6 +11534,9 @@ mod tests {
         assert_eq!(parse_sandbox_action("diag"), SandboxAction::Info);
         assert_eq!(parse_sandbox_action("reload"), SandboxAction::Reload);
         assert_eq!(parse_sandbox_action("reset"), SandboxAction::Unknown("reset"));
+        assert!(sandbox_usage_text().contains("status|state|show"));
+        assert!(sandbox_usage_text().contains("diagnostics|diag"));
+        assert!(sandbox_usage_text().contains("reload"));
     }
 
     #[test]
