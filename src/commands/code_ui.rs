@@ -5656,6 +5656,15 @@ fn print_memory(action: &str) {
         }
         return;
     }
+    if let Some(selector) = memory_file_selector(action) {
+        match crate::commands::code_memory::list_memory_files(&cwd)
+            .and_then(|files| read_memory_sidecar_selection(&files, selector))
+        {
+            Ok((file, content)) => print_memory_file(&file, &content),
+            Err(e) => eprintln!("{DIM}  /memory file: failed: {e:#}{RESET}"),
+        }
+        return;
+    }
     let doc = match crate::commands::code_memory::read_memory(&cwd) {
         Ok(doc) => doc,
         Err(e) => {
@@ -5700,6 +5709,54 @@ fn memory_import_source(action: &str) -> Option<&str> {
     parts.next().map(str::trim).filter(|source| !source.is_empty())
 }
 
+fn memory_file_selector(action: &str) -> Option<&str> {
+    let trimmed = action.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let command = parts.next()?;
+    if !matches!(command.to_ascii_lowercase().as_str(), "file" | "read" | "show-file") {
+        return None;
+    }
+    parts.next().map(str::trim).filter(|source| !source.is_empty())
+}
+
+fn read_memory_sidecar_selection(
+    files: &[crate::commands::code_memory::MemoryFileEntry],
+    selector: &str,
+) -> Result<(crate::commands::code_memory::MemoryFileEntry, String)> {
+    let Some(file) = select_memory_sidecar(files, selector) else {
+        anyhow::bail!("no memory sidecar matched `{selector}`; run /memory files for indexes");
+    };
+    let meta = std::fs::metadata(&file.path)
+        .with_context(|| format!("reading {}", file.path.display()))?;
+    if !meta.is_file() {
+        anyhow::bail!("memory sidecar is not a file: {}", file.path.display());
+    }
+    if meta.len() > 256 * 1024 {
+        anyhow::bail!("memory sidecar is too large; keep entries under 256 KiB");
+    }
+    let content = std::fs::read_to_string(&file.path)
+        .with_context(|| format!("reading {}", file.path.display()))?;
+    Ok((file.clone(), content))
+}
+
+fn select_memory_sidecar(
+    files: &[crate::commands::code_memory::MemoryFileEntry],
+    selector: &str,
+) -> Option<crate::commands::code_memory::MemoryFileEntry> {
+    let selector = selector.trim();
+    if let Ok(index) = selector.parse::<usize>() {
+        return index.checked_sub(1).and_then(|idx| files.get(idx)).cloned();
+    }
+    files
+        .iter()
+        .find(|file| {
+            file.path.display().to_string() == selector
+                || file.path.file_name().and_then(|name| name.to_str()) == Some(selector)
+                || file.title.eq_ignore_ascii_case(selector)
+        })
+        .cloned()
+}
+
 fn print_memory_references(refs: &[crate::commands::code_memory::MemoryReference]) {
     println!("{BOLD}memory references{RESET}");
     if refs.is_empty() {
@@ -5728,13 +5785,28 @@ fn print_memory_files(files: &[crate::commands::code_memory::MemoryFileEntry]) {
         println!();
         return;
     }
-    for file in files {
+    for (idx, file) in files.iter().enumerate() {
         println!(
-            "{DIM}  [{}]{RESET} {} - {}",
+            "{DIM}  {}. [{}]{RESET} {} - {}",
+            idx + 1,
             file.kind.label(),
             file.path.display(),
             file.title
         );
+    }
+    println!("{DIM}  use /memory file <number|path> to inspect one entry{RESET}");
+    println!();
+}
+
+fn print_memory_file(file: &crate::commands::code_memory::MemoryFileEntry, content: &str) {
+    println!("{BOLD}memory file{RESET}");
+    println!("{DIM}  kind:{RESET} {}", file.kind.label());
+    println!("{DIM}  path:{RESET} {}", file.path.display());
+    println!("{DIM}  title:{RESET} {}", file.title);
+    println!();
+    print!("{}", content);
+    if !content.ends_with('\n') {
+        println!();
     }
     println!();
 }
@@ -10448,6 +10520,29 @@ mod tests {
         );
         assert_eq!(memory_import_source("files"), None);
         assert_eq!(memory_import_source("import"), None);
+    }
+
+    #[test]
+    fn memory_file_selector_parses_read_aliases() {
+        assert_eq!(memory_file_selector("file 1"), Some("1"));
+        assert_eq!(memory_file_selector("read memory/project/foo.md"), Some("memory/project/foo.md"));
+        assert_eq!(memory_file_selector("show-file entry.md"), Some("entry.md"));
+        assert_eq!(memory_file_selector("files"), None);
+        assert_eq!(memory_file_selector("file"), None);
+    }
+
+    #[test]
+    fn select_memory_sidecar_matches_index_path_name_and_title() {
+        let files = vec![crate::commands::code_memory::MemoryFileEntry {
+            kind: crate::commands::code_memory::MemoryKind::Project,
+            path: PathBuf::from("/tmp/memory/project/entry.md"),
+            title: "Important note".to_string(),
+        }];
+        assert_eq!(select_memory_sidecar(&files, "1").unwrap().title, "Important note");
+        assert_eq!(select_memory_sidecar(&files, "/tmp/memory/project/entry.md").unwrap().title, "Important note");
+        assert_eq!(select_memory_sidecar(&files, "entry.md").unwrap().title, "Important note");
+        assert_eq!(select_memory_sidecar(&files, "important note").unwrap().title, "Important note");
+        assert!(select_memory_sidecar(&files, "2").is_none());
     }
 
     #[test]
