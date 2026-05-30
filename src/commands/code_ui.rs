@@ -2005,12 +2005,13 @@ fn parse_init_agent_notes(input: &str) -> Option<Option<&str>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InitFromAgentAction {
     Preview,
-    PreviewMergeLines,
+    PreviewApply(&'static str),
     Append,
     Merge,
     MergeLines,
     Replace,
     PreviewSections(Vec<usize>),
+    PreviewApplySections(&'static str, Vec<usize>),
     AppendSections(Vec<usize>),
     MergeSections(Vec<usize>),
     MergeLineSections(Vec<usize>),
@@ -2031,6 +2032,11 @@ fn parse_init_from_agent_action(input: &str) -> Option<InitFromAgentAction> {
     if let Some((mode, indexes)) = parse_init_from_agent_sections(rest) {
         return match mode {
             "preview" => Some(InitFromAgentAction::PreviewSections(indexes)),
+            "preview-append" => Some(InitFromAgentAction::PreviewApplySections("append", indexes)),
+            "preview-merge" => Some(InitFromAgentAction::PreviewApplySections("merge", indexes)),
+            "preview-merge-lines" => {
+                Some(InitFromAgentAction::PreviewApplySections("merge-lines", indexes))
+            }
             "append" => Some(InitFromAgentAction::AppendSections(indexes)),
             "merge" => Some(InitFromAgentAction::MergeSections(indexes)),
             "merge-lines" => Some(InitFromAgentAction::MergeLineSections(indexes)),
@@ -2039,9 +2045,15 @@ fn parse_init_from_agent_action(input: &str) -> Option<InitFromAgentAction> {
     }
     match rest {
         "" | "preview" | "show" => Some(InitFromAgentAction::Preview),
+        "preview append" | "show append" => Some(InitFromAgentAction::PreviewApply("append")),
+        "preview merge" | "show merge" => Some(InitFromAgentAction::PreviewApply("merge")),
         "preview merge-lines" | "preview line-merge" | "preview lines" => {
-            Some(InitFromAgentAction::PreviewMergeLines)
+            Some(InitFromAgentAction::PreviewApply("merge-lines"))
         }
+        "show merge-lines" | "show line-merge" | "show lines" => {
+            Some(InitFromAgentAction::PreviewApply("merge-lines"))
+        }
+        "preview replace" | "show replace" => Some(InitFromAgentAction::PreviewApply("replace")),
         "append" => Some(InitFromAgentAction::Append),
         "merge" | "apply" => Some(InitFromAgentAction::Merge),
         "merge-lines" | "line-merge" | "lines" => Some(InitFromAgentAction::MergeLines),
@@ -2055,6 +2067,25 @@ fn parse_init_from_agent_sections(input: &str) -> Option<(&'static str, Vec<usiz
         ("preview", rest)
     } else if let Some(rest) = input.strip_prefix("preview sections ") {
         ("preview", rest)
+    } else if let Some(rest) = input
+        .strip_prefix("preview append sections ")
+        .or_else(|| input.strip_prefix("show append sections "))
+    {
+        ("preview-append", rest)
+    } else if let Some(rest) = input
+        .strip_prefix("preview merge sections ")
+        .or_else(|| input.strip_prefix("show merge sections "))
+    {
+        ("preview-merge", rest)
+    } else if let Some(rest) = input
+        .strip_prefix("preview merge-lines sections ")
+        .or_else(|| input.strip_prefix("preview line-merge sections "))
+        .or_else(|| input.strip_prefix("preview lines sections "))
+        .or_else(|| input.strip_prefix("show merge-lines sections "))
+        .or_else(|| input.strip_prefix("show line-merge sections "))
+        .or_else(|| input.strip_prefix("show lines sections "))
+    {
+        ("preview-merge-lines", rest)
     } else if let Some(rest) = input.strip_prefix("append sections ") {
         ("append", rest)
     } else if let Some(rest) = input.strip_prefix("merge sections ") {
@@ -2567,7 +2598,7 @@ fn print_help() {
     println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
     println!("{DIM}  /skills [list|open|enable <name>|disable <name>] — manage code-agent skills for new sessions{RESET}");
     println!(
-        "{DIM}  /init [--agent|from-agent preview merge-lines|preview sections N[,M]|append sections N[,M]|merge sections N[,M]|merge-lines sections N[,M]|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}"
+        "{DIM}  /init [--agent|from-agent preview append|preview merge|preview merge-lines|preview replace|preview [append|merge|merge-lines] sections N[,M]|append sections N[,M]|merge sections N[,M]|merge-lines sections N[,M]|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}"
     );
     println!("{DIM}  /onboarding|/onboard [save|path] — write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
@@ -4971,15 +5002,15 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
             );
             println!();
         }
-        InitFromAgentAction::PreviewMergeLines => {
-            let content = match build_init_apply_content(&existing, &candidate, "merge-lines") {
+        InitFromAgentAction::PreviewApply(mode) => {
+            let content = match build_init_apply_content(&existing, &candidate, mode) {
                 Ok(content) => content,
                 Err(e) => {
                     eprintln!("{DIM}  /init from-agent: {e}{RESET}");
                     return;
                 }
             };
-            println!("{BOLD}init from-agent merge-lines preview{RESET}");
+            println!("{BOLD}init from-agent {mode} preview{RESET}");
             print!(
                 "{}",
                 init_candidate_preview(&path.display().to_string(), &existing, &content)
@@ -5001,6 +5032,28 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
             );
             println!();
         }
+        InitFromAgentAction::PreviewApplySections(mode, indexes) => {
+            let selected = match selected_init_candidate_sections(&candidate, indexes) {
+                Ok(selected) => selected,
+                Err(e) => {
+                    eprintln!("{DIM}  /init from-agent: {e}{RESET}");
+                    return;
+                }
+            };
+            let content = match build_init_apply_content(&existing, &selected, mode) {
+                Ok(content) => content,
+                Err(e) => {
+                    eprintln!("{DIM}  /init from-agent: {e}{RESET}");
+                    return;
+                }
+            };
+            println!("{BOLD}init from-agent selected-section {mode} preview{RESET}");
+            print!(
+                "{}",
+                init_candidate_preview(&path.display().to_string(), &existing, &content)
+            );
+            println!();
+        }
         InitFromAgentAction::Append
         | InitFromAgentAction::Merge
         | InitFromAgentAction::MergeLines
@@ -5017,8 +5070,9 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
                 InitFromAgentAction::MergeSections(_) => "merge",
                 InitFromAgentAction::MergeLineSections(_) => "merge-lines",
                 InitFromAgentAction::Preview
-                | InitFromAgentAction::PreviewMergeLines
-                | InitFromAgentAction::PreviewSections(_) => unreachable!(),
+                | InitFromAgentAction::PreviewApply(_)
+                | InitFromAgentAction::PreviewSections(_)
+                | InitFromAgentAction::PreviewApplySections(_, _) => unreachable!(),
             };
             let candidate = match &action {
                 InitFromAgentAction::AppendSections(indexes)
@@ -5080,8 +5134,9 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
                         "line-merged selected sections into"
                     }
                     InitFromAgentAction::Preview
-                    | InitFromAgentAction::PreviewMergeLines
-                    | InitFromAgentAction::PreviewSections(_) => unreachable!(),
+                    | InitFromAgentAction::PreviewApply(_)
+                    | InitFromAgentAction::PreviewSections(_)
+                    | InitFromAgentAction::PreviewApplySections(_, _) => unreachable!(),
                 },
                 path.display()
             );
@@ -9705,11 +9760,35 @@ mod tests {
         );
         assert_eq!(
             parse_init_from_agent_action("from-agent preview merge-lines"),
-            Some(InitFromAgentAction::PreviewMergeLines)
+            Some(InitFromAgentAction::PreviewApply("merge-lines"))
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent preview append"),
+            Some(InitFromAgentAction::PreviewApply("append"))
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent preview merge"),
+            Some(InitFromAgentAction::PreviewApply("merge"))
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent preview replace"),
+            Some(InitFromAgentAction::PreviewApply("replace"))
         );
         assert_eq!(
             parse_init_from_agent_action("from-agent preview sections 1,3"),
             Some(InitFromAgentAction::PreviewSections(vec![1, 3]))
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent preview append sections 1,3"),
+            Some(InitFromAgentAction::PreviewApplySections("append", vec![1, 3]))
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent preview merge sections 1"),
+            Some(InitFromAgentAction::PreviewApplySections("merge", vec![1]))
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent preview merge-lines sections 2"),
+            Some(InitFromAgentAction::PreviewApplySections("merge-lines", vec![2]))
         );
         assert_eq!(
             parse_init_from_agent_action("from-agent sections 2"),
