@@ -4155,7 +4155,7 @@ fn theme_command_arg(trimmed: &str) -> Option<&str> {
 
 fn parse_theme_command(rest: &str) -> ThemeCommand {
     let requested = rest.trim();
-    if matches!(requested, "" | "status" | "show" | "current") {
+    if matches!(requested, "" | "status" | "show" | "current" | "info") {
         ThemeCommand::Status
     } else {
         ThemeCommand::Requested(requested.to_string())
@@ -4456,7 +4456,7 @@ fn print_theme_status(command: ThemeCommand) {
     match command {
         ThemeCommand::Status => {
             println!(
-                "{DIM}  status aliases:{RESET} /theme status, /theme show, /theme current"
+                "{DIM}  status aliases:{RESET} /theme status, /theme show, /theme current, /theme info"
             );
         }
         ThemeCommand::Requested(requested) => {
@@ -12583,6 +12583,7 @@ mod tests {
         assert_eq!(parse_theme_command("status"), ThemeCommand::Status);
         assert_eq!(parse_theme_command("show"), ThemeCommand::Status);
         assert_eq!(parse_theme_command("current"), ThemeCommand::Status);
+        assert_eq!(parse_theme_command("info"), ThemeCommand::Status);
         assert_eq!(
             parse_theme_command("high-contrast"),
             ThemeCommand::Requested("high-contrast".to_string())
