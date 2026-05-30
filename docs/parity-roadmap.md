@@ -623,11 +623,16 @@ targets against the session cwd. Full file-per-memory storage is deferred.
 
 Shipped: CLI and desktop discover project `.claude/commands`,
 `.libertai/commands`, and legacy `.liberclaw/commands`, plus user
-`~/.claude/commands` and `~/.config/libertai/commands`. Markdown files
+`~/.claude/commands` and `~/.config/libertai/commands`. Claude-compatible
+skill entrypoints under `.claude/skills/<name>/SKILL.md`,
+`.libertai/skills/<name>/SKILL.md`, `~/.claude/skills/<name>/SKILL.md`,
+and `~/.config/libertai/skills/<name>/SKILL.md` are also invocable as
+`/<name>` and override same-named command files. Markdown command files
 are discovered recursively; nested paths are shown as namespace metadata,
 so `commands/team/audit.md` appears as `/audit` from the `team`
 namespace. Each file becomes a prompt template; frontmatter may define
-`description:` and `argHint:`. CLI and desktop support
+`description:` and `argHint:`. `user-invocable: false` skill entrypoints
+are hidden from slash invocation. CLI and desktop support
 `/template <name> [args]` and direct `/<name> [args]` dispatch with
 Claude-style `$ARGUMENTS`,
 `$ARGUMENTS[0]`, `$0` / `$1` positional arguments, implicit

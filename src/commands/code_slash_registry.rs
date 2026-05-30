@@ -48,6 +48,14 @@ fn discover_with_home(
     scan_dir(&cwd.join(".claude").join("commands"), CommandSource::Project, &mut out);
     scan_dir(&cwd.join(".libertai").join("commands"), CommandSource::Project, &mut out);
     scan_dir(&cwd.join(".liberclaw").join("commands"), CommandSource::Project, &mut out);
+    scan_skill_dir(&cwd.join(".claude").join("skills"), CommandSource::Project, &mut out);
+    scan_skill_dir(&cwd.join(".libertai").join("skills"), CommandSource::Project, &mut out);
+    if let Some(config) = config {
+        scan_skill_dir(&config.join("libertai").join("skills"), CommandSource::User, &mut out);
+    }
+    if let Some(home) = home {
+        scan_skill_dir(&home.join(".claude").join("skills"), CommandSource::User, &mut out);
+    }
     dedupe_by_name(&mut out);
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
@@ -232,6 +240,24 @@ fn scan_dir(dir: &Path, source: CommandSource, out: &mut Vec<CustomCommand>) {
     scan_dir_inner(dir, dir, source, out);
 }
 
+fn scan_skill_dir(dir: &Path, source: CommandSource, out: &mut Vec<CustomCommand>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let skill_path = path.join("SKILL.md");
+        if skill_path.is_file() {
+            if let Some(cmd) = load_skill_file(&path, &skill_path, source) {
+                out.push(cmd);
+            }
+        }
+    }
+}
+
 fn scan_dir_inner(root: &Path, dir: &Path, source: CommandSource, out: &mut Vec<CustomCommand>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -276,6 +302,41 @@ fn load_file(root: &Path, path: &Path, source: CommandSource) -> Option<CustomCo
     Some(CustomCommand {
         name,
         namespace: command_namespace(root, path),
+        description,
+        arg_hint,
+        argument_names,
+        body: body.to_string(),
+        source,
+        path: path.to_path_buf(),
+    })
+}
+
+fn load_skill_file(dir: &Path, path: &Path, source: CommandSource) -> Option<CustomCommand> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let name = dir.file_name()?.to_str()?.to_ascii_lowercase();
+    if name.is_empty() {
+        return None;
+    }
+    let (frontmatter, body) = split_frontmatter(&raw);
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    let mut description = None;
+    let mut arg_hint = None;
+    let mut argument_names = Vec::new();
+    for (key, value) in frontmatter {
+        match key.as_str() {
+            "description" => description = Some(value),
+            "argHint" | "arg_hint" | "arg-hint" | "argument-hint" => arg_hint = Some(value),
+            "arguments" => argument_names = parse_argument_names(&value),
+            "user-invocable" if is_false(&value) => return None,
+            _ => {}
+        }
+    }
+    Some(CustomCommand {
+        name,
+        namespace: None,
         description,
         arg_hint,
         argument_names,
@@ -360,6 +421,10 @@ fn unquote(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn is_false(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "false" | "no" | "0")
 }
 
 fn parse_argument_names(value: &str) -> Vec<String> {
@@ -506,6 +571,59 @@ mod tests {
             expand(&cmds[0], r#"src/lib.rs "high priority""#),
             "Review src/lib.rs at high priority"
         );
+    }
+
+    #[test]
+    fn discovers_skills_as_slash_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            &temp.path().join(".claude/skills/summarize/SKILL.md"),
+            "---\ndescription: Summarize changes\nargument-hint: scope\narguments: [scope]\n---\nSummarize $scope from ${CLAUDE_SKILL_DIR}.",
+        );
+
+        let cmds = discover_with_home(temp.path(), None, None);
+
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].name, "summarize");
+        assert_eq!(cmds[0].description.as_deref(), Some("Summarize changes"));
+        assert_eq!(cmds[0].arg_hint.as_deref(), Some("scope"));
+        assert_eq!(cmds[0].argument_names, vec!["scope"]);
+        assert_eq!(
+            expand(&cmds[0], "repo"),
+            format!(
+                "Summarize repo from {}.",
+                temp.path().join(".claude/skills/summarize").display()
+            )
+        );
+    }
+
+    #[test]
+    fn skill_entry_overrides_same_named_command() {
+        let temp = tempfile::tempdir().unwrap();
+        write(&temp.path().join(".claude/commands/deploy.md"), "command");
+        write(
+            &temp.path().join(".claude/skills/deploy/SKILL.md"),
+            "---\ndescription: Deploy skill\n---\nskill",
+        );
+
+        let cmds = discover_with_home(temp.path(), None, None);
+
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].body, "skill");
+        assert_eq!(cmds[0].path.file_name().and_then(|name| name.to_str()), Some("SKILL.md"));
+    }
+
+    #[test]
+    fn user_invocable_false_skills_are_hidden_from_slash_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            &temp.path().join(".claude/skills/background/SKILL.md"),
+            "---\ndescription: Background knowledge\nuser-invocable: false\n---\nHidden",
+        );
+
+        let cmds = discover_with_home(temp.path(), None, None);
+
+        assert!(cmds.is_empty());
     }
 
     #[test]

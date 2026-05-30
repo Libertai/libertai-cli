@@ -5370,7 +5370,7 @@ fn print_templates() {
     println!("{BOLD}templates{RESET}");
     if templates.is_empty() {
         println!("{DIM}  no prompt templates found.{RESET}");
-        println!("{DIM}  create .claude/commands/<name>.md or .libertai/commands/<name>.md.{RESET}");
+        println!("{DIM}  create .claude/commands/<name>.md or .claude/skills/<name>/SKILL.md.{RESET}");
     } else {
         for t in templates {
             let base_desc = t.description.as_deref().unwrap_or(match t.source {
