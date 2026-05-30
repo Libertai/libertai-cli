@@ -79,6 +79,26 @@ pub fn create_project_agent(
     Ok(path)
 }
 
+pub fn delete_agent(cwd: &Path, name: &str) -> Result<PathBuf> {
+    let name = name.trim().trim_start_matches('@');
+    validate_name(name)?;
+    let Some(agent) = find_agent(cwd, name)? else {
+        anyhow::bail!("agent `{name}` not found");
+    };
+    let dir = match agent.source {
+        AgentSource::Project(dir) | AgentSource::User(dir) => dir,
+    };
+    let path = dir.join(format!("{}.md", agent.name));
+    if path.extension().and_then(|s| s.to_str()) != Some("md") {
+        anyhow::bail!("agent files must use the .md extension");
+    }
+    if !path.exists() {
+        anyhow::bail!("agent file does not exist: {}", path.display());
+    }
+    std::fs::remove_file(&path).with_context(|| format!("deleting {}", path.display()))?;
+    Ok(path)
+}
+
 fn project_agent_dirs(cwd: &Path) -> Vec<PathBuf> {
     vec![cwd.join(".claude").join("agents"), cwd.join(".libertai").join("agents")]
 }
@@ -318,6 +338,18 @@ mod tests {
         assert_eq!(agent.name, "reviewer");
         assert!(agent.worktree);
         assert!(create_project_agent(tmp.path(), "reviewer", None, false).is_err());
+    }
+
+    #[test]
+    fn deletes_discovered_agent_definition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = create_project_agent(tmp.path(), "reviewer", None, false).unwrap();
+        assert!(path.exists());
+
+        let deleted = delete_agent(tmp.path(), "reviewer").unwrap();
+        assert_eq!(deleted, path);
+        assert!(!deleted.exists());
+        assert!(delete_agent(tmp.path(), "reviewer").is_err());
     }
 
     #[test]

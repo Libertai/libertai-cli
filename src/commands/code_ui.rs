@@ -2331,6 +2331,7 @@ fn print_help() {
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
     println!("{DIM}  /agents   — list named sub-agents (/agents open shows agent paths){RESET}");
     println!("{DIM}  /agents create [--worktree] <name> [description] — create a project sub-agent{RESET}");
+    println!("{DIM}  /agents delete <name> — delete the active named sub-agent definition{RESET}");
     println!("{DIM}  /agent [--worktree] <name> <task> — run a named sub-agent task{RESET}");
     println!(
         "{DIM}  /agent --background <name> <task> — desktop-only detached agent session{RESET}"
@@ -5003,8 +5004,9 @@ fn handle_agents_command(input: &str) {
         AgentsSlashCommand::List => print_agents(),
         AgentsSlashCommand::Open => print_agents_open_hint(),
         AgentsSlashCommand::Create(rest) => create_agent_from_slash(rest),
+        AgentsSlashCommand::Delete(rest) => delete_agent_from_slash(rest),
         AgentsSlashCommand::Usage => {
-            eprintln!("{DIM}  /agents: usage: /agents [list|open] | /agents create [--worktree] <name> [description]{RESET}");
+            eprintln!("{DIM}  /agents: usage: /agents [list|open] | /agents create [--worktree] <name> [description] | /agents delete <name>{RESET}");
         }
     }
 }
@@ -5014,6 +5016,7 @@ enum AgentsSlashCommand<'a> {
     List,
     Open,
     Create(&'a str),
+    Delete(&'a str),
     Usage,
 }
 
@@ -5027,6 +5030,12 @@ fn parse_agents_command(input: &str) -> AgentsSlashCommand<'_> {
     }
     if let Some(rest) = raw.strip_prefix("create ") {
         return AgentsSlashCommand::Create(rest.trim());
+    }
+    if let Some(rest) = raw
+        .strip_prefix("delete ")
+        .or_else(|| raw.strip_prefix("remove "))
+    {
+        return AgentsSlashCommand::Delete(rest.trim());
     }
     AgentsSlashCommand::Usage
 }
@@ -5073,6 +5082,32 @@ fn create_agent_from_slash(input: &str) {
             println!("{DIM}  edit the prompt, then run /agent {} <task>{RESET}", parsed.name);
         }
         Err(e) => eprintln!("{DIM}  /agents: create failed: {e:#}{RESET}"),
+    }
+}
+
+fn delete_agent_from_slash(input: &str) {
+    let Some((name, tail)) = split_first_word(input.trim()) else {
+        eprintln!("{DIM}  /agents: usage: /agents delete <name>{RESET}");
+        return;
+    };
+    if !tail.trim().is_empty() {
+        eprintln!("{DIM}  /agents: usage: /agents delete <name>{RESET}");
+        return;
+    }
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /agents: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    match crate::commands::code_agents::delete_agent(&cwd, name) {
+        Ok(path) => println!(
+            "{DIM}  deleted sub-agent `{}`: {}{RESET}",
+            name.trim().trim_start_matches('@'),
+            path.display()
+        ),
+        Err(e) => eprintln!("{DIM}  /agents: delete failed: {e:#}{RESET}"),
     }
 }
 
@@ -9487,7 +9522,14 @@ mod tests {
             parse_agents_command("create --worktree reviewer Reviews changes"),
             AgentsSlashCommand::Create("--worktree reviewer Reviews changes")
         );
-        assert_eq!(parse_agents_command("delete reviewer"), AgentsSlashCommand::Usage);
+        assert_eq!(
+            parse_agents_command("delete reviewer"),
+            AgentsSlashCommand::Delete("reviewer")
+        );
+        assert_eq!(
+            parse_agents_command("remove reviewer"),
+            AgentsSlashCommand::Delete("reviewer")
+        );
     }
 
     #[test]
