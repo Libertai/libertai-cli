@@ -11,6 +11,7 @@ pub enum CommandSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomCommand {
     pub name: String,
+    pub namespace: Option<String>,
     pub description: Option<String>,
     pub arg_hint: Option<String>,
     pub body: String,
@@ -201,6 +202,7 @@ fn load_file(root: &Path, path: &Path, source: CommandSource) -> Option<CustomCo
     }
     Some(CustomCommand {
         name,
+        namespace: command_namespace(root, path),
         description,
         arg_hint,
         body: body.to_string(),
@@ -211,26 +213,31 @@ fn load_file(root: &Path, path: &Path, source: CommandSource) -> Option<CustomCo
 
 fn command_name(root: &Path, path: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
+    let filename = relative.file_name()?.to_str()?;
+    if !filename.ends_with(".md") {
+        return None;
+    }
+    let name = &filename[..filename.len().saturating_sub(".md".len())];
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.to_lowercase())
+}
+
+fn command_namespace(root: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    let parent = relative.parent()?;
     let mut parts = Vec::new();
-    for component in relative.components() {
+    for component in parent.components() {
         let std::path::Component::Normal(part) = component else {
             return None;
         };
         let value = part.to_str()?;
-        if value.is_empty() {
-            return None;
+        if !value.is_empty() {
+            parts.push(value.to_ascii_lowercase());
         }
-        parts.push(value.to_string());
     }
-    let last = parts.last_mut()?;
-    if !last.ends_with(".md") {
-        return None;
-    }
-    last.truncate(last.len().saturating_sub(".md".len()));
-    if last.is_empty() {
-        return None;
-    }
-    Some(parts.join("/").to_lowercase())
+    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 fn split_frontmatter(input: &str) -> (Vec<(String, String)>, &str) {
@@ -284,7 +291,7 @@ fn unquote(value: &str) -> String {
 fn dedupe_by_name(out: &mut Vec<CustomCommand>) {
     let mut latest = std::collections::HashMap::new();
     for (idx, cmd) in out.iter().enumerate() {
-        latest.insert(cmd.name.clone(), idx);
+        latest.insert((cmd.namespace.clone(), cmd.name.clone()), idx);
     }
     let keep: std::collections::HashSet<usize> = latest.values().copied().collect();
     let mut idx = 0usize;
@@ -316,6 +323,7 @@ mod tests {
 
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].name, "review");
+        assert_eq!(cmds[0].namespace, None);
         assert_eq!(cmds[0].description.as_deref(), Some("Review diff"));
         assert_eq!(cmds[0].arg_hint.as_deref(), Some("scope"));
         assert_eq!(expand(&cmds[0], "src"), "Review src");
@@ -337,23 +345,24 @@ mod tests {
     }
 
     #[test]
-    fn discovers_nested_commands_with_path_names() {
+    fn discovers_nested_commands_with_namespace_metadata() {
         let temp = tempfile::tempdir().unwrap();
         write(
-            &temp.path().join(".claude/commands/team/review.md"),
-            "---\ndescription: Team review\n---\nReview {{args}}",
+            &temp.path().join(".claude/commands/team/audit.md"),
+            "---\ndescription: Team audit\n---\nReview {{args}}",
         );
         write(
-            &temp.path().join(".libertai/commands/team/review.md"),
-            "Project review {{args}}",
+            &temp.path().join(".libertai/commands/team/audit.md"),
+            "Project audit {{args}}",
         );
 
         let cmds = discover_with_home(temp.path(), None, None);
 
         assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0].name, "team/review");
-        assert_eq!(cmds[0].body, "Project review {{args}}");
-        assert_eq!(expand(&cmds[0], "src"), "Project review src");
+        assert_eq!(cmds[0].name, "audit");
+        assert_eq!(cmds[0].namespace.as_deref(), Some("team"));
+        assert_eq!(cmds[0].body, "Project audit {{args}}");
+        assert_eq!(expand(&cmds[0], "src"), "Project audit src");
     }
 
     #[test]
@@ -364,6 +373,7 @@ mod tests {
             arg_hint: None,
             body: "all=$ARGUMENTS first=$0 second=$1 indexed=$ARGUMENTS[1] missing=$3 legacy={{ args }}".into(),
             source: CommandSource::Project,
+            namespace: None,
             path: PathBuf::from(".claude/commands/review.md"),
         };
 
@@ -381,6 +391,7 @@ mod tests {
             arg_hint: None,
             body: "Review this carefully.".into(),
             source: CommandSource::Project,
+            namespace: None,
             path: PathBuf::from(".claude/commands/plain.md"),
         };
 

@@ -5373,10 +5373,15 @@ fn print_templates() {
         println!("{DIM}  create .claude/commands/<name>.md or .libertai/commands/<name>.md.{RESET}");
     } else {
         for t in templates {
-            let desc = t.description.as_deref().unwrap_or(match t.source {
+            let base_desc = t.description.as_deref().unwrap_or(match t.source {
                 crate::commands::code_slash_registry::CommandSource::Project => "project template",
                 crate::commands::code_slash_registry::CommandSource::User => "user template",
             });
+            let desc = if let Some(ns) = t.namespace.as_deref() {
+                format!("{base_desc} ({ns})")
+            } else {
+                base_desc.to_string()
+            };
             let hint = t
                 .arg_hint
                 .as_ref()
@@ -6183,7 +6188,7 @@ fn parse_direct_custom_slash(trimmed: &str) -> Option<(&str, &str)> {
     let (name, args) = raw
         .split_once(char::is_whitespace)
         .map_or((raw, ""), |(name, args)| (name, args.trim()));
-    if name.is_empty() {
+    if name.is_empty() || name.contains('/') {
         None
     } else {
         Some((name, args))
@@ -9407,6 +9412,7 @@ mod tests {
                 arg_hint: None,
                 body: "Triage {{args}}".to_string(),
                 source: crate::commands::code_slash_registry::CommandSource::Project,
+                namespace: None,
                 path: PathBuf::from(".claude/commands/triage.md"),
             },
             crate::commands::code_slash_registry::CustomCommand {
@@ -9415,6 +9421,7 @@ mod tests {
                 arg_hint: None,
                 body: "Summarize {{args}}".to_string(),
                 source: crate::commands::code_slash_registry::CommandSource::User,
+                namespace: None,
                 path: PathBuf::from("~/.claude/commands/summarize.md"),
             },
         ];
@@ -10991,10 +10998,7 @@ mod tests {
     #[test]
     fn parse_direct_custom_slash_parses_name_and_args() {
         assert_eq!(parse_direct_custom_slash("/review src"), Some(("review", "src")));
-        assert_eq!(
-            parse_direct_custom_slash("/team/review src"),
-            Some(("team/review", "src"))
-        );
+        assert_eq!(parse_direct_custom_slash("/team/review src"), None);
         assert_eq!(parse_direct_custom_slash("/review"), Some(("review", "")));
         assert_eq!(parse_direct_custom_slash("review"), None);
     }
