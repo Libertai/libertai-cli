@@ -2630,7 +2630,7 @@ fn print_help() {
     println!("{DIM}  /hotkeys  — show input bar keyboard controls{RESET}");
     println!("{DIM}  /tree [path] — show a bounded project tree{RESET}");
     println!("{DIM}  /changelog [count] — show recent git commits{RESET}");
-    println!("{DIM}  /reload   — reload config and start a fresh agent session{RESET}");
+    println!("{DIM}  /reload [config|session|now|fresh] — reload config and start a fresh agent session{RESET}");
     println!("{DIM}  /resume [path] — resume the latest or specified saved session{RESET}");
     println!("{DIM}  /fork [list|index|id] — fork from a previous user message{RESET}");
     println!("{DIM}  /thinking [off|minimal|low|medium|high|xhigh] — show or set thinking{RESET}");
@@ -12280,6 +12280,7 @@ mod tests {
         assert_eq!(parse_reload_command(""), ReloadCommand::Session);
         assert_eq!(parse_reload_command("config"), ReloadCommand::Session);
         assert_eq!(parse_reload_command("now"), ReloadCommand::Session);
+        assert_eq!(parse_reload_command("fresh"), ReloadCommand::Session);
         assert_eq!(parse_reload_command("auth"), ReloadCommand::Usage);
     }
 

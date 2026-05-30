@@ -199,7 +199,7 @@ SDK; those are flagged **(upstream)**.
   bug-report requests do not fall through as agent text.
 - **CLI `/copy`, `/hotkeys`, and `/reload` aliases** — REPL users get
   explicit `/copy last|latest|response`, `/hotkeys status|show|list`,
-  and `/reload config|session|now` handling so common Claude/Pi-style
+  and `/reload config|session|now|fresh` handling so common Claude/Pi-style
   utility subcommands do not fall through as agent text.
 - **CLI `/status` aliases** — REPL users get explicit `/status
   show|info|current|session` handling for session state so status
