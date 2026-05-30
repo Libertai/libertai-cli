@@ -169,6 +169,10 @@ SDK; those are flagged **(upstream)**.
   `/vim status`, `/vim on`, and `/vim off` handling so Vim-mode requests
   report the current terminal limitation instead of falling through as
   agent text.
+- **CLI `/ide` command** — REPL users get explicit `/ide`,
+  `/ide status`, and `/ide open` handling so IDE integration requests
+  report the current terminal/desktop handoff instead of falling through
+  as agent text.
 - **CLI `/mode` and `/rename` aliases** — REPL users can use the
   desktop/Claude-style spellings for permission-mode switching and
   session naming.

@@ -202,6 +202,13 @@ enum VimCommand {
     Usage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdeCommand {
+    Status,
+    Open,
+    Usage,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScopedModelsCommand {
     Status,
@@ -804,6 +811,10 @@ async fn repl_loop(
             print_vim_status(parse_vim_command(rest));
             continue;
         }
+        if let Some(rest) = ide_command_arg(trimmed) {
+            print_ide_status(parse_ide_command(rest));
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
@@ -1105,12 +1116,6 @@ async fn repl_loop(
             }
             "/mention" => {
                 println!("{DIM}  usage: /mention <path> [prompt]{RESET}");
-                continue;
-            }
-            "/ide" => {
-                println!(
-                    "{DIM}  Dedicated VS Code / JetBrains integrations are not part of libertai code today. Run the CLI inside your project or use the desktop app workspace.{RESET}"
-                );
                 continue;
             }
             "/bug" => {
@@ -3868,6 +3873,13 @@ fn vim_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
+fn ide_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/ide" => Some(""),
+        _ => trimmed.strip_prefix("/ide ").map(str::trim),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HooksCommand {
     Status,
@@ -3903,6 +3915,14 @@ fn parse_vim_command(input: &str) -> VimCommand {
         "on" | "enable" | "enabled" | "true" => VimCommand::Enable,
         "off" | "disable" | "disabled" | "false" => VimCommand::Disable,
         _ => VimCommand::Usage,
+    }
+}
+
+fn parse_ide_command(input: &str) -> IdeCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "status" | "state" | "show" => IdeCommand::Status,
+        "open" | "settings" | "edit" => IdeCommand::Open,
+        _ => IdeCommand::Usage,
     }
 }
 
@@ -4018,6 +4038,31 @@ fn print_vim_status(command: VimCommand) {
         }
         VimCommand::Usage => {
             println!("{DIM}  usage:{RESET} /vim, /vim status, /vim on, or /vim off");
+        }
+    }
+}
+
+fn print_ide_status(command: IdeCommand) {
+    println!("{BOLD}ide{RESET}");
+    match command {
+        IdeCommand::Status => {
+            println!(
+                "{DIM}  status:{RESET} no dedicated VS Code / JetBrains integration is bundled today."
+            );
+            println!(
+                "{DIM}  terminal:{RESET} run libertai code inside your project, or use the desktop workspace for project navigation."
+            );
+        }
+        IdeCommand::Open => {
+            println!(
+                "{DIM}  /ide open:{RESET} no IDE bridge is available to open from the terminal CLI yet."
+            );
+            println!(
+                "{DIM}  desktop:{RESET} use the desktop app workspace and external editor integration for project files."
+            );
+        }
+        IdeCommand::Usage => {
+            println!("{DIM}  usage:{RESET} /ide, /ide status, or /ide open");
         }
     }
 }
@@ -10301,6 +10346,19 @@ mod tests {
         assert_eq!(parse_vim_command("off"), VimCommand::Disable);
         assert_eq!(parse_vim_command("disable"), VimCommand::Disable);
         assert_eq!(parse_vim_command("toggle"), VimCommand::Usage);
+    }
+
+    #[test]
+    fn ide_command_arg_and_parser_capture_status_and_open() {
+        assert_eq!(ide_command_arg("/ide"), Some(""));
+        assert_eq!(ide_command_arg("/ide status"), Some("status"));
+        assert_eq!(ide_command_arg("/ide open"), Some("open"));
+        assert_eq!(ide_command_arg("/idea"), None);
+        assert_eq!(parse_ide_command(""), IdeCommand::Status);
+        assert_eq!(parse_ide_command("status"), IdeCommand::Status);
+        assert_eq!(parse_ide_command("open"), IdeCommand::Open);
+        assert_eq!(parse_ide_command("settings"), IdeCommand::Open);
+        assert_eq!(parse_ide_command("install"), IdeCommand::Usage);
     }
 
     #[test]
