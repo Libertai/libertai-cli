@@ -9300,6 +9300,10 @@ fn unset_repl_config_value(cfg: &mut Arc<LibertaiConfig>, key: &str) -> Result<(
     Ok(())
 }
 
+const HOOKS_USAGE: &str =
+    "/hooks [status|list|state|diagnostics|diag|show|event|inspect <event>|open|settings|edit]";
+const MCP_USAGE: &str = "/mcp [status|list|state|show|server|inspect <server>|probe|probes|probe --save|probe save|probe --write|probe write|refresh|diagnostics|diag|reset|reset-sessions|open|settings|edit]";
+
 fn print_hooks_command(cfg: &LibertaiConfig, command: HooksCommand) {
     match command {
         HooksCommand::Status => print_hooks_status(cfg),
@@ -9307,7 +9311,7 @@ fn print_hooks_command(cfg: &LibertaiConfig, command: HooksCommand) {
         HooksCommand::Show(event) => print_hook_event_details(cfg, &event),
         HooksCommand::Usage => {
             println!("{BOLD}hooks{RESET}");
-            println!("{DIM}  usage:{RESET} /hooks, /hooks status, /hooks show <event>, /hooks open, or /hooks edit");
+            println!("{DIM}  usage:{RESET} {HOOKS_USAGE}");
             println!();
         }
     }
@@ -9336,7 +9340,7 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     println!("{DIM}  Notification hooks run after agent-requested push notifications.{RESET}");
     println!("{DIM}  lifecycle hooks warn on nonzero exit and do not block the session.{RESET}");
     println!("{DIM}  command, HTTP, MCP-tool, prompt, and agent hook handlers are executed natively.{RESET}");
-    println!("{DIM}  usage:{RESET} /hooks, /hooks status, /hooks show <event>, /hooks open, /hooks edit");
+    println!("{DIM}  usage:{RESET} {HOOKS_USAGE}");
     println!();
 }
 
@@ -9431,7 +9435,7 @@ fn print_mcp_status(command: McpCommand) {
             println!(
                 "{DIM}  tools:{RESET} CLI executes generic mcp_call, cached named mcp__server__tool entries, mcp_read_resource, mcp_get_prompt, and MCP-tool hook handlers from mcpServers"
             );
-            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp probe --save|--write, /mcp refresh, /mcp reset, /mcp open");
+            println!("{DIM}  usage:{RESET} {MCP_USAGE}");
         }
         McpCommand::Show(name) => print_mcp_server_details(&name),
         McpCommand::Probe => print_mcp_probe(),
@@ -9450,7 +9454,7 @@ fn print_mcp_status(command: McpCommand) {
             );
         }
         McpCommand::Usage => {
-            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp show <server>, /mcp probe, /mcp probe --save|--write, /mcp refresh, /mcp reset, /mcp open, or /mcp edit");
+            println!("{DIM}  usage:{RESET} {MCP_USAGE}");
         }
     }
     println!();
@@ -12118,6 +12122,9 @@ mod tests {
         );
         assert_eq!(parse_hooks_command("show"), HooksCommand::Usage);
         assert_eq!(parse_hooks_command("show pre post"), HooksCommand::Usage);
+        assert!(HOOKS_USAGE.contains("diagnostics|diag"));
+        assert!(HOOKS_USAGE.contains("show|event|inspect"));
+        assert!(HOOKS_USAGE.contains("settings|edit"));
     }
 
     #[test]
@@ -12195,6 +12202,10 @@ mod tests {
         assert_eq!(parse_mcp_command("settings"), McpCommand::Open);
         assert_eq!(parse_mcp_command("edit"), McpCommand::Open);
         assert_eq!(parse_mcp_command("remote"), McpCommand::Usage);
+        assert!(MCP_USAGE.contains("show|server|inspect"));
+        assert!(MCP_USAGE.contains("probe|probes"));
+        assert!(MCP_USAGE.contains("reset|reset-sessions"));
+        assert!(MCP_USAGE.contains("settings|edit"));
     }
 
     #[test]
