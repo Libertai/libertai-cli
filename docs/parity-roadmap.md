@@ -219,9 +219,9 @@ SDK; those are flagged **(upstream)**.
   supported image outputs.
 - **Skill disable registry** — native sessions skip skill names listed
   in `~/.config/libertai/disabled-skills.toml`. Desktop Settings and
-  CLI REPL `/skills [list|enable <name>|disable <name>]` manage
-  built-in, project, and user skills for future sessions without
-  editing `SKILL.md` files.
+  CLI REPL `/skills [list|show <name>|enable <name>|disable <name>]`
+  inspect or manage built-in, project, and user skills for future
+  sessions without editing `SKILL.md` files.
 - **Tool-call loop guardrail** — every registered tool is wrapped by a
   shared guardrail that warns on repeated exact calls / same-tool loops
   and returns a synthetic tool error when a loop crosses the hard-stop

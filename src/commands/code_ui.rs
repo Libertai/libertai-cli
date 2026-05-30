@@ -374,6 +374,7 @@ enum AutoCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SkillsCommand {
     List,
+    Show(String),
     Open,
     Enable(String),
     Disable(String),
@@ -6123,6 +6124,7 @@ fn print_templates() {
 fn handle_skills_slash(query: &str) -> Result<()> {
     match parse_skills_command(query)? {
         SkillsCommand::List => print_code_skills(),
+        SkillsCommand::Show(name) => print_code_skill_details(&name),
         SkillsCommand::Open => print_code_skills_open_hint(),
         SkillsCommand::Enable(name) => {
             code_skills::set_skill_enabled(&name, true)?;
@@ -6147,6 +6149,13 @@ fn parse_skills_command(query: &str) -> Result<SkillsCommand> {
     {
         return Ok(SkillsCommand::List);
     }
+    if let Some(name) = raw.strip_prefix("show ") {
+        let name = name.trim().trim_start_matches('@');
+        if name.is_empty() || name.split_whitespace().count() != 1 {
+            anyhow::bail!("usage: /skills show <name>");
+        }
+        return Ok(SkillsCommand::Show(name.to_string()));
+    }
     if raw.eq_ignore_ascii_case("open") || raw.eq_ignore_ascii_case("settings") {
         return Ok(SkillsCommand::Open);
     }
@@ -6167,7 +6176,7 @@ fn parse_skills_command(query: &str) -> Result<SkillsCommand> {
             }
             Ok(SkillsCommand::Disable(name.to_string()))
         }
-        _ => anyhow::bail!("usage: /skills [list|open|enable <name>|disable <name>]"),
+        _ => anyhow::bail!("usage: /skills [list|show <name>|open|enable <name>|disable <name>]"),
     }
 }
 
@@ -6205,6 +6214,88 @@ fn print_code_skills() {
         println!("{DIM}  run /skills disable <name> or /skills enable <name>.{RESET}");
     }
     println!();
+}
+
+fn print_code_skill_details(name: &str) {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /skills: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let skills = match code_skills::skill_inventory(SkillPillar::Code, Some(&cwd)) {
+        Ok(skills) => skills,
+        Err(e) => {
+            eprintln!("{DIM}  /skills: failed: {e:#}{RESET}");
+            return;
+        }
+    };
+    let Some(skill) = skills
+        .iter()
+        .find(|skill| skill.name == name)
+        .or_else(|| skills.iter().find(|skill| skill.name.starts_with(name)))
+    else {
+        eprintln!("{DIM}  /skills: no skill found for `{name}`{RESET}");
+        return;
+    };
+    print!("{}", format_code_skill_details(skill));
+}
+
+fn format_code_skill_details(skill: &code_skills::SkillInventoryEntry) -> String {
+    let state = if skill.enabled { "on" } else { "off" };
+    let tools = skill
+        .allowed_tools
+        .as_ref()
+        .filter(|tools| !tools.trim().is_empty())
+        .map(|tools| tools.trim().to_string())
+        .unwrap_or_else(|| "not restricted".to_string());
+    let path = skill
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "(built-in)".to_string());
+    let created = if skill.agent_created { "yes" } else { "no" };
+    format!(
+        "{BOLD}skill: {}{RESET}\n  state: {state}\n  description: {}\n  tools: {tools}\n  source: {}\n  path: {path}\n  agent-created: {created}\n\n{BOLD}instruction preview{RESET}\n{}\n\n{DIM}  changes apply to new sessions; use /skills enable|disable {} to toggle it.{RESET}\n\n",
+        skill.name,
+        skill.description,
+        skill.source,
+        skill_prompt_preview(&skill.body, 16, 1200),
+        skill.name,
+    )
+}
+
+fn skill_prompt_preview(body: &str, max_lines: usize, max_chars: usize) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "(empty)".to_string();
+    }
+    let mut out = String::new();
+    let mut chars = 0usize;
+    let mut lines = 0usize;
+    let total_lines = trimmed.lines().count();
+    for line in trimmed.lines().take(max_lines) {
+        if chars >= max_chars {
+            break;
+        }
+        if lines > 0 {
+            out.push('\n');
+            chars += 1;
+        }
+        let remaining = max_chars.saturating_sub(chars);
+        let piece = truncate_chars(line.trim_end(), remaining);
+        chars += piece.chars().count();
+        out.push_str(&piece);
+        lines += 1;
+    }
+    if total_lines > lines || trimmed.chars().count() > chars {
+        if !out.ends_with('\n') && !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("...");
+    }
+    out
 }
 
 fn print_code_skills_open_hint() {
@@ -10626,6 +10717,7 @@ mod tests {
                 name: "libertai-harness".to_string(),
                 description: String::new(),
                 allowed_tools: None,
+                body: String::new(),
                 source: "builtin".to_string(),
                 source_kind: "builtin".to_string(),
                 path: None,
@@ -10636,6 +10728,7 @@ mod tests {
                 name: "project-review".to_string(),
                 description: String::new(),
                 allowed_tools: None,
+                body: String::new(),
                 source: "project".to_string(),
                 source_kind: "project".to_string(),
                 path: Some(PathBuf::from("/tmp/project-review")),
@@ -12490,6 +12583,11 @@ mod tests {
     fn parse_skills_command_accepts_list_and_toggles() {
         assert_eq!(parse_skills_command("").unwrap(), SkillsCommand::List);
         assert_eq!(parse_skills_command("status").unwrap(), SkillsCommand::List);
+        assert_eq!(parse_skills_command("show").unwrap(), SkillsCommand::List);
+        assert_eq!(
+            parse_skills_command("show libertai-harness").unwrap(),
+            SkillsCommand::Show("libertai-harness".to_string())
+        );
         assert_eq!(parse_skills_command("open").unwrap(), SkillsCommand::Open);
         assert_eq!(
             parse_skills_command("settings").unwrap(),
@@ -12505,6 +12603,29 @@ mod tests {
         );
         assert!(parse_skills_command("enable").is_err());
         assert!(parse_skills_command("remove foo").is_err());
+    }
+
+    #[test]
+    fn format_code_skill_details_includes_metadata_and_preview() {
+        let skill = code_skills::SkillInventoryEntry {
+            name: "project-review".to_string(),
+            description: "Project review flow".to_string(),
+            allowed_tools: Some("read, grep".to_string()),
+            body: "Prefer focused findings.\nCite files.".to_string(),
+            source: "project:/tmp/.libertai/skills/project-review".to_string(),
+            source_kind: "project".to_string(),
+            path: Some(PathBuf::from("/tmp/.libertai/skills/project-review")),
+            agent_created: true,
+            enabled: false,
+        };
+        let details = format_code_skill_details(&skill);
+        assert!(details.contains("skill: project-review"));
+        assert!(details.contains("state: off"));
+        assert!(details.contains("description: Project review flow"));
+        assert!(details.contains("tools: read, grep"));
+        assert!(details.contains("/tmp/.libertai/skills/project-review"));
+        assert!(details.contains("agent-created: yes"));
+        assert!(details.contains("Prefer focused findings.\nCite files."));
     }
 
     #[test]
