@@ -6534,7 +6534,10 @@ fn parse_skills_command(query: &str) -> Result<SkillsCommand> {
         }
         return Ok(SkillsCommand::Show(name.to_string()));
     }
-    if raw.eq_ignore_ascii_case("open") || raw.eq_ignore_ascii_case("settings") {
+    if raw.eq_ignore_ascii_case("open")
+        || raw.eq_ignore_ascii_case("settings")
+        || raw.eq_ignore_ascii_case("edit")
+    {
         return Ok(SkillsCommand::Open);
     }
     let Some((head, tail)) = split_first_word(raw) else {
@@ -13811,6 +13814,7 @@ mod tests {
             parse_skills_command("settings").unwrap(),
             SkillsCommand::Open
         );
+        assert_eq!(parse_skills_command("edit").unwrap(), SkillsCommand::Open);
         assert_eq!(
             parse_skills_command("enable libertai-harness").unwrap(),
             SkillsCommand::Enable("libertai-harness".to_string())
