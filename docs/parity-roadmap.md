@@ -818,8 +818,10 @@ tools/resources/prompts. Agent-callable terminal MCP calls also attach
 structured per-call diagnostics to tool details, including operation,
 server, subject, transport, timeout, elapsed time, status, stdout/stderr,
 and raw MCP result data on success. Terminal MCP clients also advertise
-configured roots during initialize and answer `roots/list` requests from
-stdio and legacy SSE servers.
+configured roots during initialize, answer `roots/list` requests from
+stdio, Streamable HTTP event-stream responses, and legacy SSE servers,
+advertise sampling, and answer `sampling/createMessage` through the
+configured LibertAI chat endpoint.
 
 **Files**: new `src/commands/code_mcp.rs` + transport modules.
 **Effort**: L (2+ weeks).

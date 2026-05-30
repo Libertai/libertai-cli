@@ -1658,6 +1658,17 @@ fn parse_mcp_http_sse_response_with_roots(
             .map_err(|e| e.to_string())?;
             continue;
         }
+        if is_sampling_create_message_request(&value) {
+            send_mcp_http_request(
+                client,
+                server,
+                url,
+                &sampling_create_message_response(value["id"].clone(), &value),
+                session_id,
+            )
+            .map_err(|e| e.to_string())?;
+            continue;
+        }
         if value.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
             return Ok(value);
         }
@@ -1936,6 +1947,17 @@ fn wait_for_mcp_sse_response_with_roots(
             }
             continue;
         }
+        if is_sampling_create_message_request(&value) {
+            if let Some((client, server, endpoint)) = responder {
+                post_mcp_sse_message(
+                    client,
+                    server,
+                    endpoint,
+                    &sampling_create_message_response(value["id"].clone(), &value),
+                )?;
+            }
+            continue;
+        }
         if value.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
             return Ok(value);
         }
@@ -1985,6 +2007,7 @@ fn write_mcp_message<W: Write + ?Sized>(
 
 fn mcp_initialize_request_with_roots(id: u64, roots: &[String]) -> serde_json::Value {
     let mut capabilities = serde_json::Map::new();
+    capabilities.insert("sampling".to_string(), json!({}));
     if roots.iter().any(|root| !root.trim().is_empty()) {
         capabilities.insert("roots".to_string(), json!({ "listChanged": true }));
     }
@@ -2044,6 +2067,16 @@ fn wait_for_mcp_response_with_roots(
             }
             continue;
         }
+        if is_sampling_create_message_request(&value) {
+            if let Some(stdin) = stdin.as_deref_mut() {
+                write_mcp_message(
+                    stdin,
+                    &sampling_create_message_response(value["id"].clone(), &value),
+                )
+                .map_err(|e| format!("writing MCP sampling/createMessage response: {e}"))?;
+            }
+            continue;
+        }
         if value.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
             return Ok(value);
         }
@@ -2062,6 +2095,13 @@ fn mcp_response_result(response: serde_json::Value) -> Result<serde_json::Value,
 
 fn is_roots_list_request(value: &serde_json::Value) -> bool {
     value.get("method").and_then(serde_json::Value::as_str) == Some("roots/list")
+        && value.get("id").is_some()
+        && value.get("result").is_none()
+        && value.get("error").is_none()
+}
+
+fn is_sampling_create_message_request(value: &serde_json::Value) -> bool {
+    value.get("method").and_then(serde_json::Value::as_str) == Some("sampling/createMessage")
         && value.get("id").is_some()
         && value.get("result").is_none()
         && value.get("error").is_none()
@@ -2113,6 +2153,192 @@ fn root_name(root: &str) -> String {
         .filter(|name| !name.trim().is_empty())
         .unwrap_or(root)
         .to_string()
+}
+
+fn sampling_create_message_response(
+    id: serde_json::Value,
+    request: &serde_json::Value,
+) -> serde_json::Value {
+    match run_sampling_create_message(request) {
+        Ok(result) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        }),
+        Err(err) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32000,
+                "message": format!("sampling/createMessage failed: {err}"),
+            },
+        }),
+    }
+}
+
+fn run_sampling_create_message(request: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let cfg = crate::config::load().map_err(|e| format!("loading LibertAI config: {e:#}"))?;
+    run_sampling_create_message_with_config(&cfg, request)
+}
+
+fn run_sampling_create_message_with_config(
+    cfg: &Config,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let params = request
+        .get("params")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "missing params".to_string())?;
+    let max_tokens = params
+        .get("maxTokens")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "missing required maxTokens".to_string())?
+        .min(u64::from(u32::MAX)) as u32;
+    let model = sampling_model(params, &cfg.default_code_model);
+    let messages = sampling_chat_messages(params)?;
+    let req = ChatRequest {
+        model: model.clone(),
+        messages,
+        stream: Some(false),
+        max_tokens: Some(max_tokens),
+    };
+    let resp = post_chat_blocking(cfg, &req)
+        .map_err(|e| format!("sampling chat request failed: {e:#}"))?;
+    let body = resp
+        .json::<serde_json::Value>()
+        .map_err(|e| format!("parsing sampling /v1/chat/completions response: {e}"))?;
+    let text = prompt_hook_content(&body)
+        .ok_or_else(|| "response missing choices[0].message.content".to_string())?;
+    Ok(json!({
+        "role": "assistant",
+        "content": {
+            "type": "text",
+            "text": text,
+        },
+        "model": model,
+        "stopReason": sampling_stop_reason(&body),
+    }))
+}
+
+fn sampling_model(
+    params: &serde_json::Map<String, serde_json::Value>,
+    default_model: &str,
+) -> String {
+    params
+        .get("modelPreferences")
+        .and_then(|prefs| prefs.get("hints"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|hints| {
+            hints
+                .iter()
+                .find_map(|hint| hint.get("name").and_then(serde_json::Value::as_str))
+        })
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(default_model)
+        .to_string()
+}
+
+fn sampling_chat_messages(
+    params: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<ChatMessage>, String> {
+    let mut messages = Vec::new();
+    if let Some(system_prompt) = params
+        .get("systemPrompt")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        messages.push(ChatMessage {
+            role: "system".to_string(),
+            content: system_prompt.to_string(),
+        });
+    }
+    let source = params
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "missing messages".to_string())?;
+    for message in source {
+        let role = match message.get("role").and_then(serde_json::Value::as_str) {
+            Some("assistant") => "assistant",
+            _ => "user",
+        };
+        messages.push(ChatMessage {
+            role: role.to_string(),
+            content: sampling_content_text(message.get("content").unwrap_or(message)),
+        });
+    }
+    if messages.is_empty() {
+        return Err("missing messages".to_string());
+    }
+    Ok(messages)
+}
+
+fn sampling_content_text(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(sampling_content_text)
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        serde_json::Value::Object(object) => {
+            match object.get("type").and_then(serde_json::Value::as_str) {
+                Some("text") => object
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                Some("image") => {
+                    let mime = object
+                        .get("mimeType")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("image");
+                    let bytes = object
+                        .get("data")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::len)
+                        .unwrap_or(0);
+                    format!("[MCP sampling image content: {mime}, {bytes} base64 bytes]")
+                }
+                Some("audio") => {
+                    let mime = object
+                        .get("mimeType")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("audio");
+                    let bytes = object
+                        .get("data")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::len)
+                        .unwrap_or(0);
+                    format!("[MCP sampling audio content: {mime}, {bytes} base64 bytes]")
+                }
+                _ => compact_json(content),
+            }
+        }
+        _ => compact_json(content),
+    }
+}
+
+fn compact_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn sampling_stop_reason(body: &serde_json::Value) -> String {
+    match body
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("stop")
+    {
+        "length" => "maxTokens",
+        "tool_calls" | "function_call" => "toolUse",
+        "content_filter" => "contentFilter",
+        _ => "endTurn",
+    }
+    .to_string()
 }
 
 fn mcp_tool_output_text(result: &serde_json::Value) -> String {
@@ -2900,9 +3126,69 @@ mod tests {
     #[test]
     fn mcp_initialize_advertises_roots_when_configured() {
         let init = mcp_initialize_request_with_roots(1, &["file:///repo".to_string()]);
+        assert!(init["params"]["capabilities"]["sampling"].is_object());
         assert_eq!(init["params"]["capabilities"]["roots"]["listChanged"], true);
         let empty = mcp_initialize_request_with_roots(1, &[]);
+        assert!(empty["params"]["capabilities"]["sampling"].is_object());
         assert!(empty["params"]["capabilities"].get("roots").is_none());
+    }
+
+    #[test]
+    fn mcp_sampling_request_renders_chat_messages() {
+        let params = json!({
+            "systemPrompt": "Follow project instructions.",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hello"}, {"type": "image", "mimeType": "image/png", "data": "abcd"}]},
+                {"role": "assistant", "content": {"type": "text", "text": "hi"}}
+            ]
+        });
+        let messages = sampling_chat_messages(params.as_object().unwrap()).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[0].content, "Follow project instructions.");
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(
+            messages[1].content,
+            "hello\n[MCP sampling image content: image/png, 4 base64 bytes]"
+        );
+        assert_eq!(messages[2].role, "assistant");
+        assert_eq!(messages[2].content, "hi");
+    }
+
+    #[test]
+    fn mcp_sampling_model_prefers_first_hint() {
+        let params = json!({
+            "modelPreferences": {
+                "hints": [
+                    {"name": " preferred-code-model "},
+                    {"name": "second"}
+                ]
+            }
+        });
+        assert_eq!(
+            sampling_model(params.as_object().unwrap(), "fallback-model"),
+            "preferred-code-model"
+        );
+        assert_eq!(
+            sampling_model(&serde_json::Map::new(), "fallback-model"),
+            "fallback-model"
+        );
+    }
+
+    #[test]
+    fn mcp_sampling_stop_reason_maps_finish_reason() {
+        assert_eq!(
+            sampling_stop_reason(&json!({"choices":[{"finish_reason":"length"}]})),
+            "maxTokens"
+        );
+        assert_eq!(
+            sampling_stop_reason(&json!({"choices":[{"finish_reason":"tool_calls"}]})),
+            "toolUse"
+        );
+        assert_eq!(
+            sampling_stop_reason(&json!({"choices":[{"finish_reason":"stop"}]})),
+            "endTurn"
+        );
     }
 
     #[test]
@@ -3028,6 +3314,46 @@ mod tests {
         assert_eq!(run.status, 0, "stderr: {}", run.stderr);
         assert_eq!(run.stdout, "roots ok");
         assert!(reset_mcp_cli_session_for_config("docs-roots-test", &server));
+    }
+
+    #[test]
+    fn mcp_tool_call_answers_stdio_sampling_request() {
+        let server = McpServerConfig {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                concat!(
+                    "read init; ",
+                    "case \"$init\" in *'\"sampling\":{}'*) : ;; *) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"missing sampling capability\"}}'; exit 0 ;; esac; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}}}'; ",
+                    "read initialized; ",
+                    "read call; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"sampling/createMessage\",\"params\":{\"messages\":[]}}'; ",
+                    "read sampling; ",
+                    "case \"$sampling\" in ",
+                    "*'sampling/createMessage failed'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"sampling answered\"}],\"isError\":false}}' ;; ",
+                    "*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32000,\"message\":\"missing sampling response\"}}' ;; ",
+                    "esac;"
+                )
+                .to_string(),
+            ],
+            env: HashMap::new(),
+            ..McpServerConfig::default()
+        };
+        let cfg = Config {
+            mcp_servers: HashMap::from([("docs-sampling-test".to_string(), server.clone())]),
+            ..Config::default()
+        };
+        let run = call_mcp_tool_with_config(
+            &cfg,
+            "docs-sampling-test",
+            "search",
+            json!({"query":"sampling"}),
+            Some(2),
+        );
+        assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+        assert_eq!(run.stdout, "sampling answered");
+        assert!(reset_mcp_cli_session_for_config("docs-sampling-test", &server));
     }
 
     #[test]
