@@ -67,7 +67,9 @@ SDK; those are flagged **(upstream)**.
   commits with `/changelog [count]`.
 - **CLI `/reload`, `/login`, and `/logout` commands** — REPL users can
   refresh config/auth state and rebuild the active agent session without
-  leaving `libertai code`.
+  leaving `libertai code`; `/login status` reports saved LibertAI
+  credentials, and `/login <provider>` / `/logout <provider>` explain
+  the desktop-only provider credential handoff.
 - **CLI `/doctor` diagnostics** — REPL users get a local health report
   for pi-session state, auth/defaults, smart approvals, remembered
   approvals, hook event counts, project memory plus sidecar/reference

@@ -1222,6 +1222,14 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix("/login ") {
+            handle_login_slash(rest.trim(), &cfg);
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/logout ") {
+            handle_logout_slash(rest.trim(), &cfg);
+            continue;
+        }
         if let Some((command, rest)) = name_command_arg(trimmed) {
             match parse_session_name(rest) {
                 Ok(name) => match handle.set_session_name(name.clone()).await {
@@ -2064,8 +2072,8 @@ fn print_help() {
     println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
     println!("{DIM}  /attach <path> [prompt] — alias for /image{RESET}");
     println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
-    println!("{DIM}  /login    — run libertai login, then reload this REPL session{RESET}");
-    println!("{DIM}  /logout   — run libertai logout, then reload this REPL session{RESET}");
+    println!("{DIM}  /login [status|libertai|provider] — inspect auth or run libertai login{RESET}");
+    println!("{DIM}  /logout [status|libertai|provider] — run libertai logout or explain provider logout{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
     println!("{DIM}  /skills [list|enable <name>|disable <name>] — manage active code-agent skills for new sessions{RESET}");
     println!("{DIM}  /init [--agent] [notes] — create or draft AGENTS.md guidance{RESET}");
@@ -2765,6 +2773,101 @@ fn print_permissions_status(mode: Mode) {
     println!("{DIM}  native bypassPermissions is intentionally unavailable.{RESET}");
     println!("{DIM}  use /permissions forget to clear saved allow rules.{RESET}");
     println!("{DIM}  use /permissions bypassPermissions to explain the native safety stance.{RESET}");
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LoginSlashTarget<'a> {
+    Account,
+    Status,
+    Provider(&'a str),
+}
+
+fn parse_login_slash_target(query: &str) -> LoginSlashTarget<'_> {
+    let raw = query.trim();
+    if raw.is_empty() {
+        return LoginSlashTarget::Account;
+    }
+    let lower = raw.to_ascii_lowercase();
+    match lower.as_str() {
+        "status" | "show" | "info" => LoginSlashTarget::Status,
+        "libertai" | "account" | "key" | "api-key" | "api" => LoginSlashTarget::Account,
+        _ => LoginSlashTarget::Provider(raw),
+    }
+}
+
+fn handle_login_slash(query: &str, cfg: &LibertaiConfig) {
+    match parse_login_slash_target(query) {
+        LoginSlashTarget::Status => print_login_status(cfg),
+        LoginSlashTarget::Account => {
+            println!("{BOLD}login{RESET}");
+            println!("{DIM}  LibertAI API key:{RESET} {}", login_key_state(cfg));
+            println!(
+                "{DIM}  use /login with no arguments to run the interactive LibertAI login flow.{RESET}"
+            );
+        }
+        LoginSlashTarget::Provider(provider) => print_provider_login_note(provider, cfg),
+    }
+}
+
+fn handle_logout_slash(query: &str, cfg: &LibertaiConfig) {
+    match parse_login_slash_target(query) {
+        LoginSlashTarget::Status => print_login_status(cfg),
+        LoginSlashTarget::Account => {
+            println!("{BOLD}logout{RESET}");
+            println!(
+                "{DIM}  use /logout with no arguments to back up and remove the LibertAI config.{RESET}"
+            );
+        }
+        LoginSlashTarget::Provider(provider) => {
+            println!("{BOLD}logout{RESET}");
+            println!(
+                "{DIM}  provider-specific logout for `{provider}` is managed by the desktop backend settings, not the terminal CLI config.{RESET}"
+            );
+            println!(
+                "{DIM}  terminal CLI only stores the LibertAI API key: {}{RESET}",
+                login_key_state(cfg)
+            );
+        }
+    }
+}
+
+fn print_login_status(cfg: &LibertaiConfig) {
+    println!("{BOLD}login{RESET}");
+    println!("{DIM}  LibertAI API key:{RESET} {}", login_key_state(cfg));
+    println!(
+        "{DIM}  wallet:{RESET} {}",
+        cfg.auth
+            .wallet_address
+            .as_deref()
+            .map(mask_key)
+            .unwrap_or_else(|| "missing".to_string())
+    );
+    println!(
+        "{DIM}  chain:{RESET} {}",
+        cfg.auth.chain.as_deref().unwrap_or("missing")
+    );
+    println!(
+        "{DIM}  providers:{RESET} terminal CLI stores only LibertAI credentials; use desktop Settings > Backends for Anthropic, Google, Copilot, GitLab, Vertex, and other provider keys."
+    );
+}
+
+fn login_key_state(cfg: &LibertaiConfig) -> String {
+    cfg.auth
+        .api_key
+        .as_deref()
+        .map(mask_key)
+        .unwrap_or_else(|| "missing".to_string())
+}
+
+fn print_provider_login_note(provider: &str, cfg: &LibertaiConfig) {
+    println!("{BOLD}login{RESET}");
+    println!(
+        "{DIM}  provider `{provider}` is not stored in the terminal CLI config.{RESET}"
+    );
+    println!(
+        "{DIM}  use the desktop `/login {provider}` flow or Settings > Backends for provider-specific credentials.{RESET}"
+    );
+    println!("{DIM}  terminal LibertAI API key:{RESET} {}", login_key_state(cfg));
 }
 
 fn parse_model_spec(current_provider: &str, input: &str) -> Result<(String, String)> {
@@ -7008,6 +7111,17 @@ mod tests {
             PermissionsCommand::UnsupportedBypass
         );
         assert_eq!(parse_permissions_command("wat"), PermissionsCommand::Show);
+    }
+
+    #[test]
+    fn parse_login_slash_target_maps_status_account_and_providers() {
+        assert_eq!(parse_login_slash_target(""), LoginSlashTarget::Account);
+        assert_eq!(parse_login_slash_target("status"), LoginSlashTarget::Status);
+        assert_eq!(parse_login_slash_target("libertai"), LoginSlashTarget::Account);
+        assert_eq!(
+            parse_login_slash_target("anthropic"),
+            LoginSlashTarget::Provider("anthropic")
+        );
     }
 
     #[test]
