@@ -201,6 +201,20 @@ pub fn set_skill_enabled(name: &str, enabled: bool) -> Result<()> {
 }
 
 fn collect_matching_skills(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Vec<AgentSkill>> {
+    collect_matching_skills_with_roots(
+        pillar,
+        cwd,
+        dirs::home_dir().as_deref(),
+        dirs::config_dir().as_deref(),
+    )
+}
+
+fn collect_matching_skills_with_roots(
+    pillar: SkillPillar,
+    cwd: Option<&Path>,
+    home: Option<&Path>,
+    config: Option<&Path>,
+) -> Result<Vec<AgentSkill>> {
     let mut skills = Vec::new();
 
     for builtin in BUILTINS {
@@ -232,15 +246,18 @@ fn collect_matching_skills(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Ve
         )?;
     }
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = home {
         load_skill_dir(
             &home.join(".claude").join("skills"),
             SkillSourceKind::User,
             pillar,
             &mut skills,
         )?;
+    }
+
+    if let Some(config) = config {
         load_skill_dir(
-            &home.join(".config").join("libertai").join("skills"),
+            &config.join("libertai").join("skills"),
             SkillSourceKind::User,
             pillar,
             &mut skills,
@@ -587,6 +604,35 @@ mod tests {
             .expect("path")
             .ends_with(".claude/skills/claude-review"));
         assert!(skill.body.contains("Prefer focused review findings."));
+    }
+
+    #[test]
+    fn user_libertai_skill_root_uses_config_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        let config = dir.path().join("xdg-config");
+        let skill_dir = config.join("libertai/skills/config-review");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: config-review\ndescription: Config-dir review skill.\nmetadata:\n  libertai.pillars: code\n---\nUse the configured skill root.\n",
+        )
+        .expect("write skill");
+
+        let skills = collect_matching_skills_with_roots(
+            SkillPillar::Code,
+            None,
+            Some(&home),
+            Some(&config),
+        )
+        .expect("skills");
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "config-review")
+            .expect("config-dir skill");
+        assert!(matches!(skill.source, SkillSource::User(_)));
+        assert!(source_label(&skill.source).contains("xdg-config/libertai/skills/config-review"));
+        assert!(skill.body.contains("Use the configured skill root."));
     }
 
     #[test]
