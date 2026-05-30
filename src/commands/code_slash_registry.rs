@@ -14,6 +14,7 @@ pub struct CustomCommand {
     pub namespace: Option<String>,
     pub description: Option<String>,
     pub arg_hint: Option<String>,
+    pub argument_names: Vec<String>,
     pub body: String,
     pub source: CommandSource,
     pub path: PathBuf,
@@ -47,10 +48,10 @@ fn discover_with_home(
 }
 
 pub fn expand(command: &CustomCommand, args: &str) -> String {
-    expand_body(&command.body, args)
+    expand_body(&command.body, args, &command.argument_names)
 }
 
-fn expand_body(body: &str, args: &str) -> String {
+fn expand_body(body: &str, args: &str, argument_names: &[String]) -> String {
     let args = args.trim();
     let positional = split_command_args(args);
     let mut out = String::with_capacity(body.len() + args.len());
@@ -101,6 +102,16 @@ fn expand_body(body: &str, args: &str) -> String {
                 continue;
             }
         }
+        if let Some((name, len)) = named_placeholder(rest) {
+            if let Some(idx) = argument_names.iter().position(|candidate| candidate == name) {
+                if let Some(value) = positional.get(idx) {
+                    out.push_str(value);
+                }
+                used_args = true;
+                i += len;
+                continue;
+            }
+        }
         let ch = rest.chars().next().expect("non-empty rest");
         out.push(ch);
         i += ch.len_utf8();
@@ -113,6 +124,26 @@ fn expand_body(body: &str, args: &str) -> String {
         out.push_str(args);
     }
     out
+}
+
+fn named_placeholder(rest: &str) -> Option<(&str, usize)> {
+    let bytes = rest.as_bytes();
+    if bytes.first() != Some(&b'$') {
+        return None;
+    }
+    let first = *bytes.get(1)?;
+    if !first.is_ascii_alphabetic() && first != b'_' {
+        return None;
+    }
+    let mut end = 2usize;
+    while let Some(byte) = bytes.get(end) {
+        if byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-' {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    Some((&rest[1..end], end))
 }
 
 fn split_command_args(args: &str) -> Vec<String> {
@@ -193,10 +224,12 @@ fn load_file(root: &Path, path: &Path, source: CommandSource) -> Option<CustomCo
     }
     let mut description = None;
     let mut arg_hint = None;
+    let mut argument_names = Vec::new();
     for (key, value) in frontmatter {
         match key.as_str() {
             "description" => description = Some(value),
             "argHint" | "arg_hint" | "arg-hint" | "argument-hint" => arg_hint = Some(value),
+            "arguments" => argument_names = parse_argument_names(&value),
             _ => {}
         }
     }
@@ -205,6 +238,7 @@ fn load_file(root: &Path, path: &Path, source: CommandSource) -> Option<CustomCo
         namespace: command_namespace(root, path),
         description,
         arg_hint,
+        argument_names,
         body: body.to_string(),
         source,
         path: path.to_path_buf(),
@@ -288,6 +322,19 @@ fn unquote(value: &str) -> String {
     }
 }
 
+fn parse_argument_names(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    let list = trimmed
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    list.split(|ch: char| ch == ',' || ch.is_whitespace())
+        .map(|name| name.trim().trim_matches(['"', '\'']))
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 fn dedupe_by_name(out: &mut Vec<CustomCommand>) {
     let mut latest = std::collections::HashMap::new();
     for (idx, cmd) in out.iter().enumerate() {
@@ -326,6 +373,7 @@ mod tests {
         assert_eq!(cmds[0].namespace, None);
         assert_eq!(cmds[0].description.as_deref(), Some("Review diff"));
         assert_eq!(cmds[0].arg_hint.as_deref(), Some("scope"));
+        assert!(cmds[0].argument_names.is_empty());
         assert_eq!(expand(&cmds[0], "src"), "Review src");
     }
 
@@ -371,6 +419,7 @@ mod tests {
             name: "review".into(),
             description: None,
             arg_hint: None,
+            argument_names: Vec::new(),
             body: "all=$ARGUMENTS first=$0 second=$1 indexed=$ARGUMENTS[1] missing=$3 legacy={{ args }}".into(),
             source: CommandSource::Project,
             namespace: None,
@@ -384,11 +433,48 @@ mod tests {
     }
 
     #[test]
+    fn expands_named_argument_placeholders() {
+        let command = CustomCommand {
+            name: "review".into(),
+            description: None,
+            arg_hint: None,
+            argument_names: vec!["path".into(), "priority".into()],
+            body: "Review $path at $priority. Keep $unknown literal.".into(),
+            source: CommandSource::Project,
+            namespace: None,
+            path: PathBuf::from(".claude/commands/review.md"),
+        };
+
+        assert_eq!(
+            expand(&command, r#"src/lib.rs "high priority""#),
+            "Review src/lib.rs at high priority. Keep $unknown literal."
+        );
+    }
+
+    #[test]
+    fn parses_named_argument_frontmatter() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            &temp.path().join(".claude/commands/review.md"),
+            "---\narguments: [path, priority]\n---\nReview $path at $priority",
+        );
+
+        let cmds = discover_with_home(temp.path(), None, None);
+
+        assert_eq!(cmds[0].argument_names, vec!["path", "priority"]);
+        assert_eq!(
+            expand(&cmds[0], r#"src/lib.rs "high priority""#),
+            "Review src/lib.rs at high priority"
+        );
+    }
+
+    #[test]
     fn appends_arguments_when_template_has_no_placeholders() {
         let command = CustomCommand {
             name: "plain".into(),
             description: None,
             arg_hint: None,
+            argument_names: Vec::new(),
             body: "Review this carefully.".into(),
             source: CommandSource::Project,
             namespace: None,

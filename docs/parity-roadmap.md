@@ -631,7 +631,8 @@ namespace. Each file becomes a prompt template; frontmatter may define
 `/template <name> [args]` and direct `/<name> [args]` dispatch with
 Claude-style `$ARGUMENTS`,
 `$ARGUMENTS[0]`, `$0` / `$1` positional arguments, implicit
-`ARGUMENTS: ...` append for templates without placeholders, and legacy
+`ARGUMENTS: ...` append for templates without placeholders, named
+`arguments:` frontmatter placeholders such as `$path`, and legacy
 `{{args}}` substitution.
 
 **Files**: `src/commands/code_slash_registry.rs`, `src/commands/code_ui.rs`.
