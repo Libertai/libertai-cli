@@ -3529,6 +3529,7 @@ async fn compact_transcript(handle: &mut AgentSessionHandle, notes: Option<&str>
 
 fn export_path(path: Option<&str>) -> Result<PathBuf> {
     let raw = path.unwrap_or("").trim();
+    let raw = strip_save_action(raw);
     if raw.is_empty() {
         return Ok(PathBuf::from("libertai-transcript.md"));
     }
@@ -3543,6 +3544,7 @@ enum ShareTarget {
 
 fn parse_share_target(path: Option<&str>) -> Result<ShareTarget> {
     let raw = path.unwrap_or("").trim();
+    let raw = strip_save_action(raw);
     if raw.is_empty() {
         return Ok(ShareTarget::File(PathBuf::from("libertai-share.html")));
     }
@@ -3571,6 +3573,21 @@ fn parse_share_target(path: Option<&str>) -> Result<ShareTarget> {
         filename.trim()
     });
     Ok(ShareTarget::Gist { public, filename })
+}
+
+fn strip_save_action(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    let Some((head, tail)) = split_first_word(trimmed) else {
+        return "";
+    };
+    if matches!(
+        head.to_ascii_lowercase().as_str(),
+        "save" | "file" | "download" | "write"
+    ) {
+        tail.trim_start()
+    } else {
+        trimmed
+    }
 }
 
 fn sanitize_gist_filename(raw: &str) -> String {
@@ -9051,6 +9068,14 @@ mod tests {
             export_path(Some("out/session.md")).unwrap(),
             PathBuf::from("out/session.md")
         );
+        assert_eq!(
+            export_path(Some("save")).unwrap(),
+            PathBuf::from("libertai-transcript.md")
+        );
+        assert_eq!(
+            export_path(Some("save report.md")).unwrap(),
+            PathBuf::from("report.md")
+        );
     }
 
     #[test]
@@ -9062,6 +9087,14 @@ mod tests {
         assert_eq!(
             parse_share_target(Some("out/session.html")).unwrap(),
             ShareTarget::File(PathBuf::from("out/session.html"))
+        );
+        assert_eq!(
+            parse_share_target(Some("save")).unwrap(),
+            ShareTarget::File(PathBuf::from("libertai-share.html"))
+        );
+        assert_eq!(
+            parse_share_target(Some("save report.html")).unwrap(),
+            ShareTarget::File(PathBuf::from("report.html"))
         );
         assert_eq!(
             parse_share_target(Some("gist")).unwrap(),
