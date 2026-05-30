@@ -755,6 +755,10 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some(rest) = hooks_command_arg(trimmed) {
+            print_hooks_command(&cfg, parse_hooks_command(rest));
+            continue;
+        }
         if let Some(rest) = mcp_command_arg(trimmed) {
             print_mcp_status(parse_mcp_command(rest));
             continue;
@@ -854,10 +858,6 @@ async fn repl_loop(
             }
             "/config" | "/settings" => {
                 print_config_status(&cfg);
-                continue;
-            }
-            "/hooks" => {
-                print_hooks_status(&cfg);
                 continue;
             }
             "/mcp" => {
@@ -2283,7 +2283,7 @@ fn print_help() {
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
     println!("{DIM}  /config [path|set <key> <value>|unset <key>] — show or update active config{RESET}");
-    println!("{DIM}  /hooks    — show configured command hooks{RESET}");
+    println!("{DIM}  /hooks    — show configured command hooks (/hooks open shows settings target){RESET}");
     println!("{DIM}  /mcp      — show terminal MCP support status{RESET}");
     println!(
         "{DIM}  /statusline <template|command <shell>|reset> — customize the input-bar status line{RESET}"
@@ -3652,10 +3652,32 @@ fn notify_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
+fn hooks_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/hooks" => Some(""),
+        _ => trimmed.strip_prefix("/hooks ").map(str::trim),
+    }
+}
+
 fn mcp_command_arg(trimmed: &str) -> Option<&str> {
     match trimmed {
         "/mcp" => Some(""),
         _ => trimmed.strip_prefix("/mcp ").map(str::trim),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HooksCommand {
+    Status,
+    Open,
+    Usage,
+}
+
+fn parse_hooks_command(input: &str) -> HooksCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "status" | "list" | "state" | "diagnostics" | "diag" => HooksCommand::Status,
+        "open" | "settings" => HooksCommand::Open,
+        _ => HooksCommand::Usage,
     }
 }
 
@@ -6886,6 +6908,18 @@ fn unset_repl_config_value(cfg: &mut Arc<LibertaiConfig>, key: &str) -> Result<(
     Ok(())
 }
 
+fn print_hooks_command(cfg: &LibertaiConfig, command: HooksCommand) {
+    match command {
+        HooksCommand::Status => print_hooks_status(cfg),
+        HooksCommand::Open => print_hooks_open_hint(),
+        HooksCommand::Usage => {
+            println!("{BOLD}hooks{RESET}");
+            println!("{DIM}  usage:{RESET} /hooks, /hooks status, or /hooks open");
+            println!();
+        }
+    }
+}
+
 fn print_hooks_status(cfg: &LibertaiConfig) {
     println!("{BOLD}hooks{RESET}");
     print_hook_section("UserPromptSubmit", &cfg.hooks.user_prompt_submit);
@@ -6909,6 +6943,16 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     println!("{DIM}  Notification hooks run after agent-requested push notifications.{RESET}");
     println!("{DIM}  lifecycle hooks warn on nonzero exit and do not block the session.{RESET}");
     println!("{DIM}  command, HTTP, prompt, and agent hook handlers are executed natively; MCP-tool handlers are not.{RESET}");
+    println!("{DIM}  usage:{RESET} /hooks, /hooks status, /hooks open");
+    println!();
+}
+
+fn print_hooks_open_hint() {
+    println!("{BOLD}hooks{RESET}");
+    println!("{DIM}  /hooks open:{RESET} open Desktop Settings > Hooks for graphical hook management.");
+    println!(
+        "{DIM}  terminal:{RESET} edit hook rows in the LibertAI config file; /hooks status shows the active rows."
+    );
     println!();
 }
 
@@ -8525,6 +8569,20 @@ mod tests {
         assert_eq!(parse_notify_command("disable"), NotifyCommand::Off);
         assert_eq!(parse_notify_command("test"), NotifyCommand::Test);
         assert_eq!(parse_notify_command("wat"), NotifyCommand::Usage);
+    }
+
+    #[test]
+    fn hooks_command_arg_and_parser_report_terminal_targets() {
+        assert_eq!(hooks_command_arg("/hooks"), Some(""));
+        assert_eq!(hooks_command_arg("/hooks status"), Some("status"));
+        assert_eq!(hooks_command_arg("/hooks open"), Some("open"));
+        assert_eq!(hooks_command_arg("/hook"), None);
+        assert_eq!(parse_hooks_command(""), HooksCommand::Status);
+        assert_eq!(parse_hooks_command("list"), HooksCommand::Status);
+        assert_eq!(parse_hooks_command("diagnostics"), HooksCommand::Status);
+        assert_eq!(parse_hooks_command("open"), HooksCommand::Open);
+        assert_eq!(parse_hooks_command("settings"), HooksCommand::Open);
+        assert_eq!(parse_hooks_command("edit"), HooksCommand::Usage);
     }
 
     #[test]
