@@ -3763,7 +3763,8 @@ fn parse_hooks_command(input: &str) -> HooksCommand {
 
 fn parse_mcp_command(input: &str) -> McpCommand {
     match input.trim().to_ascii_lowercase().as_str() {
-        "" | "status" | "list" | "state" | "diagnostics" | "diag" => McpCommand::Status,
+        "" | "status" | "list" | "state" | "diagnostics" | "diag" | "probe" | "probes"
+        | "refresh" => McpCommand::Status,
         "open" | "settings" | "edit" => McpCommand::Open,
         _ => McpCommand::Usage,
     }
@@ -7187,7 +7188,7 @@ fn print_mcp_status(command: McpCommand) {
             println!(
                 "{DIM}  hooks:{RESET} CLI preserves MCP-tool hook metadata but does not execute MCP-tool hook handlers yet"
             );
-            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp open");
+            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp open");
         }
         McpCommand::Open => {
             println!(
@@ -7195,7 +7196,7 @@ fn print_mcp_status(command: McpCommand) {
             );
         }
         McpCommand::Usage => {
-            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp open, or /mcp edit");
+            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp open, or /mcp edit");
         }
     }
     println!();
@@ -8841,10 +8842,12 @@ mod tests {
         assert_eq!(parse_mcp_command(""), McpCommand::Status);
         assert_eq!(parse_mcp_command("list"), McpCommand::Status);
         assert_eq!(parse_mcp_command("diagnostics"), McpCommand::Status);
+        assert_eq!(parse_mcp_command("probe"), McpCommand::Status);
+        assert_eq!(parse_mcp_command("refresh"), McpCommand::Status);
         assert_eq!(parse_mcp_command("open"), McpCommand::Open);
         assert_eq!(parse_mcp_command("settings"), McpCommand::Open);
         assert_eq!(parse_mcp_command("edit"), McpCommand::Open);
-        assert_eq!(parse_mcp_command("probe"), McpCommand::Usage);
+        assert_eq!(parse_mcp_command("remote"), McpCommand::Usage);
     }
 
     #[test]
