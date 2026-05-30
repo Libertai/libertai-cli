@@ -190,6 +190,23 @@ enum McpCommand {
     Usage,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScopedModelsCommand {
+    Status,
+    Clear,
+    Set(Vec<String>),
+    Usage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelSlashCommand<'a> {
+    Status,
+    List,
+    Next,
+    Previous,
+    Set(&'a str),
+}
+
 #[derive(Debug, Default)]
 struct ToolActivityTracker {
     active: HashMap<String, (String, Instant)>,
@@ -641,6 +658,7 @@ async fn repl_loop(
     let mut session_name: Option<String> = None;
     let mut autonomous_queue: VecDeque<String> = VecDeque::new();
     let mut auto_run: Option<AutoRun> = None;
+    let mut scoped_model_patterns: Vec<String> = Vec::new();
     let schedule_store_path = schedule_store_path_for_cwd().ok();
     let mut scheduled_runs = match schedule_store_path.as_deref() {
         Some(path) => match load_scheduled_runs(path) {
@@ -768,7 +786,11 @@ async fn repl_loop(
                 continue;
             }
             "/model" => {
-                print_model_status(&handle, &cfg);
+                print_model_status(&handle, &cfg, &scoped_model_patterns);
+                continue;
+            }
+            "/scoped-models" | "/scoped" => {
+                handle_scoped_models_command("", &mut scoped_model_patterns);
                 continue;
             }
             "/name" | "/rename" => {
@@ -1291,6 +1313,10 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some(rest) = scoped_models_command_arg(trimmed) {
+            handle_scoped_models_command(rest, &mut scoped_model_patterns);
+            continue;
+        }
         if let Some((_command, rest)) = mode_command_arg(trimmed) {
             match parse_permissions_command(rest) {
                 PermissionsCommand::Show => print_permissions_status(mode.get()),
@@ -1311,26 +1337,65 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/model ") {
-            match parse_model_spec(&provider, rest) {
-                Ok((next_provider, next_model)) => {
-                    match handle.set_model(&next_provider, &next_model).await {
-                        Ok(()) => {
-                            provider = next_provider;
-                            model = next_model;
-                            set_bar_status(BarStatus {
-                                model_label: format!("{provider}/{model}"),
-                                input_tokens: 0,
-                                context_window: context_window_for(&model),
-                                output_style: output_style.clone(),
-                                status_line_template: cfg.status_line_template.clone(),
-                                status_line_command: cfg.status_line_command.clone(),
-                            });
-                            println!("{DIM}  → model set to {provider}/{model}{RESET}");
+            let model_command = parse_model_slash_command(rest);
+            match model_command {
+                ModelSlashCommand::Status => {
+                    print_model_status(&handle, &cfg, &scoped_model_patterns)
+                }
+                ModelSlashCommand::List => {
+                    print_model_list(&cfg, &provider, &scoped_model_patterns)
+                }
+                ModelSlashCommand::Next | ModelSlashCommand::Previous => {
+                    let direction = if matches!(model_command, ModelSlashCommand::Previous) {
+                        -1
+                    } else {
+                        1
+                    };
+                    match next_scoped_model(&cfg, &provider, &model, &scoped_model_patterns, direction) {
+                        Ok(Some(next_model)) => {
+                            match handle.set_model(&provider, &next_model).await {
+                                Ok(()) => {
+                                    model = next_model;
+                                    set_bar_status(BarStatus {
+                                        model_label: format!("{provider}/{model}"),
+                                        input_tokens: 0,
+                                        context_window: context_window_for(&model),
+                                        output_style: output_style.clone(),
+                                        status_line_template: cfg.status_line_template.clone(),
+                                        status_line_command: cfg.status_line_command.clone(),
+                                    });
+                                    println!("{DIM}  → model set to {provider}/{model}{RESET}");
+                                }
+                                Err(e) => eprintln!("{DIM}  /model: {e:#}{RESET}"),
+                            }
                         }
+                        Ok(None) => eprintln!(
+                            "{DIM}  /model: no alternative model found for the current scope.{RESET}"
+                        ),
                         Err(e) => eprintln!("{DIM}  /model: {e:#}{RESET}"),
                     }
                 }
-                Err(e) => eprintln!("{DIM}  /model: {e:#}{RESET}"),
+                ModelSlashCommand::Set(spec) => match parse_model_spec(&provider, spec) {
+                    Ok((next_provider, next_model)) => {
+                        match handle.set_model(&next_provider, &next_model).await {
+                            Ok(()) => {
+                                provider = next_provider;
+                                model = next_model;
+                                set_bar_status(BarStatus {
+                                    model_label: format!("{provider}/{model}"),
+                                    input_tokens: 0,
+                                    context_window: context_window_for(&model),
+                                    output_style: output_style.clone(),
+                                    status_line_template: cfg.status_line_template.clone(),
+                                    status_line_command: cfg.status_line_command.clone(),
+                                });
+                                println!("{DIM}  → model set to {provider}/{model}{RESET}");
+                            }
+                            Err(e) => eprintln!("{DIM}  /model: {e:#}{RESET}"),
+                        }
+                    }
+                    Err(e) => eprintln!("{DIM}  /model: {e:#}{RESET}"),
+                },
             }
             continue;
         }
@@ -2228,6 +2293,7 @@ fn print_help() {
     println!("{DIM}  /resume [path] — resume the latest or specified saved session{RESET}");
     println!("{DIM}  /fork [list|index|id] — fork from a previous user message{RESET}");
     println!("{DIM}  /thinking [off|minimal|low|medium|high|xhigh] — show or set thinking{RESET}");
+    println!("{DIM}  /scoped-models <patterns|clear> — filter /model list and /model next{RESET}");
     println!("{DIM}  /compact — compact older conversation history now{RESET}");
     println!("{DIM}  /loop [turns] [goal] — run bounded autonomous follow-up turns{RESET}");
     println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|status){RESET}");
@@ -3100,7 +3166,90 @@ fn parse_model_spec(current_provider: &str, input: &str) -> Result<(String, Stri
     Ok((provider.to_string(), model.to_string()))
 }
 
-fn print_model_status(handle: &AgentSessionHandle, cfg: &LibertaiConfig) {
+fn parse_model_slash_command(input: &str) -> ModelSlashCommand<'_> {
+    let raw = input.trim();
+    match raw.to_ascii_lowercase().as_str() {
+        "" | "status" | "show" | "current" => ModelSlashCommand::Status,
+        "list" | "ls" => ModelSlashCommand::List,
+        "next" | "cycle" => ModelSlashCommand::Next,
+        "prev" | "previous" | "back" => ModelSlashCommand::Previous,
+        _ => ModelSlashCommand::Set(raw),
+    }
+}
+
+fn scoped_models_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/scoped-models" | "/scoped" => Some(""),
+        _ => trimmed
+            .strip_prefix("/scoped-models ")
+            .or_else(|| trimmed.strip_prefix("/scoped "))
+            .map(str::trim),
+    }
+}
+
+fn parse_scoped_models_command(input: &str) -> ScopedModelsCommand {
+    let raw = input.trim();
+    if raw.is_empty() || matches!(raw.to_ascii_lowercase().as_str(), "status" | "show") {
+        return ScopedModelsCommand::Status;
+    }
+    if matches!(raw.to_ascii_lowercase().as_str(), "clear" | "reset" | "off") {
+        return ScopedModelsCommand::Clear;
+    }
+    let patterns = parse_scoped_model_patterns(raw);
+    if patterns.is_empty() {
+        ScopedModelsCommand::Usage
+    } else {
+        ScopedModelsCommand::Set(patterns)
+    }
+}
+
+fn parse_scoped_model_patterns(input: &str) -> Vec<String> {
+    input
+        .split(|ch: char| ch == ',' || ch.is_whitespace())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn handle_scoped_models_command(raw: &str, scoped_model_patterns: &mut Vec<String>) {
+    match parse_scoped_models_command(raw) {
+        ScopedModelsCommand::Status => print_scoped_model_status(scoped_model_patterns),
+        ScopedModelsCommand::Clear => {
+            scoped_model_patterns.clear();
+            println!("{DIM}  scoped models cleared; /model list shows all discovered models.{RESET}");
+        }
+        ScopedModelsCommand::Set(patterns) => {
+            *scoped_model_patterns = patterns;
+            print_scoped_model_status(scoped_model_patterns);
+        }
+        ScopedModelsCommand::Usage => {
+            eprintln!("{DIM}  usage: /scoped-models <pattern[,pattern...]|clear>{RESET}");
+        }
+    }
+}
+
+fn print_scoped_model_status(scoped_model_patterns: &[String]) {
+    println!("{BOLD}scoped models{RESET}");
+    if scoped_model_patterns.is_empty() {
+        println!("{DIM}  patterns:{RESET} (all models)");
+    } else {
+        println!("{DIM}  patterns:{RESET}");
+        for pattern in scoped_model_patterns {
+            println!("{DIM}  -{RESET} {pattern}");
+        }
+    }
+    println!(
+        "{DIM}  usage:{RESET} /scoped-models qwen* gemma*, /scoped-models clear, /model list, /model next"
+    );
+    println!();
+}
+
+fn print_model_status(
+    handle: &AgentSessionHandle,
+    cfg: &LibertaiConfig,
+    scoped_model_patterns: &[String],
+) {
     let (provider, model) = handle.model();
     println!("{BOLD}model{RESET}");
     println!("{DIM}  current:{RESET} {provider}/{model}");
@@ -3108,7 +3257,131 @@ fn print_model_status(handle: &AgentSessionHandle, cfg: &LibertaiConfig) {
         "{DIM}  default:{RESET} {}/{}",
         cfg.default_code_provider, cfg.default_code_model
     );
-    println!("{DIM}  usage:{RESET} /model <model|provider/model>");
+    if scoped_model_patterns.is_empty() {
+        println!("{DIM}  scoped models:{RESET} (all models)");
+    } else {
+        println!("{DIM}  scoped models:{RESET} {}", scoped_model_patterns.join(", "));
+    }
+    println!("{DIM}  usage:{RESET} /model <model|provider/model>, /model list, /model next");
+}
+
+fn print_model_list(cfg: &LibertaiConfig, provider: &str, scoped_model_patterns: &[String]) {
+    match crate::client::list_models(cfg) {
+        Ok(list) => {
+            let ids: Vec<String> = list.data.into_iter().map(|entry| entry.id).collect();
+            let scoped = scoped_model_ids(provider, &ids, scoped_model_patterns);
+            println!("{BOLD}models{RESET}");
+            if !scoped_model_patterns.is_empty() {
+                println!("{DIM}  scope:{RESET} {}", scoped_model_patterns.join(", "));
+            }
+            for id in scoped {
+                println!("{DIM}  -{RESET} {provider}/{id}");
+            }
+            println!();
+        }
+        Err(e) => eprintln!("{DIM}  /model list: {e:#}{RESET}"),
+    }
+}
+
+fn next_scoped_model(
+    cfg: &LibertaiConfig,
+    provider: &str,
+    current_model: &str,
+    scoped_model_patterns: &[String],
+    direction: isize,
+) -> Result<Option<String>> {
+    let ids: Vec<String> = crate::client::list_models(cfg)?
+        .data
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect();
+    Ok(cycle_scoped_model(
+        provider,
+        current_model,
+        &ids,
+        scoped_model_patterns,
+        direction,
+    ))
+}
+
+fn cycle_scoped_model(
+    provider: &str,
+    current_model: &str,
+    ids: &[String],
+    scoped_model_patterns: &[String],
+    direction: isize,
+) -> Option<String> {
+    let scoped = scoped_model_ids(provider, ids, scoped_model_patterns);
+    if scoped.len() < 2 {
+        return None;
+    }
+    let current_idx = scoped.iter().position(|candidate| candidate == current_model);
+    let base = current_idx.unwrap_or_else(|| if direction < 0 { 0 } else { scoped.len() - 1 });
+    let len = scoped.len() as isize;
+    let next = (base as isize + direction).rem_euclid(len) as usize;
+    scoped.get(next).cloned()
+}
+
+fn scoped_model_ids(
+    provider: &str,
+    ids: &[String],
+    scoped_model_patterns: &[String],
+) -> Vec<String> {
+    if scoped_model_patterns.is_empty() {
+        return ids.to_vec();
+    }
+    let matched: Vec<String> = ids
+        .iter()
+        .filter(|id| {
+            scoped_model_patterns
+                .iter()
+                .any(|pattern| model_matches_scoped_pattern(provider, id, pattern))
+        })
+        .cloned()
+        .collect();
+    if matched.is_empty() {
+        ids.to_vec()
+    } else {
+        matched
+    }
+}
+
+fn model_matches_scoped_pattern(provider: &str, model_id: &str, pattern: &str) -> bool {
+    glob_match_case_insensitive(pattern, model_id)
+        || glob_match_case_insensitive(pattern, &format!("{provider}/{model_id}"))
+}
+
+fn glob_match_case_insensitive(pattern: &str, value: &str) -> bool {
+    glob_match(
+        &pattern.to_ascii_lowercase().chars().collect::<Vec<_>>(),
+        &value.to_ascii_lowercase().chars().collect::<Vec<_>>(),
+    )
+}
+
+fn glob_match(pattern: &[char], value: &[char]) -> bool {
+    let (mut p, mut v) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut star_value = 0usize;
+    while v < value.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == value[v]) {
+            p += 1;
+            v += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            star = Some(p);
+            p += 1;
+            star_value = v;
+        } else if let Some(star_idx) = star {
+            p = star_idx + 1;
+            star_value += 1;
+            v = star_value;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == '*' {
+        p += 1;
+    }
+    p == pattern.len()
 }
 
 fn parse_session_name(input: &str) -> Result<String> {
@@ -8442,6 +8715,80 @@ mod tests {
         assert!(parse_model_spec("libertai", "").is_err());
         assert!(parse_model_spec("libertai", "/model").is_err());
         assert!(parse_model_spec("libertai", "provider/").is_err());
+    }
+
+    #[test]
+    fn scoped_models_parse_patterns_and_filter_matches() {
+        assert_eq!(scoped_models_command_arg("/scoped-models"), Some(""));
+        assert_eq!(
+            scoped_models_command_arg("/scoped qwen* gemma*"),
+            Some("qwen* gemma*")
+        );
+        assert_eq!(scoped_models_command_arg("/scope"), None);
+        assert_eq!(
+            parse_scoped_model_patterns("qwen*, gemma*  openai/gpt?"),
+            vec!["qwen*", "gemma*", "openai/gpt?"]
+        );
+        assert_eq!(
+            parse_scoped_models_command("clear"),
+            ScopedModelsCommand::Clear
+        );
+        assert_eq!(
+            parse_scoped_models_command("qwen*"),
+            ScopedModelsCommand::Set(vec!["qwen*".to_string()])
+        );
+
+        let ids = vec![
+            "qwen3.6-35b-a3b".to_string(),
+            "gemma-4-31b-it".to_string(),
+            "gpt-5".to_string(),
+        ];
+        assert_eq!(
+            scoped_model_ids("libertai", &ids, &["qwen*".to_string()]),
+            vec!["qwen3.6-35b-a3b".to_string()]
+        );
+        assert_eq!(
+            scoped_model_ids("openai", &ids, &["openai/gpt-*".to_string()]),
+            vec!["gpt-5".to_string()]
+        );
+        assert_eq!(
+            scoped_model_ids("libertai", &ids, &["no-match*".to_string()]),
+            ids
+        );
+    }
+
+    #[test]
+    fn model_slash_command_cycles_scoped_models() {
+        assert_eq!(parse_model_slash_command(""), ModelSlashCommand::Status);
+        assert_eq!(parse_model_slash_command("list"), ModelSlashCommand::List);
+        assert_eq!(parse_model_slash_command("next"), ModelSlashCommand::Next);
+        assert_eq!(
+            parse_model_slash_command("prev"),
+            ModelSlashCommand::Previous
+        );
+        assert_eq!(
+            parse_model_slash_command("openai/gpt-5"),
+            ModelSlashCommand::Set("openai/gpt-5")
+        );
+
+        let ids = vec![
+            "qwen-a".to_string(),
+            "gemma".to_string(),
+            "qwen-b".to_string(),
+        ];
+        let scope = vec!["qwen*".to_string()];
+        assert_eq!(
+            cycle_scoped_model("libertai", "qwen-a", &ids, &scope, 1),
+            Some("qwen-b".to_string())
+        );
+        assert_eq!(
+            cycle_scoped_model("libertai", "qwen-a", &ids, &scope, -1),
+            Some("qwen-b".to_string())
+        );
+        assert_eq!(
+            cycle_scoped_model("libertai", "gemma", &ids, &scope, 1),
+            Some("qwen-a".to_string())
+        );
     }
 
     #[test]
