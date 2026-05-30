@@ -775,6 +775,10 @@ async fn repl_loop(
             print_send_status(rest);
             continue;
         }
+        if let Some(rest) = theme_command_arg(trimmed) {
+            print_theme_status(rest);
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
@@ -2332,6 +2336,7 @@ fn print_help() {
         "{DIM}  /agent --background <name> <task> — desktop-only detached agent session{RESET}"
     );
     println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
+    println!("{DIM}  /theme [system|dark|light|high-contrast] — show terminal theme status{RESET}");
     println!("{DIM}  /export [path] — write this session transcript as Markdown{RESET}");
     println!("{DIM}  /share [path] — write this session transcript as shareable HTML{RESET}");
     println!("{DIM}  /share gist [public|secret] [filename.html] — publish the HTML transcript with gh{RESET}");
@@ -3733,6 +3738,13 @@ fn send_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
+fn theme_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/theme" => Some(""),
+        _ => trimmed.strip_prefix("/theme ").map(str::trim),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HooksCommand {
     Status,
@@ -3828,6 +3840,20 @@ fn print_send_status(rest: &str) {
     println!(
         "{DIM}  remaining gap:{RESET} pi-level streaming child-agent bus or detached inter-agent scheduler."
     );
+}
+
+fn print_theme_status(rest: &str) {
+    let requested = rest.trim();
+    println!("{BOLD}theme{RESET}");
+    println!(
+        "{DIM}  desktop:{RESET} /theme system|dark|light|high-contrast updates the app appearance."
+    );
+    println!(
+        "{DIM}  terminal:{RESET} colors are controlled by your terminal emulator; libertai code uses ANSI styling only."
+    );
+    if !requested.is_empty() {
+        println!("{DIM}  requested theme:{RESET} {requested}");
+    }
 }
 
 fn parse_schedule_command(input: &str) -> ScheduleCommand {
@@ -8807,6 +8833,17 @@ mod tests {
             Some("worker finish tests")
         );
         assert_eq!(send_command_arg("/sender worker finish tests"), None);
+    }
+
+    #[test]
+    fn theme_command_arg_intercepts_desktop_theme_command() {
+        assert_eq!(theme_command_arg("/theme"), Some(""));
+        assert_eq!(theme_command_arg("/theme dark"), Some("dark"));
+        assert_eq!(
+            theme_command_arg("/theme high-contrast"),
+            Some("high-contrast")
+        );
+        assert_eq!(theme_command_arg("/themes dark"), None);
     }
 
     #[test]
