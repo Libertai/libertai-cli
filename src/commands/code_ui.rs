@@ -6490,12 +6490,13 @@ fn print_templates() {
             } else {
                 base_desc.to_string()
             };
+            let slash_name = custom_slash_invocation_name(&t);
             let hint = t
                 .arg_hint
                 .as_ref()
                 .map(|h| format!(" · args: {h}"))
                 .unwrap_or_default();
-            println!("- /{}: {}{}", t.name, desc, hint);
+            println!("- /{slash_name}: {}{}", desc, hint);
         }
         println!("{DIM}  run /template <name> [args], or /<name> [args].{RESET}");
     }
@@ -7454,11 +7455,36 @@ fn parse_direct_custom_slash(trimmed: &str) -> Option<(&str, &str)> {
     let (name, args) = raw
         .split_once(char::is_whitespace)
         .map_or((raw, ""), |(name, args)| (name, args.trim()));
-    if name.is_empty() || name.contains('/') {
+    if name.is_empty() || name.split('/').any(str::is_empty) {
         None
     } else {
         Some((name, args))
     }
+}
+
+fn custom_slash_invocation_name(cmd: &crate::commands::code_slash_registry::CustomCommand) -> String {
+    cmd.namespace
+        .as_deref()
+        .filter(|namespace| !namespace.trim().is_empty())
+        .map(|namespace| format!("{namespace}/{}", cmd.name))
+        .unwrap_or_else(|| cmd.name.clone())
+}
+
+fn custom_slash_matches(
+    cmd: &crate::commands::code_slash_registry::CustomCommand,
+    needle: &str,
+) -> bool {
+    cmd.name == needle || custom_slash_invocation_name(cmd).eq_ignore_ascii_case(needle)
+}
+
+fn custom_slash_starts_with(
+    cmd: &crate::commands::code_slash_registry::CustomCommand,
+    needle: &str,
+) -> bool {
+    cmd.name.starts_with(needle)
+        || custom_slash_invocation_name(cmd)
+            .to_ascii_lowercase()
+            .starts_with(needle)
 }
 
 async fn build_custom_slash_prompt(
@@ -7471,8 +7497,8 @@ async fn build_custom_slash_prompt(
     let needle = name.trim().to_lowercase();
     let Some(hit) = templates
         .iter()
-        .find(|cmd| cmd.name == needle)
-        .or_else(|| templates.iter().find(|cmd| cmd.name.starts_with(&needle)))
+        .find(|cmd| custom_slash_matches(cmd, &needle))
+        .or_else(|| templates.iter().find(|cmd| custom_slash_starts_with(cmd, &needle)))
     else {
         return Ok(None);
     };
@@ -13830,8 +13856,35 @@ mod tests {
     #[test]
     fn parse_template_query_splits_name_and_args() {
         assert_eq!(parse_template_query("review src/lib.rs").unwrap(), ("review", "src/lib.rs"));
+        assert_eq!(
+            parse_template_query("team/audit src/lib.rs").unwrap(),
+            ("team/audit", "src/lib.rs")
+        );
         assert_eq!(parse_template_query("review").unwrap(), ("review", ""));
         assert!(parse_template_query("").is_err());
+    }
+
+    #[test]
+    fn custom_slash_matching_accepts_namespace_qualified_names() {
+        let command = crate::commands::code_slash_registry::CustomCommand {
+            name: "audit".to_string(),
+            namespace: Some("team".to_string()),
+            description: None,
+            arg_hint: None,
+            argument_names: Vec::new(),
+            body: "Audit $ARGUMENTS".to_string(),
+            source: crate::commands::code_slash_registry::CommandSource::Project,
+            path: PathBuf::from(".claude/commands/team/audit.md"),
+        };
+
+        assert_eq!(custom_slash_invocation_name(&command), "team/audit");
+        assert!(custom_slash_matches(&command, "audit"));
+        assert!(custom_slash_matches(&command, "team/audit"));
+        assert!(custom_slash_starts_with(&command, "team/aud"));
+        assert_eq!(
+            parse_direct_custom_slash("/team/audit src"),
+            Some(("team/audit", "src"))
+        );
     }
 
     #[test]
