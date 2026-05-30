@@ -102,6 +102,8 @@ timeout = 5
 matcher = "bash|write|edit"
 command = "scripts/pre-tool-use.sh"
 timeout = 5
+reviewPolicy = "strict"
+continueOnBlock = true
 
 [[hooks.PostToolUse]]
 matcher = "bash|write|edit"
@@ -137,10 +139,14 @@ reaches the agent and may add `additionalContext` or block on nonzero exit.
 Tool hook `matcher` values support case-sensitive exact names, `*` globs,
 `|` alternatives, `regex:<pattern>`, and slash-delimited regex patterns
 such as `/^(bash|write)$/`.
+Claude-style hook metadata such as `source`, `statusMessage`,
+`reviewPolicy`, `once`, `asyncRewake`, and `continueOnBlock` round-trips as
+named fields; unknown hook metadata is preserved for config-save fidelity.
 Set `async = true` (or imported `asyncHook = true`) to launch a command
 hook without waiting for completion; async hook output is discarded and
 cannot affect prompt/tool decisions.
-Native non-command hook handlers are intentionally not executed.
+Native command, HTTP, prompt, agent, and MCP-tool hook handlers are supported
+for session hook events.
 
 Set values with:
 
