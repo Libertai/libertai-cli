@@ -8,7 +8,7 @@
 //!
 //! v0 non-goals: typing during a running prompt (pi callback fires on the
 //! runtime thread; mixing that with a parallel stdin reader is out of
-//! scope); persistent history file; multi-line paste; syntax highlighting.
+//! scope); multi-line paste; syntax highlighting.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -608,8 +608,17 @@ async fn repl_loop(
         }
     }
 
-    // In-memory input history (no persistence in v0).
-    let mut history: VecDeque<String> = VecDeque::with_capacity(64);
+    let history_store_path = history_store_path().ok();
+    let mut history = match history_store_path.as_deref() {
+        Some(path) => match load_input_history(path) {
+            Ok(history) => history,
+            Err(err) => {
+                eprintln!("{DIM}  /history: could not load saved prompts: {err}.{RESET}");
+                VecDeque::with_capacity(HISTORY_MAX_LIMIT)
+            }
+        },
+        None => VecDeque::with_capacity(HISTORY_MAX_LIMIT),
+    };
     let mut output_style: Option<String> = None;
     let mut usage_history: Vec<UsageRecord> = Vec::new();
     let tool_activity = Arc::new(Mutex::new(ToolActivityTracker::default()));
@@ -1531,10 +1540,15 @@ async fn repl_loop(
 
         // Remember the submitted line.
         if !is_autonomous && history.back().is_none_or(|last| last != trimmed) {
-            if history.len() == 64 {
+            if history.len() == HISTORY_MAX_LIMIT {
                 history.pop_front();
             }
             history.push_back(trimmed.to_string());
+            if let Err(err) =
+                persist_input_history_if_configured(history_store_path.as_deref(), &history)
+            {
+                eprintln!("{DIM}  /history: could not save prompt history: {err}.{RESET}");
+            }
         }
 
         // Echo the submitted user line as a chip above the stream region.
@@ -2547,6 +2561,57 @@ fn last_assistant_text(messages: &[Message]) -> Option<String> {
 
 fn osc52_sequence(text: &str) -> String {
     format!("\x1b]52;c;{}\x07", BASE64_STANDARD.encode(text.as_bytes()))
+}
+
+fn history_store_path() -> Result<PathBuf> {
+    Ok(crate::config::libertai_config_dir()?.join("code-history.json"))
+}
+
+fn load_input_history(path: &Path) -> Result<VecDeque<String>> {
+    if !path.exists() {
+        return Ok(VecDeque::with_capacity(HISTORY_MAX_LIMIT));
+    }
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("reading history {}", path.display()))?;
+    let items: Vec<String> = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing history {}", path.display()))?;
+    let mut history = VecDeque::with_capacity(HISTORY_MAX_LIMIT);
+    for item in items
+        .into_iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+    {
+        if history.back() == Some(&item) {
+            continue;
+        }
+        if history.len() == HISTORY_MAX_LIMIT {
+            history.pop_front();
+        }
+        history.push_back(item);
+    }
+    Ok(history)
+}
+
+fn persist_input_history_if_configured(
+    path: Option<&Path>,
+    history: &VecDeque<String>,
+) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    persist_input_history(path, history)
+}
+
+fn persist_input_history(path: &Path, history: &VecDeque<String>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating history dir {}", parent.display()))?;
+    }
+    let items: Vec<&str> = history.iter().map(String::as_str).collect();
+    let raw = serde_json::to_string_pretty(&items).context("serializing history")?;
+    fs::write(path, format!("{raw}\n"))
+        .with_context(|| format!("writing history {}", path.display()))?;
+    Ok(())
 }
 
 fn parse_history_limit(input: &str) -> Result<usize> {
@@ -7368,6 +7433,30 @@ mod tests {
         assert_eq!(parse_history_limit("0").unwrap(), 1);
         assert_eq!(parse_history_limit("999").unwrap(), HISTORY_MAX_LIMIT);
         assert!(parse_history_limit("recent").is_err());
+    }
+
+    #[test]
+    fn input_history_round_trips_and_keeps_recent_unique_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history").join("code-history.json");
+        let mut history = VecDeque::new();
+        for idx in 0..(HISTORY_MAX_LIMIT + 2) {
+            history.push_back(format!("prompt {idx}"));
+        }
+        persist_input_history(&path, &history).unwrap();
+
+        let loaded = load_input_history(&path).unwrap();
+        assert_eq!(loaded.len(), HISTORY_MAX_LIMIT);
+        assert_eq!(loaded.front().map(String::as_str), Some("prompt 2"));
+        let expected_last = format!("prompt {}", HISTORY_MAX_LIMIT + 1);
+        assert_eq!(
+            loaded.back().map(String::as_str),
+            Some(expected_last.as_str())
+        );
+
+        fs::write(&path, "[\" one \", \"one\", \"\", \"two\"]\n").unwrap();
+        let loaded = load_input_history(&path).unwrap();
+        assert_eq!(loaded.into_iter().collect::<Vec<_>>(), vec!["one", "two"]);
     }
 
     #[test]
