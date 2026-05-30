@@ -821,7 +821,9 @@ and raw MCP result data on success. Terminal MCP clients also advertise
 configured roots during initialize, answer `roots/list` requests from
 stdio, Streamable HTTP event-stream responses, and legacy SSE servers,
 advertise sampling, and answer `sampling/createMessage` through the
-configured LibertAI chat endpoint.
+configured LibertAI chat endpoint. Persistent terminal sessions also
+subscribe to enabled cached MCP resources when the server initialize
+response declares `capabilities.resources.subscribe`.
 
 **Files**: new `src/commands/code_mcp.rs` + transport modules.
 **Effort**: L (2+ weeks).

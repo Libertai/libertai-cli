@@ -554,18 +554,26 @@ impl PersistentStdioMcpClient {
 
         write_mcp_message(&mut stdin, &mcp_initialize_request_with_roots(1, &server.roots))
             .map_err(|e| format!("writing MCP initialize request: {e}"))?;
-        wait_for_mcp_response_with_roots(&rx, Some(&mut stdin), &server.roots, 1, timeout)
-            .and_then(mcp_response_result)
-            .map_err(|e| format!("MCP initialize failed: {e}"))?;
+        let init_response =
+            wait_for_mcp_response_with_roots(&rx, Some(&mut stdin), &server.roots, 1, timeout)
+                .map_err(|e| format!("MCP initialize failed: {e}"))?;
+        let supports_resource_subscriptions =
+            server_supports_resource_subscriptions(&init_response);
+        mcp_response_result(init_response).map_err(|e| format!("MCP initialize failed: {e}"))?;
         write_mcp_message(&mut stdin, &mcp_initialized_notification())
             .map_err(|e| format!("writing MCP initialized notification: {e}"))?;
+        let next_id = if supports_resource_subscriptions {
+            subscribe_stdio_resources(&mut stdin, &rx, server, 2, timeout)?
+        } else {
+            2
+        };
 
         Ok(Self {
             child,
             stdin,
             rx,
             reader: Some(reader),
-            next_id: 2,
+            next_id,
         })
     }
 
@@ -631,6 +639,8 @@ impl PersistentHttpMcpClient {
             &server.roots,
             1,
         )?;
+        let supports_resource_subscriptions =
+            server_supports_resource_subscriptions(&init_response);
         mcp_response_result(init_response).map_err(|e| format!("MCP initialize failed: {e}"))?;
         post_mcp_http_notification(
             &client,
@@ -639,10 +649,15 @@ impl PersistentHttpMcpClient {
             &mcp_initialized_notification(),
             session_id.as_deref(),
         )?;
+        let (next_id, session_id) = if supports_resource_subscriptions {
+            subscribe_http_resources(&client, server, url, session_id, 2)?
+        } else {
+            (2, session_id)
+        };
         Ok(Self {
             client,
             session_id,
-            next_id: 2,
+            next_id,
         })
     }
 
@@ -698,22 +713,29 @@ impl PersistentSseMcpClient {
             &endpoint,
             &mcp_initialize_request_with_roots(1, &server.roots),
         )?;
-        wait_for_mcp_sse_response_with_roots(
+        let init_response = wait_for_mcp_sse_response_with_roots(
             &rx,
             Some((&client, server, endpoint.as_str())),
             &server.roots,
             1,
             timeout,
         )
-            .and_then(mcp_response_result)
-            .map_err(|e| format!("MCP initialize failed: {e}"))?;
+        .map_err(|e| format!("MCP initialize failed: {e}"))?;
+        let supports_resource_subscriptions =
+            server_supports_resource_subscriptions(&init_response);
+        mcp_response_result(init_response).map_err(|e| format!("MCP initialize failed: {e}"))?;
         post_mcp_sse_message(&client, server, &endpoint, &mcp_initialized_notification())?;
+        let next_id = if supports_resource_subscriptions {
+            subscribe_sse_resources(&client, server, &endpoint, &rx, 2, timeout)?
+        } else {
+            2
+        };
         Ok(Self {
             client,
             endpoint,
             rx,
             _reader: reader,
-            next_id: 2,
+            next_id,
         })
     }
 
@@ -2034,6 +2056,113 @@ fn mcp_initialized_notification() -> serde_json::Value {
     })
 }
 
+fn resources_subscribe_request(id: u64, uri: &str) -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "resources/subscribe",
+        "params": {
+            "uri": uri,
+        },
+    })
+}
+
+fn server_supports_resource_subscriptions(initialize_response: &serde_json::Value) -> bool {
+    initialize_response
+        .get("result")
+        .and_then(|result| result.get("capabilities"))
+        .and_then(|capabilities| capabilities.get("resources"))
+        .and_then(|resources| resources.get("subscribe"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn subscription_uris(server: &crate::config::McpServerConfig) -> Vec<String> {
+    let mut seen = HashSet::new();
+    server
+        .resources
+        .iter()
+        .filter(|resource| resource.enabled)
+        .map(|resource| resource.uri.trim())
+        .filter(|uri| !uri.is_empty())
+        .filter(|uri| seen.insert((*uri).to_string()))
+        .map(str::to_string)
+        .collect()
+}
+
+fn subscribe_stdio_resources(
+    stdin: &mut dyn Write,
+    rx: &mpsc::Receiver<String>,
+    server: &crate::config::McpServerConfig,
+    mut next_id: u64,
+    timeout: Duration,
+) -> Result<u64, String> {
+    for uri in subscription_uris(server) {
+        let id = next_id;
+        next_id = next_id.saturating_add(1);
+        write_mcp_message(stdin, &resources_subscribe_request(id, &uri))
+            .map_err(|e| format!("writing MCP resources/subscribe request: {e}"))?;
+        let _ = wait_for_mcp_response_with_roots(rx, Some(&mut *stdin), &server.roots, id, timeout);
+    }
+    Ok(next_id)
+}
+
+fn subscribe_http_resources(
+    client: &reqwest::blocking::Client,
+    server: &crate::config::McpServerConfig,
+    url: &str,
+    mut session_id: Option<String>,
+    mut next_id: u64,
+) -> Result<(u64, Option<String>), String> {
+    for uri in subscription_uris(server) {
+        let id = next_id;
+        next_id = next_id.saturating_add(1);
+        match post_mcp_http_message(
+            client,
+            server,
+            url,
+            &resources_subscribe_request(id, &uri),
+            session_id.as_deref(),
+            &server.roots,
+            id,
+        ) {
+            Ok((response, next_session_id)) => {
+                if response.get("error").is_none() && next_session_id.is_some() {
+                    session_id = next_session_id;
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+    Ok((next_id, session_id))
+}
+
+fn subscribe_sse_resources(
+    client: &reqwest::blocking::Client,
+    server: &crate::config::McpServerConfig,
+    endpoint: &str,
+    rx: &mpsc::Receiver<SseEvent>,
+    mut next_id: u64,
+    timeout: Duration,
+) -> Result<u64, String> {
+    for uri in subscription_uris(server) {
+        let id = next_id;
+        next_id = next_id.saturating_add(1);
+        if post_mcp_sse_message(client, server, endpoint, &resources_subscribe_request(id, &uri))
+            .is_ok()
+        {
+            let _ = wait_for_mcp_sse_response_with_roots(
+                rx,
+                Some((client, server, endpoint)),
+                &server.roots,
+                id,
+                timeout,
+            );
+        }
+    }
+    Ok(next_id)
+}
+
 fn wait_for_mcp_response(
     rx: &mpsc::Receiver<String>,
     id: u64,
@@ -3076,7 +3205,7 @@ fn non_empty(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{HooksConfig, McpServerConfig};
+    use crate::config::{HooksConfig, McpResourceConfig, McpServerConfig};
     use std::collections::HashMap;
 
     #[test]
@@ -3203,6 +3332,32 @@ mod tests {
         assert_eq!(roots[0]["name"], "repo");
         assert_eq!(roots[1]["name"], "docs");
         assert!(roots[1]["uri"].as_str().unwrap().starts_with("file:///tmp/docs"));
+    }
+
+    #[test]
+    fn mcp_subscription_uris_include_enabled_cached_resources_once() {
+        let server = McpServerConfig {
+            resources: vec![
+                McpResourceConfig {
+                    uri: " file:///repo/context.md ".to_string(),
+                    ..McpResourceConfig::default()
+                },
+                McpResourceConfig {
+                    uri: "file:///repo/context.md".to_string(),
+                    ..McpResourceConfig::default()
+                },
+                McpResourceConfig {
+                    uri: "file:///repo/disabled.md".to_string(),
+                    enabled: false,
+                    ..McpResourceConfig::default()
+                },
+            ],
+            ..McpServerConfig::default()
+        };
+        assert_eq!(
+            subscription_uris(&server),
+            vec!["file:///repo/context.md".to_string()]
+        );
     }
 
     #[test]
@@ -3354,6 +3509,52 @@ mod tests {
         assert_eq!(run.status, 0, "stderr: {}", run.stderr);
         assert_eq!(run.stdout, "sampling answered");
         assert!(reset_mcp_cli_session_for_config("docs-sampling-test", &server));
+    }
+
+    #[test]
+    fn mcp_tool_call_subscribes_enabled_stdio_resources() {
+        let server = McpServerConfig {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                concat!(
+                    "read init; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"resources\":{\"subscribe\":true}},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}}}'; ",
+                    "read initialized; ",
+                    "read subscribe; ",
+                    "case \"$subscribe\" in ",
+                    "*'resources/subscribe'*'file:///repo/context.md'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":{\"uri\":\"file:///repo/context.md\"}}'; printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}' ;; ",
+                    "*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32000,\"message\":\"missing subscribe\"}}' ;; ",
+                    "esac; ",
+                    "read call; ",
+                    "case \"$call\" in ",
+                    "*'\"id\":3'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"subscribed\"}],\"isError\":false}}' ;; ",
+                    "*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32000,\"message\":\"wrong call id\"}}' ;; ",
+                    "esac;"
+                )
+                .to_string(),
+            ],
+            resources: vec![McpResourceConfig {
+                uri: "file:///repo/context.md".to_string(),
+                ..McpResourceConfig::default()
+            }],
+            env: HashMap::new(),
+            ..McpServerConfig::default()
+        };
+        let cfg = Config {
+            mcp_servers: HashMap::from([("docs-subscribe-test".to_string(), server.clone())]),
+            ..Config::default()
+        };
+        let run = call_mcp_tool_with_config(
+            &cfg,
+            "docs-subscribe-test",
+            "search",
+            json!({"query":"subscriptions"}),
+            Some(2),
+        );
+        assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+        assert_eq!(run.stdout, "subscribed");
+        assert!(reset_mcp_cli_session_for_config("docs-subscribe-test", &server));
     }
 
     #[test]
