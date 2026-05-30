@@ -2570,7 +2570,7 @@ fn model_usage_text() -> &'static str {
 }
 
 fn scoped_models_usage_text() -> &'static str {
-    "/scoped-models <patterns|clear> — filter /model list and /model next|prev"
+    "/scoped-models <status|show|patterns|clear|reset|off> — filter /model list and /model next|prev"
 }
 
 fn hotkey_lines() -> &'static [&'static str] {
@@ -3493,7 +3493,9 @@ fn handle_scoped_models_command(raw: &str, scoped_model_patterns: &mut Vec<Strin
             print_scoped_model_status(scoped_model_patterns);
         }
         ScopedModelsCommand::Usage => {
-            eprintln!("{DIM}  usage: /scoped-models <pattern[,pattern...]|clear>{RESET}");
+            eprintln!(
+                "{DIM}  usage: /scoped-models <status|show|pattern[,pattern...]|clear|reset|off>{RESET}"
+            );
         }
     }
 }
@@ -3509,7 +3511,7 @@ fn print_scoped_model_status(scoped_model_patterns: &[String]) {
         }
     }
     println!(
-        "{DIM}  usage:{RESET} /scoped-models qwen* gemma*, /scoped-models clear, /model list, /model next|prev"
+        "{DIM}  usage:{RESET} /scoped-models status, /scoped-models qwen* gemma*, /scoped-models clear|reset|off, /model list, /model next|prev"
     );
     println!();
 }
@@ -11197,7 +11199,7 @@ mod tests {
     fn scoped_models_parse_patterns_and_filter_matches() {
         assert_eq!(
             scoped_models_usage_text(),
-            "/scoped-models <patterns|clear> — filter /model list and /model next|prev"
+            "/scoped-models <status|show|patterns|clear|reset|off> — filter /model list and /model next|prev"
         );
         assert_eq!(scoped_models_command_arg("/scoped-models"), Some(""));
         assert_eq!(
@@ -11213,6 +11215,19 @@ mod tests {
             parse_scoped_models_command("clear"),
             ScopedModelsCommand::Clear
         );
+        assert_eq!(
+            parse_scoped_models_command("status"),
+            ScopedModelsCommand::Status
+        );
+        assert_eq!(
+            parse_scoped_models_command("show"),
+            ScopedModelsCommand::Status
+        );
+        assert_eq!(
+            parse_scoped_models_command("reset"),
+            ScopedModelsCommand::Clear
+        );
+        assert_eq!(parse_scoped_models_command("off"), ScopedModelsCommand::Clear);
         assert_eq!(
             parse_scoped_models_command("qwen*"),
             ScopedModelsCommand::Set(vec!["qwen*".to_string()])
