@@ -4407,7 +4407,7 @@ fn print_send_status(rest: &str) {
         "" | "status" | "state" | "show" | "list" | "targets"
     ) {
         println!(
-            "{DIM}  target inspection:{RESET} use desktop /send targets to list open idle/busy sessions."
+            "{DIM}  target inspection:{RESET} use desktop /send status, /send targets, or /send list to list open idle/busy sessions."
         );
     } else if !requested.is_empty() {
         println!(
