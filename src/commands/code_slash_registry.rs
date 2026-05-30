@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+const DESCRIPTION_LIMIT: usize = 1536;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandSource {
     Project,
@@ -362,11 +364,19 @@ fn prompt_description(
         .filter(|value| !value.trim().is_empty())
         .or_else(|| first_body_paragraph(body));
     match (base, when_to_use.filter(|value| !value.trim().is_empty())) {
-        (Some(base), Some(when)) => Some(format!("{} {}", base.trim(), when.trim())),
-        (Some(base), None) => Some(base.trim().to_string()),
-        (None, Some(when)) => Some(when.trim().to_string()),
+        (Some(base), Some(when)) => Some(truncate_description(&format!(
+            "{} {}",
+            base.trim(),
+            when.trim()
+        ))),
+        (Some(base), None) => Some(truncate_description(base.trim())),
+        (None, Some(when)) => Some(truncate_description(when.trim())),
         (None, None) => None,
     }
+}
+
+fn truncate_description(value: &str) -> String {
+    value.chars().take(DESCRIPTION_LIMIT).collect()
 }
 
 fn first_body_paragraph(body: &str) -> Option<String> {
@@ -440,14 +450,33 @@ fn split_frontmatter(input: &str) -> (Vec<(String, String)>, &str) {
     let fm = &after_open[..walked];
     let body = &after_open[close_end..];
     let mut pairs = Vec::new();
-    for line in fm.lines() {
-        let line = line.trim();
+    let mut list_key = None;
+    let mut list_items = Vec::new();
+    for raw in fm.lines() {
+        let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some((key, value)) = line.split_once(':') {
-            pairs.push((key.trim().to_string(), unquote(value.trim())));
+        if list_key.is_some() && line.starts_with('-') {
+            list_items.push(unquote(line.trim_start_matches('-').trim()));
+            continue;
         }
+        if let Some(key) = list_key.take() {
+            pairs.push((key, list_items.join(" ")));
+            list_items.clear();
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            let key = key.trim().to_string();
+            let value = value.trim();
+            if value.is_empty() {
+                list_key = Some(key);
+            } else {
+                pairs.push((key, unquote(value)));
+            }
+        }
+    }
+    if let Some(key) = list_key {
+        pairs.push((key, list_items.join(" ")));
     }
     (pairs, body)
 }
@@ -601,7 +630,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         write(
             &temp.path().join(".claude/commands/review.md"),
-            "---\narguments: [path, priority]\nwhen_to_use: Use for focused review.\n---\nReview $path at $priority",
+            "---\narguments:\n  - path\n  - priority\nwhen_to_use: Use for focused review.\n---\nReview $path at $priority",
         );
 
         let cmds = discover_with_home(temp.path(), None, None);
@@ -615,6 +644,20 @@ mod tests {
             expand(&cmds[0], r#"src/lib.rs "high priority""#),
             "Review src/lib.rs at high priority"
         );
+    }
+
+    #[test]
+    fn caps_prompt_descriptions_to_claude_listing_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let long = "x".repeat(DESCRIPTION_LIMIT + 32);
+        write(
+            &temp.path().join(".claude/commands/long.md"),
+            &format!("---\ndescription: {long}\n---\nBody"),
+        );
+
+        let cmds = discover_with_home(temp.path(), None, None);
+
+        assert_eq!(cmds[0].description.as_ref().unwrap().chars().count(), DESCRIPTION_LIMIT);
     }
 
     #[test]

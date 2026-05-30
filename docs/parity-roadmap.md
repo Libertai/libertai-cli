@@ -633,16 +633,18 @@ so `commands/team/audit.md` appears as `/audit` from the `team`
 namespace. Each file becomes a prompt template; frontmatter may define
 `description:` and `argHint:`. Command and skill entrypoints append
 `when_to_use` to the slash description and fall back to the first body
-paragraph when `description:` is omitted. `user-invocable: false`
-entrypoints are hidden from slash invocation. CLI and desktop support
-`/template <name> [args]` and direct `/<name> [args]` dispatch with
+paragraph when `description:` is omitted; combined descriptions are
+capped to Claude's 1,536-character listing limit.
+`user-invocable: false` entrypoints are hidden from slash invocation.
+CLI and desktop support `/template <name> [args]` and direct
+`/<name> [args]` dispatch with
 Claude-style `$ARGUMENTS`,
 `$ARGUMENTS[0]`, `$0` / `$1` positional arguments, implicit
 `ARGUMENTS: ...` append for templates without placeholders, named
-`arguments:` frontmatter placeholders such as `$path`, Claude context
-variables `${CLAUDE_SESSION_ID}`, `${CLAUDE_EFFORT}`, and
-`${CLAUDE_SKILL_DIR}`, and legacy
-`{{args}}` substitution.
+`arguments:` frontmatter placeholders such as `$path` from inline
+strings, inline lists, or simple YAML lists, Claude context variables
+`${CLAUDE_SESSION_ID}`, `${CLAUDE_EFFORT}`, and
+`${CLAUDE_SKILL_DIR}`, and legacy `{{args}}` substitution.
 
 **Files**: `src/commands/code_slash_registry.rs`, `src/commands/code_ui.rs`.
 
