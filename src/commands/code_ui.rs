@@ -263,6 +263,7 @@ impl ToolActivityTracker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PermissionsCommand {
     Show,
+    Open,
     Set(Mode),
     Forget,
     UnsupportedBypass,
@@ -1327,6 +1328,7 @@ async fn repl_loop(
         if let Some((_command, rest)) = mode_command_arg(trimmed) {
             match parse_permissions_command(rest) {
                 PermissionsCommand::Show => print_permissions_status(mode.get()),
+                PermissionsCommand::Open => print_permissions_open_hint(),
                 PermissionsCommand::Set(new_mode) => {
                     mode.set(new_mode);
                     announce_mode_change(new_mode);
@@ -2251,7 +2253,7 @@ fn print_help() {
     println!("{DIM}  /help     — show this message{RESET}");
     println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
-    println!("{DIM}  /permissions [default|acceptEdits|plan|forget]{RESET}");
+    println!("{DIM}  /permissions [default|acceptEdits|plan|open|forget]{RESET}");
     println!("{DIM}  /mode [default|acceptEdits|plan] — alias for /permissions{RESET}");
     println!("{DIM}  /model [model|provider/model]{RESET}");
     println!("{DIM}  /name <name> — set this session's display name (also /rename){RESET}");
@@ -2903,6 +2905,7 @@ fn detect_supported_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
 fn parse_permissions_command(input: &str) -> PermissionsCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "show" | "status" => PermissionsCommand::Show,
+        "open" | "settings" | "approvals" => PermissionsCommand::Open,
         "default" | "normal" => PermissionsCommand::Set(Mode::Normal),
         "acceptedits" | "accept-edits" | "accept_edits" => {
             PermissionsCommand::Set(Mode::AcceptEdits)
@@ -3065,7 +3068,22 @@ fn print_permissions_status(mode: Mode) {
     println!("{DIM}  supported: default, acceptEdits, plan{RESET}");
     println!("{DIM}  native bypassPermissions is intentionally unavailable.{RESET}");
     println!("{DIM}  use /permissions forget to clear saved allow rules.{RESET}");
+    println!("{DIM}  use /permissions open to show the approvals settings target and rule path.{RESET}");
     println!("{DIM}  use /permissions bypassPermissions to explain the native safety stance.{RESET}");
+}
+
+fn print_permissions_open_hint() {
+    println!("{BOLD}permissions{RESET}");
+    println!("{DIM}  desktop: /permissions open jumps to Settings > Approvals.{RESET}");
+    match crate::config::allow_rules_path() {
+        Ok(path) => println!(
+            "{DIM}  terminal: remembered \"always allow\" rules are stored in {}{RESET}",
+            path.display()
+        ),
+        Err(e) => println!("{DIM}  terminal: could not resolve allow-rules path: {e}{RESET}"),
+    }
+    println!("{DIM}  use /permissions forget to clear remembered terminal approval rules.{RESET}");
+    println!();
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8864,6 +8882,11 @@ mod tests {
     fn parse_permissions_command_handles_management_actions() {
         assert_eq!(parse_permissions_command(""), PermissionsCommand::Show);
         assert_eq!(parse_permissions_command("status"), PermissionsCommand::Show);
+        assert_eq!(parse_permissions_command("open"), PermissionsCommand::Open);
+        assert_eq!(
+            parse_permissions_command("approvals"),
+            PermissionsCommand::Open
+        );
         assert_eq!(parse_permissions_command("forget"), PermissionsCommand::Forget);
         assert_eq!(
             parse_permissions_command("bypassPermissions"),
