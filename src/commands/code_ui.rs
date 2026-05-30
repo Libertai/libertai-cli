@@ -170,12 +170,31 @@ struct PrCommentDraft {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScheduleCommand {
     Status,
+    Json,
     Show(String),
+    ShowJson(String),
     Run(String),
     Cancel(String),
     Clear,
     Add { delay: Duration, prompt: String },
     Usage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ScheduleJsonRow {
+    id: String,
+    prompt: String,
+    state: String,
+    due_epoch_ms: u64,
+    due_in_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ScheduleJsonPayload {
+    total: usize,
+    due: usize,
+    pending: usize,
+    runs: Vec<ScheduleJsonRow>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1408,7 +1427,9 @@ async fn repl_loop(
         if let Some(rest) = schedule_command_arg(trimmed) {
             match parse_schedule_command(rest) {
                 ScheduleCommand::Status => print_schedule_status(&scheduled_runs),
+                ScheduleCommand::Json => print_schedule_json(&scheduled_runs, None),
                 ScheduleCommand::Show(id) => print_schedule_details(&scheduled_runs, &id),
+                ScheduleCommand::ShowJson(id) => print_schedule_json(&scheduled_runs, Some(&id)),
                 ScheduleCommand::Run(id) => {
                     let now = Instant::now();
                     if let Some(run) = scheduled_runs.iter_mut().find(|run| run.id == id) {
@@ -1486,7 +1507,7 @@ async fn repl_loop(
                 }
                 ScheduleCommand::Usage => {
                     eprintln!(
-                        "{DIM}  usage: /schedule in 10m follow up, /schedule list|status|state, /schedule show <id>, /schedule run <id>, /schedule cancel <id>, or /schedule clear|stop (also /cron){RESET}"
+                        "{DIM}  usage: /schedule in 10m follow up, /schedule list|status|state|json, /schedule show <id> [--json], /schedule run <id>, /schedule cancel <id>, or /schedule clear|stop (also /cron){RESET}"
                     );
                 }
             }
@@ -2631,7 +2652,7 @@ fn print_help() {
     println!("{DIM}  /compact — compact older conversation history now{RESET}");
     println!("{DIM}  /loop [turns] [goal] — run bounded autonomous follow-up turns{RESET}");
     println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|stop|status|state; also /autorun, /continuous){RESET}");
-    println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|status|state|cancel|clear|stop; also /cron){RESET}");
+    println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|status|state|json|cancel|clear|stop; also /cron){RESET}");
     println!("{DIM}  /send [target message] — show terminal inter-session send status{RESET}");
     println!("{DIM}  /notify on|enable|enabled|off|disable|disabled|clear|status|state|show|test|ping — turn-complete terminal notifications{RESET}");
     println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
@@ -4614,13 +4635,46 @@ fn parse_schedule_command(input: &str) -> ScheduleCommand {
     let head = parts.next().unwrap_or("").trim();
     let rest = parts.next().unwrap_or("").trim();
     match head {
-        "list" | "status" | "state" => ScheduleCommand::Status,
+        "list" | "status" | "state" => {
+            if rest.is_empty() {
+                ScheduleCommand::Status
+            } else if rest == "--json" || rest == "json" {
+                ScheduleCommand::Json
+            } else {
+                ScheduleCommand::Usage
+            }
+        }
+        "json" => {
+            if rest.is_empty() {
+                ScheduleCommand::Json
+            } else {
+                ScheduleCommand::Usage
+            }
+        }
         "clear" | "stop" => ScheduleCommand::Clear,
         "show" | "inspect" => {
+            let mut args = rest.split_whitespace();
+            let Some(id) = args.next() else {
+                return ScheduleCommand::Usage;
+            };
+            match (args.next(), args.next()) {
+                (None, None) => ScheduleCommand::Show(id.to_string()),
+                (Some("--json" | "json"), None) => ScheduleCommand::ShowJson(id.to_string()),
+                _ => ScheduleCommand::Usage,
+            }
+        }
+        "show-json" | "inspect-json" => {
             if rest.is_empty() || rest.split_whitespace().nth(1).is_some() {
                 ScheduleCommand::Usage
             } else {
-                ScheduleCommand::Show(rest.to_string())
+                ScheduleCommand::ShowJson(rest.to_string())
+            }
+        }
+        "list-json" | "status-json" | "state-json" => {
+            if rest.is_empty() {
+                ScheduleCommand::Json
+            } else {
+                ScheduleCommand::Usage
             }
         }
         "run" | "now" | "trigger" => {
@@ -4638,7 +4692,13 @@ fn parse_schedule_command(input: &str) -> ScheduleCommand {
             }
         }
         "in" => parse_schedule_add(rest),
-        _ => parse_schedule_add(raw),
+        _ => {
+            if raw == "--json" {
+                ScheduleCommand::Json
+            } else {
+                parse_schedule_add(raw)
+            }
+        }
     }
 }
 
@@ -4835,6 +4895,48 @@ fn print_schedule_details(scheduled_runs: &[ScheduledRun], id: &str) {
     );
     println!("{DIM}  due epoch ms:{RESET} {}", run.due_epoch_ms);
     println!("{DIM}  prompt:{RESET} {}", run.prompt.replace('\n', " "));
+}
+
+fn schedule_json_payload(scheduled_runs: &[ScheduledRun], now: Instant) -> ScheduleJsonPayload {
+    let counts = schedule_status_counts(scheduled_runs, now);
+    let runs = scheduled_runs
+        .iter()
+        .map(|run| {
+            let due_in = run.due_at.saturating_duration_since(now);
+            ScheduleJsonRow {
+                id: run.id.clone(),
+                prompt: run.prompt.clone(),
+                state: if run.due_at <= now {
+                    "due".to_string()
+                } else {
+                    "pending".to_string()
+                },
+                due_epoch_ms: run.due_epoch_ms,
+                due_in_ms: duration_millis_u64(due_in),
+            }
+        })
+        .collect();
+    ScheduleJsonPayload {
+        total: counts.total,
+        due: counts.due,
+        pending: counts.pending,
+        runs,
+    }
+}
+
+fn print_schedule_json(scheduled_runs: &[ScheduledRun], id: Option<&str>) {
+    let now = Instant::now();
+    let mut payload = schedule_json_payload(scheduled_runs, now);
+    if let Some(id) = id {
+        payload.runs.retain(|run| run.id == id);
+        payload.total = payload.runs.len();
+        payload.due = payload.runs.iter().filter(|run| run.state == "due").count();
+        payload.pending = payload.runs.iter().filter(|run| run.state == "pending").count();
+    }
+    match serde_json::to_string_pretty(&payload) {
+        Ok(raw) => println!("{raw}"),
+        Err(err) => eprintln!("{DIM}  /schedule: could not render JSON: {err}.{RESET}"),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12899,6 +13001,17 @@ mod tests {
     fn parse_schedule_command_matches_desktop_contract() {
         assert_eq!(parse_schedule_command(""), ScheduleCommand::Status);
         assert_eq!(parse_schedule_command("list"), ScheduleCommand::Status);
+        assert_eq!(parse_schedule_command("json"), ScheduleCommand::Json);
+        assert_eq!(parse_schedule_command("--json"), ScheduleCommand::Json);
+        assert_eq!(parse_schedule_command("list --json"), ScheduleCommand::Json);
+        assert_eq!(
+            parse_schedule_command("show sch_2 --json"),
+            ScheduleCommand::ShowJson("sch_2".to_string())
+        );
+        assert_eq!(
+            parse_schedule_command("show-json sch_2"),
+            ScheduleCommand::ShowJson("sch_2".to_string())
+        );
         assert_eq!(parse_schedule_command("status"), ScheduleCommand::Status);
         assert_eq!(parse_schedule_command("state"), ScheduleCommand::Status);
         assert_eq!(
@@ -12929,6 +13042,10 @@ mod tests {
         ));
         assert!(matches!(
             parse_schedule_command("show sch_2 extra"),
+            ScheduleCommand::Usage
+        ));
+        assert!(matches!(
+            parse_schedule_command("show sch_2 --json extra"),
             ScheduleCommand::Usage
         ));
         assert!(matches!(
@@ -12994,6 +13111,24 @@ mod tests {
                 pending: 1,
             }
         );
+    }
+
+    #[test]
+    fn schedule_json_payload_reports_counts_and_rows() {
+        let now = Instant::now();
+        let runs = vec![
+            scheduled_run_for_test("sch_1", "due", now - Duration::from_millis(1)),
+            scheduled_run_for_test("sch_2", "later", now + Duration::from_secs(5)),
+        ];
+        let payload = schedule_json_payload(&runs, now);
+        assert_eq!(payload.total, 2);
+        assert_eq!(payload.due, 1);
+        assert_eq!(payload.pending, 1);
+        assert_eq!(payload.runs[0].id, "sch_1");
+        assert_eq!(payload.runs[0].state, "due");
+        assert_eq!(payload.runs[1].id, "sch_2");
+        assert_eq!(payload.runs[1].state, "pending");
+        assert!(payload.runs[1].due_in_ms >= 4_000);
     }
 
     #[test]

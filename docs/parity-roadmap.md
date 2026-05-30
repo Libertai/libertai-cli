@@ -124,10 +124,11 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/schedule` command** — REPL users can queue in-process
   follow-up prompts with `/schedule in <delay> <prompt>`, inspect them
   with `/schedule list` / `/schedule state` including due/pending
-  counts, inspect one queued prompt with `/schedule show <id>`, manually
-  queue one immediately with `/schedule run <id>`, and cancel them with
-  `/schedule cancel <id>` or `/schedule clear`; `/cron` aliases match the
-  desktop composer. Due prompts run
+  counts, emit machine-readable status with `/schedule json` or
+  `/schedule list --json`, inspect one queued prompt with `/schedule show
+  <id>` or `/schedule show <id> --json`, manually queue one immediately
+  with `/schedule run <id>`, and cancel them with `/schedule cancel <id>`
+  or `/schedule clear`; `/cron` aliases match the desktop composer. Due prompts run
   between REPL turns; durable detached cron remains out of scope here.
 - **Bash background execution** — the upstream `bash` tool accepts
   Claude-style `run_in_background: true` for long-running servers and
