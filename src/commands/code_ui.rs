@@ -12823,6 +12823,10 @@ mod tests {
         assert_eq!(parse_login_slash_target("show"), LoginSlashTarget::Status);
         assert_eq!(parse_login_slash_target("info"), LoginSlashTarget::Status);
         assert_eq!(parse_login_slash_target("libertai"), LoginSlashTarget::Account);
+        assert_eq!(parse_login_slash_target("account"), LoginSlashTarget::Account);
+        assert_eq!(parse_login_slash_target("key"), LoginSlashTarget::Account);
+        assert_eq!(parse_login_slash_target("api-key"), LoginSlashTarget::Account);
+        assert_eq!(parse_login_slash_target("api"), LoginSlashTarget::Account);
         assert_eq!(
             parse_login_slash_target("anthropic"),
             LoginSlashTarget::Provider("anthropic")
