@@ -43,11 +43,23 @@ pub fn builtin_styles() -> Vec<OutputStyle> {
 }
 
 pub fn load_styles(cwd: Option<&Path>) -> Vec<OutputStyle> {
+    load_styles_with_roots(
+        cwd,
+        dirs::home_dir().as_deref(),
+        dirs::config_dir().as_deref(),
+    )
+}
+
+fn load_styles_with_roots(
+    cwd: Option<&Path>,
+    home: Option<&Path>,
+    config: Option<&Path>,
+) -> Vec<OutputStyle> {
     let mut out: BTreeMap<String, OutputStyle> = builtin_styles()
         .into_iter()
         .map(|style| (style.name.clone(), style))
         .collect();
-    for dir in style_dirs(cwd) {
+    for dir in style_dirs(cwd, home, config) {
         load_dir(&dir, &mut out);
     }
     out.into_values().collect()
@@ -76,11 +88,13 @@ pub fn apply_output_style(style: Option<&str>, prompt: &str, cwd: Option<&Path>)
     )
 }
 
-fn style_dirs(cwd: Option<&Path>) -> Vec<PathBuf> {
+fn style_dirs(cwd: Option<&Path>, home: Option<&Path>, config: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = home {
         dirs.push(home.join(".claude/output-styles"));
-        dirs.push(home.join(".config/libertai/output-styles"));
+    }
+    if let Some(config) = config {
+        dirs.push(config.join("libertai/output-styles"));
     }
     if let Some(cwd) = cwd {
         dirs.push(cwd.join(".claude/output-styles"));
@@ -101,7 +115,11 @@ fn load_dir(dir: &Path, out: &mut BTreeMap<String, OutputStyle>) {
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
-        let Some(name) = path.file_stem().and_then(|s| s.to_str()).and_then(normalize_name) else {
+        let Some(name) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(normalize_name)
+        else {
             continue;
         };
         let (description, instruction) = parse_style_file(&text);
@@ -183,5 +201,27 @@ mod tests {
         let style = find_style("terse", Some(temp.path())).unwrap();
         assert_eq!(style.description, "Very short");
         assert_eq!(style.instruction, "Answer in one paragraph.");
+    }
+
+    #[test]
+    fn loads_user_output_styles_from_config_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let config = temp.path().join("xdg-config");
+        let dir = config.join("libertai/output-styles");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("findings.md"),
+            "---\ndescription: Findings first\n---\nLead with findings.",
+        )
+        .unwrap();
+
+        let styles = load_styles_with_roots(None, Some(&home), Some(&config));
+        let style = styles
+            .into_iter()
+            .find(|style| style.name == "findings")
+            .unwrap();
+        assert_eq!(style.description, "Findings first");
+        assert_eq!(style.instruction, "Lead with findings.");
     }
 }
