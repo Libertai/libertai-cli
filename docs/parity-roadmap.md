@@ -47,8 +47,10 @@ SDK; those are flagged **(upstream)**.
   approval UI. Auto-approve and auto-deny decisions emit structured
   `smart_approval` tool updates for CLI/desktop audit visibility.
 - **CLI `/model` command** — REPL users can inspect the active
-  provider/model and switch with `/model <model|provider/model>` without
-  rebuilding the session.
+  provider/model, list discovered models, cycle with `/model next|prev`,
+  and switch with `/model <model|provider/model>` without rebuilding the
+  session. Session-local `/scoped-models` patterns filter `/model list`
+  and cycling.
 - **CLI `/name` command** — REPL users can persist a display name for
   the current session so it appears in later session listings.
 - **CLI `/export` command** — REPL users can write the current transcript
