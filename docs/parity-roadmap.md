@@ -647,10 +647,13 @@ and numeric-string `timeout` values deserialize to seconds. CLI HTTP hook rows u
 `type = "http"`, `url`, optional `headers`,
 `allowedEnvVars`, timeout, and `continueOnBlock`, POST the same JSON
 payloads as command hooks, and can return the same JSON decision/context
-fields for UserPromptSubmit and PreToolUse. CLI prompt/agent hook rows
-use `type = "prompt"` or `type = "agent"`, `prompt`, optional `model`,
-and the configured LibertAI chat endpoint, returning the model message as
-hook output. Hook rows with `once = true` run at most once per native CLI
+fields for UserPromptSubmit and PreToolUse. CLI prompt hook rows use
+`type = "prompt"`, `prompt`, optional `model`, and the configured LibertAI
+chat endpoint, returning the model message as hook output. CLI agent hook
+rows use `type = "agent"`, `prompt`, and optional `model` to run an
+ephemeral read-only code-agent session with `read`, `grep`, `find`, and
+`ls`, returning the child agent's final text as hook output. Hook rows with
+`once = true` run at most once per native CLI
 session/event/index, and named `source`, `statusMessage`, plus
 `asyncRewake` metadata round-trip and display in `/hooks`. Unknown
 preserved metadata keys are also listed in `/hooks`. CLI MCP-tool hook rows preserve

@@ -11,12 +11,23 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use pi::sdk::{AgentEvent, ToolOutput};
+use async_trait::async_trait;
+use pi::model::ContentBlock;
+use pi::sdk::{create_agent_session, AgentEvent, ToolOutput};
 use serde_json::json;
 
-use crate::commands::code_approvals::{ToolPolicy, ToolPolicyDecision};
+use crate::commands::code_approvals::{
+    ApprovalState, ApprovalUi, PromptChoice, ToolPolicy, ToolPolicyDecision,
+};
+use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
+use crate::commands::code_session::{
+    build_session_options, CodeSessionConfig, SessionPersistence, DEFAULT_MAX_TOKENS,
+};
+use crate::commands::code_skills::{self, SkillPillar};
 use crate::config::{Config, HookCommandConfig};
 use crate::client::{post_chat_blocking, ChatMessage, ChatRequest};
+
+const AGENT_HOOK_TOOLS: &[&str] = &["read", "grep", "find", "ls"];
 
 pub struct SessionHookGuard {
     cfg: Arc<Config>,
@@ -537,8 +548,10 @@ fn run_detached_hook(
 ) -> HookRun {
     if hook_is_http(hook) {
         run_http_hook(hook, payload, event_name)
-    } else if hook_is_prompt(hook) || hook_is_agent(hook) {
+    } else if hook_is_prompt(hook) {
         run_prompt_hook(hook, payload)
+    } else if hook_is_agent(hook) {
+        run_agent_hook(hook, payload)
     } else {
         run_detached_shell_hook(hook, cwd, payload, event_name)
     }
@@ -552,8 +565,10 @@ fn run_configured_hook(
 ) -> HookRun {
     if hook_is_http(hook) {
         run_http_hook(hook, payload, event_name)
-    } else if hook_is_prompt(hook) || hook_is_agent(hook) {
+    } else if hook_is_prompt(hook) {
         run_prompt_hook(hook, payload)
+    } else if hook_is_agent(hook) {
+        run_agent_hook(hook, payload)
     } else {
         run_shell_hook(hook, cwd, payload, event_name)
     }
@@ -699,8 +714,173 @@ fn run_prompt_hook(hook: &HookCommandConfig, payload: &serde_json::Value) -> Hoo
     }
 }
 
+fn run_agent_hook(hook: &HookCommandConfig, payload: &serde_json::Value) -> HookRun {
+    let cfg = match crate::config::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("loading agent hook config: {e:#}"),
+            };
+        }
+    };
+    crate::commands::code_session::ensure_pi_http_timeout(cfg.http_timeout_secs);
+    if let Err(e) = crate::commands::code_models::ensure_libertai_registered(&cfg) {
+        return HookRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: format!("registering agent hook model provider: {e:#}"),
+        };
+    }
+    if let Err(e) = crate::commands::code_memory::ensure_memory_env() {
+        return HookRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: format!("preparing agent hook memory environment: {e:#}"),
+        };
+    }
+
+    let reactor = match asupersync::runtime::reactor::create_reactor() {
+        Ok(reactor) => reactor,
+        Err(e) => {
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("creating agent hook reactor: {e}"),
+            };
+        }
+    };
+    let runtime = match asupersync::runtime::RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("creating agent hook runtime: {e}"),
+            };
+        }
+    };
+
+    let hook = hook.clone();
+    let cfg = Arc::new(cfg);
+    let payload = payload.clone();
+    runtime.block_on(async move { run_agent_hook_async(&hook, payload, cfg).await })
+}
+
+async fn run_agent_hook_async(
+    hook: &HookCommandConfig,
+    payload: serde_json::Value,
+    cfg: Arc<Config>,
+) -> HookRun {
+    let cwd = std::env::current_dir().ok();
+    let append_system_prompt =
+        match code_skills::prompt_for_pillar(SkillPillar::Code, cwd.as_deref()) {
+            Ok(prompt) => prompt,
+            Err(e) => {
+                return HookRun {
+                    status: 1,
+                    stdout: String::new(),
+                    stderr: format!("loading agent hook skills: {e:#}"),
+                };
+            }
+        };
+    let append_system_prompt =
+        crate::commands::code_env_prompt::append_environment_prompt(append_system_prompt, cwd.as_deref());
+    let prompt = prompt_hook_user_content(&hook.prompt, &payload);
+    let model = hook
+        .model
+        .trim()
+        .is_empty()
+        .then(|| cfg.default_code_model.clone())
+        .unwrap_or_else(|| hook.model.trim().to_string());
+    let approvals = Arc::new(ApprovalState::new());
+    let ui = Arc::new(HookApprovalUi);
+    let factory = Arc::new(LibertaiToolFactory::new_with_features(
+        ModeFlag::new(Mode::Plan),
+        approvals,
+        ui,
+        FactoryFeatures::cli_defaults(),
+        Some(Arc::clone(&cfg)),
+    ));
+    let max_tokens = Some(DEFAULT_MAX_TOKENS);
+    let options = build_session_options(CodeSessionConfig {
+        provider: cfg.default_code_provider.clone(),
+        model,
+        working_directory: cwd.clone(),
+        include_cwd_in_prompt: true,
+        max_tool_iterations: 25,
+        tool_factory: factory,
+        persistence: SessionPersistence::Ephemeral,
+        enabled_tools: Some(AGENT_HOOK_TOOLS.iter().map(|tool| tool.to_string()).collect()),
+        append_system_prompt,
+        max_tokens,
+        bash_command_wrapper: None,
+        auto_compaction_enabled: cfg.code_auto_compaction_enabled,
+        compaction_reserve_tokens: cfg.code_compaction_reserve_tokens,
+        compaction_keep_recent_tokens: cfg.code_compaction_keep_recent_tokens,
+    });
+    let mut handle = match create_agent_session(options).await {
+        Ok(handle) => handle,
+        Err(e) => {
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("creating agent hook session: {e}"),
+            };
+        }
+    };
+    handle.set_max_tokens(max_tokens);
+    let msg = match handle.prompt(prompt, |_| {}).await {
+        Ok(msg) => msg,
+        Err(e) => {
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("running agent hook session: {e}"),
+            };
+        }
+    };
+    let stdout = msg
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    if stdout.is_empty() {
+        HookRun {
+            status: 1,
+            stdout,
+            stderr: "agent hook response was empty".to_string(),
+        }
+    } else {
+        HookRun {
+            status: 0,
+            stdout,
+            stderr: String::new(),
+        }
+    }
+}
+
+struct HookApprovalUi;
+
+#[async_trait]
+impl ApprovalUi for HookApprovalUi {
+    async fn decide(&self, _tool_name: &str, _preview: &str, _always_rule: &str) -> PromptChoice {
+        PromptChoice::Deny
+    }
+}
+
 fn prompt_hook_messages(prompt: &str, payload: &serde_json::Value) -> Vec<ChatMessage> {
-    let payload = serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string());
+    let content = prompt_hook_user_content(prompt, payload);
     vec![
         ChatMessage {
             role: "system".to_string(),
@@ -708,13 +888,18 @@ fn prompt_hook_messages(prompt: &str, payload: &serde_json::Value) -> Vec<ChatMe
         },
         ChatMessage {
             role: "user".to_string(),
-            content: format!(
-                "{}\n\nHook event payload:\n```json\n{}\n```",
-                prompt.trim(),
-                payload
-            ),
+            content,
         },
     ]
+}
+
+fn prompt_hook_user_content(prompt: &str, payload: &serde_json::Value) -> String {
+    let payload = serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string());
+    format!(
+        "{}\n\nHook event payload:\n```json\n{}\n```",
+        prompt.trim(),
+        payload
+    )
 }
 
 fn prompt_hook_content(body: &serde_json::Value) -> Option<String> {
@@ -1150,6 +1335,22 @@ fn non_empty(value: Option<String>) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::HooksConfig;
+
+    #[test]
+    fn agent_hook_tool_allowlist_is_read_only() {
+        assert_eq!(AGENT_HOOK_TOOLS, &["read", "grep", "find", "ls"]);
+    }
+
+    #[test]
+    fn prompt_hook_user_content_is_shared_by_prompt_and_agent_hooks() {
+        let content = prompt_hook_user_content(
+            "Inspect the hook payload",
+            &json!({"event":"PreToolUse","toolName":"read"}),
+        );
+        assert!(content.starts_with("Inspect the hook payload"));
+        assert!(content.contains("Hook event payload:"));
+        assert!(content.contains("\"toolName\": \"read\""));
+    }
 
     #[test]
     fn matcher_accepts_case_sensitive_exact_alternative_and_glob() {
