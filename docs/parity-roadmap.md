@@ -515,8 +515,10 @@ desktop composer escape and reuses the same bash wrapper argv when
 `--sandbox=strict` is active.
 
 **Files**: `src/commands/code_ui.rs`.
-**Status**: shipped for local `!cmd` and `!!` repeat; agent-history
-injection remains an optional follow-up.
+**Status**: shipped for local `!cmd` and `!!` repeat. Captured
+stdout/stderr/exit summaries are now attached to the next text prompt
+so the agent can reason from quick local shell checks without rerunning
+them.
 **Desktop note**: shipped on desktop (composer commit `7029b1b`).
 
 ---

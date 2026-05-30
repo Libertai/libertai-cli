@@ -58,6 +58,7 @@ const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
 
 const SHELL_ESCAPE_MAX_DISPLAY_BYTES: usize = 256 * 1024;
+const SHELL_ESCAPE_CONTEXT_LIMIT: usize = 5;
 const HISTORY_DEFAULT_LIMIT: usize = 20;
 const HISTORY_MAX_LIMIT: usize = 64;
 const OSC52_MAX_TEXT_BYTES: usize = 128 * 1024;
@@ -777,6 +778,7 @@ async fn repl_loop(
     let mut next_scheduled_run_id = next_scheduled_run_id(&scheduled_runs);
     let mut pr_comment_drafts: Vec<PrCommentDraft> = Vec::new();
     let mut last_shell_command: Option<String> = None;
+    let mut pending_shell_context: Vec<String> = Vec::new();
 
     loop {
         let autonomous_turn = if let Some(prompt) = pop_due_scheduled_prompt(&mut scheduled_runs) {
@@ -1842,7 +1844,14 @@ async fn repl_loop(
             match shell_escape_command(rest, last_shell_command.as_deref()) {
                 ShellEscapeAction::Run(command) => {
                     last_shell_command = Some(command.clone());
-                    run_shell_escape(&command, bash_command_wrapper.as_deref());
+                    if let Some(context) =
+                        run_shell_escape(&command, bash_command_wrapper.as_deref())
+                    {
+                        pending_shell_context.push(context);
+                        if pending_shell_context.len() > SHELL_ESCAPE_CONTEXT_LIMIT {
+                            pending_shell_context.remove(0);
+                        }
+                    }
                 }
                 ShellEscapeAction::Usage(message) => println!("{DIM}  {message}{RESET}"),
             }
@@ -1886,11 +1895,15 @@ async fn repl_loop(
                 .await
         } else {
             let agent_line = apply_output_style(output_style.as_deref(), &line);
+            let agent_line = apply_pending_shell_context(&pending_shell_context, &agent_line);
             match crate::commands::code_hooks::run_user_prompt_submit_hooks(
                 cfg.as_ref(),
                 &agent_line,
             ) {
-                Ok(agent_line) => handle.prompt_with_abort(agent_line, abort_signal, render).await,
+                Ok(agent_line) => {
+                    pending_shell_context.clear();
+                    handle.prompt_with_abort(agent_line, abort_signal, render).await
+                }
                 Err(e) => {
                     clear_current_abort();
                     eprintln!("{DIM}  {e:#}{RESET}");
@@ -8059,18 +8072,24 @@ fn shell_escape_command(rest: &str, last: Option<&str>) -> ShellEscapeAction {
     ShellEscapeAction::Run(command.to_string())
 }
 
-fn run_shell_escape(command: &str, wrapper: Option<&[String]>) {
+fn run_shell_escape(command: &str, wrapper: Option<&[String]>) -> Option<String> {
     println!("{BOLD}$ {command}{RESET}");
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(e) => {
             eprintln!("{DIM}  shell: could not resolve cwd: {e}{RESET}");
-            return;
+            return None;
         }
     };
     match execute_shell_escape(&cwd, command, wrapper) {
-        Ok(result) => print_shell_escape_result(&result),
-        Err(e) => eprintln!("{DIM}  shell: {e:#}{RESET}"),
+        Ok(result) => {
+            print_shell_escape_result(&result);
+            Some(shell_escape_prompt_context(command, &result))
+        }
+        Err(e) => {
+            eprintln!("{DIM}  shell: {e:#}{RESET}");
+            None
+        }
     }
 }
 
@@ -8107,6 +8126,45 @@ fn shell_escape_argv(wrapper: Option<&[String]>) -> Vec<String> {
         }
         None => vec!["/bin/sh".to_string()],
     }
+}
+
+fn shell_escape_prompt_context(command: &str, result: &ShellEscapeResult) -> String {
+    let mut out = String::new();
+    out.push_str("Local shell command run before this prompt:\n");
+    out.push_str("$ ");
+    out.push_str(command);
+    out.push('\n');
+    if result.stdout.is_empty() {
+        out.push_str("stdout: (empty)\n");
+    } else {
+        out.push_str("stdout:\n");
+        out.push_str(result.stdout.trim_end());
+        out.push('\n');
+    }
+    if result.stderr.is_empty() {
+        out.push_str("stderr: (empty)\n");
+    } else {
+        out.push_str("stderr:\n");
+        out.push_str(result.stderr.trim_end());
+        out.push('\n');
+    }
+    match result.exit_code {
+        Some(code) => out.push_str(&format!("exit: {code}")),
+        None => out.push_str("exit: terminated by signal"),
+    }
+    out
+}
+
+fn apply_pending_shell_context(contexts: &[String], prompt: &str) -> String {
+    if contexts.is_empty() {
+        return prompt.to_string();
+    }
+    let mut out = String::new();
+    out.push_str("Context from local shell escape commands (`!cmd`) executed in this session:\n\n");
+    out.push_str(&contexts.join("\n\n---\n\n"));
+    out.push_str("\n\nUser prompt:\n");
+    out.push_str(prompt);
+    out
 }
 
 fn truncate_shell_output(raw: &str) -> String {
@@ -10880,6 +10938,35 @@ mod tests {
         let result = execute_shell_escape(temp.path(), "pwd", None).unwrap();
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stdout.trim(), temp.path().display().to_string());
+    }
+
+    #[test]
+    fn shell_escape_prompt_context_captures_output_and_exit() {
+        let result = ShellEscapeResult {
+            stdout: "ok\n".to_string(),
+            stderr: "warn\n".to_string(),
+            exit_code: Some(7),
+        };
+        let context = shell_escape_prompt_context("make check", &result);
+        assert!(context.contains("Local shell command run before this prompt:"));
+        assert!(context.contains("$ make check"));
+        assert!(context.contains("stdout:\nok"));
+        assert!(context.contains("stderr:\nwarn"));
+        assert!(context.contains("exit: 7"));
+    }
+
+    #[test]
+    fn apply_pending_shell_context_prefixes_next_prompt() {
+        let prompt = apply_pending_shell_context(
+            &[
+                "Local shell command run before this prompt:\n$ git status\nstdout:\nclean\nstderr: (empty)\nexit: 0"
+                    .to_string(),
+            ],
+            "What changed?",
+        );
+        assert!(prompt.starts_with("Context from local shell escape commands"));
+        assert!(prompt.contains("$ git status"));
+        assert!(prompt.ends_with("User prompt:\nWhat changed?"));
     }
 
     #[test]
