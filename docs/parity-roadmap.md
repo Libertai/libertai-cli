@@ -447,8 +447,10 @@ files such as Dockerfile / GitHub Actions / Makefile, and
 CONTRIBUTING/EditorConfig guidance. CLI and desktop
 `/init from-agent merge-lines` can now apply an assistant-proposed
 candidate by appending only new lines inside matching `##` sections,
-and CLI `/init from-agent preview merge-lines` plus the desktop merge
-modal's no-write preview show the resulting file before applying.
+CLI `/init from-agent preview merge-lines` shows the resulting file
+before applying, and CLI `/init from-agent preview sections N[,M]` plus
+`/init from-agent append|merge|merge-lines sections N[,M]` support
+numbered-section review/apply flows alongside the desktop merge modal.
 Remaining work is richer interactive review controls around
 agent-written prose.
 

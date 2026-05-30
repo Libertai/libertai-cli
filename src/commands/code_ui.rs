@@ -1864,7 +1864,7 @@ fn parse_init_agent_notes(input: &str) -> Option<Option<&str>> {
     None
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum InitFromAgentAction {
     Preview,
     PreviewMergeLines,
@@ -1872,6 +1872,10 @@ enum InitFromAgentAction {
     Merge,
     MergeLines,
     Replace,
+    PreviewSections(Vec<usize>),
+    AppendSections(Vec<usize>),
+    MergeSections(Vec<usize>),
+    MergeLineSections(Vec<usize>),
 }
 
 fn parse_init_from_agent_action(input: &str) -> Option<InitFromAgentAction> {
@@ -1885,7 +1889,17 @@ fn parse_init_from_agent_action(input: &str) -> Option<InitFromAgentAction> {
     if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
         return None;
     }
-    match rest.trim() {
+    let rest = rest.trim();
+    if let Some((mode, indexes)) = parse_init_from_agent_sections(rest) {
+        return match mode {
+            "preview" => Some(InitFromAgentAction::PreviewSections(indexes)),
+            "append" => Some(InitFromAgentAction::AppendSections(indexes)),
+            "merge" => Some(InitFromAgentAction::MergeSections(indexes)),
+            "merge-lines" => Some(InitFromAgentAction::MergeLineSections(indexes)),
+            _ => None,
+        };
+    }
+    match rest {
         "" | "preview" | "show" => Some(InitFromAgentAction::Preview),
         "preview merge-lines" | "preview line-merge" | "preview lines" => {
             Some(InitFromAgentAction::PreviewMergeLines)
@@ -1896,6 +1910,43 @@ fn parse_init_from_agent_action(input: &str) -> Option<InitFromAgentAction> {
         "replace" => Some(InitFromAgentAction::Replace),
         _ => None,
     }
+}
+
+fn parse_init_from_agent_sections(input: &str) -> Option<(&'static str, Vec<usize>)> {
+    let (mode, rest) = if let Some(rest) = input.strip_prefix("sections ") {
+        ("preview", rest)
+    } else if let Some(rest) = input.strip_prefix("preview sections ") {
+        ("preview", rest)
+    } else if let Some(rest) = input.strip_prefix("append sections ") {
+        ("append", rest)
+    } else if let Some(rest) = input.strip_prefix("merge sections ") {
+        ("merge", rest)
+    } else if let Some(rest) = input
+        .strip_prefix("merge-lines sections ")
+        .or_else(|| input.strip_prefix("line-merge sections "))
+        .or_else(|| input.strip_prefix("lines sections "))
+    {
+        ("merge-lines", rest)
+    } else {
+        return None;
+    };
+    parse_init_section_indexes(rest).map(|indexes| (mode, indexes))
+}
+
+fn parse_init_section_indexes(input: &str) -> Option<Vec<usize>> {
+    let mut indexes = Vec::new();
+    for part in input
+        .split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let index = part.parse::<usize>().ok()?;
+        if index == 0 || indexes.contains(&index) {
+            return None;
+        }
+        indexes.push(index);
+    }
+    (!indexes.is_empty()).then_some(indexes)
 }
 
 fn prompt_plan_exit_handoff() -> Result<bool> {
@@ -2363,7 +2414,9 @@ fn print_help() {
     println!("{DIM}  /logout [status|libertai|provider] — run libertai logout or explain provider logout{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
     println!("{DIM}  /skills [list|open|enable <name>|disable <name>] — manage code-agent skills for new sessions{RESET}");
-    println!("{DIM}  /init [--agent|from-agent preview merge-lines|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}");
+    println!(
+        "{DIM}  /init [--agent|from-agent preview merge-lines|preview sections N[,M]|append sections N[,M]|merge sections N[,M]|merge-lines sections N[,M]|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}"
+    );
     println!("{DIM}  /onboarding|/onboard [save|path] — write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
     println!("{DIM}  /agents   — list named sub-agents (/agents open shows agent paths){RESET}");
@@ -4490,7 +4543,7 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
     };
     let path = cwd.join("AGENTS.md");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    match action {
+    match &action {
         InitFromAgentAction::Preview => {
             println!("{BOLD}init from-agent{RESET}");
             print!(
@@ -4514,18 +4567,53 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
             );
             println!();
         }
+        InitFromAgentAction::PreviewSections(indexes) => {
+            let selected = match selected_init_candidate_sections(&candidate, indexes) {
+                Ok(selected) => selected,
+                Err(e) => {
+                    eprintln!("{DIM}  /init from-agent: {e}{RESET}");
+                    return;
+                }
+            };
+            println!("{BOLD}init from-agent selected-section preview{RESET}");
+            print!(
+                "{}",
+                init_candidate_preview(&path.display().to_string(), &existing, &selected)
+            );
+            println!();
+        }
         InitFromAgentAction::Append
         | InitFromAgentAction::Merge
         | InitFromAgentAction::MergeLines
-        | InitFromAgentAction::Replace => {
-            let mode = match action {
+        | InitFromAgentAction::Replace
+        | InitFromAgentAction::AppendSections(_)
+        | InitFromAgentAction::MergeSections(_)
+        | InitFromAgentAction::MergeLineSections(_) => {
+            let mode = match &action {
                 InitFromAgentAction::Append => "append",
                 InitFromAgentAction::Merge => "merge",
                 InitFromAgentAction::MergeLines => "merge-lines",
                 InitFromAgentAction::Replace => "replace",
-                InitFromAgentAction::Preview | InitFromAgentAction::PreviewMergeLines => {
-                    unreachable!()
+                InitFromAgentAction::AppendSections(_) => "append",
+                InitFromAgentAction::MergeSections(_) => "merge",
+                InitFromAgentAction::MergeLineSections(_) => "merge-lines",
+                InitFromAgentAction::Preview
+                | InitFromAgentAction::PreviewMergeLines
+                | InitFromAgentAction::PreviewSections(_) => unreachable!(),
+            };
+            let candidate = match &action {
+                InitFromAgentAction::AppendSections(indexes)
+                | InitFromAgentAction::MergeSections(indexes)
+                | InitFromAgentAction::MergeLineSections(indexes) => {
+                    match selected_init_candidate_sections(&candidate, indexes) {
+                        Ok(selected) => selected,
+                        Err(e) => {
+                            eprintln!("{DIM}  /init from-agent: {e}{RESET}");
+                            return;
+                        }
+                    }
                 }
+                _ => candidate.clone(),
             };
             let content = match build_init_apply_content(&existing, &candidate, mode) {
                 Ok(content) => content,
@@ -4562,14 +4650,19 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
             }
             println!(
                 "{DIM}  /init from-agent: {} AGENTS.md from latest assistant candidate: {}{RESET}",
-                match action {
+                match &action {
                     InitFromAgentAction::Append => "appended to",
                     InitFromAgentAction::Merge => "merged into",
                     InitFromAgentAction::MergeLines => "line-merged into",
                     InitFromAgentAction::Replace => "replaced",
-                    InitFromAgentAction::Preview | InitFromAgentAction::PreviewMergeLines => {
-                        unreachable!()
+                    InitFromAgentAction::AppendSections(_) => "appended selected sections to",
+                    InitFromAgentAction::MergeSections(_) => "merged selected sections into",
+                    InitFromAgentAction::MergeLineSections(_) => {
+                        "line-merged selected sections into"
                     }
+                    InitFromAgentAction::Preview
+                    | InitFromAgentAction::PreviewMergeLines
+                    | InitFromAgentAction::PreviewSections(_) => unreachable!(),
                 },
                 path.display()
             );
@@ -4597,6 +4690,25 @@ fn build_init_apply_content(existing: &str, candidate: &str, mode: &str) -> Resu
         "replace" => Ok(candidate),
         _ => Err("init apply mode must be append, merge-lines, merge, or replace".to_string()),
     }
+}
+
+fn selected_init_candidate_sections(candidate: &str, indexes: &[usize]) -> Result<String, String> {
+    let sections = split_init_markdown_sections(candidate);
+    if sections.is_empty() {
+        return Err("assistant candidate has no selectable markdown sections".to_string());
+    }
+    let mut selected = Vec::new();
+    for index in indexes {
+        let Some(section) = sections.get(index.saturating_sub(1)) else {
+            return Err(format!(
+                "section index {index} is out of range; candidate has {} section{}",
+                sections.len(),
+                if sections.len() == 1 { "" } else { "s" }
+            ));
+        };
+        selected.push(section.clone());
+    }
+    Ok(ensure_trailing_newline(&join_init_markdown_sections(&selected)))
 }
 
 fn ensure_trailing_newline(value: &str) -> String {
@@ -8774,9 +8886,31 @@ mod tests {
             Some(InitFromAgentAction::PreviewMergeLines)
         );
         assert_eq!(
+            parse_init_from_agent_action("from-agent preview sections 1,3"),
+            Some(InitFromAgentAction::PreviewSections(vec![1, 3]))
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent sections 2"),
+            Some(InitFromAgentAction::PreviewSections(vec![2]))
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent append sections 1 2"),
+            Some(InitFromAgentAction::AppendSections(vec![1, 2]))
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent merge sections 2"),
+            Some(InitFromAgentAction::MergeSections(vec![2]))
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent merge-lines sections 2"),
+            Some(InitFromAgentAction::MergeLineSections(vec![2]))
+        );
+        assert_eq!(
             parse_init_from_agent_action("apply-agent replace"),
             Some(InitFromAgentAction::Replace)
         );
+        assert_eq!(parse_init_from_agent_action("from-agent sections 0"), None);
+        assert_eq!(parse_init_from_agent_action("from-agent sections 1 1"), None);
         assert_eq!(parse_init_from_agent_action("from-agent nope"), None);
     }
 
@@ -8814,6 +8948,19 @@ mod tests {
         );
         assert!(merged.contains("## Conventions\n- keep scoped\n- prefer small diffs"));
         assert!(!merged.contains("# Candidate"));
+    }
+
+    #[test]
+    fn selected_init_candidate_sections_returns_numbered_sections_only() {
+        let candidate = "# Candidate\n\n## Build & test\n- test: cargo test\n\n## Structure\n- src/ - code\n";
+        let selected = selected_init_candidate_sections(candidate, &[3]).unwrap();
+        assert!(!selected.contains("# Candidate"));
+        assert!(!selected.contains("## Build & test"));
+        assert!(selected.starts_with("## Structure\n- src/ - code\n"));
+        assert!(selected.ends_with('\n'));
+        assert!(selected_init_candidate_sections(candidate, &[4])
+            .unwrap_err()
+            .contains("out of range"));
     }
 
     #[test]
