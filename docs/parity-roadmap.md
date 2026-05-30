@@ -175,9 +175,9 @@ SDK; those are flagged **(upstream)**.
   status|state|show|diagnostics|diag` handling for strict-profile
   inspection.
 - **CLI `/vim` command** — REPL users get explicit `/vim`,
-  `/vim status`, `/vim on`, and `/vim off` handling so Vim-mode requests
-  report the current terminal limitation instead of falling through as
-  agent text.
+  `/vim status`, `/vim on`, and `/vim off` handling. `/vim on` enables a
+  session-local Vim input mode in the raw REPL bar with insert/normal
+  state, Esc, i/a/I/A, h/l/0/$, x, and Enter.
 - **CLI `/ide` command** — REPL users get explicit `/ide`,
   `/ide status`, and `/ide open` handling so IDE integration requests
   report the current terminal/desktop handoff instead of falling through

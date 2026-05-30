@@ -203,6 +203,27 @@ enum VimCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VimInputMode {
+    Insert,
+    Normal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VimNormalAction {
+    MoveLeft,
+    MoveRight,
+    Home,
+    End,
+    Delete,
+    InsertBefore,
+    InsertAfter,
+    InsertHome,
+    InsertEnd,
+    Submit,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IdeCommand {
     Status,
     Open,
@@ -387,6 +408,7 @@ enum ConfigSettingsTarget {
 static BAR_STATUS: Mutex<Option<BarStatus>> = Mutex::new(None);
 static STATUS_LINE_COMMAND_CACHE: OnceLock<Mutex<Option<StatusLineCommandCache>>> =
     OnceLock::new();
+static VIM_INPUT_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Current in-flight abort handle, populated for the duration of each
 /// `handle.prompt_with_abort` call. The Ctrl-C handler (installed once at
@@ -4243,27 +4265,54 @@ fn print_vim_status(command: VimCommand) {
     println!("{BOLD}vim{RESET}");
     match command {
         VimCommand::Status => {
+            let enabled = VIM_INPUT_ENABLED.load(Ordering::SeqCst);
             println!(
-                "{DIM}  status:{RESET} off - Vim bindings are not implemented in the CLI REPL yet."
+                "{DIM}  status:{RESET} {}",
+                if enabled { "on" } else { "off" }
             );
             println!(
-                "{DIM}  terminal:{RESET} the input bar uses native line-editing keys."
+                "{DIM}  terminal:{RESET} Vim input supports insert/normal mode: Esc, i/a/I/A, h/l/0/$, x, and Enter."
             );
         }
         VimCommand::Enable => {
+            VIM_INPUT_ENABLED.store(true, Ordering::SeqCst);
             println!(
-                "{DIM}  /vim on:{RESET} unavailable - this CLI REPL does not have a Vim input mode yet."
+                "{DIM}  /vim on:{RESET} enabled for this terminal session."
             );
             println!(
-                "{DIM}  terminal:{RESET} use your shell/editor Vim mode outside libertai code for now."
+                "{DIM}  terminal:{RESET} input starts in insert mode; press Esc for normal mode."
             );
         }
         VimCommand::Disable => {
-            println!("{DIM}  /vim off:{RESET} already off.");
+            VIM_INPUT_ENABLED.store(false, Ordering::SeqCst);
+            println!("{DIM}  /vim off:{RESET} disabled for this terminal session.");
         }
         VimCommand::Usage => {
             println!("{DIM}  usage:{RESET} /vim, /vim status, /vim on, or /vim off");
         }
+    }
+}
+
+fn vim_normal_key_action(code: KeyCode, modifiers: KeyModifiers) -> VimNormalAction {
+    match (code, modifiers) {
+        (KeyCode::Enter, _) => VimNormalAction::Submit,
+        (KeyCode::Char('h'), KeyModifiers::NONE)
+        | (KeyCode::Left, _) => VimNormalAction::MoveLeft,
+        (KeyCode::Char('l'), KeyModifiers::NONE)
+        | (KeyCode::Right, _) => VimNormalAction::MoveRight,
+        (KeyCode::Char('0'), KeyModifiers::NONE)
+        | (KeyCode::Home, _) => VimNormalAction::Home,
+        (KeyCode::Char('$'), KeyModifiers::NONE | KeyModifiers::SHIFT)
+        | (KeyCode::End, _) => VimNormalAction::End,
+        (KeyCode::Char('x'), KeyModifiers::NONE)
+        | (KeyCode::Delete, _) => VimNormalAction::Delete,
+        (KeyCode::Char('i'), KeyModifiers::NONE) => VimNormalAction::InsertBefore,
+        (KeyCode::Char('a'), KeyModifiers::NONE) => VimNormalAction::InsertAfter,
+        (KeyCode::Char('I'), KeyModifiers::SHIFT)
+        | (KeyCode::Char('I'), KeyModifiers::NONE) => VimNormalAction::InsertHome,
+        (KeyCode::Char('A'), KeyModifiers::SHIFT)
+        | (KeyCode::Char('A'), KeyModifiers::NONE) => VimNormalAction::InsertEnd,
+        _ => VimNormalAction::None,
     }
 }
 
@@ -9182,12 +9231,25 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
     // back to the live buffer.
     let mut hist_idx: Option<usize> = None;
     let mut stashed_live: Option<Vec<char>> = None;
+    let vim_enabled = VIM_INPUT_ENABLED.load(Ordering::SeqCst);
+    let mut vim_input_mode = if vim_enabled {
+        Some(VimInputMode::Insert)
+    } else {
+        None
+    };
 
     // First paint lays down two fresh lines; every subsequent paint moves
     // back up to the rule line and overwrites in place so the bar stays
     // anchored to its starting position instead of marching down.
     let mut painted = false;
-    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
+    repaint(
+        &mut stdout,
+        &buffer,
+        cursor_pos,
+        mode,
+        vim_input_mode,
+        painted,
+    )?;
     painted = true;
 
     loop {
@@ -9196,6 +9258,17 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
             Event::Key(KeyEvent {
                 code, modifiers, ..
             }) => match (code, modifiers) {
+                (KeyCode::Esc, _) if vim_enabled => {
+                    vim_input_mode = Some(VimInputMode::Normal);
+                    repaint(
+                        &mut stdout,
+                        &buffer,
+                        cursor_pos,
+                        mode,
+                        vim_input_mode,
+                        painted,
+                    )?;
+                }
                 (KeyCode::Enter, _) => {
                     // Erase both bar lines so the caller's printlns flow
                     // naturally where the bar used to be — no stale rule,
@@ -9221,30 +9294,114 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
                     clear_bar(&mut stdout)?;
                     return Ok(LineResult::ToggleMode);
                 }
+                (code, modifiers) if vim_input_mode == Some(VimInputMode::Normal) => {
+                    match vim_normal_key_action(code, modifiers) {
+                        VimNormalAction::Submit => {
+                            clear_bar(&mut stdout)?;
+                            let line: String = buffer.into_iter().collect();
+                            return Ok(LineResult::Submit(line));
+                        }
+                        VimNormalAction::MoveLeft if cursor_pos > 0 => cursor_pos -= 1,
+                        VimNormalAction::MoveRight if cursor_pos < buffer.len() => cursor_pos += 1,
+                        VimNormalAction::Home => cursor_pos = 0,
+                        VimNormalAction::End => cursor_pos = buffer.len(),
+                        VimNormalAction::Delete if cursor_pos < buffer.len() => {
+                            buffer.remove(cursor_pos);
+                        }
+                        VimNormalAction::InsertBefore => {
+                            vim_input_mode = Some(VimInputMode::Insert);
+                        }
+                        VimNormalAction::InsertAfter => {
+                            if cursor_pos < buffer.len() {
+                                cursor_pos += 1;
+                            }
+                            vim_input_mode = Some(VimInputMode::Insert);
+                        }
+                        VimNormalAction::InsertHome => {
+                            cursor_pos = 0;
+                            vim_input_mode = Some(VimInputMode::Insert);
+                        }
+                        VimNormalAction::InsertEnd => {
+                            cursor_pos = buffer.len();
+                            vim_input_mode = Some(VimInputMode::Insert);
+                        }
+                        _ => {}
+                    }
+                    repaint(
+                        &mut stdout,
+                        &buffer,
+                        cursor_pos,
+                        mode,
+                        vim_input_mode,
+                        painted,
+                    )?;
+                }
                 (KeyCode::Backspace, _) if cursor_pos > 0 => {
                     buffer.remove(cursor_pos - 1);
                     cursor_pos -= 1;
-                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
+                    repaint(
+                        &mut stdout,
+                        &buffer,
+                        cursor_pos,
+                        mode,
+                        vim_input_mode,
+                        painted,
+                    )?;
                 }
                 (KeyCode::Delete, _) if cursor_pos < buffer.len() => {
                     buffer.remove(cursor_pos);
-                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
+                    repaint(
+                        &mut stdout,
+                        &buffer,
+                        cursor_pos,
+                        mode,
+                        vim_input_mode,
+                        painted,
+                    )?;
                 }
                 (KeyCode::Left, _) if cursor_pos > 0 => {
                     cursor_pos -= 1;
-                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
+                    repaint(
+                        &mut stdout,
+                        &buffer,
+                        cursor_pos,
+                        mode,
+                        vim_input_mode,
+                        painted,
+                    )?;
                 }
                 (KeyCode::Right, _) if cursor_pos < buffer.len() => {
                     cursor_pos += 1;
-                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
+                    repaint(
+                        &mut stdout,
+                        &buffer,
+                        cursor_pos,
+                        mode,
+                        vim_input_mode,
+                        painted,
+                    )?;
                 }
                 (KeyCode::Home, _) => {
                     cursor_pos = 0;
-                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
+                    repaint(
+                        &mut stdout,
+                        &buffer,
+                        cursor_pos,
+                        mode,
+                        vim_input_mode,
+                        painted,
+                    )?;
                 }
                 (KeyCode::End, _) => {
                     cursor_pos = buffer.len();
-                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
+                    repaint(
+                        &mut stdout,
+                        &buffer,
+                        cursor_pos,
+                        mode,
+                        vim_input_mode,
+                        painted,
+                    )?;
                 }
                 (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                     // Any edit to the buffer ends history navigation —
@@ -9255,7 +9412,14 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
                     }
                     buffer.insert(cursor_pos, c);
                     cursor_pos += 1;
-                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
+                    repaint(
+                        &mut stdout,
+                        &buffer,
+                        cursor_pos,
+                        mode,
+                        vim_input_mode,
+                        painted,
+                    )?;
                 }
                 (KeyCode::Up, _) => {
                     if history.is_empty() {
@@ -9272,7 +9436,19 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
                         .unwrap_or_default();
                     buffer = recalled.chars().collect();
                     cursor_pos = buffer.len();
-                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
+                    vim_input_mode = if vim_enabled {
+                        Some(VimInputMode::Insert)
+                    } else {
+                        None
+                    };
+                    repaint(
+                        &mut stdout,
+                        &buffer,
+                        cursor_pos,
+                        mode,
+                        vim_input_mode,
+                        painted,
+                    )?;
                 }
                 (KeyCode::Down, _) => {
                     match hist_idx {
@@ -9294,7 +9470,19 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
                             cursor_pos = buffer.len();
                         }
                     }
-                    repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
+                    vim_input_mode = if vim_enabled {
+                        Some(VimInputMode::Insert)
+                    } else {
+                        None
+                    };
+                    repaint(
+                        &mut stdout,
+                        &buffer,
+                        cursor_pos,
+                        mode,
+                        vim_input_mode,
+                        painted,
+                    )?;
                 }
                 // Old TODO retired: history nav is wired above.
                 _ => {}
@@ -9305,7 +9493,14 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
                 // paint. The previous bar position is left as-is in
                 // scrollback rather than risk drifting into row 0.
                 painted = false;
-                repaint(&mut stdout, &buffer, cursor_pos, mode, painted)?;
+                repaint(
+                    &mut stdout,
+                    &buffer,
+                    cursor_pos,
+                    mode,
+                    vim_input_mode,
+                    painted,
+                )?;
                 painted = true;
             }
             _ => {}
@@ -9331,6 +9526,7 @@ fn repaint(
     buffer: &[char],
     cursor_pos: usize,
     mode: Mode,
+    vim_input_mode: Option<VimInputMode>,
     painted_before: bool,
 ) -> Result<()> {
     let cols = terminal::size()
@@ -9342,10 +9538,22 @@ fn repaint(
 
     // Mode chip printed in-line with the prompt, left of ❯. Dimmed so
     // it's a status cue, not a shout.
-    let (chip_text, chip_colour) = match mode {
-        Mode::Normal => ("", Color::DarkGrey),
-        Mode::AcceptEdits => ("[accept-edits] ", Color::Cyan),
-        Mode::Plan => ("[plan] ", Color::Yellow),
+    let mode_chip = match mode {
+        Mode::Normal => "",
+        Mode::AcceptEdits => "[accept-edits] ",
+        Mode::Plan => "[plan] ",
+    };
+    let vim_chip = match vim_input_mode {
+        Some(VimInputMode::Normal) => "[vim:normal] ",
+        Some(VimInputMode::Insert) => "[vim:insert] ",
+        None => "",
+    };
+    let chip_text = format!("{mode_chip}{vim_chip}");
+    let chip_colour = match mode {
+        Mode::Plan => Color::Yellow,
+        Mode::AcceptEdits => Color::Cyan,
+        Mode::Normal if vim_input_mode.is_some() => Color::Magenta,
+        Mode::Normal => Color::DarkGrey,
     };
 
     // Prefix width: mode chip + `❯ ` (2 cells). Anything past
@@ -9375,7 +9583,7 @@ fn repaint(
         Clear(ClearType::CurrentLine),
         SetForegroundColor(chip_colour),
         SetAttribute(Attribute::Dim),
-        Print(chip_text),
+        Print(&chip_text),
         ResetColor,
         SetAttribute(Attribute::Reset),
         SetForegroundColor(Color::Cyan),
@@ -10617,6 +10825,50 @@ mod tests {
         assert_eq!(parse_vim_command("off"), VimCommand::Disable);
         assert_eq!(parse_vim_command("disable"), VimCommand::Disable);
         assert_eq!(parse_vim_command("toggle"), VimCommand::Usage);
+    }
+
+    #[test]
+    fn vim_normal_key_action_maps_core_motion_and_insert_keys() {
+        assert_eq!(
+            vim_normal_key_action(KeyCode::Char('h'), KeyModifiers::NONE),
+            VimNormalAction::MoveLeft
+        );
+        assert_eq!(
+            vim_normal_key_action(KeyCode::Char('l'), KeyModifiers::NONE),
+            VimNormalAction::MoveRight
+        );
+        assert_eq!(
+            vim_normal_key_action(KeyCode::Char('0'), KeyModifiers::NONE),
+            VimNormalAction::Home
+        );
+        assert_eq!(
+            vim_normal_key_action(KeyCode::Char('$'), KeyModifiers::SHIFT),
+            VimNormalAction::End
+        );
+        assert_eq!(
+            vim_normal_key_action(KeyCode::Char('x'), KeyModifiers::NONE),
+            VimNormalAction::Delete
+        );
+        assert_eq!(
+            vim_normal_key_action(KeyCode::Char('i'), KeyModifiers::NONE),
+            VimNormalAction::InsertBefore
+        );
+        assert_eq!(
+            vim_normal_key_action(KeyCode::Char('a'), KeyModifiers::NONE),
+            VimNormalAction::InsertAfter
+        );
+        assert_eq!(
+            vim_normal_key_action(KeyCode::Char('I'), KeyModifiers::SHIFT),
+            VimNormalAction::InsertHome
+        );
+        assert_eq!(
+            vim_normal_key_action(KeyCode::Char('A'), KeyModifiers::SHIFT),
+            VimNormalAction::InsertEnd
+        );
+        assert_eq!(
+            vim_normal_key_action(KeyCode::Enter, KeyModifiers::NONE),
+            VimNormalAction::Submit
+        );
     }
 
     #[test]
