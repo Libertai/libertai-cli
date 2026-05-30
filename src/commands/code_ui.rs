@@ -3260,14 +3260,14 @@ fn detect_supported_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
 fn parse_permissions_command(input: &str) -> PermissionsCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "show" | "status" | "current" | "info" => PermissionsCommand::Show,
-        "open" | "settings" | "approvals" => PermissionsCommand::Open,
+        "open" | "settings" | "edit" | "approvals" => PermissionsCommand::Open,
         "default" | "normal" => PermissionsCommand::Set(Mode::Normal),
         "acceptedits" | "accept-edits" | "accept_edits" => {
             PermissionsCommand::Set(Mode::AcceptEdits)
         }
-        "plan" => PermissionsCommand::Set(Mode::Plan),
-        "forget" | "clear" => PermissionsCommand::Forget,
-        "bypass" | "bypasspermissions" | "bypass-permissions" | "bypass_permissions" => {
+        "plan" | "readonly" | "read-only" => PermissionsCommand::Set(Mode::Plan),
+        "forget" | "clear" | "reset" => PermissionsCommand::Forget,
+        "bypass" | "danger" | "bypasspermissions" | "bypass-permissions" | "bypass_permissions" => {
             PermissionsCommand::UnsupportedBypass
         }
         _ => PermissionsCommand::Show,
@@ -12824,6 +12824,14 @@ mod tests {
             parse_permissions_command("plan"),
             PermissionsCommand::Set(Mode::Plan)
         );
+        assert_eq!(
+            parse_permissions_command("readonly"),
+            PermissionsCommand::Set(Mode::Plan)
+        );
+        assert_eq!(
+            parse_permissions_command("read-only"),
+            PermissionsCommand::Set(Mode::Plan)
+        );
     }
 
     #[test]
@@ -12834,13 +12842,21 @@ mod tests {
         assert_eq!(parse_permissions_command("current"), PermissionsCommand::Show);
         assert_eq!(parse_permissions_command("info"), PermissionsCommand::Show);
         assert_eq!(parse_permissions_command("open"), PermissionsCommand::Open);
+        assert_eq!(parse_permissions_command("settings"), PermissionsCommand::Open);
+        assert_eq!(parse_permissions_command("edit"), PermissionsCommand::Open);
         assert_eq!(
             parse_permissions_command("approvals"),
             PermissionsCommand::Open
         );
         assert_eq!(parse_permissions_command("forget"), PermissionsCommand::Forget);
+        assert_eq!(parse_permissions_command("clear"), PermissionsCommand::Forget);
+        assert_eq!(parse_permissions_command("reset"), PermissionsCommand::Forget);
         assert_eq!(
             parse_permissions_command("bypassPermissions"),
+            PermissionsCommand::UnsupportedBypass
+        );
+        assert_eq!(
+            parse_permissions_command("danger"),
             PermissionsCommand::UnsupportedBypass
         );
         assert_eq!(parse_permissions_command("wat"), PermissionsCommand::Show);
