@@ -8665,7 +8665,7 @@ fn format_schedule_doctor_summary(scheduled_runs: &[ScheduledRun]) -> String {
 fn format_mcp_doctor_summary(cfg: &LibertaiConfig) -> String {
     let exposure = mcp_exposure_summary(cfg);
     format!(
-        "{} configured; mcp_call {}, {} named tool(s), resource reader {}, prompt getter {}, {} subscription candidate(s); CLI calls are short-lived",
+        "{} configured; mcp_call {}, {} named tool(s), resource reader {}, prompt getter {}, {} subscription candidate(s); stdio reuse on",
         cfg.mcp_servers.len(),
         if exposure.mcp_call { "on" } else { "off" },
         exposure.named_tools,
@@ -9506,12 +9506,12 @@ fn print_mcp_status(command: McpCommand) {
         McpCommand::Probe => print_mcp_probe(),
         McpCommand::ProbeSave => print_mcp_probe_save(),
         McpCommand::Reset => {
+            let closed = crate::commands::code_hooks::reset_mcp_cli_sessions();
             println!(
-                "{DIM}  /mcp reset:{RESET} no terminal MCP sessions were reset; CLI MCP calls are short-lived today."
+                "{DIM}  /mcp reset:{RESET} closed {closed} terminal stdio MCP session{}.",
+                if closed == 1 { "" } else { "s" }
             );
-            println!(
-                "{DIM}  desktop:{RESET} use Desktop Settings > MCP or desktop /mcp reset to close live stdio/HTTP/SSE clients."
-            );
+            println!("{DIM}  note:{RESET} HTTP/SSE MCP calls are still per-call; stdio MCP tools/resources/prompts reuse live CLI sessions until reset or process exit.");
         }
         McpCommand::Open => {
             println!(
@@ -12718,11 +12718,11 @@ mod tests {
         };
         assert_eq!(
             format_mcp_doctor_summary(&cfg),
-            "1 configured; mcp_call on, 1 named tool(s), resource reader on, prompt getter on, 1 subscription candidate(s); CLI calls are short-lived"
+            "1 configured; mcp_call on, 1 named tool(s), resource reader on, prompt getter on, 1 subscription candidate(s); stdio reuse on"
         );
         assert_eq!(
             format_mcp_doctor_summary(&LibertaiConfig::default()),
-            "0 configured; mcp_call off, 0 named tool(s), resource reader off, prompt getter off, 0 subscription candidate(s); CLI calls are short-lived"
+            "0 configured; mcp_call off, 0 named tool(s), resource reader off, prompt getter off, 0 subscription candidate(s); stdio reuse on"
         );
     }
 

@@ -4,9 +4,9 @@
 //! this surface narrow: configured shell commands, HTTP handlers,
 //! stdio MCP-tool handlers, and prompt/agent handlers are executed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -502,6 +502,135 @@ pub struct McpToolCallRun {
     pub stderr: String,
 }
 
+struct PersistentStdioMcpClient {
+    child: Child,
+    stdin: ChildStdin,
+    rx: mpsc::Receiver<String>,
+    reader: Option<thread::JoinHandle<()>>,
+    next_id: u64,
+}
+
+impl PersistentStdioMcpClient {
+    fn start(server: &crate::config::McpServerConfig, timeout: Duration) -> Result<Self, String> {
+        let mut cmd = Command::new(server.command.trim());
+        cmd.args(&server.args)
+            .envs(&server.env)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("failed to spawn MCP server: {e}"))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "MCP server did not expose stdin".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "MCP server did not expose stdout".to_string())?;
+        let (tx, rx) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            let _ = tx.send(trimmed.to_string());
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        write_mcp_message(&mut stdin, &mcp_initialize_request(1))
+            .map_err(|e| format!("writing MCP initialize request: {e}"))?;
+        wait_for_mcp_response(&rx, 1, timeout)
+            .and_then(mcp_response_result)
+            .map_err(|e| format!("MCP initialize failed: {e}"))?;
+        write_mcp_message(&mut stdin, &mcp_initialized_notification())
+            .map_err(|e| format!("writing MCP initialized notification: {e}"))?;
+
+        Ok(Self {
+            child,
+            stdin,
+            rx,
+            reader: Some(reader),
+            next_id: 2,
+        })
+    }
+
+    fn call(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        write_mcp_message(
+            &mut self.stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params,
+            }),
+        )
+        .map_err(|e| format!("writing MCP {method} request: {e}"))?;
+        wait_for_mcp_response(&self.rx, id, timeout).and_then(mcp_response_result)
+    }
+
+    fn shutdown(mut self) {
+        let _ = self.stdin.flush();
+        drop(self.stdin);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+static MCP_STDIO_CLIENTS: OnceLock<Mutex<HashMap<String, PersistentStdioMcpClient>>> =
+    OnceLock::new();
+
+fn mcp_stdio_clients() -> &'static Mutex<HashMap<String, PersistentStdioMcpClient>> {
+    MCP_STDIO_CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn reset_mcp_cli_sessions() -> usize {
+    let Ok(mut clients) = mcp_stdio_clients().lock() else {
+        return 0;
+    };
+    let count = clients.len();
+    for (_, client) in clients.drain() {
+        client.shutdown();
+    }
+    count
+}
+
+#[cfg(test)]
+fn reset_mcp_cli_session_for_config(
+    server_name: &str,
+    server: &crate::config::McpServerConfig,
+) -> bool {
+    let key = mcp_stdio_client_key(server_name, server);
+    let Ok(mut clients) = mcp_stdio_clients().lock() else {
+        return false;
+    };
+    let Some(client) = clients.remove(&key) else {
+        return false;
+    };
+    client.shutdown();
+    true
+}
+
 fn spawn_async_hook(
     hook: &HookCommandConfig,
     cwd: &std::path::Path,
@@ -872,20 +1001,16 @@ pub fn call_mcp_tool_with_config(
     arguments: serde_json::Value,
     timeout: Option<u64>,
 ) -> McpToolCallRun {
-    let hook = HookCommandConfig {
-        hook_type: "mcp_tool".to_string(),
-        server: server.to_string(),
-        tool: tool.to_string(),
-        input: Some(arguments),
+    call_mcp_method_with_config(
+        cfg,
+        server,
+        "tools/call",
+        json!({
+            "name": tool,
+            "arguments": arguments,
+        }),
         timeout,
-        ..HookCommandConfig::default()
-    };
-    let run = run_mcp_tool_hook_with_config(&hook, &serde_json::Value::Null, cfg);
-    McpToolCallRun {
-        status: run.status,
-        stdout: run.stdout,
-        stderr: run.stderr,
-    }
+    )
 }
 
 pub fn call_mcp_method_with_config(
@@ -919,7 +1044,7 @@ pub fn call_mcp_method_with_config(
             call_mcp_http_method(server, method, params, timeout)
         }
     } else if !server.command.trim().is_empty() {
-        call_mcp_stdio_method(server, method, params, timeout)
+        call_mcp_stdio_method(server_name, server, method, params, timeout)
     } else {
         Err(format!("MCP server `{server_name}` has no command or url"))
     };
@@ -938,93 +1063,53 @@ pub fn call_mcp_method_with_config(
 }
 
 fn call_mcp_stdio_method(
+    server_name: &str,
     server: &crate::config::McpServerConfig,
     method: &str,
     params: serde_json::Value,
     timeout: Duration,
 ) -> Result<serde_json::Value, String> {
-    let mut cmd = Command::new(server.command.trim());
-    cmd.args(&server.args)
-        .envs(&server.env)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to spawn MCP server: {e}"))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "MCP server did not expose stdin".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "MCP server did not expose stdout".to_string())?;
-    let (tx, rx) = mpsc::channel();
-    let reader = thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        let _ = tx.send(trimmed.to_string());
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
+    let key = mcp_stdio_client_key(server_name, server);
+    let mut clients = mcp_stdio_clients()
+        .lock()
+        .map_err(|_| "MCP stdio session registry is unavailable".to_string())?;
 
-    let result = (|| {
-        let init = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "libertai-cli",
-                    "version": env!("CARGO_PKG_VERSION"),
-                },
-            },
-        });
-        write_mcp_message(&mut stdin, &init)
-            .map_err(|e| format!("writing MCP initialize request: {e}"))?;
-        wait_for_mcp_response(&rx, 1, timeout)
-            .and_then(mcp_response_result)
-            .map_err(|e| format!("MCP initialize failed: {e}"))?;
-        write_mcp_message(
-            &mut stdin,
-            &json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-                "params": {},
-            }),
-        )
-        .map_err(|e| format!("writing MCP initialized notification: {e}"))?;
-        write_mcp_message(
-            &mut stdin,
-            &json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": method,
-                "params": params,
-            }),
-        )
-        .map_err(|e| format!("writing MCP {method} request: {e}"))?;
-        wait_for_mcp_response(&rx, 2, timeout).and_then(mcp_response_result)
-    })();
-    let _ = stdin.flush();
-    drop(stdin);
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = reader.join();
-    result
+    if !clients.contains_key(&key) {
+        let client = PersistentStdioMcpClient::start(server, timeout)?;
+        clients.insert(key.clone(), client);
+    }
+
+    let result = clients
+        .get_mut(&key)
+        .ok_or_else(|| "MCP stdio session was not registered".to_string())?
+        .call(method, params.clone(), timeout);
+    if result.is_ok() {
+        return result;
+    }
+
+    if let Some(client) = clients.remove(&key) {
+        client.shutdown();
+    }
+    let mut client = PersistentStdioMcpClient::start(server, timeout)?;
+    let retry = client.call(method, params, timeout);
+    if retry.is_ok() {
+        clients.insert(key, client);
+    } else {
+        client.shutdown();
+    }
+    retry
+}
+
+fn mcp_stdio_client_key(server_name: &str, server: &crate::config::McpServerConfig) -> String {
+    let mut env = server.env.iter().collect::<Vec<_>>();
+    env.sort_by(|(left, _), (right, _)| left.cmp(right));
+    json!({
+        "name": server_name,
+        "command": server.command,
+        "args": server.args,
+        "env": env,
+    })
+    .to_string()
 }
 
 fn call_mcp_http_method(
@@ -1636,6 +1721,30 @@ fn write_mcp_message(stdin: &mut impl Write, value: &serde_json::Value) -> std::
     line.push('\n');
     stdin.write_all(line.as_bytes())?;
     stdin.flush()
+}
+
+fn mcp_initialize_request(id: u64) -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "libertai-cli",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+        },
+    })
+}
+
+fn mcp_initialized_notification() -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {},
+    })
 }
 
 fn wait_for_mcp_response(
@@ -2491,37 +2600,83 @@ mod tests {
 
     #[test]
     fn mcp_method_call_reads_stdio_resource() {
+        let server = McpServerConfig {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                concat!(
+                    "read init; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}}}'; ",
+                    "read initialized; ",
+                    "read call; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"contents\":[{\"uri\":\"file:///repo/README.md\",\"mimeType\":\"text/markdown\",\"text\":\"hello docs\"}]}}';"
+                )
+                .to_string(),
+            ],
+            env: HashMap::new(),
+            ..McpServerConfig::default()
+        };
         let cfg = Config {
-            mcp_servers: HashMap::from([(
-                "docs".to_string(),
-                McpServerConfig {
-                    command: "sh".to_string(),
-                    args: vec![
-                        "-c".to_string(),
-                        concat!(
-                            "read init; ",
-                            "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}}}'; ",
-                            "read initialized; ",
-                            "read call; ",
-                            "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"contents\":[{\"uri\":\"file:///repo/README.md\",\"mimeType\":\"text/markdown\",\"text\":\"hello docs\"}]}}';"
-                        )
-                        .to_string(),
-                    ],
-                    env: HashMap::new(),
-                    ..McpServerConfig::default()
-                },
-            )]),
+            mcp_servers: HashMap::from([("docs-resource-test".to_string(), server.clone())]),
             ..Config::default()
         };
         let run = call_mcp_method_with_config(
             &cfg,
-            "docs",
+            "docs-resource-test",
             "resources/read",
             json!({"uri":"file:///repo/README.md"}),
             Some(2),
         );
         assert_eq!(run.status, 0, "stderr: {}", run.stderr);
         assert!(run.stdout.contains("hello docs"));
+        reset_mcp_cli_session_for_config("docs-resource-test", &server);
+    }
+
+    #[test]
+    fn mcp_tool_calls_reuse_stdio_session_until_reset() {
+        let server = McpServerConfig {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                concat!(
+                    "read init; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}}}'; ",
+                    "read initialized; ",
+                    "read call1; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"first\"}],\"isError\":false}}'; ",
+                    "read call2; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"second\"}],\"isError\":false}}'; ",
+                    "sleep 5;"
+                )
+                .to_string(),
+            ],
+            env: HashMap::new(),
+            ..McpServerConfig::default()
+        };
+        let cfg = Config {
+            mcp_servers: HashMap::from([("docs-reuse-test".to_string(), server.clone())]),
+            ..Config::default()
+        };
+        let first = call_mcp_tool_with_config(
+            &cfg,
+            "docs-reuse-test",
+            "search",
+            json!({"query":"one"}),
+            Some(2),
+        );
+        assert_eq!(first.status, 0, "stderr: {}", first.stderr);
+        assert_eq!(first.stdout, "first");
+
+        let second = call_mcp_tool_with_config(
+            &cfg,
+            "docs-reuse-test",
+            "search",
+            json!({"query":"two"}),
+            Some(2),
+        );
+        assert_eq!(second.status, 0, "stderr: {}", second.stderr);
+        assert_eq!(second.stdout, "second");
+        assert!(reset_mcp_cli_session_for_config("docs-reuse-test", &server));
     }
 
     #[test]

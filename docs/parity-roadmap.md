@@ -783,7 +783,7 @@ review policy, MCP input presence, and preserved metadata keys without printing 
 header or environment values.
 
 Remaining work: any pi-level typed hook dispatcher and persistent/live CLI MCP
-connection management.
+connection management beyond the terminal stdio session registry.
 
 **Files**: `src/config.rs`,
 `src/commands/code_hooks.rs`,
@@ -805,10 +805,13 @@ enabled entries as named `mcp__server__tool` tools, plus cached
 `mcp_read_resource` and `mcp_get_prompt` tools. Terminal `/mcp status`
 now reports native exposure coverage for `mcp_call`, named cached tools,
 resource/prompt bridge tools, and resource subscription candidates. It
-still does not keep persistent MCP connections. Terminal `/mcp probe --save` and `/mcp refresh`
-can refresh discovery caches for future code sessions, and `/mcp reset`
-explicitly reports that terminal MCP calls are short-lived while Desktop owns
-the richest stdio/HTTP/SSE live registry today. Terminal `/mcp show
+keeps initialized stdio MCP sessions alive across agent-callable
+`mcp_call`, cached `mcp__server__tool`, `mcp_read_resource`, and
+`mcp_get_prompt` calls until `/mcp reset` or process exit. Streamable
+HTTP and legacy SSE calls remain per-call in the terminal. Terminal
+`/mcp probe --save` and `/mcp refresh` can refresh discovery caches for
+future code sessions, and `/mcp reset` closes live terminal stdio MCP
+sessions. Terminal `/mcp show
 <server>` inspects one configured server without exposing secret
 env/header values, including transport, target, cache counts, and cached
 tools/resources/prompts.

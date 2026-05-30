@@ -548,7 +548,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert!(text.contains("MCP hook server `github` is not configured"));
+            assert!(text.contains("MCP server `github` is not configured"));
         });
     }
 
