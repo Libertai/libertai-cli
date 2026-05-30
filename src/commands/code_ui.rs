@@ -4415,7 +4415,9 @@ fn print_send_status(rest: &str) {
             requested.replace('\n', " ")
         );
     }
-    println!("{DIM}  usage:{RESET} /send status, /send targets, /send <session> <message>");
+    println!(
+        "{DIM}  usage:{RESET} /send status, /send targets, /send list, /send <session> <message>"
+    );
     println!(
         "{DIM}  remaining gap:{RESET} pi-level streaming child-agent bus or detached inter-agent scheduler."
     );
@@ -12477,6 +12479,9 @@ mod tests {
     #[test]
     fn send_command_arg_accepts_desktop_alias() {
         assert_eq!(send_command_arg("/send"), Some(""));
+        assert_eq!(send_command_arg("/send status"), Some("status"));
+        assert_eq!(send_command_arg("/send targets"), Some("targets"));
+        assert_eq!(send_command_arg("/send list"), Some("list"));
         assert_eq!(send_command_arg("/send worker finish tests"), Some("worker finish tests"));
         assert_eq!(send_command_arg("/send-message"), Some(""));
         assert_eq!(
