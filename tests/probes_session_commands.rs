@@ -17,6 +17,7 @@ const REQUIRED_PHRASES: &[&str] = &[
     "/remember <kind>: <fact>",
     "/mcp",
     "/hooks",
+    "/hook",
     "!<command>",
     "/loop",
     "/auto",

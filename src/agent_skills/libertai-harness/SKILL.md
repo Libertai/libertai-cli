@@ -169,8 +169,8 @@ the task is to address GitHub review feedback; use `/agent <name>
 `/send` when another open session should receive context; use `/init --agent <notes>`
 when the task is to have the model inspect a repo and write or merge
 AGENTS.md guidance; use `/memory` or `/remember <kind>: <fact>` for
-durable memory updates; use `/mcp` and `/hooks` to inspect integrations
-before assuming they are absent.
+durable memory updates; use `/mcp` and `/hooks` (or `/hook`) to inspect
+integrations before assuming they are absent.
 
 Use `!<command>` only for local shell escape checks that should run
 outside the model as a user-visible command. Prefer the bash tool when

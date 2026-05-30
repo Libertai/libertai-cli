@@ -2623,7 +2623,7 @@ fn print_help() {
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
     println!("{DIM}  /config [status|show|current|info|path|open|advanced|set <key> <value>|unset <key>] — show or update active config{RESET}");
-    println!("{DIM}  /hooks    — show configured command hooks (/hooks open shows settings target){RESET}");
+    println!("{DIM}  /hooks    — show configured command hooks (/hook is accepted too){RESET}");
     println!("{DIM}  /mcp      — show terminal MCP support status{RESET}");
     println!(
         "{DIM}  /statusline <template|command <shell>|reset> — customize the input-bar status line{RESET}"
@@ -4114,8 +4114,11 @@ fn notify_command_arg(trimmed: &str) -> Option<&str> {
 
 fn hooks_command_arg(trimmed: &str) -> Option<&str> {
     match trimmed {
-        "/hooks" => Some(""),
-        _ => trimmed.strip_prefix("/hooks ").map(str::trim),
+        "/hooks" | "/hook" => Some(""),
+        _ => trimmed
+            .strip_prefix("/hooks ")
+            .or_else(|| trimmed.strip_prefix("/hook "))
+            .map(str::trim),
     }
 }
 
@@ -12065,7 +12068,9 @@ mod tests {
         assert_eq!(hooks_command_arg("/hooks"), Some(""));
         assert_eq!(hooks_command_arg("/hooks status"), Some("status"));
         assert_eq!(hooks_command_arg("/hooks open"), Some("open"));
-        assert_eq!(hooks_command_arg("/hook"), None);
+        assert_eq!(hooks_command_arg("/hook"), Some(""));
+        assert_eq!(hooks_command_arg("/hook status"), Some("status"));
+        assert_eq!(hooks_command_arg("/hook open"), Some("open"));
         assert_eq!(parse_hooks_command(""), HooksCommand::Status);
         assert_eq!(parse_hooks_command("list"), HooksCommand::Status);
         assert_eq!(parse_hooks_command("diagnostics"), HooksCommand::Status);
