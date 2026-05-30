@@ -2787,7 +2787,10 @@ fn parse_sandbox_action(raw: &str) -> SandboxAction<'_> {
     if value.is_empty()
         || value.eq_ignore_ascii_case("info")
         || value.eq_ignore_ascii_case("status")
+        || value.eq_ignore_ascii_case("state")
         || value.eq_ignore_ascii_case("show")
+        || value.eq_ignore_ascii_case("diagnostics")
+        || value.eq_ignore_ascii_case("diag")
     {
         SandboxAction::Info
     } else if value.eq_ignore_ascii_case("reload") {
@@ -10008,6 +10011,10 @@ mod tests {
         assert_eq!(parse_sandbox_action(""), SandboxAction::Info);
         assert_eq!(parse_sandbox_action("info"), SandboxAction::Info);
         assert_eq!(parse_sandbox_action("STATUS"), SandboxAction::Info);
+        assert_eq!(parse_sandbox_action("state"), SandboxAction::Info);
+        assert_eq!(parse_sandbox_action("show"), SandboxAction::Info);
+        assert_eq!(parse_sandbox_action("diagnostics"), SandboxAction::Info);
+        assert_eq!(parse_sandbox_action("diag"), SandboxAction::Info);
         assert_eq!(parse_sandbox_action("reload"), SandboxAction::Reload);
         assert_eq!(parse_sandbox_action("reset"), SandboxAction::Unknown("reset"));
     }

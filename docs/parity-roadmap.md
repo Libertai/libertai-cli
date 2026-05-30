@@ -165,6 +165,9 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/sandbox` command** — REPL users can inspect the effective
   strict bash sandbox profile with `/sandbox [info]`; `/sandbox reload`
   explains the CLI restart requirement.
+- **CLI `/sandbox` aliases** — REPL users get explicit `/sandbox
+  status|state|show|diagnostics|diag` handling for strict-profile
+  inspection.
 - **CLI `/vim` command** — REPL users get explicit `/vim`,
   `/vim status`, `/vim on`, and `/vim off` handling so Vim-mode requests
   report the current terminal limitation instead of falling through as
