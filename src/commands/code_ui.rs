@@ -2621,9 +2621,7 @@ fn print_help() {
     println!("{DIM}  /config [status|show|current|info|path|open|advanced|set <key> <value>|unset <key>] — show or update active config{RESET}");
     println!("{DIM}  /hooks    — show configured command hooks (/hook is accepted too){RESET}");
     println!("{DIM}  /mcp      — show terminal MCP support status{RESET}");
-    println!(
-        "{DIM}  /statusline <template|command <shell>|reset> — customize the input-bar status line{RESET}"
-    );
+    println!("{DIM}  {} — customize the input-bar status line{RESET}", status_line_usage_text());
     println!("{DIM}  /hotkeys  — show input bar keyboard controls{RESET}");
     println!("{DIM}  /tree [path] — show a bounded project tree{RESET}");
     println!("{DIM}  /changelog [count] — show recent git commits{RESET}");
@@ -10148,14 +10146,12 @@ fn print_status_line_status(cfg: &LibertaiConfig) {
         }
     );
     println!("{DIM}  {}{RESET}", status_line_help());
-    println!(
-        "{DIM}  usage:{RESET} {}",
-        concat!(
-            "/statusline <template>, /statusline command <shell>, ",
-            "/statusline command-clear, /statusline reset, /statusline status"
-        )
-    );
+    println!("{DIM}  usage:{RESET} {}", status_line_usage_text());
     println!();
+}
+
+fn status_line_usage_text() -> &'static str {
+    "/statusline|/status-line <status|show|template|command <shell>|command-clear|command reset|command clear|reset|clear>"
 }
 
 fn handle_status_line_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Result<()> {
@@ -11415,6 +11411,9 @@ mod tests {
             "reset"
         );
         assert!(status_line_command_arg("/status").is_none());
+        assert!(status_line_usage_text().contains("/statusline|/status-line"));
+        assert!(status_line_usage_text().contains("command reset|command clear"));
+        assert!(status_line_usage_text().contains("reset|clear"));
     }
 
     #[test]
