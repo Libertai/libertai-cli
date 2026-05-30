@@ -137,10 +137,13 @@ SDK; those are flagged **(upstream)**.
   `/agent --detached` alias, without blocking the active transcript; the
   command prints the child PID and a log path under
   `~/.config/libertai/code-background-agents`. `/agents background`
-  lists recorded detached runs, `/agents background show [pid|latest]`
-  inspects one run's status/backend/cwd/log/prompt metadata, `/agents
-  background log [pid|latest]` tails saved output, and `/agents
-  background kill <pid>` stops a running child process.
+  lists recorded detached runs with stable run ids, `/agents background
+  json` emits machine-readable status, `/agents background show
+  [pid|run-id|latest]` inspects one run's status/backend/cwd/log/prompt
+  metadata, `/agents background show [pid|run-id|latest] --json` emits
+  one machine-readable run record, `/agents background log
+  [pid|run-id|latest]` tails saved output, and `/agents background kill
+  <pid>` stops a running child process.
 - **CLI `/doctor` command** — REPL users can print a local diagnostic
   report for session state, auth/config, smart approval status,
   remembered approvals, hook event counts, memory/templates/agents,
@@ -654,10 +657,13 @@ tool for that named sub-agent, and `/agent --background <name> <task>`
 or `/agent --detached <name> <task>` starts a detached terminal child
 process with PID/log reporting while the current REPL remains usable.
 `/agents background` lists recorded detached runs with
-total/running/exited/unknown status counts, `/agents background
-show [pid|latest]` inspects one run's status/backend/cwd/log/prompt
-metadata, `/agents background log [pid|latest]` tails their saved output,
-and `/agents background kill <pid>` stops a running child process;
+total/running/exited/unknown status counts and stable run ids,
+`/agents background json` emits machine-readable status, `/agents
+background show [pid|run-id|latest]` inspects one run's
+status/backend/cwd/log/prompt metadata, `/agents background show
+[pid|run-id|latest] --json` emits one machine-readable run record,
+`/agents background log [pid|run-id|latest]` tails their saved output, and
+`/agents background kill <pid>` stops a running child process;
 `/agents background prune` removes non-running records from the durable
 list. CLI
 `/agents show <name>` inspects a definition with source path, metadata,

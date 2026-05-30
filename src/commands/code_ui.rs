@@ -6104,7 +6104,7 @@ fn print_agents() {
     println!();
 }
 
-const AGENTS_USAGE: &str = "/agents [list|status|show <name>|open|settings|edit|background|bg] | /agents background|bg [list|show|inspect|log|kill|stop|prune|clear] | /agents create [--worktree|--same-cwd] <name> [description] | /agents delete|remove <name>";
+const AGENTS_USAGE: &str = "/agents [list|status|show <name>|open|settings|edit|background|bg] | /agents background|bg [list|json|show|inspect|show-json|log|kill|stop|prune|clear] | /agents create [--worktree|--same-cwd] <name> [description] | /agents delete|remove <name>";
 
 fn handle_agents_command(input: &str) {
     match parse_agents_command(input) {
@@ -6114,7 +6114,9 @@ fn handle_agents_command(input: &str) {
         AgentsSlashCommand::Create(rest) => create_agent_from_slash(rest),
         AgentsSlashCommand::Delete(rest) => delete_agent_from_slash(rest),
         AgentsSlashCommand::BackgroundList => print_background_agents(),
+        AgentsSlashCommand::BackgroundListJson => print_background_agents_json(),
         AgentsSlashCommand::BackgroundShow(rest) => print_background_agent_details(rest),
+        AgentsSlashCommand::BackgroundShowJson(rest) => print_background_agent_details_json(rest),
         AgentsSlashCommand::BackgroundLog(rest) => print_background_agent_log(rest),
         AgentsSlashCommand::BackgroundKill(rest) => kill_background_agent(rest),
         AgentsSlashCommand::BackgroundPrune => prune_background_agents(),
@@ -6132,7 +6134,9 @@ enum AgentsSlashCommand<'a> {
     Create(&'a str),
     Delete(&'a str),
     BackgroundList,
+    BackgroundListJson,
     BackgroundShow(&'a str),
+    BackgroundShowJson(&'a str),
     BackgroundLog(&'a str),
     BackgroundKill(&'a str),
     BackgroundPrune,
@@ -6153,12 +6157,29 @@ fn parse_agents_command(input: &str) -> AgentsSlashCommand<'_> {
     if raw == "background" || raw == "background list" || raw == "bg" || raw == "bg list" {
         return AgentsSlashCommand::BackgroundList;
     }
+    if matches!(
+        raw,
+        "background json" | "bg json" | "background list --json" | "bg list --json"
+    ) {
+        return AgentsSlashCommand::BackgroundListJson;
+    }
+    if let Some(rest) = raw
+        .strip_prefix("background show-json")
+        .or_else(|| raw.strip_prefix("bg show-json"))
+        .or_else(|| raw.strip_prefix("background inspect-json"))
+        .or_else(|| raw.strip_prefix("bg inspect-json"))
+    {
+        return AgentsSlashCommand::BackgroundShowJson(rest.trim());
+    }
     if let Some(rest) = raw
         .strip_prefix("background show")
         .or_else(|| raw.strip_prefix("bg show"))
         .or_else(|| raw.strip_prefix("background inspect"))
         .or_else(|| raw.strip_prefix("bg inspect"))
     {
+        if let Some(rest) = strip_trailing_json_flag(rest) {
+            return AgentsSlashCommand::BackgroundShowJson(rest);
+        }
         return AgentsSlashCommand::BackgroundShow(rest.trim());
     }
     if let Some(rest) = raw
@@ -6191,6 +6212,11 @@ fn parse_agents_command(input: &str) -> AgentsSlashCommand<'_> {
         return AgentsSlashCommand::Delete(rest.trim());
     }
     AgentsSlashCommand::Usage
+}
+
+fn strip_trailing_json_flag(input: &str) -> Option<&str> {
+    let rest = input.trim();
+    rest.strip_suffix(" --json").map(str::trim)
 }
 
 fn print_agent_details(input: &str) {
@@ -6375,7 +6401,8 @@ fn print_background_agents() {
             for record in records.iter().rev().take(20) {
                 let status = background_agent_status(record.pid);
                 println!(
-                    "- pid {} [{}] {} — {}",
+                    "- {} · pid {} [{}] {} — {}",
+                    background_agent_record_id(record),
                     record.pid,
                     status.label(),
                     record.name,
@@ -6388,12 +6415,41 @@ fn print_background_agents() {
                 );
                 println!("{DIM}  log: {}{RESET}", record.log_path);
             }
-            println!("{DIM}  /agents background log [pid|latest] shows the saved output.{RESET}");
             println!(
-                "{DIM}  /agents background show [pid|latest] inspects one recorded run.{RESET}"
+                "{DIM}  /agents background log [pid|run-id|latest] shows the saved output.{RESET}"
             );
+            println!(
+                "{DIM}  /agents background show [pid|run-id|latest] inspects one recorded run.{RESET}"
+            );
+            println!("{DIM}  /agents background json prints machine-readable status.{RESET}");
             println!("{DIM}  /agents background kill <pid> stops a running background agent.{RESET}");
             println!("{DIM}  /agents background prune removes exited records from the list.{RESET}");
+        }
+        Err(e) => eprintln!("{DIM}  /agents: could not read background agents: {e:#}{RESET}"),
+    }
+}
+
+fn print_background_agents_json() {
+    match load_background_agent_records() {
+        Ok(records) => {
+            let counts = background_agent_status_counts(&records, background_agent_status);
+            let payload = BackgroundAgentListJson {
+                counts,
+                records: records
+                    .iter()
+                    .rev()
+                    .map(|record| BackgroundAgentRecordJson {
+                        record,
+                        status: background_agent_status(record.pid).label(),
+                    })
+                    .collect(),
+            };
+            match serde_json::to_string_pretty(&payload) {
+                Ok(raw) => println!("{raw}"),
+                Err(e) => eprintln!(
+                    "{DIM}  /agents: could not serialize background agents: {e:#}{RESET}"
+                ),
+            }
         }
         Err(e) => eprintln!("{DIM}  /agents: could not read background agents: {e:#}{RESET}"),
     }
@@ -6410,12 +6466,33 @@ fn print_background_agent_details(input: &str) {
     }
 }
 
+fn print_background_agent_details_json(input: &str) {
+    match resolve_background_agent_record(input.trim()) {
+        Ok(Some(record)) => {
+            let status = background_agent_status(record.pid);
+            let payload = BackgroundAgentRecordJson {
+                record: &record,
+                status: status.label(),
+            };
+            match serde_json::to_string_pretty(&payload) {
+                Ok(raw) => println!("{raw}"),
+                Err(e) => eprintln!(
+                    "{DIM}  /agents: could not serialize background agent: {e:#}{RESET}"
+                ),
+            }
+        }
+        Ok(None) => eprintln!("{DIM}  /agents: no matching background agent found{RESET}"),
+        Err(e) => eprintln!("{DIM}  /agents: {e:#}{RESET}"),
+    }
+}
+
 fn format_background_agent_details(
     record: &BackgroundAgentRecord,
     status: BackgroundAgentStatus,
 ) -> String {
     [
         format!("{BOLD}background agent: pid {}{RESET}", record.pid),
+        format!("{DIM}  run id:{RESET} {}", background_agent_record_id(record)),
         format!("{DIM}  status:{RESET} {}", status.label()),
         format!("{DIM}  name:{RESET} {}", record.name),
         format!("{DIM}  provider:{RESET} {}", display_or_dash(&record.provider)),
@@ -6434,6 +6511,19 @@ fn format_background_agent_details(
         format!("{DIM}  prompt:{RESET} {}", record.prompt_preview),
     ]
     .join("\n")
+}
+
+#[derive(Debug, Serialize)]
+struct BackgroundAgentListJson<'a> {
+    counts: BackgroundAgentStatusCounts,
+    records: Vec<BackgroundAgentRecordJson<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct BackgroundAgentRecordJson<'a> {
+    #[serde(flatten)]
+    record: &'a BackgroundAgentRecord,
+    status: &'static str,
 }
 
 fn format_background_agent_command(record: &BackgroundAgentRecord) -> String {
@@ -7604,6 +7694,8 @@ struct StartedBackgroundAgent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BackgroundAgentRecord {
     pid: u32,
+    #[serde(default)]
+    run_id: String,
     name: String,
     provider: String,
     model: String,
@@ -7623,7 +7715,7 @@ enum BackgroundAgentStatus {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 struct BackgroundAgentStatusCounts {
     total: usize,
     running: usize,
@@ -7798,8 +7890,10 @@ fn background_agent_record(
 ) -> BackgroundAgentRecord {
     let mut launched_argv = vec![exe.display().to_string()];
     launched_argv.extend(background_agent_args(exe, launch));
+    let started_at_ms = now_epoch_ms();
     BackgroundAgentRecord {
         pid: started.pid,
+        run_id: background_agent_run_id(started.pid, started_at_ms),
         name: launch.name.clone(),
         provider: launch.provider.clone(),
         model: launch.model.clone(),
@@ -7812,8 +7906,20 @@ fn background_agent_record(
         prompt_preview: preview_text(&launch.prompt, 160),
         cwd: launch.cwd.display().to_string(),
         log_path: started.log_path.display().to_string(),
-        started_at_ms: now_epoch_ms(),
+        started_at_ms,
         launched_argv,
+    }
+}
+
+fn background_agent_run_id(pid: u32, started_at_ms: u64) -> String {
+    format!("bg-{started_at_ms}-{pid}")
+}
+
+fn background_agent_record_id(record: &BackgroundAgentRecord) -> String {
+    if record.run_id.trim().is_empty() {
+        background_agent_run_id(record.pid, record.started_at_ms)
+    } else {
+        record.run_id.clone()
     }
 }
 
@@ -7876,8 +7982,11 @@ fn load_background_agent_records() -> Result<Vec<BackgroundAgentRecord>> {
         if line.is_empty() {
             continue;
         }
-        let record = serde_json::from_str::<BackgroundAgentRecord>(line)
+        let mut record = serde_json::from_str::<BackgroundAgentRecord>(line)
             .with_context(|| format!("parsing {} line {}", path.display(), idx + 1))?;
+        if record.run_id.trim().is_empty() {
+            record.run_id = background_agent_record_id(&record);
+        }
         out.push(record);
     }
     Ok(out)
@@ -7890,6 +7999,13 @@ fn resolve_background_agent_record(input: &str) -> Result<Option<BackgroundAgent
     }
     if input.is_empty() || input == "latest" {
         return Ok(records.into_iter().last());
+    }
+    if let Some(record) = records
+        .iter()
+        .rev()
+        .find(|record| background_agent_record_id(record) == input)
+    {
+        return Ok(Some(record.clone()));
     }
     let pid = parse_background_agent_pid(input)?;
     Ok(records.into_iter().rev().find(|record| record.pid == pid))
@@ -11759,6 +11875,7 @@ mod tests {
         let background_records = vec![
             BackgroundAgentRecord {
                 pid: 1,
+                run_id: "bg-10-1".to_string(),
                 name: "running".to_string(),
                 provider: "libertai".to_string(),
                 model: "qwen".to_string(),
@@ -11771,6 +11888,7 @@ mod tests {
             },
             BackgroundAgentRecord {
                 pid: 2,
+                run_id: "bg-20-2".to_string(),
                 name: "done".to_string(),
                 provider: "libertai".to_string(),
                 model: "qwen".to_string(),
@@ -11783,6 +11901,7 @@ mod tests {
             },
             BackgroundAgentRecord {
                 pid: 3,
+                run_id: "bg-30-3".to_string(),
                 name: "unknown".to_string(),
                 provider: "libertai".to_string(),
                 model: "qwen".to_string(),
@@ -13593,8 +13712,24 @@ mod tests {
             AgentsSlashCommand::BackgroundList
         );
         assert_eq!(
+            parse_agents_command("background json"),
+            AgentsSlashCommand::BackgroundListJson
+        );
+        assert_eq!(
+            parse_agents_command("bg list --json"),
+            AgentsSlashCommand::BackgroundListJson
+        );
+        assert_eq!(
             parse_agents_command("background show 123"),
             AgentsSlashCommand::BackgroundShow("123")
+        );
+        assert_eq!(
+            parse_agents_command("background show 123 --json"),
+            AgentsSlashCommand::BackgroundShowJson("123")
+        );
+        assert_eq!(
+            parse_agents_command("bg show-json latest"),
+            AgentsSlashCommand::BackgroundShowJson("latest")
         );
         assert_eq!(
             parse_agents_command("bg inspect latest"),
@@ -13634,6 +13769,7 @@ mod tests {
         };
         let record = background_agent_record(&launch, &started, Path::new("/usr/bin/lcode"));
         assert_eq!(record.pid, 4242);
+        assert_eq!(record.run_id, format!("bg-{}-4242", record.started_at_ms));
         assert_eq!(record.name, "reviewer");
         assert_eq!(record.mode, "plan");
         assert_eq!(record.cwd, "/tmp/project");
@@ -13655,9 +13791,30 @@ mod tests {
     }
 
     #[test]
+    fn background_agent_record_id_backfills_legacy_records() {
+        let mut record = BackgroundAgentRecord {
+            pid: 4242,
+            run_id: String::new(),
+            name: "reviewer".to_string(),
+            provider: "libertai".to_string(),
+            model: "qwen".to_string(),
+            mode: "normal".to_string(),
+            prompt_preview: "Run review".to_string(),
+            cwd: "/tmp/project".to_string(),
+            log_path: "/tmp/reviewer.log".to_string(),
+            started_at_ms: 99,
+            launched_argv: Vec::new(),
+        };
+        assert_eq!(background_agent_record_id(&record), "bg-99-4242");
+        record.run_id = "custom-run".to_string();
+        assert_eq!(background_agent_record_id(&record), "custom-run");
+    }
+
+    #[test]
     fn background_agent_details_include_runtime_metadata() {
         let record = BackgroundAgentRecord {
             pid: 4242,
+            run_id: "bg-0-4242".to_string(),
             name: "reviewer".to_string(),
             provider: "libertai".to_string(),
             model: "qwen".to_string(),
@@ -13678,6 +13835,8 @@ mod tests {
         };
         let details = format_background_agent_details(&record, BackgroundAgentStatus::Running);
         assert!(details.contains("background agent: pid 4242"));
+        assert!(details.contains("run id:"));
+        assert!(details.contains("bg-0-4242"));
         assert!(details.contains("status:"));
         assert!(details.contains("running"));
         assert!(details.contains("name:"));
@@ -13698,10 +13857,35 @@ mod tests {
     }
 
     #[test]
+    fn background_agent_json_includes_status_and_run_id() {
+        let record = BackgroundAgentRecord {
+            pid: 4242,
+            run_id: "bg-0-4242".to_string(),
+            name: "reviewer".to_string(),
+            provider: "libertai".to_string(),
+            model: "qwen".to_string(),
+            mode: "plan".to_string(),
+            prompt_preview: "Run review".to_string(),
+            cwd: "/tmp/project".to_string(),
+            log_path: "/tmp/reviewer.log".to_string(),
+            started_at_ms: 0,
+            launched_argv: Vec::new(),
+        };
+        let payload = BackgroundAgentRecordJson {
+            record: &record,
+            status: BackgroundAgentStatus::Running.label(),
+        };
+        let raw = serde_json::to_string(&payload).unwrap();
+        assert!(raw.contains("\"run_id\":\"bg-0-4242\""));
+        assert!(raw.contains("\"status\":\"running\""));
+    }
+
+    #[test]
     fn retain_running_background_agent_records_prunes_finished_runs() {
         let records = vec![
             BackgroundAgentRecord {
                 pid: 1,
+                run_id: "bg-10-1".to_string(),
                 name: "running".to_string(),
                 provider: "libertai".to_string(),
                 model: "qwen".to_string(),
@@ -13714,6 +13898,7 @@ mod tests {
             },
             BackgroundAgentRecord {
                 pid: 2,
+                run_id: "bg-20-2".to_string(),
                 name: "done".to_string(),
                 provider: "libertai".to_string(),
                 model: "qwen".to_string(),
@@ -13741,6 +13926,7 @@ mod tests {
         let records = vec![
             BackgroundAgentRecord {
                 pid: 1,
+                run_id: "bg-10-1".to_string(),
                 name: "running".to_string(),
                 provider: "libertai".to_string(),
                 model: "qwen".to_string(),
@@ -13753,6 +13939,7 @@ mod tests {
             },
             BackgroundAgentRecord {
                 pid: 2,
+                run_id: "bg-20-2".to_string(),
                 name: "done".to_string(),
                 provider: "libertai".to_string(),
                 model: "qwen".to_string(),
@@ -13765,6 +13952,7 @@ mod tests {
             },
             BackgroundAgentRecord {
                 pid: 3,
+                run_id: "bg-30-3".to_string(),
                 name: "unknown".to_string(),
                 provider: "libertai".to_string(),
                 model: "qwen".to_string(),
