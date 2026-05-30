@@ -1718,7 +1718,7 @@ async fn repl_loop(
             } else {
                 if trimmed == "/agent" {
                     println!(
-                        "{DIM}  usage: /agent [--worktree|--background] <name> <task>{RESET}"
+                        "{DIM}  usage: /agent [--worktree|--background|--detached] <name> <task>{RESET}"
                     );
                     continue;
                 }
@@ -2651,9 +2651,9 @@ fn print_help() {
     println!("{DIM}  /agents create [--worktree] <name> [description] — create a project sub-agent{RESET}");
     println!("{DIM}  /agents delete <name> — delete the active named sub-agent definition{RESET}");
     println!(
-        "{DIM}  /agent [--worktree|--background] <name> <task> — run a named sub-agent task{RESET}"
+        "{DIM}  /agent [--worktree|--background|--detached] <name> <task> — run a named sub-agent task{RESET}"
     );
-    println!("{DIM}  /agent --background <name> <task> — start a detached terminal agent and write a log under ~/.config/libertai/code-background-agents{RESET}");
+    println!("{DIM}  /agent --background|--detached <name> <task> — start a detached terminal agent and write a log under ~/.config/libertai/code-background-agents{RESET}");
     println!("{DIM}  /agents background [list|show|log|kill|prune|clear] — inspect, stop, or prune terminal background agents{RESET}");
     println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
     println!("{DIM}  /theme [system|dark|light|high-contrast] — show terminal theme status{RESET}");
@@ -7920,7 +7920,7 @@ fn parse_agent_slash_query(query: &str) -> Result<AgentSlashQuery<'_>> {
     let mut rest = raw;
     loop {
         let Some((head, tail)) = split_first_word(rest) else {
-            anyhow::bail!("usage: /agent [--worktree|--background] <name> <task>");
+            anyhow::bail!("usage: /agent [--worktree|--background|--detached] <name> <task>");
         };
         match head {
             "--worktree" | "--isolation=worktree" => {
@@ -7939,12 +7939,12 @@ fn parse_agent_slash_query(query: &str) -> Result<AgentSlashQuery<'_>> {
         }
     }
     let Some((name, task)) = rest.split_once(char::is_whitespace) else {
-        anyhow::bail!("usage: /agent [--worktree|--background] <name> <task>");
+        anyhow::bail!("usage: /agent [--worktree|--background|--detached] <name> <task>");
     };
     let name = name.trim();
     let task = task.trim();
     if name.is_empty() || task.is_empty() {
-        anyhow::bail!("usage: /agent [--worktree|--background] <name> <task>");
+        anyhow::bail!("usage: /agent [--worktree|--background|--detached] <name> <task>");
     }
     Ok(AgentSlashQuery {
         name,
@@ -13206,7 +13206,10 @@ mod tests {
             }
         );
         assert!(parse_agent_slash_query("reviewer").is_err());
-        assert!(parse_agent_slash_query("reviewer   ").is_err());
+        let usage = parse_agent_slash_query("reviewer   ")
+            .unwrap_err()
+            .to_string();
+        assert!(usage.contains("--detached"));
     }
 
     #[test]
