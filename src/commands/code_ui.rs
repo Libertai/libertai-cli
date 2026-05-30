@@ -2648,7 +2648,7 @@ fn print_help() {
     println!("{DIM}  /login [status|show|info|libertai|provider] — inspect auth or run libertai login{RESET}");
     println!("{DIM}  /logout [status|show|info|libertai|provider] — run libertai logout or explain provider logout{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
-    println!("{DIM}  /skills [list|open|enable <name>|disable <name>] — manage code-agent skills for new sessions{RESET}");
+    println!("{DIM}  /skills [list|status|show <name>|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions{RESET}");
     println!(
         "{DIM}  /init [--agent|from-agent preview append|preview merge|preview merge-lines|preview replace|preview [append|merge|merge-lines] sections N[,M]|append sections N[,M]|merge sections N[,M]|merge-lines sections N[,M]|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}"
     );
@@ -6561,7 +6561,9 @@ fn parse_skills_command(query: &str) -> Result<SkillsCommand> {
             }
             Ok(SkillsCommand::Disable(name.to_string()))
         }
-        _ => anyhow::bail!("usage: /skills [list|show <name>|open|enable <name>|disable <name>]"),
+        _ => anyhow::bail!(
+            "usage: /skills [list|status|show <name>|open|settings|edit|enable|on <name>|disable|off <name>]"
+        ),
     }
 }
 
@@ -13913,7 +13915,10 @@ mod tests {
             SkillsCommand::Disable("project-review".to_string())
         );
         assert!(parse_skills_command("enable").is_err());
-        assert!(parse_skills_command("remove foo").is_err());
+        let usage = parse_skills_command("remove foo").unwrap_err().to_string();
+        assert!(usage.contains("settings"));
+        assert!(usage.contains("on <name>"));
+        assert!(usage.contains("off <name>"));
     }
 
     #[test]
