@@ -2763,6 +2763,7 @@ fn print_permissions_status(mode: Mode) {
     println!("{DIM}  supported: default, acceptEdits, plan{RESET}");
     println!("{DIM}  native bypassPermissions is intentionally unavailable.{RESET}");
     println!("{DIM}  use /permissions forget to clear saved allow rules.{RESET}");
+    println!("{DIM}  use /permissions bypassPermissions to explain the native safety stance.{RESET}");
 }
 
 fn parse_model_spec(current_provider: &str, input: &str) -> Result<(String, String)> {

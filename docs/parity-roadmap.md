@@ -32,7 +32,8 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/permissions` command** — reports the current native permission
   mode, switches among `default`, `acceptEdits`, and `plan`, clears saved
   allow rules, and documents that native `bypassPermissions`
-  is intentionally unavailable.
+  is intentionally unavailable; `/permissions bypassPermissions` is an
+  explicit explanatory action rather than a silent no-op.
 - **CLI tool preview lines** — REPL and one-shot renderers now show the
   primary tool arguments (`read src/lib.rs:12+40`, `bash cargo test`,
   `grep pattern in src`) instead of only the tool name.
