@@ -823,7 +823,10 @@ stdio, Streamable HTTP event-stream responses, and legacy SSE servers,
 advertise sampling, and answer `sampling/createMessage` through the
 configured LibertAI chat endpoint. Persistent terminal sessions also
 subscribe to enabled cached MCP resources when the server initialize
-response declares `capabilities.resources.subscribe`.
+response declares `capabilities.resources.subscribe`. Stdio,
+Streamable HTTP event-stream, and legacy SSE terminal sessions drain
+`notifications/resources/updated`, refresh the updated resource, and
+serve that fresh content on the next matching `mcp_read_resource`.
 
 **Files**: new `src/commands/code_mcp.rs` + transport modules.
 **Effort**: L (2+ weeks).

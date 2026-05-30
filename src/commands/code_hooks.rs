@@ -512,6 +512,7 @@ struct PersistentStdioMcpClient {
     rx: mpsc::Receiver<String>,
     reader: Option<thread::JoinHandle<()>>,
     next_id: u64,
+    cached_resources: HashMap<String, serde_json::Value>,
 }
 
 impl PersistentStdioMcpClient {
@@ -574,6 +575,7 @@ impl PersistentStdioMcpClient {
             rx,
             reader: Some(reader),
             next_id,
+            cached_resources: HashMap::new(),
         })
     }
 
@@ -584,6 +586,13 @@ impl PersistentStdioMcpClient {
         params: serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, String> {
+        if method == "resources/read" {
+            if let Some(uri) = params.get("uri").and_then(serde_json::Value::as_str) {
+                if let Some(result) = self.cached_resources.remove(uri) {
+                    return Ok(result);
+                }
+            }
+        }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         write_mcp_message(
@@ -596,14 +605,58 @@ impl PersistentStdioMcpClient {
             }),
         )
         .map_err(|e| format!("writing MCP {method} request: {e}"))?;
-        wait_for_mcp_response_with_roots(
+        let mut notifications = Vec::new();
+        let response = wait_for_mcp_response_with_roots_and_notifications(
             &self.rx,
             Some(&mut self.stdin),
             &server.roots,
             id,
             timeout,
-        )
-        .and_then(mcp_response_result)
+            &mut notifications,
+        )?;
+        let result = mcp_response_result(response)?;
+        self.refresh_notifications(server, notifications, timeout);
+        Ok(result)
+    }
+
+    fn refresh_notifications(
+        &mut self,
+        server: &crate::config::McpServerConfig,
+        notifications: Vec<McpNotification>,
+        timeout: Duration,
+    ) {
+        for notification in notifications {
+            let McpNotification::ResourceUpdated(uri) = notification;
+            let id = self.next_id;
+            self.next_id = self.next_id.saturating_add(1);
+            if write_mcp_message(
+                &mut self.stdin,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "resources/read",
+                    "params": { "uri": uri },
+                }),
+            )
+            .is_err()
+            {
+                continue;
+            }
+            let mut nested = Vec::new();
+            let Ok(response) = wait_for_mcp_response_with_roots_and_notifications(
+                &self.rx,
+                Some(&mut self.stdin),
+                &server.roots,
+                id,
+                timeout,
+                &mut nested,
+            ) else {
+                continue;
+            };
+            if let Ok(result) = mcp_response_result(response) {
+                self.cached_resources.insert(uri, result);
+            }
+        }
     }
 
     fn shutdown(mut self) {
@@ -621,6 +674,7 @@ struct PersistentHttpMcpClient {
     client: reqwest::blocking::Client,
     session_id: Option<String>,
     next_id: u64,
+    cached_resources: HashMap<String, serde_json::Value>,
 }
 
 impl PersistentHttpMcpClient {
@@ -658,6 +712,7 @@ impl PersistentHttpMcpClient {
             client,
             session_id,
             next_id,
+            cached_resources: HashMap::new(),
         })
     }
 
@@ -667,9 +722,17 @@ impl PersistentHttpMcpClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
+        if method == "resources/read" {
+            if let Some(uri) = params.get("uri").and_then(serde_json::Value::as_str) {
+                if let Some(result) = self.cached_resources.remove(uri) {
+                    return Ok(result);
+                }
+            }
+        }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
-        let (response, session_id) = post_mcp_http_message(
+        let mut notifications = Vec::new();
+        let (response, session_id) = post_mcp_http_message_with_notifications(
             &self.client,
             server,
             server.url.trim(),
@@ -682,11 +745,50 @@ impl PersistentHttpMcpClient {
             self.session_id.as_deref(),
             &server.roots,
             id,
+            &mut notifications,
         )?;
         if session_id.is_some() {
             self.session_id = session_id;
         }
-        mcp_response_result(response)
+        let result = mcp_response_result(response)?;
+        self.refresh_notifications(server, notifications);
+        Ok(result)
+    }
+
+    fn refresh_notifications(
+        &mut self,
+        server: &crate::config::McpServerConfig,
+        notifications: Vec<McpNotification>,
+    ) {
+        for notification in notifications {
+            let McpNotification::ResourceUpdated(uri) = notification;
+            let id = self.next_id;
+            self.next_id = self.next_id.saturating_add(1);
+            let mut nested = Vec::new();
+            let Ok((response, session_id)) = post_mcp_http_message_with_notifications(
+                &self.client,
+                server,
+                server.url.trim(),
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "resources/read",
+                    "params": { "uri": uri },
+                }),
+                self.session_id.as_deref(),
+                &server.roots,
+                id,
+                &mut nested,
+            ) else {
+                continue;
+            };
+            if session_id.is_some() {
+                self.session_id = session_id;
+            }
+            if let Ok(result) = mcp_response_result(response) {
+                self.cached_resources.insert(uri, result);
+            }
+        }
     }
 }
 
@@ -696,6 +798,7 @@ struct PersistentSseMcpClient {
     rx: mpsc::Receiver<SseEvent>,
     _reader: thread::JoinHandle<()>,
     next_id: u64,
+    cached_resources: HashMap<String, serde_json::Value>,
 }
 
 impl PersistentSseMcpClient {
@@ -736,6 +839,7 @@ impl PersistentSseMcpClient {
             rx,
             _reader: reader,
             next_id,
+            cached_resources: HashMap::new(),
         })
     }
 
@@ -746,6 +850,13 @@ impl PersistentSseMcpClient {
         params: serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, String> {
+        if method == "resources/read" {
+            if let Some(uri) = params.get("uri").and_then(serde_json::Value::as_str) {
+                if let Some(result) = self.cached_resources.remove(uri) {
+                    return Ok(result);
+                }
+            }
+        }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         post_mcp_sse_message(
@@ -759,14 +870,60 @@ impl PersistentSseMcpClient {
                 "params": params,
             }),
         )?;
-        wait_for_mcp_sse_response_with_roots(
+        let mut notifications = Vec::new();
+        let response = wait_for_mcp_sse_response_with_roots_and_notifications(
             &self.rx,
             Some((&self.client, server, self.endpoint.as_str())),
             &server.roots,
             id,
             timeout,
-        )
-        .and_then(mcp_response_result)
+            &mut notifications,
+        )?;
+        let result = mcp_response_result(response)?;
+        self.refresh_notifications(server, notifications, timeout);
+        Ok(result)
+    }
+
+    fn refresh_notifications(
+        &mut self,
+        server: &crate::config::McpServerConfig,
+        notifications: Vec<McpNotification>,
+        timeout: Duration,
+    ) {
+        for notification in notifications {
+            let McpNotification::ResourceUpdated(uri) = notification;
+            let id = self.next_id;
+            self.next_id = self.next_id.saturating_add(1);
+            if post_mcp_sse_message(
+                &self.client,
+                server,
+                &self.endpoint,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "resources/read",
+                    "params": { "uri": uri },
+                }),
+            )
+            .is_err()
+            {
+                continue;
+            }
+            let mut nested = Vec::new();
+            let Ok(response) = wait_for_mcp_sse_response_with_roots_and_notifications(
+                &self.rx,
+                Some((&self.client, server, self.endpoint.as_str())),
+                &server.roots,
+                id,
+                timeout,
+                &mut nested,
+            ) else {
+                continue;
+            };
+            if let Ok(result) = mcp_response_result(response) {
+                self.cached_resources.insert(uri, result);
+            }
+        }
     }
 }
 
@@ -1342,6 +1499,7 @@ fn mcp_stdio_client_key(server_name: &str, server: &crate::config::McpServerConf
         "args": server.args,
         "env": env,
         "roots": server.roots,
+        "resources": subscription_uris(server),
     })
     .to_string()
 }
@@ -1389,6 +1547,7 @@ fn mcp_http_client_key(server_name: &str, server: &crate::config::McpServerConfi
         "transport": server.transport,
         "headers": headers,
         "roots": server.roots,
+        "resources": subscription_uris(server),
     })
     .to_string()
 }
@@ -1436,6 +1595,7 @@ fn mcp_sse_client_key(server_name: &str, server: &crate::config::McpServerConfig
         "transport": server.transport,
         "headers": headers,
         "roots": server.roots,
+        "resources": subscription_uris(server),
     })
     .to_string()
 }
@@ -1570,6 +1730,28 @@ fn post_mcp_http_message(
     roots: &[String],
     id: u64,
 ) -> Result<(serde_json::Value, Option<String>), String> {
+    post_mcp_http_message_with_notifications(
+        client,
+        server,
+        url,
+        message,
+        session_id,
+        roots,
+        id,
+        &mut Vec::new(),
+    )
+}
+
+fn post_mcp_http_message_with_notifications(
+    client: &reqwest::blocking::Client,
+    server: &crate::config::McpServerConfig,
+    url: &str,
+    message: &serde_json::Value,
+    session_id: Option<&str>,
+    roots: &[String],
+    id: u64,
+    notifications: &mut Vec<McpNotification>,
+) -> Result<(serde_json::Value, Option<String>), String> {
     let response = send_mcp_http_request(client, server, url, message, session_id)
         .map_err(|e| e.to_string())?;
     let session_id = response
@@ -1590,7 +1772,7 @@ fn post_mcp_http_message(
         return Err(format!("HTTP {status}: {}", body.trim()));
     }
     let value = if content_type.contains("text/event-stream") {
-        parse_mcp_http_sse_response_with_roots(
+        parse_mcp_http_sse_response_with_roots_and_notifications(
             client,
             server,
             url,
@@ -1598,6 +1780,7 @@ fn post_mcp_http_message(
             roots,
             &body,
             id,
+            notifications,
         )?
     } else if body.trim().is_empty() {
         return Err("empty MCP HTTP response".to_string());
@@ -1648,7 +1831,7 @@ fn send_mcp_http_request(
     request.send()
 }
 
-fn parse_mcp_http_sse_response_with_roots(
+fn parse_mcp_http_sse_response_with_roots_and_notifications(
     client: &reqwest::blocking::Client,
     server: &crate::config::McpServerConfig,
     url: &str,
@@ -1656,6 +1839,7 @@ fn parse_mcp_http_sse_response_with_roots(
     roots: &[String],
     body: &str,
     id: u64,
+    notifications: &mut Vec<McpNotification>,
 ) -> Result<serde_json::Value, String> {
     let mut data_lines = Vec::new();
     for line in body.lines() {
@@ -1669,6 +1853,10 @@ fn parse_mcp_http_sse_response_with_roots(
         }
         let value: serde_json::Value = serde_json::from_str(data)
             .map_err(|e| format!("invalid MCP HTTP SSE data: {e}"))?;
+        if let Some(notification) = mcp_notification(&value) {
+            notifications.push(notification);
+            continue;
+        }
         if is_roots_list_request(&value) {
             send_mcp_http_request(
                 client,
@@ -1947,6 +2135,28 @@ fn wait_for_mcp_sse_response_with_roots(
     id: u64,
     timeout: Duration,
 ) -> Result<serde_json::Value, String> {
+    wait_for_mcp_sse_response_with_roots_and_notifications(
+        rx,
+        responder,
+        roots,
+        id,
+        timeout,
+        &mut Vec::new(),
+    )
+}
+
+fn wait_for_mcp_sse_response_with_roots_and_notifications(
+    rx: &mpsc::Receiver<SseEvent>,
+    responder: Option<(
+        &reqwest::blocking::Client,
+        &crate::config::McpServerConfig,
+        &str,
+    )>,
+    roots: &[String],
+    id: u64,
+    timeout: Duration,
+    notifications: &mut Vec<McpNotification>,
+) -> Result<serde_json::Value, String> {
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1958,6 +2168,10 @@ fn wait_for_mcp_sse_response_with_roots(
             .map_err(|_| "timed out waiting for SSE event".to_string())?;
         let value = serde_json::from_str::<serde_json::Value>(&event.data)
             .map_err(|e| format!("invalid MCP SSE JSON response: {e}"))?;
+        if let Some(notification) = mcp_notification(&value) {
+            notifications.push(notification);
+            continue;
+        }
         if is_roots_list_request(&value) {
             if let Some((client, server, endpoint)) = responder {
                 post_mcp_sse_message(
@@ -2173,10 +2387,28 @@ fn wait_for_mcp_response(
 
 fn wait_for_mcp_response_with_roots(
     rx: &mpsc::Receiver<String>,
+    stdin: Option<&mut dyn Write>,
+    roots: &[String],
+    id: u64,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    wait_for_mcp_response_with_roots_and_notifications(
+        rx,
+        stdin,
+        roots,
+        id,
+        timeout,
+        &mut Vec::new(),
+    )
+}
+
+fn wait_for_mcp_response_with_roots_and_notifications(
+    rx: &mpsc::Receiver<String>,
     mut stdin: Option<&mut dyn Write>,
     roots: &[String],
     id: u64,
     timeout: Duration,
+    notifications: &mut Vec<McpNotification>,
 ) -> Result<serde_json::Value, String> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -2189,6 +2421,10 @@ fn wait_for_mcp_response_with_roots(
             .map_err(|_| format!("timed out waiting for response id {id}"))?;
         let value: serde_json::Value = serde_json::from_str(&line)
             .map_err(|e| format!("invalid JSON-RPC message from MCP server: {e}"))?;
+        if let Some(notification) = mcp_notification(&value) {
+            notifications.push(notification);
+            continue;
+        }
         if is_roots_list_request(&value) {
             if let Some(stdin) = stdin.as_deref_mut() {
                 write_mcp_message(stdin, &roots_list_response(value["id"].clone(), roots))
@@ -2234,6 +2470,22 @@ fn is_sampling_create_message_request(value: &serde_json::Value) -> bool {
         && value.get("id").is_some()
         && value.get("result").is_none()
         && value.get("error").is_none()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum McpNotification {
+    ResourceUpdated(String),
+}
+
+fn mcp_notification(value: &serde_json::Value) -> Option<McpNotification> {
+    match value.get("method").and_then(serde_json::Value::as_str) {
+        Some("notifications/resources/updated") if value.get("id").is_none() => value
+            .get("params")
+            .and_then(|params| params.get("uri"))
+            .and_then(serde_json::Value::as_str)
+            .map(|uri| McpNotification::ResourceUpdated(uri.to_string())),
+        _ => None,
+    }
 }
 
 fn roots_list_response(id: serde_json::Value, roots: &[String]) -> serde_json::Value {
@@ -3555,6 +3807,63 @@ mod tests {
         assert_eq!(run.status, 0, "stderr: {}", run.stderr);
         assert_eq!(run.stdout, "subscribed");
         assert!(reset_mcp_cli_session_for_config("docs-subscribe-test", &server));
+    }
+
+    #[test]
+    fn mcp_tool_call_refreshes_updated_stdio_resource_for_next_read() {
+        let server = McpServerConfig {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                concat!(
+                    "read init; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"resources\":{\"subscribe\":true}},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}}}'; ",
+                    "read initialized; ",
+                    "read subscribe; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}'; ",
+                    "read call; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":{\"uri\":\"file:///repo/context.md\"}}'; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"tool ok\"}],\"isError\":false}}'; ",
+                    "read refresh; ",
+                    "case \"$refresh\" in ",
+                    "*'resources/read'*'file:///repo/context.md'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"contents\":[{\"uri\":\"file:///repo/context.md\",\"mimeType\":\"text/plain\",\"text\":\"fresh context\"}]}}' ;; ",
+                    "*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":4,\"error\":{\"code\":-32000,\"message\":\"missing refresh\"}}' ;; ",
+                    "esac; ",
+                    "sleep 1;"
+                )
+                .to_string(),
+            ],
+            resources: vec![McpResourceConfig {
+                uri: "file:///repo/context.md".to_string(),
+                ..McpResourceConfig::default()
+            }],
+            env: HashMap::new(),
+            ..McpServerConfig::default()
+        };
+        let cfg = Config {
+            mcp_servers: HashMap::from([("docs-refresh-test".to_string(), server.clone())]),
+            ..Config::default()
+        };
+        let run = call_mcp_tool_with_config(
+            &cfg,
+            "docs-refresh-test",
+            "search",
+            json!({"query":"context"}),
+            Some(2),
+        );
+        assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+        assert_eq!(run.stdout, "tool ok");
+
+        let read = call_mcp_method_with_config(
+            &cfg,
+            "docs-refresh-test",
+            "resources/read",
+            json!({"uri":"file:///repo/context.md"}),
+            Some(2),
+        );
+        assert_eq!(read.status, 0, "stderr: {}", read.stderr);
+        assert!(read.stdout.contains("fresh context"));
+        assert!(reset_mcp_cli_session_for_config("docs-refresh-test", &server));
     }
 
     #[test]
