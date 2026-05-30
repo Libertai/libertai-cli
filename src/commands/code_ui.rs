@@ -188,6 +188,7 @@ enum NotifyCommand {
 enum McpCommand {
     Status,
     Probe,
+    ProbeSave,
     Open,
     Usage,
 }
@@ -3791,11 +3792,13 @@ fn parse_hooks_command(input: &str) -> HooksCommand {
 }
 
 fn parse_mcp_command(input: &str) -> McpCommand {
-    match input.trim().to_ascii_lowercase().as_str() {
-        "" | "status" | "list" | "state" | "diagnostics" | "diag" | "refresh" => {
-            McpCommand::Status
-        }
+    let normalized = input.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" | "status" | "list" | "state" | "diagnostics" | "diag" => McpCommand::Status,
         "probe" | "probes" => McpCommand::Probe,
+        "refresh" | "probe --save" | "probe save" | "probe --write" | "probe write" => {
+            McpCommand::ProbeSave
+        }
         "open" | "settings" | "edit" => McpCommand::Open,
         _ => McpCommand::Usage,
     }
@@ -7679,16 +7682,17 @@ fn print_mcp_status(command: McpCommand) {
             println!(
                 "{DIM}  tools:{RESET} CLI executes generic mcp_call, cached named mcp__server__tool entries, mcp_read_resource, mcp_get_prompt, and MCP-tool hook handlers from mcpServers"
             );
-            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp open");
+            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp probe --save, /mcp refresh, /mcp open");
         }
         McpCommand::Probe => print_mcp_probe(),
+        McpCommand::ProbeSave => print_mcp_probe_save(),
         McpCommand::Open => {
             println!(
                 "{DIM}  /mcp open:{RESET} open Desktop Settings > MCP for live server management. The terminal CLI has no MCP settings pane."
             );
         }
         McpCommand::Usage => {
-            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp open, or /mcp edit");
+            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp probe --save, /mcp refresh, /mcp open, or /mcp edit");
         }
     }
     println!();
@@ -7728,6 +7732,120 @@ fn print_mcp_probe() {
     println!(
         "{DIM}  note:{RESET} /mcp probe is terminal discovery only; generic mcp_call plus cached tool/resource/prompt entries can call configured servers."
     );
+}
+
+fn print_mcp_probe_save() {
+    let mut cfg = match crate::config::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("{DIM}  /mcp probe --save: config load failed: {e:#}{RESET}");
+            return;
+        }
+    };
+    if cfg.mcp_servers.is_empty() {
+        println!("{DIM}  no configured mcpServers in terminal config.{RESET}");
+        return;
+    }
+    println!("{DIM}  probing configured mcpServers and updating cached inventory...{RESET}");
+    let report = crate::commands::code_mcp::probe_configured_servers(&cfg, Duration::from_secs(5));
+    let changed = merge_mcp_probe_report_into_config(&mut cfg, &report);
+    for server in &report.servers {
+        println!(
+            "- {} [{}] {} · tools={} resources={} prompts={}",
+            server.name,
+            server.status.label(),
+            server.transport,
+            server.tools.len(),
+            server.resources.len(),
+            server.prompts.len()
+        );
+        print_mcp_probe_inventory("tools", &server.tools);
+        print_mcp_probe_inventory("resources", &server.resources);
+        print_mcp_probe_inventory("prompts", &server.prompts);
+        for diagnostic in &server.diagnostics {
+            println!("{DIM}  warning: {diagnostic}{RESET}");
+        }
+    }
+    if let Err(e) = crate::config::save(&cfg) {
+        eprintln!("{DIM}  /mcp probe --save: config save failed: {e:#}{RESET}");
+        return;
+    }
+    println!(
+        "{DIM}  saved:{RESET} refreshed cached MCP inventory for {changed} configured server(s). New code sessions will expose updated cached MCP tools/resources/prompts."
+    );
+}
+
+fn merge_mcp_probe_report_into_config(
+    cfg: &mut LibertaiConfig,
+    report: &crate::commands::code_mcp::McpProbeReport,
+) -> usize {
+    let mut changed = 0usize;
+    for probed in &report.servers {
+        if probed.status == crate::commands::code_mcp::McpProbeStatus::Error {
+            continue;
+        }
+        let Some(server) = cfg.mcp_servers.get_mut(&probed.name) else {
+            continue;
+        };
+        let next_tools = probed
+            .tools
+            .iter()
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| {
+                server
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name == *name)
+                    .cloned()
+                    .unwrap_or_else(|| crate::config::McpToolConfig {
+                        name: name.clone(),
+                        ..crate::config::McpToolConfig::default()
+                    })
+            })
+            .collect::<Vec<_>>();
+        let next_resources = probed
+            .resources
+            .iter()
+            .filter(|uri| !uri.trim().is_empty())
+            .map(|uri| {
+                server
+                    .resources
+                    .iter()
+                    .find(|resource| resource.uri == *uri)
+                    .cloned()
+                    .unwrap_or_else(|| crate::config::McpResourceConfig {
+                        uri: uri.clone(),
+                        ..crate::config::McpResourceConfig::default()
+                    })
+            })
+            .collect::<Vec<_>>();
+        let next_prompts = probed
+            .prompts
+            .iter()
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| {
+                server
+                    .prompts
+                    .iter()
+                    .find(|prompt| prompt.name == *name)
+                    .cloned()
+                    .unwrap_or_else(|| crate::config::McpPromptConfig {
+                        name: name.clone(),
+                        ..crate::config::McpPromptConfig::default()
+                    })
+            })
+            .collect::<Vec<_>>();
+        if server.tools != next_tools
+            || server.resources != next_resources
+            || server.prompts != next_prompts
+        {
+            server.tools = next_tools;
+            server.resources = next_resources;
+            server.prompts = next_prompts;
+            changed += 1;
+        }
+    }
+    changed
 }
 
 fn print_mcp_probe_inventory(label: &str, items: &[String]) {
@@ -9401,11 +9519,74 @@ mod tests {
         assert_eq!(parse_mcp_command("list"), McpCommand::Status);
         assert_eq!(parse_mcp_command("diagnostics"), McpCommand::Status);
         assert_eq!(parse_mcp_command("probe"), McpCommand::Probe);
-        assert_eq!(parse_mcp_command("refresh"), McpCommand::Status);
+        assert_eq!(parse_mcp_command("probe --save"), McpCommand::ProbeSave);
+        assert_eq!(parse_mcp_command("refresh"), McpCommand::ProbeSave);
         assert_eq!(parse_mcp_command("open"), McpCommand::Open);
         assert_eq!(parse_mcp_command("settings"), McpCommand::Open);
         assert_eq!(parse_mcp_command("edit"), McpCommand::Open);
         assert_eq!(parse_mcp_command("remote"), McpCommand::Usage);
+    }
+
+    #[test]
+    fn mcp_probe_cache_merge_preserves_matching_metadata() {
+        let mut cfg = LibertaiConfig {
+            mcp_servers: std::collections::HashMap::from([(
+                "docs".to_string(),
+                crate::config::McpServerConfig {
+                    tools: vec![
+                        crate::config::McpToolConfig {
+                            name: "search".to_string(),
+                            enabled: false,
+                            description: "Search docs".to_string(),
+                            ..crate::config::McpToolConfig::default()
+                        },
+                        crate::config::McpToolConfig {
+                            name: "stale".to_string(),
+                            ..crate::config::McpToolConfig::default()
+                        },
+                    ],
+                    resources: vec![crate::config::McpResourceConfig {
+                        uri: "file:///repo/README.md".to_string(),
+                        enabled: false,
+                        name: "README".to_string(),
+                        ..crate::config::McpResourceConfig::default()
+                    }],
+                    prompts: vec![crate::config::McpPromptConfig {
+                        name: "summarize".to_string(),
+                        enabled: false,
+                        description: "Summarize docs".to_string(),
+                        ..crate::config::McpPromptConfig::default()
+                    }],
+                    ..crate::config::McpServerConfig::default()
+                },
+            )]),
+            ..LibertaiConfig::default()
+        };
+        let report = crate::commands::code_mcp::McpProbeReport {
+            servers: vec![crate::commands::code_mcp::McpServerProbe {
+                name: "docs".to_string(),
+                transport: "stdio".to_string(),
+                status: crate::commands::code_mcp::McpProbeStatus::Ok,
+                tools: vec!["search".to_string(), "lookup".to_string()],
+                resources: vec!["file:///repo/README.md".to_string()],
+                prompts: vec!["summarize".to_string()],
+                diagnostics: Vec::new(),
+            }],
+        };
+        assert_eq!(merge_mcp_probe_report_into_config(&mut cfg, &report), 1);
+        let server = cfg.mcp_servers.get("docs").unwrap();
+        assert_eq!(
+            server
+                .tools
+                .iter()
+                .map(|tool| (tool.name.as_str(), tool.enabled, tool.description.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("search", false, "Search docs"), ("lookup", true, "")]
+        );
+        assert_eq!(server.resources[0].name, "README");
+        assert!(!server.resources[0].enabled);
+        assert_eq!(server.prompts[0].description, "Summarize docs");
+        assert!(!server.prompts[0].enabled);
     }
 
     #[test]
