@@ -2349,8 +2349,12 @@ fn print_help() {
     println!("{DIM}  /help     — show this message{RESET}");
     println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
-    println!("{DIM}  /permissions [default|acceptEdits|plan|open|forget]{RESET}");
-    println!("{DIM}  /mode [default|acceptEdits|plan] — alias for /permissions{RESET}");
+    println!(
+        "{DIM}  /permissions [default|acceptEdits|accept-edits|plan|open|forget|bypassPermissions]{RESET}"
+    );
+    println!(
+        "{DIM}  /mode [default|acceptEdits|accept-edits|plan] — alias for /permissions{RESET}"
+    );
     println!("{DIM}  {}{RESET}", model_usage_text());
     println!("{DIM}  /name <name> — set this session's display name (also /rename){RESET}");
     println!("{DIM}  /status   — show current REPL session status{RESET}");
@@ -3178,7 +3182,7 @@ fn is_status_line_token_name(name: &str) -> bool {
 
 fn print_permissions_status(mode: Mode) {
     println!("{DIM}  permission mode: {}{RESET}", mode_label(mode));
-    println!("{DIM}  supported: default, acceptEdits, plan{RESET}");
+    println!("{DIM}  supported: default, acceptEdits / accept-edits, plan{RESET}");
     println!("{DIM}  native bypassPermissions is intentionally unavailable.{RESET}");
     println!("{DIM}  use /permissions forget to clear saved allow rules.{RESET}");
     println!("{DIM}  use /permissions open to show the approvals settings target and rule path.{RESET}");
