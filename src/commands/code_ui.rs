@@ -2383,6 +2383,9 @@ fn print_help() {
     println!(
         "{DIM}  /pr_comments review <approve|comment|request_changes> <body> — submit a GitHub PR summary review{RESET}"
     );
+    println!(
+        "{DIM}  /pr_comments drafts submit [approve|comment|request_changes] [body] — publish queued draft threads, optionally with a review event{RESET}"
+    );
     println!("{DIM}  /sandbox [info|reload] — inspect the bash sandbox profile{RESET}");
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost; /usage export [json|csv]){RESET}");
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
@@ -6187,7 +6190,12 @@ fn print_pr_comment_drafts(drafts: &[PrCommentDraft]) {
 }
 
 fn handle_pr_comment_drafts(input: &str, drafts: &mut Vec<PrCommentDraft>) {
-    let action = input.trim().to_ascii_lowercase();
+    let trimmed = input.trim();
+    let action = trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     match action.as_str() {
         "" | "list" | "state" | "status" => print_pr_comment_drafts(drafts),
         "clear" => {
@@ -6198,14 +6206,44 @@ fn handle_pr_comment_drafts(input: &str, drafts: &mut Vec<PrCommentDraft>) {
                 if count == 1 { "" } else { "s" }
             );
         }
-        "submit" | "publish" => submit_pr_comment_drafts(drafts),
+        "submit" | "publish" => {
+            let review = parse_pr_comments_draft_submit_review(trimmed);
+            match review {
+                Ok(review) => submit_pr_comment_drafts(drafts, review),
+                Err(e) => eprintln!("{DIM}  /pr_comments: {e:#}{RESET}"),
+            }
+        }
         _ => eprintln!(
-            "{DIM}  usage: /pr_comments draft <path>:<line> <body>, /pr_comments drafts, /pr_comments drafts submit, or /pr_comments drafts clear{RESET}"
+            "{DIM}  usage: /pr_comments draft <path>:<line> <body>, /pr_comments drafts, /pr_comments drafts submit [approve|comment|request_changes] [body], or /pr_comments drafts clear{RESET}"
         ),
     }
 }
 
-fn submit_pr_comment_drafts(drafts: &mut Vec<PrCommentDraft>) {
+fn parse_pr_comments_draft_submit_review(input: &str) -> Result<Option<(&str, &str)>> {
+    let trimmed = input.trim();
+    let rest = trimmed
+        .strip_prefix("submit")
+        .or_else(|| trimmed.strip_prefix("publish"))
+        .map(str::trim)
+        .unwrap_or("");
+    if rest.is_empty() {
+        return Ok(None);
+    }
+    let (event, body) = parse_pr_comments_review(rest)?;
+    if body.is_empty()
+        && !matches!(
+            event.trim().to_ascii_lowercase().as_str(),
+            "approve" | "approved" | "approval"
+        )
+    {
+        anyhow::bail!(
+            "usage: /pr_comments drafts submit <approve|comment|request_changes> [body]"
+        );
+    }
+    Ok(Some((event, body)))
+}
+
+fn submit_pr_comment_drafts(drafts: &mut Vec<PrCommentDraft>, review: Option<(&str, &str)>) {
     if drafts.is_empty() {
         println!("{DIM}  /pr_comments drafts: no queued draft review threads.{RESET}");
         return;
@@ -6253,6 +6291,35 @@ fn submit_pr_comment_drafts(drafts: &mut Vec<PrCommentDraft>) {
         "{DIM}  /pr_comments drafts: submitted {succeeded}/{total} draft review thread{}.{RESET}",
         if total == 1 { "" } else { "s" }
     );
+    let Some((event, body)) = review else {
+        return;
+    };
+    if succeeded == 0 {
+        eprintln!(
+            "{DIM}  /pr_comments: skipped review submit because no draft threads were submitted.{RESET}"
+        );
+        return;
+    }
+    let capture = crate::commands::code_pr_comments::submit_pull_request_review(
+        &cwd, "", event, body,
+    );
+    if capture.error.is_none() && capture.status == Some(0) {
+        println!("{DIM}  /pr_comments drafts: submitted PR review: {event}{RESET}");
+        return;
+    }
+    let detail = capture
+        .error
+        .as_deref()
+        .or_else(|| {
+            let stderr = capture.stderr.trim();
+            (!stderr.is_empty()).then_some(stderr)
+        })
+        .or_else(|| {
+            let stdout = capture.stdout.trim();
+            (!stdout.is_empty()).then_some(stdout)
+        })
+        .unwrap_or("unknown error");
+    eprintln!("{DIM}  /pr_comments: review submit failed after drafts: {detail}{RESET}");
 }
 
 fn create_pr_comment_thread(input: &str) {
@@ -11117,6 +11184,10 @@ mod tests {
             pr_comments_drafts_arg("/pr_comments drafts submit"),
             Some("submit")
         );
+        assert_eq!(
+            pr_comments_drafts_arg("/pr_comments drafts submit comment Looks good."),
+            Some("submit comment Looks good.")
+        );
         assert_eq!(pr_comments_drafts_arg("/pr_comments drafts"), Some(""));
 
         let draft = parse_pr_comment_draft("src/lib.rs:42 Needs a test.").unwrap();
@@ -11128,6 +11199,15 @@ mod tests {
                 body: "Needs a test.".to_string(),
             }
         );
+        assert_eq!(
+            parse_pr_comments_draft_submit_review("submit approve").unwrap(),
+            Some(("approve", ""))
+        );
+        assert_eq!(
+            parse_pr_comments_draft_submit_review("submit comment Summary.").unwrap(),
+            Some(("comment", "Summary."))
+        );
+        assert!(parse_pr_comments_draft_submit_review("submit comment").is_err());
     }
 
     #[test]

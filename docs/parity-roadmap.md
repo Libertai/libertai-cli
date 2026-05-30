@@ -157,7 +157,9 @@ SDK; those are flagged **(upstream)**.
   `/pr_comments unviewed <path>` through `markFileAsViewed` /
   `unmarkFileAsViewed`. They can also create line-level pending review
   threads with `/pr_comments thread <path>:<line> <body>` through
-  `addPullRequestReviewThread`.
+  `addPullRequestReviewThread`, stage queued draft threads, and publish
+  queued drafts together with a summary review event via
+  `/pr_comments drafts submit <approve|comment|request_changes> [body]`.
 - **CLI `/sandbox` command** — REPL users can inspect the effective
   strict bash sandbox profile with `/sandbox [info]`; `/sandbox reload`
   explains the CLI restart requirement.
