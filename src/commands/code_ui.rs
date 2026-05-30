@@ -2419,8 +2419,8 @@ fn print_help() {
     println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
     println!("{DIM}  /attach <path> [prompt] — alias for /image{RESET}");
     println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
-    println!("{DIM}  /login [status|libertai|provider] — inspect auth or run libertai login{RESET}");
-    println!("{DIM}  /logout [status|libertai|provider] — run libertai logout or explain provider logout{RESET}");
+    println!("{DIM}  /login [status|show|info|libertai|provider] — inspect auth or run libertai login{RESET}");
+    println!("{DIM}  /logout [status|show|info|libertai|provider] — run libertai logout or explain provider logout{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
     println!("{DIM}  /skills [list|open|enable <name>|disable <name>] — manage code-agent skills for new sessions{RESET}");
     println!(
@@ -10396,6 +10396,8 @@ mod tests {
     fn parse_login_slash_target_maps_status_account_and_providers() {
         assert_eq!(parse_login_slash_target(""), LoginSlashTarget::Account);
         assert_eq!(parse_login_slash_target("status"), LoginSlashTarget::Status);
+        assert_eq!(parse_login_slash_target("show"), LoginSlashTarget::Status);
+        assert_eq!(parse_login_slash_target("info"), LoginSlashTarget::Status);
         assert_eq!(parse_login_slash_target("libertai"), LoginSlashTarget::Account);
         assert_eq!(
             parse_login_slash_target("anthropic"),
