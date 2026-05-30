@@ -140,6 +140,13 @@ struct ScheduledRun {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct PrCommentDraft {
+    path: String,
+    line: u64,
+    body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ScheduleCommand {
     Status,
     Cancel(String),
@@ -592,6 +599,7 @@ async fn repl_loop(
     let mut auto_run: Option<AutoRun> = None;
     let mut scheduled_runs: Vec<ScheduledRun> = Vec::new();
     let mut next_scheduled_run_id = 1usize;
+    let mut pr_comment_drafts: Vec<PrCommentDraft> = Vec::new();
     let mut last_shell_command: Option<String> = None;
 
     loop {
@@ -1253,6 +1261,14 @@ async fn repl_loop(
         }
         if let Some(rest) = trimmed.strip_prefix("/onboarding ") {
             write_onboarding_guide(Some(rest.trim()));
+            continue;
+        }
+        if let Some(rest) = pr_comments_draft_arg(trimmed) {
+            stage_pr_comment_draft(rest, &mut pr_comment_drafts);
+            continue;
+        }
+        if let Some(rest) = pr_comments_drafts_arg(trimmed) {
+            handle_pr_comment_drafts(rest, &mut pr_comment_drafts);
             continue;
         }
         if let Some(rest) = pr_comments_reply_arg(trimmed) {
@@ -4338,6 +4354,24 @@ fn pr_comments_thread_arg(trimmed: &str) -> Option<&str> {
     None
 }
 
+fn pr_comments_draft_arg(trimmed: &str) -> Option<&str> {
+    for prefix in ["/pr_comments draft ", "/pr-comments draft "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
+fn pr_comments_drafts_arg(trimmed: &str) -> Option<&str> {
+    for prefix in ["/pr_comments drafts", "/pr-comments drafts"] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
 fn parse_pr_comments_reply(input: &str) -> Result<(&str, &str)> {
     let raw = input.trim();
     let Some((thread_id, body)) = raw.split_once(char::is_whitespace) else {
@@ -4416,6 +4450,15 @@ fn parse_pr_comments_thread(input: &str) -> Result<(&str, u64, &str)> {
         anyhow::bail!("usage: /pr_comments thread <path>:<line> <body>");
     }
     Ok((path, line, body))
+}
+
+fn parse_pr_comment_draft(input: &str) -> Result<PrCommentDraft> {
+    let (path, line, body) = parse_pr_comments_thread(input)?;
+    Ok(PrCommentDraft {
+        path: path.to_string(),
+        line,
+        body: body.to_string(),
+    })
 }
 
 fn reply_to_pr_comment_thread(input: &str) {
@@ -4663,6 +4706,105 @@ fn mark_all_pr_comment_files(viewed: bool) {
             eprintln!("{DIM}    {path}: {detail}{RESET}");
         }
     }
+}
+
+fn stage_pr_comment_draft(input: &str, drafts: &mut Vec<PrCommentDraft>) {
+    match parse_pr_comment_draft(input) {
+        Ok(draft) => {
+            println!(
+                "{DIM}  staged PR review draft {}:{}. Use /pr_comments drafts submit to publish queued thread(s).{RESET}",
+                draft.path, draft.line
+            );
+            drafts.push(draft);
+        }
+        Err(e) => eprintln!("{DIM}  /pr_comments: {e:#}{RESET}"),
+    }
+}
+
+fn print_pr_comment_drafts(drafts: &[PrCommentDraft]) {
+    if drafts.is_empty() {
+        println!("{DIM}  /pr_comments drafts: no queued draft review threads.{RESET}");
+        return;
+    }
+    println!("{DIM}  /pr_comments drafts: {} queued thread(s):{RESET}", drafts.len());
+    for (idx, draft) in drafts.iter().enumerate() {
+        println!(
+            "{DIM}    {}. {}:{} - {}{RESET}",
+            idx + 1,
+            draft.path,
+            draft.line,
+            truncate_chars(&draft.body, 80)
+        );
+    }
+}
+
+fn handle_pr_comment_drafts(input: &str, drafts: &mut Vec<PrCommentDraft>) {
+    let action = input.trim().to_ascii_lowercase();
+    match action.as_str() {
+        "" | "list" | "state" | "status" => print_pr_comment_drafts(drafts),
+        "clear" => {
+            let count = drafts.len();
+            drafts.clear();
+            println!(
+                "{DIM}  /pr_comments drafts: cleared {count} draft thread{}.{RESET}",
+                if count == 1 { "" } else { "s" }
+            );
+        }
+        "submit" | "publish" => submit_pr_comment_drafts(drafts),
+        _ => eprintln!(
+            "{DIM}  usage: /pr_comments draft <path>:<line> <body>, /pr_comments drafts, /pr_comments drafts submit, or /pr_comments drafts clear{RESET}"
+        ),
+    }
+}
+
+fn submit_pr_comment_drafts(drafts: &mut Vec<PrCommentDraft>) {
+    if drafts.is_empty() {
+        println!("{DIM}  /pr_comments drafts: no queued draft review threads.{RESET}");
+        return;
+    }
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /pr_comments: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let total = drafts.len();
+    let mut failed = Vec::new();
+    for draft in drafts.iter() {
+        let capture = crate::commands::code_pr_comments::create_review_thread(
+            &cwd,
+            "",
+            &draft.path,
+            draft.line,
+            &draft.body,
+        );
+        if capture.error.is_some() || capture.status != Some(0) {
+            let detail = capture
+                .error
+                .as_deref()
+                .or_else(|| {
+                    let stderr = capture.stderr.trim();
+                    (!stderr.is_empty()).then_some(stderr)
+                })
+                .or_else(|| {
+                    let stdout = capture.stdout.trim();
+                    (!stdout.is_empty()).then_some(stdout)
+                })
+                .unwrap_or("unknown error");
+            eprintln!(
+                "{DIM}    draft failed for {}:{}: {detail}{RESET}",
+                draft.path, draft.line
+            );
+            failed.push(draft.clone());
+        }
+    }
+    let succeeded = total.saturating_sub(failed.len());
+    *drafts = failed;
+    println!(
+        "{DIM}  /pr_comments drafts: submitted {succeeded}/{total} draft review thread{}.{RESET}",
+        if total == 1 { "" } else { "s" }
+    );
 }
 
 fn create_pr_comment_thread(input: &str) {
@@ -7790,6 +7932,29 @@ mod tests {
         assert!(parse_pr_comments_thread("src/lib.rs Needs a test.").is_err());
         assert!(parse_pr_comments_thread("src/lib.rs:0 Needs a test.").is_err());
         assert!(parse_pr_comments_thread("src/lib.rs:42").is_err());
+    }
+
+    #[test]
+    fn parse_pr_comments_drafts_supports_stage_list_and_submit() {
+        assert_eq!(
+            pr_comments_draft_arg("/pr_comments draft src/lib.rs:42 Needs a test."),
+            Some("src/lib.rs:42 Needs a test.")
+        );
+        assert_eq!(
+            pr_comments_drafts_arg("/pr_comments drafts submit"),
+            Some("submit")
+        );
+        assert_eq!(pr_comments_drafts_arg("/pr_comments drafts"), Some(""));
+
+        let draft = parse_pr_comment_draft("src/lib.rs:42 Needs a test.").unwrap();
+        assert_eq!(
+            draft,
+            PrCommentDraft {
+                path: "src/lib.rs".to_string(),
+                line: 42,
+                body: "Needs a test.".to_string(),
+            }
+        );
     }
 
     #[test]
