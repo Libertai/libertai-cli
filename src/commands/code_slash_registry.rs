@@ -47,17 +47,17 @@ fn discover_with_home(
     if let Some(home) = home {
         scan_dir(&home.join(".liberclaw").join("commands"), CommandSource::User, &mut out);
     }
-    scan_dir(&cwd.join(".claude").join("commands"), CommandSource::Project, &mut out);
-    scan_dir(&cwd.join(".libertai").join("commands"), CommandSource::Project, &mut out);
-    scan_dir(&cwd.join(".liberclaw").join("commands"), CommandSource::Project, &mut out);
-    scan_skill_dir(&cwd.join(".claude").join("skills"), CommandSource::Project, &mut out);
-    scan_skill_dir(&cwd.join(".libertai").join("skills"), CommandSource::Project, &mut out);
     if let Some(config) = config {
         scan_skill_dir(&config.join("libertai").join("skills"), CommandSource::User, &mut out);
     }
     if let Some(home) = home {
         scan_skill_dir(&home.join(".claude").join("skills"), CommandSource::User, &mut out);
     }
+    scan_dir(&cwd.join(".claude").join("commands"), CommandSource::Project, &mut out);
+    scan_dir(&cwd.join(".libertai").join("commands"), CommandSource::Project, &mut out);
+    scan_dir(&cwd.join(".liberclaw").join("commands"), CommandSource::Project, &mut out);
+    scan_skill_dir(&cwd.join(".claude").join("skills"), CommandSource::Project, &mut out);
+    scan_skill_dir(&cwd.join(".libertai").join("skills"), CommandSource::Project, &mut out);
     dedupe_by_name(&mut out);
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
@@ -730,6 +730,24 @@ mod tests {
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].body, "skill");
         assert_eq!(cmds[0].path.file_name().and_then(|name| name.to_str()), Some("SKILL.md"));
+    }
+
+    #[test]
+    fn project_command_overrides_same_named_user_skill() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let cwd = temp.path().join("repo");
+        write(
+            &home.join(".claude/skills/deploy/SKILL.md"),
+            "---\ndescription: User deploy skill\n---\nuser skill",
+        );
+        write(&cwd.join(".claude/commands/deploy.md"), "project command");
+
+        let cmds = discover_with_home(&cwd, Some(&home), None);
+
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].body, "project command");
+        assert_eq!(cmds[0].source, CommandSource::Project);
     }
 
     #[test]
