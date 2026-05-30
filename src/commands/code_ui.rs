@@ -6427,9 +6427,25 @@ fn format_background_agent_details(
         ),
         format!("{DIM}  cwd:{RESET} {}", record.cwd),
         format!("{DIM}  log:{RESET} {}", record.log_path),
+        format!(
+            "{DIM}  command:{RESET} {}",
+            format_background_agent_command(record)
+        ),
         format!("{DIM}  prompt:{RESET} {}", record.prompt_preview),
     ]
     .join("\n")
+}
+
+fn format_background_agent_command(record: &BackgroundAgentRecord) -> String {
+    if record.launched_argv.is_empty() {
+        return "-".to_string();
+    }
+    record
+        .launched_argv
+        .iter()
+        .map(|arg| quote_sh_string(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn display_or_dash(value: &str) -> &str {
@@ -7596,6 +7612,8 @@ struct BackgroundAgentRecord {
     cwd: String,
     log_path: String,
     started_at_ms: u64,
+    #[serde(default)]
+    launched_argv: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7694,7 +7712,7 @@ fn start_background_agent(launch: &BackgroundAgentLaunch) -> Result<StartedBackg
         .spawn()
         .with_context(|| format!("starting background agent `{}`", launch.name))?;
     let started = started_background_agent(child, log_path);
-    persist_background_agent_record(&background_agent_record(launch, &started))?;
+    persist_background_agent_record(&background_agent_record(launch, &started, &exe))?;
     Ok(started)
 }
 
@@ -7776,7 +7794,10 @@ fn detach_background_command(command: &mut Command) {
 fn background_agent_record(
     launch: &BackgroundAgentLaunch,
     started: &StartedBackgroundAgent,
+    exe: &Path,
 ) -> BackgroundAgentRecord {
+    let mut launched_argv = vec![exe.display().to_string()];
+    launched_argv.extend(background_agent_args(exe, launch));
     BackgroundAgentRecord {
         pid: started.pid,
         name: launch.name.clone(),
@@ -7792,6 +7813,7 @@ fn background_agent_record(
         cwd: launch.cwd.display().to_string(),
         log_path: started.log_path.display().to_string(),
         started_at_ms: now_epoch_ms(),
+        launched_argv,
     }
 }
 
@@ -11745,6 +11767,7 @@ mod tests {
                 cwd: "/tmp/project".to_string(),
                 log_path: "/tmp/one.log".to_string(),
                 started_at_ms: 10,
+                launched_argv: Vec::new(),
             },
             BackgroundAgentRecord {
                 pid: 2,
@@ -11756,6 +11779,7 @@ mod tests {
                 cwd: "/tmp/project".to_string(),
                 log_path: "/tmp/two.log".to_string(),
                 started_at_ms: 20,
+                launched_argv: Vec::new(),
             },
             BackgroundAgentRecord {
                 pid: 3,
@@ -11767,6 +11791,7 @@ mod tests {
                 cwd: "/tmp/project".to_string(),
                 log_path: "/tmp/three.log".to_string(),
                 started_at_ms: 30,
+                launched_argv: Vec::new(),
             },
         ];
         assert_eq!(
@@ -13607,13 +13632,25 @@ mod tests {
             pid: 4242,
             log_path: PathBuf::from("/tmp/reviewer.log"),
         };
-        let record = background_agent_record(&launch, &started);
+        let record = background_agent_record(&launch, &started, Path::new("/usr/bin/lcode"));
         assert_eq!(record.pid, 4242);
         assert_eq!(record.name, "reviewer");
         assert_eq!(record.mode, "plan");
         assert_eq!(record.cwd, "/tmp/project");
         assert_eq!(record.log_path, "/tmp/reviewer.log");
         assert_eq!(record.prompt_preview, "Run review with details");
+        assert_eq!(
+            record.launched_argv,
+            vec![
+                "/usr/bin/lcode".to_string(),
+                "--provider".to_string(),
+                "libertai".to_string(),
+                "--model".to_string(),
+                "qwen".to_string(),
+                "--plan".to_string(),
+                "Run review\nwith details".to_string(),
+            ]
+        );
         assert!(record.started_at_ms > 0);
     }
 
@@ -13629,6 +13666,15 @@ mod tests {
             cwd: "/tmp/project".to_string(),
             log_path: "/tmp/reviewer.log".to_string(),
             started_at_ms: 0,
+            launched_argv: vec![
+                "/usr/bin/lcode".to_string(),
+                "--provider".to_string(),
+                "libertai".to_string(),
+                "--model".to_string(),
+                "qwen".to_string(),
+                "--plan".to_string(),
+                "Run review".to_string(),
+            ],
         };
         let details = format_background_agent_details(&record, BackgroundAgentStatus::Running);
         assert!(details.contains("background agent: pid 4242"));
@@ -13644,6 +13690,10 @@ mod tests {
         assert!(details.contains("plan"));
         assert!(details.contains("/tmp/project"));
         assert!(details.contains("/tmp/reviewer.log"));
+        assert!(details.contains("command:"));
+        assert!(details.contains(
+            "'/usr/bin/lcode' '--provider' 'libertai' '--model' 'qwen' '--plan' 'Run review'"
+        ));
         assert!(details.contains("Run review"));
     }
 
@@ -13660,6 +13710,7 @@ mod tests {
                 cwd: "/tmp/project".to_string(),
                 log_path: "/tmp/one.log".to_string(),
                 started_at_ms: 10,
+                launched_argv: Vec::new(),
             },
             BackgroundAgentRecord {
                 pid: 2,
@@ -13671,6 +13722,7 @@ mod tests {
                 cwd: "/tmp/project".to_string(),
                 log_path: "/tmp/two.log".to_string(),
                 started_at_ms: 20,
+                launched_argv: Vec::new(),
             },
         ];
         let kept = retain_running_background_agent_records(records, |pid| {
@@ -13697,6 +13749,7 @@ mod tests {
                 cwd: "/tmp/project".to_string(),
                 log_path: "/tmp/one.log".to_string(),
                 started_at_ms: 10,
+                launched_argv: Vec::new(),
             },
             BackgroundAgentRecord {
                 pid: 2,
@@ -13708,6 +13761,7 @@ mod tests {
                 cwd: "/tmp/project".to_string(),
                 log_path: "/tmp/two.log".to_string(),
                 started_at_ms: 20,
+                launched_argv: Vec::new(),
             },
             BackgroundAgentRecord {
                 pid: 3,
@@ -13719,6 +13773,7 @@ mod tests {
                 cwd: "/tmp/project".to_string(),
                 log_path: "/tmp/three.log".to_string(),
                 started_at_ms: 30,
+                launched_argv: Vec::new(),
             },
         ];
         assert_eq!(
@@ -14252,7 +14307,10 @@ mod tests {
     #[test]
     fn parse_direct_custom_slash_parses_name_and_args() {
         assert_eq!(parse_direct_custom_slash("/review src"), Some(("review", "src")));
-        assert_eq!(parse_direct_custom_slash("/team/review src"), None);
+        assert_eq!(
+            parse_direct_custom_slash("/team/review src"),
+            Some(("team/review", "src"))
+        );
         assert_eq!(parse_direct_custom_slash("/review"), Some(("review", "")));
         assert_eq!(parse_direct_custom_slash("review"), None);
     }
