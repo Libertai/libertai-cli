@@ -139,8 +139,9 @@ SDK; those are flagged **(upstream)**.
   turn counts, token high-water/output totals, and observed per-tool
   call counts/durations for the current session, plus clearly labeled
   estimated per-tool token/cost attribution weighted by observed tool
-  duration when model rates are known. True provider-measured per-tool
-  token/cost attribution remains deferred.
+  duration when model rates are known. `/usage status|show|summary|tools`
+  and matching `/cost ...` aliases print the same auditable view. True
+  provider-measured per-tool token/cost attribution remains deferred.
 - **Typed project memory** — `/remember` accepts `user:`, `feedback:`,
   `project:`, `reference:`, or `--type <kind>` prefixes and stores
   categorized bullets in the shared `MEMORY.md` index, with per-entry

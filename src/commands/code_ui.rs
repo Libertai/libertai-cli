@@ -851,6 +851,14 @@ async fn repl_loop(
             print_usage_export(usage_summary(&usage_history), &tool_activity, format);
             continue;
         }
+        if parse_usage_summary_command(trimmed).is_some() {
+            let tool_activity = tool_activity
+                .lock()
+                .map(|tracker| tracker.summary())
+                .unwrap_or_default();
+            print_usage_summary(usage_summary(&usage_history), &tool_activity);
+            continue;
+        }
         if let Some(rest) = notify_command_arg(trimmed) {
             if let Err(e) = handle_notify_command(rest, &mut cfg) {
                 eprintln!("{DIM}  /notify: {e:#}{RESET}");
@@ -8243,6 +8251,21 @@ fn parse_usage_export_command(input: &str) -> Option<UsageExportFormat> {
     }
 }
 
+fn parse_usage_summary_command(input: &str) -> Option<()> {
+    let raw = input.trim();
+    let rest = raw
+        .strip_prefix("/usage")
+        .or_else(|| raw.strip_prefix("/cost"))?;
+    if rest.is_empty() || !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let action = rest.trim().to_ascii_lowercase();
+    match action.as_str() {
+        "status" | "show" | "summary" | "tools" => Some(()),
+        _ => None,
+    }
+}
+
 fn print_usage_export(
     summary: Option<UsageSummary>,
     tool_activity: &[ToolActivitySummary],
@@ -10476,6 +10499,17 @@ mod tests {
             Some(UsageExportFormat::Csv)
         );
         assert_eq!(parse_usage_export_command("/cost export xml"), None);
+    }
+
+    #[test]
+    fn parse_usage_summary_accepts_status_show_and_tools_aliases() {
+        assert_eq!(parse_usage_summary_command("/usage status"), Some(()));
+        assert_eq!(parse_usage_summary_command("/usage show"), Some(()));
+        assert_eq!(parse_usage_summary_command("/cost summary"), Some(()));
+        assert_eq!(parse_usage_summary_command("/cost tools"), Some(()));
+        assert_eq!(parse_usage_summary_command("/cost export"), None);
+        assert_eq!(parse_usage_summary_command("/costtools"), None);
+        assert_eq!(parse_usage_summary_command("/usage nonsense"), None);
     }
 
     #[test]
