@@ -36,6 +36,7 @@ use pi::sdk::{
     create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle, Error as PiError,
     RpcForkMessage, ThinkingLevel,
 };
+use serde_json::json;
 
 use crate::commands::code_approvals::ApprovalState;
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
@@ -130,6 +131,12 @@ struct ToolAttribution {
     total_duration: Duration,
     estimated_tokens: u64,
     estimated_cost: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsageExportFormat {
+    Json,
+    Csv,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -660,6 +667,14 @@ async fn repl_loop(
         let trimmed_owned = line.trim().to_string();
         let trimmed = trimmed_owned.as_str();
         if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(format) = parse_usage_export_command(trimmed) {
+            let tool_activity = tool_activity
+                .lock()
+                .map(|tracker| tracker.summary())
+                .unwrap_or_default();
+            print_usage_export(usage_summary(&usage_history), &tool_activity, format);
             continue;
         }
         let mut content_override: Option<Vec<ContentBlock>> = None;
@@ -2097,7 +2112,7 @@ fn print_help() {
         "{DIM}  /pr_comments review <approve|comment|request_changes> <body> — submit a GitHub PR summary review{RESET}"
     );
     println!("{DIM}  /sandbox [info|reload] — inspect the bash sandbox profile{RESET}");
-    println!("{DIM}  /usage    — show token usage for this REPL session (also /cost){RESET}");
+    println!("{DIM}  /usage    — show token usage for this REPL session (also /cost; /usage export [json|csv]){RESET}");
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
     println!("{DIM}  /config   — show active configuration summary (/settings is an alias){RESET}");
@@ -5765,6 +5780,168 @@ fn print_usage_summary(summary: Option<UsageSummary>, tool_activity: &[ToolActiv
     println!();
 }
 
+fn parse_usage_export_command(input: &str) -> Option<UsageExportFormat> {
+    let raw = input.trim();
+    let rest = raw
+        .strip_prefix("/usage export")
+        .or_else(|| raw.strip_prefix("/cost export"))?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    match rest.trim().to_ascii_lowercase().as_str() {
+        "" | "json" => Some(UsageExportFormat::Json),
+        "csv" => Some(UsageExportFormat::Csv),
+        _ => None,
+    }
+}
+
+fn print_usage_export(
+    summary: Option<UsageSummary>,
+    tool_activity: &[ToolActivitySummary],
+    format: UsageExportFormat,
+) {
+    match format {
+        UsageExportFormat::Json => {
+            println!("{}", usage_export_json(summary.as_ref(), tool_activity))
+        }
+        UsageExportFormat::Csv => print!("{}", usage_export_csv(summary.as_ref(), tool_activity)),
+    }
+}
+
+fn usage_export_json(
+    summary: Option<&UsageSummary>,
+    tool_activity: &[ToolActivitySummary],
+) -> String {
+    let tool_rows = summary
+        .map(|summary| estimate_tool_attribution(summary, tool_activity))
+        .unwrap_or_default();
+    let tools = if tool_rows.is_empty() {
+        tool_activity
+            .iter()
+            .map(|tool| {
+                json!({
+                    "toolName": tool.tool_name,
+                    "count": tool.count,
+                    "observedDurationMs": tool.total_duration.as_millis() as u64,
+                    "estimatedTokens": null,
+                    "estimatedCostUsd": null,
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        tool_rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "toolName": row.tool_name,
+                    "count": row.count,
+                    "observedDurationMs": row.total_duration.as_millis() as u64,
+                    "estimatedTokens": row.estimated_tokens,
+                    "estimatedCostUsd": row.estimated_cost,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let usage = summary.map(|summary| {
+        json!({
+            "provider": summary.provider,
+            "model": summary.model,
+            "turns": summary.turns,
+            "lastInputTokens": summary.last_input,
+            "lastOutputTokens": summary.last_output,
+            "outputTotalTokens": summary.output_total,
+            "contextHighWaterTokens": summary.context_high_water,
+            "contextWindow": summary.context_window,
+            "estimatedCostUsd": model_token_cost(
+                &summary.model,
+                summary.context_high_water,
+                summary.output_total,
+            ),
+        })
+    });
+    serde_json::to_string_pretty(&json!({
+        "kind": "libertai_code_usage_export",
+        "version": 1,
+        "usage": usage,
+        "tools": tools,
+        "provenance": {
+            "usage": "Input is cumulative context high-water; output is summed across completed turns.",
+            "toolAttribution": "Estimated by distributing session tokens/cost across observed tool calls, weighted by observed duration when available.",
+            "rates": "Static model rates from libertai-cli pricing table; provider-measured per-tool billing is not available."
+        }
+    }))
+    .unwrap_or_else(|_| "{}".to_string())
+}
+
+fn usage_export_csv(
+    summary: Option<&UsageSummary>,
+    tool_activity: &[ToolActivitySummary],
+) -> String {
+    let mut out = String::from(
+        "category,name,count,input_tokens,output_tokens,estimated_tokens,estimated_cost_usd,duration_ms,provenance\n",
+    );
+    if let Some(summary) = summary {
+        out.push_str(&format!(
+            "usage,{},{},{},{},{},{},{},{}\n",
+            csv_cell(&format!("{}/{}", summary.provider, summary.model)),
+            summary.turns,
+            summary.context_high_water,
+            summary.output_total,
+            "",
+            summary
+                .model_token_cost()
+                .map(|cost| format!("{cost:.8}"))
+                .unwrap_or_default(),
+            "",
+            csv_cell("input=context high-water; output=sum of completed turns")
+        ));
+        for row in estimate_tool_attribution(summary, tool_activity) {
+            out.push_str(&format!(
+                "tool,{},{},{},{},{},{},{},{}\n",
+                csv_cell(&row.tool_name),
+                row.count,
+                "",
+                "",
+                row.estimated_tokens,
+                row.estimated_cost
+                    .map(|cost| format!("{cost:.8}"))
+                    .unwrap_or_default(),
+                row.total_duration.as_millis(),
+                csv_cell("estimated duration-weighted attribution")
+            ));
+        }
+    } else {
+        for tool in tool_activity {
+            out.push_str(&format!(
+                "tool,{},{},{},{},{},{},{},{}\n",
+                csv_cell(&tool.tool_name),
+                tool.count,
+                "",
+                "",
+                "",
+                "",
+                tool.total_duration.as_millis(),
+                csv_cell("observed tool activity only; no usage recorded")
+            ));
+        }
+    }
+    out
+}
+
+impl UsageSummary {
+    fn model_token_cost(&self) -> Option<f64> {
+        model_token_cost(&self.model, self.context_high_water, self.output_total)
+    }
+}
+
+fn csv_cell(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
 fn print_tool_activity(tool_activity: &[ToolActivitySummary], usage: Option<&UsageSummary>) {
     if tool_activity.is_empty() {
         return;
@@ -6890,6 +7067,69 @@ mod tests {
         );
         assert_eq!(rows[0].estimated_tokens, 15);
         assert_eq!(rows[0].estimated_cost, None);
+    }
+
+    #[test]
+    fn parse_usage_export_accepts_cost_and_usage_aliases() {
+        assert_eq!(
+            parse_usage_export_command("/usage export"),
+            Some(UsageExportFormat::Json)
+        );
+        assert_eq!(
+            parse_usage_export_command("/cost export csv"),
+            Some(UsageExportFormat::Csv)
+        );
+        assert_eq!(parse_usage_export_command("/cost export xml"), None);
+    }
+
+    #[test]
+    fn usage_export_json_includes_provenance_and_tool_estimates() {
+        let usage = UsageSummary {
+            turns: 2,
+            last_input: 600,
+            last_output: 200,
+            output_total: 300,
+            context_high_water: 600,
+            context_window: 32768,
+            provider: "libertai".to_string(),
+            model: "qwen3-coder-480b".to_string(),
+        };
+        let report = usage_export_json(
+            Some(&usage),
+            &[ToolActivitySummary {
+                tool_name: "bash".to_string(),
+                count: 1,
+                total_duration: Duration::from_millis(25),
+            }],
+        );
+        assert!(report.contains("\"kind\": \"libertai_code_usage_export\""));
+        assert!(report.contains("\"toolName\": \"bash\""));
+        assert!(report.contains("provider-measured per-tool billing is not available"));
+    }
+
+    #[test]
+    fn usage_export_csv_quotes_cells_and_labels_estimates() {
+        let usage = UsageSummary {
+            turns: 1,
+            last_input: 10,
+            last_output: 5,
+            output_total: 5,
+            context_high_water: 10,
+            context_window: 100,
+            provider: "local,dev".to_string(),
+            model: "unknown".to_string(),
+        };
+        let report = usage_export_csv(
+            Some(&usage),
+            &[ToolActivitySummary {
+                tool_name: "read".to_string(),
+                count: 2,
+                total_duration: Duration::ZERO,
+            }],
+        );
+        assert!(report.starts_with("category,name,count"));
+        assert!(report.contains("\"local,dev/unknown\""));
+        assert!(report.contains("estimated duration-weighted attribution"));
     }
 
     #[test]
