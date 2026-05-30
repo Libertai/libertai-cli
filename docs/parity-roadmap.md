@@ -782,8 +782,9 @@ target, flag, timeout, source, status-message, HTTP header/env counts,
 review policy, MCP input presence, and preserved metadata keys without printing secret
 header or environment values.
 
-Remaining work: any pi-level typed hook dispatcher and persistent/live CLI MCP
-connection management beyond the terminal stdio session registry.
+Remaining work: any pi-level typed hook dispatcher. Persistent terminal
+MCP connection management for stdio, Streamable HTTP, and legacy SSE is
+covered in 5B.
 
 **Files**: `src/config.rs`,
 `src/commands/code_hooks.rs`,
