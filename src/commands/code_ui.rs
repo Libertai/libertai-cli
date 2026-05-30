@@ -1722,7 +1722,7 @@ async fn repl_loop(
             } else {
                 if trimmed == "/agent" {
                     println!(
-                        "{DIM}  usage: /agent [--worktree|--background|--detached] <name> <task>{RESET}"
+                        "{DIM}  usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>{RESET}"
                     );
                     continue;
                 }
@@ -2655,10 +2655,10 @@ fn print_help() {
     println!("{DIM}  /onboarding|/onboard [save|path] — write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
     println!("{DIM}  /agents   — list named sub-agents (/agents show <name> inspects one){RESET}");
-    println!("{DIM}  /agents create [--worktree] <name> [description] — create a project sub-agent{RESET}");
+    println!("{DIM}  /agents create [--worktree|--same-cwd] <name> [description] — create a project sub-agent{RESET}");
     println!("{DIM}  /agents delete <name> — delete the active named sub-agent definition{RESET}");
     println!(
-        "{DIM}  /agent [--worktree|--background|--detached] <name> <task> — run a named sub-agent task{RESET}"
+        "{DIM}  /agent [--worktree|--same-cwd|--background|--detached] <name> <task> — run a named sub-agent task{RESET}"
     );
     println!("{DIM}  /agent --background|--detached <name> <task> — start a detached terminal agent and write a log under ~/.config/libertai/code-background-agents{RESET}");
     println!("{DIM}  /agents background [list|show|log|kill|prune|clear] — inspect, stop, or prune terminal background agents{RESET}");
@@ -7947,7 +7947,7 @@ fn parse_agents_create_query(query: &str) -> Result<AgentsCreateQuery<'_>> {
     let mut worktree = false;
     loop {
         let Some((head, tail)) = split_first_word(rest) else {
-            anyhow::bail!("usage: /agents create [--worktree] <name> [description]");
+            anyhow::bail!("usage: /agents create [--worktree|--same-cwd] <name> [description]");
         };
         match head {
             "--worktree" | "--isolation=worktree" => {
@@ -7962,7 +7962,7 @@ fn parse_agents_create_query(query: &str) -> Result<AgentsCreateQuery<'_>> {
         }
     }
     let Some((name, tail)) = split_first_word(rest) else {
-        anyhow::bail!("usage: /agents create [--worktree] <name> [description]");
+        anyhow::bail!("usage: /agents create [--worktree|--same-cwd] <name> [description]");
     };
     let description = tail.trim();
     Ok(AgentsCreateQuery {
@@ -7985,7 +7985,7 @@ fn parse_agent_slash_query(query: &str) -> Result<AgentSlashQuery<'_>> {
     let mut rest = raw;
     loop {
         let Some((head, tail)) = split_first_word(rest) else {
-            anyhow::bail!("usage: /agent [--worktree|--background|--detached] <name> <task>");
+            anyhow::bail!("usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>");
         };
         match head {
             "--worktree" | "--isolation=worktree" => {
@@ -8004,12 +8004,12 @@ fn parse_agent_slash_query(query: &str) -> Result<AgentSlashQuery<'_>> {
         }
     }
     let Some((name, task)) = rest.split_once(char::is_whitespace) else {
-        anyhow::bail!("usage: /agent [--worktree|--background|--detached] <name> <task>");
+        anyhow::bail!("usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>");
     };
     let name = name.trim();
     let task = task.trim();
     if name.is_empty() || task.is_empty() {
-        anyhow::bail!("usage: /agent [--worktree|--background|--detached] <name> <task>");
+        anyhow::bail!("usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>");
     }
     Ok(AgentSlashQuery {
         name,
@@ -13373,6 +13373,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(usage.contains("--detached"));
+        assert!(usage.contains("--same-cwd"));
     }
 
     #[test]
@@ -13623,7 +13624,8 @@ mod tests {
                 worktree: false
             }
         );
-        assert!(parse_agents_create_query("").is_err());
+        let usage = parse_agents_create_query("").unwrap_err().to_string();
+        assert!(usage.contains("--same-cwd"));
     }
 
     #[test]
