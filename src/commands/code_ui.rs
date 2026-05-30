@@ -2602,7 +2602,7 @@ fn print_help() {
     );
     println!("{DIM}  /onboarding|/onboard [save|path] — write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
-    println!("{DIM}  /agents   — list named sub-agents (/agents open shows agent paths){RESET}");
+    println!("{DIM}  /agents   — list named sub-agents (/agents show <name> inspects one){RESET}");
     println!("{DIM}  /agents create [--worktree] <name> [description] — create a project sub-agent{RESET}");
     println!("{DIM}  /agents delete <name> — delete the active named sub-agent definition{RESET}");
     println!(
@@ -5740,6 +5740,7 @@ fn print_agents() {
 fn handle_agents_command(input: &str) {
     match parse_agents_command(input) {
         AgentsSlashCommand::List => print_agents(),
+        AgentsSlashCommand::Show(rest) => print_agent_details(rest),
         AgentsSlashCommand::Open => print_agents_open_hint(),
         AgentsSlashCommand::Create(rest) => create_agent_from_slash(rest),
         AgentsSlashCommand::Delete(rest) => delete_agent_from_slash(rest),
@@ -5748,7 +5749,7 @@ fn handle_agents_command(input: &str) {
         AgentsSlashCommand::BackgroundKill(rest) => kill_background_agent(rest),
         AgentsSlashCommand::BackgroundPrune => prune_background_agents(),
         AgentsSlashCommand::Usage => {
-            eprintln!("{DIM}  /agents: usage: /agents [list|open|background] | /agents background [list|log|kill|prune|clear] | /agents create [--worktree] <name> [description] | /agents delete <name>{RESET}");
+            eprintln!("{DIM}  /agents: usage: /agents [list|show <name>|open|background] | /agents background [list|log|kill|prune|clear] | /agents create [--worktree] <name> [description] | /agents delete <name>{RESET}");
         }
     }
 }
@@ -5756,6 +5757,7 @@ fn handle_agents_command(input: &str) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentsSlashCommand<'a> {
     List,
+    Show(&'a str),
     Open,
     Create(&'a str),
     Delete(&'a str),
@@ -5768,8 +5770,11 @@ enum AgentsSlashCommand<'a> {
 
 fn parse_agents_command(input: &str) -> AgentsSlashCommand<'_> {
     let raw = input.trim();
-    if raw.is_empty() || raw == "list" {
+    if raw.is_empty() || raw == "list" || raw == "show" || raw == "status" {
         return AgentsSlashCommand::List;
+    }
+    if let Some(rest) = raw.strip_prefix("show ") {
+        return AgentsSlashCommand::Show(rest.trim());
     }
     if raw == "open" {
         return AgentsSlashCommand::Open;
@@ -5807,6 +5812,102 @@ fn parse_agents_command(input: &str) -> AgentsSlashCommand<'_> {
         return AgentsSlashCommand::Delete(rest.trim());
     }
     AgentsSlashCommand::Usage
+}
+
+fn print_agent_details(input: &str) {
+    let name = input.trim().trim_start_matches('@');
+    if name.is_empty() || name.split_whitespace().count() != 1 {
+        eprintln!("{DIM}  /agents: usage: /agents show <name>{RESET}");
+        return;
+    }
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /agents: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let agent = match crate::commands::code_agents::find_agent(&cwd, name) {
+        Ok(Some(agent)) => agent,
+        Ok(None) => {
+            eprintln!("{DIM}  /agents: no named sub-agent found for `{name}`{RESET}");
+            return;
+        }
+        Err(e) => {
+            eprintln!("{DIM}  /agents: failed: {e:#}{RESET}");
+            return;
+        }
+    };
+    print!("{}", format_agent_details(&agent));
+}
+
+fn format_agent_details(agent: &crate::commands::code_agents::AgentDefinition) -> String {
+    let tools = agent
+        .tools
+        .as_ref()
+        .filter(|tools| !tools.is_empty())
+        .map(|tools| tools.join(", "))
+        .unwrap_or_else(|| "read, grep, find, ls".to_string());
+    let model = agent.model.as_deref().unwrap_or("default");
+    let isolation = if agent.worktree {
+        "worktree"
+    } else {
+        "same cwd"
+    };
+    let path = agent_definition_path(agent);
+    format!(
+        "{BOLD}agent: {}{RESET}\n  description: {}\n  model: {model}\n  tools: {tools}\n  isolation: {isolation}\n  source: {}\n  path: {}\n\n{BOLD}prompt preview{RESET}\n{}\n\n{DIM}  run /agent {} <task> to dispatch this sub-agent.{RESET}\n\n",
+        agent.name,
+        if agent.description.trim().is_empty() {
+            "Named sub-agent"
+        } else {
+            agent.description.as_str()
+        },
+        agent_source_label(&agent.source),
+        path.display(),
+        agent_prompt_preview(&agent.system_prompt, 12, 900),
+        agent.name,
+    )
+}
+
+fn agent_definition_path(agent: &crate::commands::code_agents::AgentDefinition) -> PathBuf {
+    let dir = match &agent.source {
+        crate::commands::code_agents::AgentSource::Project(path)
+        | crate::commands::code_agents::AgentSource::User(path) => path,
+    };
+    dir.join(format!("{}.md", agent.name))
+}
+
+fn agent_prompt_preview(prompt: &str, max_lines: usize, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut chars = 0usize;
+    let mut lines = 0usize;
+    let total_lines = prompt.lines().count();
+    for line in prompt.lines().take(max_lines) {
+        if chars >= max_chars {
+            break;
+        }
+        if lines > 0 {
+            out.push('\n');
+            chars += 1;
+        }
+        let remaining = max_chars.saturating_sub(chars);
+        let piece = truncate_chars(line.trim_end(), remaining);
+        chars += piece.chars().count();
+        out.push_str(&piece);
+        lines += 1;
+    }
+    if total_lines > lines || prompt.chars().count() > chars {
+        if !out.ends_with('\n') && !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("...");
+    }
+    if out.trim().is_empty() {
+        "(empty)".to_string()
+    } else {
+        out
+    }
 }
 
 fn print_agents_open_hint() {
@@ -12157,6 +12258,11 @@ mod tests {
     fn parse_agents_command_accepts_list_open_and_create() {
         assert_eq!(parse_agents_command(""), AgentsSlashCommand::List);
         assert_eq!(parse_agents_command("list"), AgentsSlashCommand::List);
+        assert_eq!(parse_agents_command("show"), AgentsSlashCommand::List);
+        assert_eq!(
+            parse_agents_command("show reviewer"),
+            AgentsSlashCommand::Show("reviewer")
+        );
         assert_eq!(parse_agents_command("open"), AgentsSlashCommand::Open);
         assert_eq!(
             parse_agents_command("create --worktree reviewer Reviews changes"),
@@ -12170,6 +12276,29 @@ mod tests {
             parse_agents_command("remove reviewer"),
             AgentsSlashCommand::Delete("reviewer")
         );
+    }
+
+    #[test]
+    fn format_agent_details_includes_metadata_and_prompt_preview() {
+        let agent = crate::commands::code_agents::AgentDefinition {
+            name: "reviewer".to_string(),
+            description: "Reviews changes".to_string(),
+            tools: Some(vec!["read".to_string(), "grep".to_string()]),
+            model: Some("qwen".to_string()),
+            worktree: true,
+            system_prompt: "Review carefully.\nCite files.".to_string(),
+            source: crate::commands::code_agents::AgentSource::Project(PathBuf::from(
+                "/tmp/project/.libertai/agents",
+            )),
+        };
+        let details = format_agent_details(&agent);
+        assert!(details.contains("agent: reviewer"));
+        assert!(details.contains("description: Reviews changes"));
+        assert!(details.contains("model: qwen"));
+        assert!(details.contains("tools: read, grep"));
+        assert!(details.contains("isolation: worktree"));
+        assert!(details.contains("/tmp/project/.libertai/agents/reviewer.md"));
+        assert!(details.contains("Review carefully.\nCite files."));
     }
 
     #[test]

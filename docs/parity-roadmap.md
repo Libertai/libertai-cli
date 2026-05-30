@@ -638,11 +638,13 @@ runs with total/running/exited/unknown status counts, `/agents background
 log [pid|latest]` tails their saved output, and `/agents background kill
 <pid>` stops a running child process; `/agents background prune` removes
 non-running records from the durable list. CLI
-`/agents create [--worktree] <name> [description]` scaffolds
-project-local `.libertai/agents/<name>.md` definitions. Worktree
-isolation now uses a detached git worktree when possible and a copied
-temp workspace snapshot outside git. Remaining work is pi-level child
-event streaming and durable scheduling controls for detached agents.
+`/agents show <name>` inspects a definition with source path, metadata,
+and prompt preview, and `/agents create [--worktree] <name>
+[description]` scaffolds project-local `.libertai/agents/<name>.md`
+definitions. Worktree isolation now uses a detached git worktree when
+possible and a copied temp workspace snapshot outside git. Remaining work
+is pi-level child event streaming and durable scheduling controls for
+detached agents.
 
 **Files**: `src/commands/code_agents.rs`, `src/commands/code_task.rs`,
 `src/commands/code_ui.rs`.
