@@ -46,7 +46,114 @@ fn discover_with_home(
 }
 
 pub fn expand(command: &CustomCommand, args: &str) -> String {
-    command.body.replace("{{args}}", args.trim())
+    expand_body(&command.body, args)
+}
+
+fn expand_body(body: &str, args: &str) -> String {
+    let args = args.trim();
+    let positional = split_command_args(args);
+    let mut out = String::with_capacity(body.len() + args.len());
+    let mut i = 0usize;
+    let mut used_args = false;
+    while i < body.len() {
+        let rest = &body[i..];
+        if rest.starts_with("{{") {
+            if let Some(end) = rest.find("}}") {
+                if rest[2..end].trim().eq_ignore_ascii_case("args") {
+                    out.push_str(args);
+                    used_args = true;
+                    i += end + "}}".len();
+                    continue;
+                }
+            }
+        }
+        if let Some(indexed) = rest.strip_prefix("$ARGUMENTS[") {
+            if let Some(end) = indexed.find(']') {
+                if let Ok(idx) = indexed[..end].parse::<usize>() {
+                    if let Some(value) = positional.get(idx) {
+                        out.push_str(value);
+                    }
+                    used_args = true;
+                    i += "$ARGUMENTS[".len() + end + "]".len();
+                    continue;
+                }
+            }
+        }
+        if rest.starts_with("$ARGUMENTS") {
+            out.push_str(args);
+            used_args = true;
+            i += "$ARGUMENTS".len();
+            continue;
+        }
+        let bytes = rest.as_bytes();
+        if bytes.first() == Some(&b'$') && bytes.get(1).is_some_and(u8::is_ascii_digit) {
+            let mut end = 1usize;
+            while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+                end += 1;
+            }
+            if let Ok(idx) = rest[1..end].parse::<usize>() {
+                if let Some(value) = positional.get(idx) {
+                    out.push_str(value);
+                }
+                used_args = true;
+                i += end;
+                continue;
+            }
+        }
+        let ch = rest.chars().next().expect("non-empty rest");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    if !used_args && !args.is_empty() {
+        if !out.ends_with('\n') {
+            out.push_str("\n\n");
+        }
+        out.push_str("ARGUMENTS: ");
+        out.push_str(args);
+    }
+    out
+}
+
+fn split_command_args(args: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for ch in args.trim().chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            c if c.is_whitespace() => {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if escaped {
+        current.push('\\');
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
 }
 
 fn scan_dir(dir: &Path, source: CommandSource, out: &mut Vec<CustomCommand>) {
@@ -88,7 +195,7 @@ fn load_file(root: &Path, path: &Path, source: CommandSource) -> Option<CustomCo
     for (key, value) in frontmatter {
         match key.as_str() {
             "description" => description = Some(value),
-            "argHint" | "arg_hint" | "arg-hint" => arg_hint = Some(value),
+            "argHint" | "arg_hint" | "arg-hint" | "argument-hint" => arg_hint = Some(value),
             _ => {}
         }
     }
@@ -202,7 +309,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         write(
             &temp.path().join(".claude/commands/review.md"),
-            "---\ndescription: Review diff\nargHint: scope\n---\nReview {{args}}",
+            "---\ndescription: Review diff\nargument-hint: scope\n---\nReview {{args}}",
         );
 
         let cmds = discover_with_home(temp.path(), None, None);
@@ -247,5 +354,39 @@ mod tests {
         assert_eq!(cmds[0].name, "team/review");
         assert_eq!(cmds[0].body, "Project review {{args}}");
         assert_eq!(expand(&cmds[0], "src"), "Project review src");
+    }
+
+    #[test]
+    fn expands_claude_argument_placeholders() {
+        let command = CustomCommand {
+            name: "review".into(),
+            description: None,
+            arg_hint: None,
+            body: "all=$ARGUMENTS first=$0 second=$1 indexed=$ARGUMENTS[1] missing=$3 legacy={{ args }}".into(),
+            source: CommandSource::Project,
+            path: PathBuf::from(".claude/commands/review.md"),
+        };
+
+        assert_eq!(
+            expand(&command, r#"src/lib.rs "high priority""#),
+            "all=src/lib.rs \"high priority\" first=src/lib.rs second=high priority indexed=high priority missing= legacy=src/lib.rs \"high priority\""
+        );
+    }
+
+    #[test]
+    fn appends_arguments_when_template_has_no_placeholders() {
+        let command = CustomCommand {
+            name: "plain".into(),
+            description: None,
+            arg_hint: None,
+            body: "Review this carefully.".into(),
+            source: CommandSource::Project,
+            path: PathBuf::from(".claude/commands/plain.md"),
+        };
+
+        assert_eq!(
+            expand(&command, "src/lib.rs"),
+            "Review this carefully.\n\nARGUMENTS: src/lib.rs"
+        );
     }
 }

@@ -628,7 +628,10 @@ are discovered recursively; nested paths keep their slash name, so
 `commands/team/review.md` becomes `/team/review`. Each file becomes a
 prompt template; frontmatter may define `description:` and `argHint:`.
 CLI and desktop support `/template <name> [args]` and direct
-`/<name> [args]` dispatch with `{{args}}` substitution.
+`/<name> [args]` dispatch with Claude-style `$ARGUMENTS`,
+`$ARGUMENTS[0]`, `$0` / `$1` positional arguments, implicit
+`ARGUMENTS: ...` append for templates without placeholders, and legacy
+`{{args}}` substitution.
 
 **Files**: `src/commands/code_slash_registry.rs`, `src/commands/code_ui.rs`.
 
