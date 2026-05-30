@@ -109,6 +109,8 @@ pub struct Config {
     pub status_line_command: String,
     #[serde(default, skip_serializing_if = "HooksConfig::is_default")]
     pub hooks: HooksConfig,
+    #[serde(default, rename = "mcpServers", skip_serializing_if = "HashMap::is_empty")]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
     #[serde(default)]
     pub auth: Auth,
 }
@@ -203,6 +205,16 @@ impl Default for LauncherDefaults {
             haiku_model: DEFAULT_FAST_MODEL.into(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpServerConfig {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -838,6 +850,7 @@ impl Default for Config {
             status_line_template: String::new(),
             status_line_command: String::new(),
             hooks: HooksConfig::default(),
+            mcp_servers: HashMap::new(),
             auth: Auth::default(),
         }
     }

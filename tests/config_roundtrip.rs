@@ -1,6 +1,8 @@
 //! Guards the on-disk config shape and the key-masking helper.
 
-use libertai_cli::config::{mask_key, Auth, Config, HookCommandConfig, HooksConfig, LauncherDefaults};
+use libertai_cli::config::{
+    mask_key, Auth, Config, HookCommandConfig, HooksConfig, LauncherDefaults, McpServerConfig,
+};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -23,6 +25,7 @@ fn empty_toml_parses_as_defaults() {
     assert!(cfg.hooks.stop.is_empty());
     assert!(cfg.hooks.session_end.is_empty());
     assert!(cfg.hooks.notification.is_empty());
+    assert!(cfg.mcp_servers.is_empty());
     assert!(cfg.auth.api_key.is_none());
 }
 
@@ -97,6 +100,17 @@ fn save_then_load_preserves_fields() {
                 ..HookCommandConfig::default()
             }],
         },
+        mcp_servers: std::collections::HashMap::from([(
+            "policy".to_string(),
+            McpServerConfig {
+                command: "node".into(),
+                args: vec!["servers/policy.mjs".into()],
+                env: std::collections::HashMap::from([(
+                    "POLICY_LEVEL".to_string(),
+                    "strict".to_string(),
+                )]),
+            },
+        )]),
         ..Default::default()
     };
 
@@ -164,6 +178,13 @@ fn save_then_load_preserves_fields() {
     assert_eq!(round.hooks.session_end[0].command, "scripts/session-end.sh");
     assert_eq!(round.hooks.notification.len(), 1);
     assert_eq!(round.hooks.notification[0].command, "scripts/notification.sh");
+    let policy_server = round.mcp_servers.get("policy").unwrap();
+    assert_eq!(policy_server.command, "node");
+    assert_eq!(policy_server.args, vec!["servers/policy.mjs".to_string()]);
+    assert_eq!(
+        policy_server.env.get("POLICY_LEVEL").map(String::as_str),
+        Some("strict")
+    );
 }
 
 #[test]

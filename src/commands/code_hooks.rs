@@ -1,14 +1,14 @@
 //! Claude Code-style hooks for native CLI sessions.
 //!
 //! The desktop has a richer hook registry. The CLI intentionally keeps
-//! this surface narrow: configured shell commands, HTTP handlers, and
-//! prompt/agent handlers are executed, while imported MCP handlers are not
-//! run natively.
+//! this surface narrow: configured shell commands, HTTP handlers,
+//! stdio MCP-tool handlers, and prompt/agent handlers are executed.
 
 use std::collections::HashSet;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -209,6 +209,8 @@ fn is_runnable_hook(hook: &HookCommandConfig) -> bool {
             !hook.url.trim().is_empty()
         } else if hook_is_prompt(hook) || hook_is_agent(hook) {
             !hook.prompt.trim().is_empty()
+        } else if hook_is_mcp_tool(hook) {
+            !hook.server.trim().is_empty() && !hook.tool.trim().is_empty()
         } else if hook_is_command(hook) {
             !hook.command.trim().is_empty()
         } else {
@@ -253,11 +255,20 @@ fn hook_is_agent(hook: &HookCommandConfig) -> bool {
     hook.hook_type.trim().eq_ignore_ascii_case("agent")
 }
 
+fn hook_is_mcp_tool(hook: &HookCommandConfig) -> bool {
+    matches!(
+        hook.hook_type.trim().to_ascii_lowercase().as_str(),
+        "mcp_tool" | "mcp-tool" | "mcptool"
+    )
+}
+
 fn hook_target(hook: &HookCommandConfig) -> &str {
     if hook_is_http(hook) {
         hook.url.trim()
     } else if hook_is_prompt(hook) || hook_is_agent(hook) {
         hook.prompt.trim()
+    } else if hook_is_mcp_tool(hook) {
+        hook.tool.trim()
     } else {
         hook.command.trim()
     }
@@ -548,6 +559,8 @@ fn run_detached_hook(
 ) -> HookRun {
     if hook_is_http(hook) {
         run_http_hook(hook, payload, event_name)
+    } else if hook_is_mcp_tool(hook) {
+        run_mcp_tool_hook(hook, payload)
     } else if hook_is_prompt(hook) {
         run_prompt_hook(hook, payload)
     } else if hook_is_agent(hook) {
@@ -565,6 +578,8 @@ fn run_configured_hook(
 ) -> HookRun {
     if hook_is_http(hook) {
         run_http_hook(hook, payload, event_name)
+    } else if hook_is_mcp_tool(hook) {
+        run_mcp_tool_hook(hook, payload)
     } else if hook_is_prompt(hook) {
         run_prompt_hook(hook, payload)
     } else if hook_is_agent(hook) {
@@ -640,6 +655,259 @@ fn run_http_hook(
             format!("HTTP hook returned {status}")
         },
     }
+}
+
+fn run_mcp_tool_hook(hook: &HookCommandConfig, payload: &serde_json::Value) -> HookRun {
+    let cfg = match crate::config::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("loading MCP hook config: {e:#}"),
+            };
+        }
+    };
+    run_mcp_tool_hook_with_config(hook, payload, &cfg)
+}
+
+fn run_mcp_tool_hook_with_config(
+    hook: &HookCommandConfig,
+    payload: &serde_json::Value,
+    cfg: &Config,
+) -> HookRun {
+    let server_name = hook.server.trim();
+    let tool_name = hook.tool.trim();
+    if server_name.is_empty() || tool_name.is_empty() {
+        return HookRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: "MCP hook requires server and tool".to_string(),
+        };
+    }
+    let Some(server) = cfg.mcp_servers.get(server_name) else {
+        return HookRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: format!("MCP hook server `{server_name}` is not configured"),
+        };
+    };
+    if server.command.trim().is_empty() {
+        return HookRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: format!("MCP hook server `{server_name}` has no command"),
+        };
+    }
+
+    let timeout = Duration::from_secs(hook.timeout.filter(|secs| *secs > 0).unwrap_or(30));
+    let mut cmd = Command::new(server.command.trim());
+    cmd.args(&server.args)
+        .envs(&server.env)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let spawn = cmd.spawn();
+    let Ok(mut child) = spawn else {
+        return HookRun {
+            status: 127,
+            stdout: String::new(),
+            stderr: format!("failed to spawn MCP hook server `{server_name}`"),
+        };
+    };
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        return HookRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: format!("MCP hook server `{server_name}` did not expose stdin"),
+        };
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        return HookRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: format!("MCP hook server `{server_name}` did not expose stdout"),
+        };
+    };
+    let stderr = child.stderr.take();
+    let (tx, rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        let _ = tx.send(trimmed.to_string());
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let input = hook.input.clone().unwrap_or_else(|| payload.clone());
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "libertai-cli",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+        },
+    });
+    if let Err(e) = write_mcp_message(&mut stdin, &init) {
+        let _ = child.kill();
+        return HookRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: format!("writing MCP initialize request: {e}"),
+        };
+    }
+    if let Err(e) = wait_for_mcp_response(&rx, 1, timeout).and_then(mcp_response_result) {
+        let _ = child.kill();
+        return HookRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: format!("MCP initialize failed: {e}"),
+        };
+    }
+    let initialized = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {},
+    });
+    if let Err(e) = write_mcp_message(&mut stdin, &initialized) {
+        let _ = child.kill();
+        return HookRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: format!("writing MCP initialized notification: {e}"),
+        };
+    }
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": input,
+        },
+    });
+    if let Err(e) = write_mcp_message(&mut stdin, &call) {
+        let _ = child.kill();
+        return HookRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: format!("writing MCP tools/call request: {e}"),
+        };
+    }
+    let response = match wait_for_mcp_response(&rx, 2, timeout).and_then(mcp_response_result) {
+        Ok(response) => response,
+        Err(e) => {
+            let _ = child.kill();
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("MCP tools/call failed: {e}"),
+            };
+        }
+    };
+    let _ = stdin.flush();
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    let stderr_text = stderr
+        .map(|stderr| {
+            let mut reader = BufReader::new(stderr);
+            let mut text = String::new();
+            let _ = reader.read_to_string(&mut text);
+            text.trim().to_string()
+        })
+        .unwrap_or_default();
+    let _ = reader.join();
+    let stdout = mcp_tool_output_text(&response);
+    let is_error = response
+        .get("isError")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    HookRun {
+        status: if is_error { 1 } else { 0 },
+        stdout,
+        stderr: if is_error {
+            mcp_tool_output_text(&response)
+        } else {
+            stderr_text
+        },
+    }
+}
+
+fn write_mcp_message(stdin: &mut impl Write, value: &serde_json::Value) -> std::io::Result<()> {
+    let mut line = serde_json::to_string(value).map_err(std::io::Error::other)?;
+    line.push('\n');
+    stdin.write_all(line.as_bytes())?;
+    stdin.flush()
+}
+
+fn wait_for_mcp_response(
+    rx: &mpsc::Receiver<String>,
+    id: u64,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("timed out waiting for response id {id}"));
+        }
+        let line = rx
+            .recv_timeout(remaining)
+            .map_err(|_| format!("timed out waiting for response id {id}"))?;
+        let value: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|e| format!("invalid JSON-RPC message from MCP server: {e}"))?;
+        if value.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
+            return Ok(value);
+        }
+    }
+}
+
+fn mcp_response_result(response: serde_json::Value) -> Result<serde_json::Value, String> {
+    if let Some(error) = response.get("error") {
+        return Err(error.to_string());
+    }
+    response
+        .get("result")
+        .cloned()
+        .ok_or_else(|| "missing result".to_string())
+}
+
+fn mcp_tool_output_text(result: &serde_json::Value) -> String {
+    result
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| {
+                    block
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| block.as_str())
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| result.to_string())
 }
 
 fn expand_allowed_env_vars(value: &str, allowed_env_vars: &[String]) -> String {
@@ -1334,7 +1602,8 @@ fn non_empty(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::HooksConfig;
+    use crate::config::{HooksConfig, McpServerConfig};
+    use std::collections::HashMap;
 
     #[test]
     fn agent_hook_tool_allowlist_is_read_only() {
@@ -1350,6 +1619,53 @@ mod tests {
         assert!(content.starts_with("Inspect the hook payload"));
         assert!(content.contains("Hook event payload:"));
         assert!(content.contains("\"toolName\": \"read\""));
+    }
+
+    #[test]
+    fn mcp_tool_output_text_reads_text_blocks() {
+        let result = json!({
+            "content": [
+                { "type": "text", "text": "first" },
+                { "type": "text", "text": "second" }
+            ]
+        });
+        assert_eq!(mcp_tool_output_text(&result), "first\nsecond");
+    }
+
+    #[test]
+    fn mcp_tool_hook_calls_stdio_server() {
+        let hook = HookCommandConfig {
+            hook_type: "mcp_tool".to_string(),
+            server: "policy".to_string(),
+            tool: "check".to_string(),
+            input: Some(json!({"level":"strict"})),
+            timeout: Some(2),
+            ..HookCommandConfig::default()
+        };
+        let cfg = Config {
+            mcp_servers: HashMap::from([(
+                "policy".to_string(),
+                McpServerConfig {
+                    command: "sh".to_string(),
+                    args: vec![
+                        "-c".to_string(),
+                        concat!(
+                            "read init; ",
+                            "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}}}'; ",
+                            "read initialized; ",
+                            "read call; ",
+                            "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"policy ok\"}],\"isError\":false}}';"
+                        )
+                        .to_string(),
+                    ],
+                    env: HashMap::new(),
+                },
+            )]),
+            ..Config::default()
+        };
+        let run = run_mcp_tool_hook_with_config(&hook, &json!({"event":"PreToolUse"}), &cfg);
+        assert_eq!(run.status, 0);
+        assert_eq!(run.stdout, "policy ok");
     }
 
     #[test]

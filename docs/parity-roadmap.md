@@ -656,15 +656,16 @@ ephemeral read-only code-agent session with `read`, `grep`, `find`, and
 `once = true` run at most once per native CLI
 session/event/index, and named `source`, `statusMessage`, plus
 `asyncRewake` metadata round-trip and display in `/hooks`. Unknown
-preserved metadata keys are also listed in `/hooks`. CLI MCP-tool hook rows preserve
+preserved metadata keys are also listed in `/hooks`. CLI MCP-tool hook rows use
 `type = "mcp_tool"` plus Claude-imported `type = "mcp-tool"` aliases,
-`server`, `tool`, and optional JSON `input` metadata in config and
-`/hooks` output, but are not executed yet. Unknown/less-common hook fields
+`server`, `tool`, and optional JSON `input` metadata, launching stdio
+servers configured under `mcpServers` and calling the named tool through
+MCP `initialize` plus `tools/call`. Unknown/less-common hook fields
 are flattened into each hook row and round-trip through TOML config saves.
 `/hooks` and `libertai status` report configured runnable hooks.
 
-Remaining work: any pi-level typed hook dispatcher.
-Native MCP-tool hook handlers remain intentionally unexecuted in the CLI.
+Remaining work: any pi-level typed hook dispatcher and broader HTTP/SSE
+MCP hook transports in the terminal CLI.
 
 **Files**: `src/config.rs`,
 `src/commands/code_hooks.rs`,
@@ -674,9 +675,10 @@ Native MCP-tool hook handlers remain intentionally unexecuted in the CLI.
 ### 5B. MCP support
 
 Spawn user-configured MCP servers (stdio/HTTP/SSE), expose their tools
-to the agent. Currently the parity doc reserves Tier C for this
-(`../libertai-code-desktop/docs/claude-code-parity.md:43`); nothing
-wired.
+to the agent. The CLI now has a narrow stdio MCP client for MCP-tool hook
+handlers configured through `mcpServers`, but it still does not expose a
+live MCP tool/resource/prompt registry to the agent. Desktop owns the full
+stdio/HTTP/SSE live registry today.
 
 **Files**: new `src/commands/code_mcp.rs` + transport modules.
 **Effort**: L (2+ weeks).
