@@ -2722,7 +2722,7 @@ fn should_skip_tree_entry(name: &str) -> bool {
 
 fn parse_changelog_limit(input: &str) -> Result<usize> {
     let value = input.trim();
-    if value.is_empty() {
+    if value.is_empty() || is_default_list_alias(value) {
         return Ok(CHANGELOG_DEFAULT_LIMIT);
     }
     let limit = value
@@ -2962,7 +2962,7 @@ fn persist_input_history(path: &Path, history: &VecDeque<String>) -> Result<()> 
 
 fn parse_history_limit(input: &str) -> Result<usize> {
     let value = input.trim();
-    if value.is_empty() {
+    if value.is_empty() || is_default_list_alias(value) {
         return Ok(HISTORY_DEFAULT_LIMIT);
     }
     let limit = value
@@ -2970,6 +2970,13 @@ fn parse_history_limit(input: &str) -> Result<usize> {
         .context("usage: /history [count]")?
         .clamp(1, HISTORY_MAX_LIMIT);
     Ok(limit)
+}
+
+fn is_default_list_alias(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "status" | "state" | "show" | "list" | "recent" | "latest"
+    )
 }
 
 fn print_history(history: &VecDeque<String>, limit: usize) {
@@ -9931,10 +9938,14 @@ mod tests {
     #[test]
     fn parse_history_limit_defaults_and_clamps() {
         assert_eq!(parse_history_limit("").unwrap(), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(parse_history_limit("list").unwrap(), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(parse_history_limit("recent").unwrap(), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(parse_history_limit("latest").unwrap(), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(parse_history_limit("status").unwrap(), HISTORY_DEFAULT_LIMIT);
         assert_eq!(parse_history_limit("3").unwrap(), 3);
         assert_eq!(parse_history_limit("0").unwrap(), 1);
         assert_eq!(parse_history_limit("999").unwrap(), HISTORY_MAX_LIMIT);
-        assert!(parse_history_limit("recent").is_err());
+        assert!(parse_history_limit("open").is_err());
     }
 
     #[test]
@@ -10000,10 +10011,23 @@ mod tests {
     #[test]
     fn parse_changelog_limit_defaults_and_clamps() {
         assert_eq!(parse_changelog_limit("").unwrap(), CHANGELOG_DEFAULT_LIMIT);
+        assert_eq!(parse_changelog_limit("list").unwrap(), CHANGELOG_DEFAULT_LIMIT);
+        assert_eq!(
+            parse_changelog_limit("recent").unwrap(),
+            CHANGELOG_DEFAULT_LIMIT
+        );
+        assert_eq!(
+            parse_changelog_limit("latest").unwrap(),
+            CHANGELOG_DEFAULT_LIMIT
+        );
+        assert_eq!(
+            parse_changelog_limit("status").unwrap(),
+            CHANGELOG_DEFAULT_LIMIT
+        );
         assert_eq!(parse_changelog_limit("3").unwrap(), 3);
         assert_eq!(parse_changelog_limit("0").unwrap(), 1);
         assert_eq!(parse_changelog_limit("999").unwrap(), CHANGELOG_MAX_LIMIT);
-        assert!(parse_changelog_limit("recent").is_err());
+        assert!(parse_changelog_limit("open").is_err());
     }
 
     #[test]

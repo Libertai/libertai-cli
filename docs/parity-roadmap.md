@@ -57,6 +57,8 @@ SDK; those are flagged **(upstream)**.
   to Markdown with `/export [path]`.
 - **CLI `/history` command** — REPL users can inspect recent submitted
   prompts with `/history [count]`.
+- **CLI `/history` aliases** — REPL users can use `/history
+  list|recent|latest|status` for the default recent-prompt view.
 - **CLI `/new` alias** — REPL users can start a fresh session with the
   Claude/Pi-style `/new` spelling as well as `/clear`.
 - **CLI `/copy` command** — REPL users can copy the latest assistant
@@ -67,6 +69,8 @@ SDK; those are flagged **(upstream)**.
   with noisy dependency/build directories skipped.
 - **CLI `/changelog` command** — REPL users can inspect recent git
   commits with `/changelog [count]`.
+- **CLI `/changelog` aliases** — REPL users can use `/changelog
+  list|recent|latest|status` for the default recent-commit view.
 - **CLI `/reload`, `/login`, and `/logout` commands** — REPL users can
   refresh config/auth state and rebuild the active agent session without
   leaving `libertai code`; `/login status` reports saved LibertAI
