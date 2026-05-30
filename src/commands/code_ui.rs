@@ -2621,7 +2621,7 @@ fn print_help() {
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost; /usage export [json|csv]){RESET}");
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
-    println!("{DIM}  /config [path|open|advanced|set <key> <value>|unset <key>] — show or update active config{RESET}");
+    println!("{DIM}  /config [status|show|current|info|path|open|advanced|set <key> <value>|unset <key>] — show or update active config{RESET}");
     println!("{DIM}  /hooks    — show configured command hooks (/hooks open shows settings target){RESET}");
     println!("{DIM}  /mcp      — show terminal MCP support status{RESET}");
     println!(
@@ -9047,10 +9047,7 @@ fn print_config_status(cfg: &LibertaiConfig) {
 
 fn handle_repl_config_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Result<()> {
     let action = raw.trim();
-    if action.is_empty()
-        || action.eq_ignore_ascii_case("show")
-        || action.eq_ignore_ascii_case("status")
-    {
+    if is_config_status_alias(action) {
         print_config_status(cfg);
         return Ok(());
     }
@@ -9087,6 +9084,13 @@ fn handle_repl_config_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Resul
         _ => print_config_status(cfg),
     }
     Ok(())
+}
+
+fn is_config_status_alias(action: &str) -> bool {
+    matches!(
+        action.trim().to_ascii_lowercase().as_str(),
+        "" | "status" | "show" | "current" | "info"
+    )
 }
 
 fn parse_config_settings_target(action: &str) -> Option<ConfigSettingsTarget> {
@@ -11970,6 +11974,17 @@ mod tests {
         assert_eq!(parse_notify_command("test"), NotifyCommand::Test);
         assert_eq!(parse_notify_command("ping"), NotifyCommand::Test);
         assert_eq!(parse_notify_command("wat"), NotifyCommand::Usage);
+    }
+
+    #[test]
+    fn config_status_aliases_match_desktop_palette() {
+        assert!(is_config_status_alias(""));
+        assert!(is_config_status_alias("status"));
+        assert!(is_config_status_alias("show"));
+        assert!(is_config_status_alias("current"));
+        assert!(is_config_status_alias("info"));
+        assert!(!is_config_status_alias("path"));
+        assert!(!is_config_status_alias("set code_turn_notifications true"));
     }
 
     #[test]
