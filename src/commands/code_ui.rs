@@ -170,6 +170,7 @@ struct PrCommentDraft {
 enum ScheduleCommand {
     Status,
     Show(String),
+    Run(String),
     Cancel(String),
     Clear,
     Add { delay: Duration, prompt: String },
@@ -1404,6 +1405,25 @@ async fn repl_loop(
             match parse_schedule_command(rest) {
                 ScheduleCommand::Status => print_schedule_status(&scheduled_runs),
                 ScheduleCommand::Show(id) => print_schedule_details(&scheduled_runs, &id),
+                ScheduleCommand::Run(id) => {
+                    let now = Instant::now();
+                    if let Some(run) = scheduled_runs.iter_mut().find(|run| run.id == id) {
+                        run.due_at = now;
+                        run.due_epoch_ms = now_epoch_ms();
+                        scheduled_runs.sort_by_key(|run| run.due_at);
+                        if let Err(err) = persist_scheduled_runs_if_configured(
+                            schedule_store_path.as_deref(),
+                            &scheduled_runs,
+                        ) {
+                            eprintln!(
+                                "{DIM}  /schedule: could not save scheduled prompts: {err}.{RESET}"
+                            );
+                        }
+                        println!("{DIM}  /schedule: queued {id} to run now.{RESET}");
+                    } else {
+                        println!("{DIM}  /schedule: no scheduled prompt found for {id}.{RESET}");
+                    }
+                }
                 ScheduleCommand::Cancel(id) => {
                     let before = scheduled_runs.len();
                     scheduled_runs.retain(|run| run.id != id);
@@ -1462,7 +1482,7 @@ async fn repl_loop(
                 }
                 ScheduleCommand::Usage => {
                     eprintln!(
-                        "{DIM}  usage: /schedule in 10m follow up, /schedule list|status|state, /schedule show <id>, /schedule cancel <id>, or /schedule clear|stop (also /cron){RESET}"
+                        "{DIM}  usage: /schedule in 10m follow up, /schedule list|status|state, /schedule show <id>, /schedule run <id>, /schedule cancel <id>, or /schedule clear|stop (also /cron){RESET}"
                     );
                 }
             }
@@ -4514,6 +4534,13 @@ fn parse_schedule_command(input: &str) -> ScheduleCommand {
                 ScheduleCommand::Usage
             } else {
                 ScheduleCommand::Show(rest.to_string())
+            }
+        }
+        "run" | "now" | "trigger" => {
+            if rest.is_empty() || rest.split_whitespace().nth(1).is_some() {
+                ScheduleCommand::Usage
+            } else {
+                ScheduleCommand::Run(rest.to_string())
             }
         }
         "cancel" | "delete" | "rm" => {
@@ -12278,6 +12305,14 @@ mod tests {
             ScheduleCommand::Show("sch_2".to_string())
         );
         assert_eq!(
+            parse_schedule_command("run sch_2"),
+            ScheduleCommand::Run("sch_2".to_string())
+        );
+        assert_eq!(
+            parse_schedule_command("now sch_2"),
+            ScheduleCommand::Run("sch_2".to_string())
+        );
+        assert_eq!(
             parse_schedule_command("cancel sch_2"),
             ScheduleCommand::Cancel("sch_2".to_string())
         );
@@ -12289,6 +12324,10 @@ mod tests {
         ));
         assert!(matches!(
             parse_schedule_command("show sch_2 extra"),
+            ScheduleCommand::Usage
+        ));
+        assert!(matches!(
+            parse_schedule_command("run sch_2 extra"),
             ScheduleCommand::Usage
         ));
         assert_eq!(
