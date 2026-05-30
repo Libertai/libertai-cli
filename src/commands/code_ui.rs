@@ -3403,6 +3403,7 @@ fn print_permissions_open_hint() {
 enum LoginSlashTarget<'a> {
     Account,
     Status,
+    ProviderStatus(&'a str),
     Provider(&'a str),
 }
 
@@ -3410,6 +3411,18 @@ fn parse_login_slash_target(query: &str) -> LoginSlashTarget<'_> {
     let raw = query.trim();
     if raw.is_empty() {
         return LoginSlashTarget::Account;
+    }
+    if let Some((head, tail)) = split_first_word(raw) {
+        if matches!(
+            head.to_ascii_lowercase().as_str(),
+            "show" | "info" | "inspect" | "provider"
+        ) {
+            let provider = tail.trim();
+            if !provider.is_empty() && provider.split_whitespace().count() == 1 {
+                return LoginSlashTarget::ProviderStatus(provider);
+            }
+            return LoginSlashTarget::Status;
+        }
     }
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
@@ -3429,6 +3442,7 @@ fn handle_login_slash(query: &str, cfg: &LibertaiConfig) {
                 "{DIM}  use /login with no arguments to run the interactive LibertAI login flow.{RESET}"
             );
         }
+        LoginSlashTarget::ProviderStatus(provider) => print_provider_login_details(provider, cfg),
         LoginSlashTarget::Provider(provider) => print_provider_login_note(provider, cfg),
     }
 }
@@ -3442,6 +3456,7 @@ fn handle_logout_slash(query: &str, cfg: &LibertaiConfig) {
                 "{DIM}  use /logout with no arguments to back up and remove the LibertAI config.{RESET}"
             );
         }
+        LoginSlashTarget::ProviderStatus(provider) => print_provider_logout_details(provider, cfg),
         LoginSlashTarget::Provider(provider) => {
             println!("{BOLD}logout{RESET}");
             println!(
@@ -3490,6 +3505,52 @@ fn print_provider_login_note(provider: &str, cfg: &LibertaiConfig) {
     );
     println!(
         "{DIM}  use the desktop `/login {provider}` flow or Settings > Backends for provider-specific credentials.{RESET}"
+    );
+    println!("{DIM}  terminal LibertAI API key:{RESET} {}", login_key_state(cfg));
+}
+
+fn print_provider_login_details(provider: &str, cfg: &LibertaiConfig) {
+    println!("{BOLD}login: {provider}{RESET}");
+    if provider.eq_ignore_ascii_case("libertai") {
+        println!(
+            "{DIM}  terminal LibertAI API key:{RESET} {}",
+            login_key_state(cfg)
+        );
+        println!(
+            "{DIM}  wallet:{RESET} {}",
+            cfg.auth
+                .wallet_address
+                .as_deref()
+                .map(mask_key)
+                .unwrap_or_else(|| "missing".to_string())
+        );
+        println!(
+            "{DIM}  chain:{RESET} {}",
+            cfg.auth.chain.as_deref().unwrap_or("missing")
+        );
+        println!("{DIM}  run /login libertai to inspect the terminal account flow.{RESET}");
+        return;
+    }
+    println!("{DIM}  terminal provider key:{RESET} not stored");
+    println!(
+        "{DIM}  desktop state:{RESET} use desktop /login show {provider} or Settings > Backends for key/base URL/model-cache details."
+    );
+    println!("{DIM}  terminal LibertAI API key:{RESET} {}", login_key_state(cfg));
+}
+
+fn print_provider_logout_details(provider: &str, cfg: &LibertaiConfig) {
+    println!("{BOLD}logout: {provider}{RESET}");
+    if provider.eq_ignore_ascii_case("libertai") {
+        println!(
+            "{DIM}  terminal LibertAI API key:{RESET} {}",
+            login_key_state(cfg)
+        );
+        println!("{DIM}  run /logout libertai to clear terminal LibertAI credentials.{RESET}");
+        return;
+    }
+    println!("{DIM}  terminal provider key:{RESET} not stored");
+    println!(
+        "{DIM}  desktop action:{RESET} use desktop /logout {provider} to clear a desktop-stored provider API key."
     );
     println!("{DIM}  terminal LibertAI API key:{RESET} {}", login_key_state(cfg));
 }
@@ -12403,6 +12464,14 @@ mod tests {
         assert_eq!(
             parse_login_slash_target("anthropic"),
             LoginSlashTarget::Provider("anthropic")
+        );
+        assert_eq!(
+            parse_login_slash_target("show anthropic"),
+            LoginSlashTarget::ProviderStatus("anthropic")
+        );
+        assert_eq!(
+            parse_login_slash_target("inspect libertai"),
+            LoginSlashTarget::ProviderStatus("libertai")
         );
     }
 
