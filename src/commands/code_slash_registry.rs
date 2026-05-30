@@ -323,17 +323,20 @@ fn load_skill_file(dir: &Path, path: &Path, source: CommandSource) -> Option<Cus
         return None;
     }
     let mut description = None;
+    let mut when_to_use = None;
     let mut arg_hint = None;
     let mut argument_names = Vec::new();
     for (key, value) in frontmatter {
         match key.as_str() {
             "description" => description = Some(value),
+            "when_to_use" | "when-to-use" => when_to_use = Some(value),
             "argHint" | "arg_hint" | "arg-hint" | "argument-hint" => arg_hint = Some(value),
             "arguments" => argument_names = parse_argument_names(&value),
             "user-invocable" if is_false(&value) => return None,
             _ => {}
         }
     }
+    let description = skill_description(description, when_to_use, body);
     Some(CustomCommand {
         name,
         namespace: None,
@@ -344,6 +347,39 @@ fn load_skill_file(dir: &Path, path: &Path, source: CommandSource) -> Option<Cus
         source,
         path: path.to_path_buf(),
     })
+}
+
+fn skill_description(
+    description: Option<String>,
+    when_to_use: Option<String>,
+    body: &str,
+) -> Option<String> {
+    let base = description
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| first_body_paragraph(body));
+    match (base, when_to_use.filter(|value| !value.trim().is_empty())) {
+        (Some(base), Some(when)) => Some(format!("{} {}", base.trim(), when.trim())),
+        (Some(base), None) => Some(base.trim().to_string()),
+        (None, Some(when)) => Some(when.trim().to_string()),
+        (None, None) => None,
+    }
+}
+
+fn first_body_paragraph(body: &str) -> Option<String> {
+    let mut lines = Vec::new();
+    for line in body.lines().map(str::trim) {
+        if line.is_empty() {
+            if !lines.is_empty() {
+                break;
+            }
+            continue;
+        }
+        if lines.is_empty() && line.starts_with('#') {
+            continue;
+        }
+        lines.push(line);
+    }
+    (!lines.is_empty()).then(|| lines.join(" "))
 }
 
 fn command_name(root: &Path, path: &Path) -> Option<String> {
@@ -578,14 +614,17 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         write(
             &temp.path().join(".claude/skills/summarize/SKILL.md"),
-            "---\ndescription: Summarize changes\nargument-hint: scope\narguments: [scope]\n---\nSummarize $scope from ${CLAUDE_SKILL_DIR}.",
+            "---\ndescription: Summarize changes\nwhen_to_use: Use for review prep.\nargument-hint: scope\narguments: [scope]\n---\nSummarize $scope from ${CLAUDE_SKILL_DIR}.",
         );
 
         let cmds = discover_with_home(temp.path(), None, None);
 
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].name, "summarize");
-        assert_eq!(cmds[0].description.as_deref(), Some("Summarize changes"));
+        assert_eq!(
+            cmds[0].description.as_deref(),
+            Some("Summarize changes Use for review prep.")
+        );
         assert_eq!(cmds[0].arg_hint.as_deref(), Some("scope"));
         assert_eq!(cmds[0].argument_names, vec!["scope"]);
         assert_eq!(
@@ -594,6 +633,22 @@ mod tests {
                 "Summarize repo from {}.",
                 temp.path().join(".claude/skills/summarize").display()
             )
+        );
+    }
+
+    #[test]
+    fn skill_description_falls_back_to_first_paragraph() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            &temp.path().join(".claude/skills/explain/SKILL.md"),
+            "---\nargument-hint: topic\n---\n# Explain\n\nExplain the topic clearly.\nInclude tradeoffs.",
+        );
+
+        let cmds = discover_with_home(temp.path(), None, None);
+
+        assert_eq!(
+            cmds[0].description.as_deref(),
+            Some("Explain the topic clearly. Include tradeoffs.")
         );
     }
 
