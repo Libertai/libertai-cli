@@ -2577,12 +2577,8 @@ fn print_help() {
     println!("{DIM}  /help     — show this message{RESET}");
     println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
-    println!(
-        "{DIM}  /permissions [status|show|current|info|default|acceptEdits|accept-edits|plan|open|forget|bypassPermissions]{RESET}"
-    );
-    println!(
-        "{DIM}  /mode [status|show|current|default|acceptEdits|accept-edits|plan] — alias for /permissions{RESET}"
-    );
+    println!("{DIM}  {}{RESET}", permissions_usage_text());
+    println!("{DIM}  {} — alias for /permissions{RESET}", mode_usage_text());
     println!("{DIM}  {}{RESET}", model_usage_text());
     println!("{DIM}  /name <name> — set this session's display name (also /rename){RESET}");
     println!("{DIM}  /status   — show current REPL session status{RESET}");
@@ -3420,11 +3416,21 @@ fn is_status_line_token_name(name: &str) -> bool {
 
 fn print_permissions_status(mode: Mode) {
     println!("{DIM}  permission mode: {}{RESET}", mode_label(mode));
-    println!("{DIM}  supported: default, acceptEdits / accept-edits, plan{RESET}");
+    println!(
+        "{DIM}  supported:{RESET} default/normal, acceptEdits/accept-edits/accept_edits, plan/readonly/read-only"
+    );
     println!("{DIM}  native bypassPermissions is intentionally unavailable.{RESET}");
     println!("{DIM}  use /permissions forget to clear saved allow rules.{RESET}");
     println!("{DIM}  use /permissions open to show the approvals settings target and rule path.{RESET}");
     println!("{DIM}  use /permissions bypassPermissions to explain the native safety stance.{RESET}");
+}
+
+fn permissions_usage_text() -> &'static str {
+    "/permissions [status|show|current|info|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only|open|settings|edit|approvals|forget|clear|reset|bypassPermissions|bypass|danger]"
+}
+
+fn mode_usage_text() -> &'static str {
+    "/mode [status|show|current|info|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only|open|settings|edit|approvals|forget|clear|reset|bypassPermissions|bypass|danger]"
 }
 
 fn print_permissions_open_hint() {
@@ -12940,6 +12946,14 @@ mod tests {
             PermissionsCommand::UnsupportedBypass
         );
         assert_eq!(parse_permissions_command("wat"), PermissionsCommand::Show);
+        assert!(permissions_usage_text().contains("default|normal"));
+        assert!(permissions_usage_text().contains("accept-edits|accept_edits"));
+        assert!(permissions_usage_text().contains("readonly|read-only"));
+        assert!(permissions_usage_text().contains("settings|edit|approvals"));
+        assert!(permissions_usage_text().contains("forget|clear|reset"));
+        assert!(permissions_usage_text().contains("bypassPermissions|bypass|danger"));
+        assert!(mode_usage_text().contains("normal|acceptEdits"));
+        assert!(mode_usage_text().contains("readonly|read-only"));
     }
 
     #[test]
