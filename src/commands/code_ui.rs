@@ -189,6 +189,7 @@ enum McpCommand {
     Status,
     Probe,
     ProbeSave,
+    Reset,
     Open,
     Usage,
 }
@@ -3805,6 +3806,7 @@ fn parse_mcp_command(input: &str) -> McpCommand {
         "refresh" | "probe --save" | "probe save" | "probe --write" | "probe write" => {
             McpCommand::ProbeSave
         }
+        "reset" | "reset-sessions" => McpCommand::Reset,
         "open" | "settings" | "edit" => McpCommand::Open,
         _ => McpCommand::Usage,
     }
@@ -7788,17 +7790,25 @@ fn print_mcp_status(command: McpCommand) {
             println!(
                 "{DIM}  tools:{RESET} CLI executes generic mcp_call, cached named mcp__server__tool entries, mcp_read_resource, mcp_get_prompt, and MCP-tool hook handlers from mcpServers"
             );
-            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp probe --save, /mcp refresh, /mcp open");
+            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp probe --save, /mcp refresh, /mcp reset, /mcp open");
         }
         McpCommand::Probe => print_mcp_probe(),
         McpCommand::ProbeSave => print_mcp_probe_save(),
+        McpCommand::Reset => {
+            println!(
+                "{DIM}  /mcp reset:{RESET} no terminal MCP sessions were reset; CLI MCP calls are short-lived today."
+            );
+            println!(
+                "{DIM}  desktop:{RESET} use Desktop Settings > MCP or desktop /mcp reset to close live stdio/HTTP/SSE clients."
+            );
+        }
         McpCommand::Open => {
             println!(
                 "{DIM}  /mcp open:{RESET} open Desktop Settings > MCP for live server management. The terminal CLI has no MCP settings pane."
             );
         }
         McpCommand::Usage => {
-            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp probe --save, /mcp refresh, /mcp open, or /mcp edit");
+            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp probe --save, /mcp refresh, /mcp reset, /mcp open, or /mcp edit");
         }
     }
     println!();
@@ -9648,6 +9658,8 @@ mod tests {
         assert_eq!(parse_mcp_command("probe"), McpCommand::Probe);
         assert_eq!(parse_mcp_command("probe --save"), McpCommand::ProbeSave);
         assert_eq!(parse_mcp_command("refresh"), McpCommand::ProbeSave);
+        assert_eq!(parse_mcp_command("reset"), McpCommand::Reset);
+        assert_eq!(parse_mcp_command("reset-sessions"), McpCommand::Reset);
         assert_eq!(parse_mcp_command("open"), McpCommand::Open);
         assert_eq!(parse_mcp_command("settings"), McpCommand::Open);
         assert_eq!(parse_mcp_command("edit"), McpCommand::Open);

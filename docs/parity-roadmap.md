@@ -710,7 +710,8 @@ enabled entries as named `mcp__server__tool` tools, plus cached
 `resources = [...]` and `prompts = [...]` metadata through read-only
 `mcp_read_resource` and `mcp_get_prompt` tools. It still does not keep
 persistent MCP connections. Terminal `/mcp probe --save` and `/mcp refresh`
-can refresh discovery caches for future code sessions, while Desktop owns
+can refresh discovery caches for future code sessions, and `/mcp reset`
+explicitly reports that terminal MCP calls are short-lived while Desktop owns
 the richest stdio/HTTP/SSE live registry today.
 
 **Files**: new `src/commands/code_mcp.rs` + transport modules.
