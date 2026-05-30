@@ -20,6 +20,12 @@ pub struct CustomCommand {
     pub path: PathBuf,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExpansionContext {
+    pub session_id: Option<String>,
+    pub effort: Option<String>,
+}
+
 pub fn discover(cwd: &Path) -> Vec<CustomCommand> {
     discover_with_home(cwd, dirs::home_dir().as_deref(), dirs::config_dir().as_deref())
 }
@@ -48,10 +54,29 @@ fn discover_with_home(
 }
 
 pub fn expand(command: &CustomCommand, args: &str) -> String {
-    expand_body(&command.body, args, &command.argument_names)
+    expand_with_context(command, args, &ExpansionContext::default())
 }
 
-fn expand_body(body: &str, args: &str, argument_names: &[String]) -> String {
+pub fn expand_with_context(
+    command: &CustomCommand,
+    args: &str,
+    context: &ExpansionContext,
+) -> String {
+    let skill_dir = command
+        .path
+        .parent()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    expand_body(&command.body, args, &command.argument_names, context, &skill_dir)
+}
+
+fn expand_body(
+    body: &str,
+    args: &str,
+    argument_names: &[String],
+    context: &ExpansionContext,
+    skill_dir: &str,
+) -> String {
     let args = args.trim();
     let positional = split_command_args(args);
     let mut out = String::with_capacity(body.len() + args.len());
@@ -85,6 +110,21 @@ fn expand_body(body: &str, args: &str, argument_names: &[String]) -> String {
             out.push_str(args);
             used_args = true;
             i += "$ARGUMENTS".len();
+            continue;
+        }
+        if rest.starts_with("${CLAUDE_SESSION_ID}") {
+            out.push_str(context.session_id.as_deref().unwrap_or_default());
+            i += "${CLAUDE_SESSION_ID}".len();
+            continue;
+        }
+        if rest.starts_with("${CLAUDE_EFFORT}") {
+            out.push_str(context.effort.as_deref().unwrap_or_default());
+            i += "${CLAUDE_EFFORT}".len();
+            continue;
+        }
+        if rest.starts_with("${CLAUDE_SKILL_DIR}") {
+            out.push_str(skill_dir);
+            i += "${CLAUDE_SKILL_DIR}".len();
             continue;
         }
         let bytes = rest.as_bytes();
@@ -465,6 +505,32 @@ mod tests {
         assert_eq!(
             expand(&cmds[0], r#"src/lib.rs "high priority""#),
             "Review src/lib.rs at high priority"
+        );
+    }
+
+    #[test]
+    fn expands_claude_context_placeholders() {
+        let command = CustomCommand {
+            name: "session-log".into(),
+            description: None,
+            arg_hint: None,
+            argument_names: Vec::new(),
+            body: "id=${CLAUDE_SESSION_ID} effort=${CLAUDE_EFFORT} dir=${CLAUDE_SKILL_DIR}".into(),
+            source: CommandSource::Project,
+            namespace: None,
+            path: PathBuf::from("/repo/.claude/commands/session-log.md"),
+        };
+
+        assert_eq!(
+            expand_with_context(
+                &command,
+                "",
+                &ExpansionContext {
+                    session_id: Some("sess-123".into()),
+                    effort: Some("high".into()),
+                },
+            ),
+            "id=sess-123 effort=high dir=/repo/.claude/commands"
         );
     }
 

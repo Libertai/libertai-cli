@@ -1580,7 +1580,7 @@ async fn repl_loop(
                     }
                 }
                 if let Some(rest) = trimmed.strip_prefix("/template ") {
-                    match build_template_slash_prompt(rest.trim()) {
+                    match build_template_slash_prompt(rest.trim(), &handle).await {
                         Ok(prompt) => {
                             line = prompt;
                         }
@@ -1590,7 +1590,7 @@ async fn repl_loop(
                         }
                     }
                 } else if let Some((name, args)) = parse_direct_custom_slash(trimmed) {
-                    match build_custom_slash_prompt(name, args) {
+                    match build_custom_slash_prompt(name, args, &handle).await {
                         Ok(Some(prompt)) => {
                             line = prompt;
                         }
@@ -5499,9 +5499,9 @@ fn print_code_skills_open_hint() {
     println!();
 }
 
-fn build_template_slash_prompt(query: &str) -> Result<String> {
+async fn build_template_slash_prompt(query: &str, handle: &AgentSessionHandle) -> Result<String> {
     let (name, args) = parse_template_query(query)?;
-    let Some(prompt) = build_custom_slash_prompt(name, args)? else {
+    let Some(prompt) = build_custom_slash_prompt(name, args, handle).await? else {
         anyhow::bail!("template not found: {name}");
     };
     Ok(prompt)
@@ -6195,7 +6195,11 @@ fn parse_direct_custom_slash(trimmed: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn build_custom_slash_prompt(name: &str, args: &str) -> Result<Option<String>> {
+async fn build_custom_slash_prompt(
+    name: &str,
+    args: &str,
+    handle: &AgentSessionHandle,
+) -> Result<Option<String>> {
     let cwd = std::env::current_dir().context("resolving cwd")?;
     let templates = crate::commands::code_slash_registry::discover(&cwd);
     let needle = name.trim().to_lowercase();
@@ -6206,7 +6210,22 @@ fn build_custom_slash_prompt(name: &str, args: &str) -> Result<Option<String>> {
     else {
         return Ok(None);
     };
-    Ok(Some(crate::commands::code_slash_registry::expand(hit, args)))
+    let context = slash_expansion_context(handle).await;
+    Ok(Some(crate::commands::code_slash_registry::expand_with_context(
+        hit, args, &context,
+    )))
+}
+
+async fn slash_expansion_context(
+    handle: &AgentSessionHandle,
+) -> crate::commands::code_slash_registry::ExpansionContext {
+    match handle.state().await {
+        Ok(state) => crate::commands::code_slash_registry::ExpansionContext {
+            session_id: state.session_id,
+            effort: state.thinking_level.map(|level| level.to_string()),
+        },
+        Err(_) => crate::commands::code_slash_registry::ExpansionContext::default(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
