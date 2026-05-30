@@ -2615,7 +2615,7 @@ fn print_help() {
         "{DIM}  /pr_comments drafts submit [approve|comment|request_changes] [body] — publish queued draft threads, optionally with a review event{RESET}"
     );
     println!("{DIM}  {} — inspect the bash sandbox profile{RESET}", sandbox_usage_text());
-    println!("{DIM}  /usage    — show token usage for this REPL session (also /cost; /usage export [json|csv]){RESET}");
+    println!("{DIM}  {} — show token usage for this REPL session{RESET}", usage_slash_usage_text());
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
     println!("{DIM}  /config [status|show|current|info|path|open|advanced|set <key> <value>|unset <key>] — show or update active config{RESET}");
@@ -8730,6 +8730,10 @@ fn parse_usage_export_command(input: &str) -> Option<UsageExportFormat> {
     }
 }
 
+fn usage_slash_usage_text() -> &'static str {
+    "/usage|/cost [status|show|summary|tools|export|export json|export csv]"
+}
+
 fn parse_usage_summary_command(input: &str) -> Option<()> {
     let raw = input.trim();
     let rest = raw
@@ -11280,6 +11284,8 @@ mod tests {
             Some(UsageExportFormat::Csv)
         );
         assert_eq!(parse_usage_export_command("/cost export xml"), None);
+        assert!(usage_slash_usage_text().contains("/usage|/cost"));
+        assert!(usage_slash_usage_text().contains("export json|export csv"));
     }
 
     #[test]
@@ -11291,6 +11297,7 @@ mod tests {
         assert_eq!(parse_usage_summary_command("/cost export"), None);
         assert_eq!(parse_usage_summary_command("/costtools"), None);
         assert_eq!(parse_usage_summary_command("/usage nonsense"), None);
+        assert!(usage_slash_usage_text().contains("status|show|summary|tools"));
     }
 
     #[test]
