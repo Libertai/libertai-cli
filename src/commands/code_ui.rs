@@ -4367,12 +4367,20 @@ fn print_send_status(rest: &str) {
     println!(
         "{DIM}  terminal:{RESET} this REPL has one active session and no desktop session registry to target."
     );
-    if !requested.is_empty() {
+    if matches!(
+        requested.to_ascii_lowercase().as_str(),
+        "" | "status" | "state" | "show" | "list" | "targets"
+    ) {
+        println!(
+            "{DIM}  target inspection:{RESET} use desktop /send targets to list open idle/busy sessions."
+        );
+    } else if !requested.is_empty() {
         println!(
             "{DIM}  ignored target/message:{RESET} {}",
             requested.replace('\n', " ")
         );
     }
+    println!("{DIM}  usage:{RESET} /send status, /send targets, /send <session> <message>");
     println!(
         "{DIM}  remaining gap:{RESET} pi-level streaming child-agent bus or detached inter-agent scheduler."
     );

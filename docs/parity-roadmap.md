@@ -80,6 +80,11 @@ SDK; those are flagged **(upstream)**.
   inspect the terminal-vs-desktop credential boundary without printing
   secret values, and `/login <provider>` / `/logout <provider>` explain
   the desktop-only provider credential handoff.
+- **CLI `/send` and `/send-message` aliases** — REPL users get the
+  desktop send-path explanation instead of accidentally sending the slash
+  line to the model; `/send status` and `/send targets` mirror the
+  desktop target-inspection vocabulary while noting the terminal's
+  single-session limitation.
 - **CLI `/doctor` diagnostics** — REPL users get a local health report
   for pi-session state, auth/defaults, smart approvals, remembered
   approvals, hook event counts, project memory plus sidecar/reference
