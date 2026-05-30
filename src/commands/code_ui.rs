@@ -187,6 +187,7 @@ enum NotifyCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum McpCommand {
     Status,
+    Probe,
     Open,
     Usage,
 }
@@ -3791,8 +3792,10 @@ fn parse_hooks_command(input: &str) -> HooksCommand {
 
 fn parse_mcp_command(input: &str) -> McpCommand {
     match input.trim().to_ascii_lowercase().as_str() {
-        "" | "status" | "list" | "state" | "diagnostics" | "diag" | "probe" | "probes"
-        | "refresh" => McpCommand::Status,
+        "" | "status" | "list" | "state" | "diagnostics" | "diag" | "refresh" => {
+            McpCommand::Status
+        }
+        "probe" | "probes" => McpCommand::Probe,
         "open" | "settings" | "edit" => McpCommand::Open,
         _ => McpCommand::Usage,
     }
@@ -7659,6 +7662,17 @@ fn print_mcp_status(command: McpCommand) {
         McpCommand::Status => {
             println!("{DIM}  terminal registry:{RESET} stdio, Streamable HTTP, and legacy SSE mcpServers from config.toml are available to MCP-tool hooks");
             println!("{DIM}  native CLI tools:{RESET} no live MCP tool/resource/prompt registry yet");
+            match crate::config::load() {
+                Ok(cfg) if cfg.mcp_servers.is_empty() => {
+                    println!("{DIM}  configured servers:{RESET} 0");
+                }
+                Ok(cfg) => {
+                    println!("{DIM}  configured servers:{RESET} {}", cfg.mcp_servers.len());
+                }
+                Err(e) => {
+                    println!("{DIM}  configured servers:{RESET} config load failed: {e:#}");
+                }
+            }
             println!(
                 "{DIM}  desktop:{RESET} Settings > MCP owns stdio/HTTP/SSE server discovery, probing, tool/resource/prompt caches, and named mcp__server__tool exposure"
             );
@@ -7667,6 +7681,7 @@ fn print_mcp_status(command: McpCommand) {
             );
             println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp open");
         }
+        McpCommand::Probe => print_mcp_probe(),
         McpCommand::Open => {
             println!(
                 "{DIM}  /mcp open:{RESET} open Desktop Settings > MCP for live server management. The terminal CLI has no MCP settings pane."
@@ -7677,6 +7692,55 @@ fn print_mcp_status(command: McpCommand) {
         }
     }
     println!();
+}
+
+fn print_mcp_probe() {
+    let cfg = match crate::config::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("{DIM}  /mcp probe: config load failed: {e:#}{RESET}");
+            return;
+        }
+    };
+    if cfg.mcp_servers.is_empty() {
+        println!("{DIM}  no configured mcpServers in terminal config.{RESET}");
+        return;
+    }
+    println!("{DIM}  probing configured mcpServers...{RESET}");
+    let report = crate::commands::code_mcp::probe_configured_servers(&cfg, Duration::from_secs(5));
+    for server in report.servers {
+        println!(
+            "- {} [{}] {} · tools={} resources={} prompts={}",
+            server.name,
+            server.status.label(),
+            server.transport,
+            server.tools.len(),
+            server.resources.len(),
+            server.prompts.len()
+        );
+        print_mcp_probe_inventory("tools", &server.tools);
+        print_mcp_probe_inventory("resources", &server.resources);
+        print_mcp_probe_inventory("prompts", &server.prompts);
+        for diagnostic in server.diagnostics {
+            println!("{DIM}  warning: {diagnostic}{RESET}");
+        }
+    }
+    println!(
+        "{DIM}  note:{RESET} /mcp probe is terminal discovery only; live named mcp__server__tool registration is still desktop-owned."
+    );
+}
+
+fn print_mcp_probe_inventory(label: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    let shown = items.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
+    let suffix = if items.len() > 6 {
+        format!(" +{} more", items.len() - 6)
+    } else {
+        String::new()
+    };
+    println!("{DIM}  {label}: {shown}{suffix}{RESET}");
 }
 
 fn count_runnable_hooks(hooks: &[crate::config::HookCommandConfig]) -> usize {
@@ -9336,7 +9400,7 @@ mod tests {
         assert_eq!(parse_mcp_command(""), McpCommand::Status);
         assert_eq!(parse_mcp_command("list"), McpCommand::Status);
         assert_eq!(parse_mcp_command("diagnostics"), McpCommand::Status);
-        assert_eq!(parse_mcp_command("probe"), McpCommand::Status);
+        assert_eq!(parse_mcp_command("probe"), McpCommand::Probe);
         assert_eq!(parse_mcp_command("refresh"), McpCommand::Status);
         assert_eq!(parse_mcp_command("open"), McpCommand::Open);
         assert_eq!(parse_mcp_command("settings"), McpCommand::Open);

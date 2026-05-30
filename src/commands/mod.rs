@@ -15,6 +15,7 @@ pub mod code_guardrail;
 pub mod code_hooks;
 pub mod code_init;
 pub mod code_memory;
+pub mod code_mcp;
 pub mod code_mode_prompt;
 pub mod code_models;
 pub mod code_notification;
