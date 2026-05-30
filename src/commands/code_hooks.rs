@@ -3867,6 +3867,123 @@ mod tests {
     }
 
     #[test]
+    fn mcp_tool_call_refreshes_updated_http_resource_for_next_read() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            for idx in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 8192];
+                let mut text = String::new();
+                loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if text.contains("\r\n\r\n") {
+                        let header_end = text.find("\r\n\r\n").unwrap() + 4;
+                        let headers = &text[..header_end];
+                        let content_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if text.len() >= header_end + content_len {
+                            break;
+                        }
+                    }
+                }
+
+                let (status, headers, body) = match idx {
+                    0 => (
+                        "200 OK",
+                        "Content-Type: application/json\r\nMcp-Session-Id: session-refresh\r\n",
+                        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"resources":{"subscribe":true}},"serverInfo":{"name":"test","version":"1"}}}"#.to_string(),
+                    ),
+                    1 => ("202 Accepted", "", String::new()),
+                    2 => {
+                        assert!(text.contains("resources/subscribe"), "{text}");
+                        (
+                            "200 OK",
+                            "Content-Type: application/json\r\n",
+                            r#"{"jsonrpc":"2.0","id":2,"result":{}}"#.to_string(),
+                        )
+                    }
+                    3 => {
+                        assert!(text.contains("tools/call"), "{text}");
+                        (
+                            "200 OK",
+                            "Content-Type: text/event-stream\r\n",
+                            concat!(
+                                "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":{\"uri\":\"file:///repo/context.md\"}}\n\n",
+                                "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"tool ok\"}],\"isError\":false}}\n\n"
+                            )
+                            .to_string(),
+                        )
+                    }
+                    _ => {
+                        assert!(text.contains("resources/read"), "{text}");
+                        (
+                            "200 OK",
+                            "Content-Type: application/json\r\n",
+                            r#"{"jsonrpc":"2.0","id":4,"result":{"contents":[{"uri":"file:///repo/context.md","mimeType":"text/plain","text":"fresh http context"}]}}"#.to_string(),
+                        )
+                    }
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let server = McpServerConfig {
+            url: format!("http://{addr}/mcp"),
+            resources: vec![McpResourceConfig {
+                uri: "file:///repo/context.md".to_string(),
+                ..McpResourceConfig::default()
+            }],
+            ..McpServerConfig::default()
+        };
+        let cfg = Config {
+            mcp_servers: HashMap::from([("docs-http-refresh-test".to_string(), server.clone())]),
+            ..Config::default()
+        };
+        let run = call_mcp_tool_with_config(
+            &cfg,
+            "docs-http-refresh-test",
+            "search",
+            json!({"query":"context"}),
+            Some(2),
+        );
+        assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+        assert_eq!(run.stdout, "tool ok");
+
+        let read = call_mcp_method_with_config(
+            &cfg,
+            "docs-http-refresh-test",
+            "resources/read",
+            json!({"uri":"file:///repo/context.md"}),
+            Some(2),
+        );
+        assert_eq!(read.status, 0, "stderr: {}", read.stderr);
+        assert!(read.stdout.contains("fresh http context"));
+        assert!(reset_mcp_cli_session_for_config(
+            "docs-http-refresh-test",
+            &server
+        ));
+        handle.join().unwrap();
+    }
+
+    #[test]
     fn mcp_tool_calls_reuse_stdio_session_until_reset() {
         let server = McpServerConfig {
             command: "sh".to_string(),
