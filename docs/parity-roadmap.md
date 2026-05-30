@@ -165,6 +165,10 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/sandbox` command** — REPL users can inspect the effective
   strict bash sandbox profile with `/sandbox [info]`; `/sandbox reload`
   explains the CLI restart requirement.
+- **CLI `/vim` command** — REPL users get explicit `/vim`,
+  `/vim status`, `/vim on`, and `/vim off` handling so Vim-mode requests
+  report the current terminal limitation instead of falling through as
+  agent text.
 - **CLI `/mode` and `/rename` aliases** — REPL users can use the
   desktop/Claude-style spellings for permission-mode switching and
   session naming.

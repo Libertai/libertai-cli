@@ -194,6 +194,14 @@ enum McpCommand {
     Usage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VimCommand {
+    Status,
+    Enable,
+    Disable,
+    Usage,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScopedModelsCommand {
     Status,
@@ -792,6 +800,10 @@ async fn repl_loop(
             print_theme_status(rest);
             continue;
         }
+        if let Some(rest) = vim_command_arg(trimmed) {
+            print_vim_status(parse_vim_command(rest));
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
@@ -1093,12 +1105,6 @@ async fn repl_loop(
             }
             "/mention" => {
                 println!("{DIM}  usage: /mention <path> [prompt]{RESET}");
-                continue;
-            }
-            "/vim" => {
-                println!(
-                    "{DIM}  Vim bindings are not implemented in the CLI REPL yet. The input bar uses native line-editing keys.{RESET}"
-                );
                 continue;
             }
             "/ide" => {
@@ -3855,6 +3861,13 @@ fn theme_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
+fn vim_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/vim" => Some(""),
+        _ => trimmed.strip_prefix("/vim ").map(str::trim),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HooksCommand {
     Status,
@@ -3881,6 +3894,15 @@ fn parse_mcp_command(input: &str) -> McpCommand {
         "reset" | "reset-sessions" => McpCommand::Reset,
         "open" | "settings" | "edit" => McpCommand::Open,
         _ => McpCommand::Usage,
+    }
+}
+
+fn parse_vim_command(input: &str) -> VimCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "status" | "state" | "show" => VimCommand::Status,
+        "on" | "enable" | "enabled" | "true" => VimCommand::Enable,
+        "off" | "disable" | "disabled" | "false" => VimCommand::Disable,
+        _ => VimCommand::Usage,
     }
 }
 
@@ -3969,6 +3991,34 @@ fn print_theme_status(rest: &str) {
     );
     if !requested.is_empty() {
         println!("{DIM}  requested theme:{RESET} {requested}");
+    }
+}
+
+fn print_vim_status(command: VimCommand) {
+    println!("{BOLD}vim{RESET}");
+    match command {
+        VimCommand::Status => {
+            println!(
+                "{DIM}  status:{RESET} off - Vim bindings are not implemented in the CLI REPL yet."
+            );
+            println!(
+                "{DIM}  terminal:{RESET} the input bar uses native line-editing keys."
+            );
+        }
+        VimCommand::Enable => {
+            println!(
+                "{DIM}  /vim on:{RESET} unavailable - this CLI REPL does not have a Vim input mode yet."
+            );
+            println!(
+                "{DIM}  terminal:{RESET} use your shell/editor Vim mode outside libertai code for now."
+            );
+        }
+        VimCommand::Disable => {
+            println!("{DIM}  /vim off:{RESET} already off.");
+        }
+        VimCommand::Usage => {
+            println!("{DIM}  usage:{RESET} /vim, /vim status, /vim on, or /vim off");
+        }
     }
 }
 
@@ -10235,6 +10285,22 @@ mod tests {
         assert_eq!(parse_mcp_command("settings"), McpCommand::Open);
         assert_eq!(parse_mcp_command("edit"), McpCommand::Open);
         assert_eq!(parse_mcp_command("remote"), McpCommand::Usage);
+    }
+
+    #[test]
+    fn vim_command_arg_and_parser_capture_status_toggles() {
+        assert_eq!(vim_command_arg("/vim"), Some(""));
+        assert_eq!(vim_command_arg("/vim status"), Some("status"));
+        assert_eq!(vim_command_arg("/vim on"), Some("on"));
+        assert_eq!(vim_command_arg("/vim off"), Some("off"));
+        assert_eq!(vim_command_arg("/vimrc"), None);
+        assert_eq!(parse_vim_command(""), VimCommand::Status);
+        assert_eq!(parse_vim_command("status"), VimCommand::Status);
+        assert_eq!(parse_vim_command("on"), VimCommand::Enable);
+        assert_eq!(parse_vim_command("enable"), VimCommand::Enable);
+        assert_eq!(parse_vim_command("off"), VimCommand::Disable);
+        assert_eq!(parse_vim_command("disable"), VimCommand::Disable);
+        assert_eq!(parse_vim_command("toggle"), VimCommand::Usage);
     }
 
     #[test]
