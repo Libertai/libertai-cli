@@ -4391,6 +4391,10 @@ fn parse_pr_comments_file_path(input: &str) -> Result<&str> {
     Ok(path)
 }
 
+fn parse_pr_comments_all_files(input: &str) -> bool {
+    matches!(input.trim().to_ascii_lowercase().as_str(), "--all" | "all")
+}
+
 fn parse_pr_comments_thread(input: &str) -> Result<(&str, u64, &str)> {
     let raw = input.trim();
     let Some((target, body)) = raw.split_once(char::is_whitespace) else {
@@ -4563,6 +4567,10 @@ fn submit_pr_review(input: &str) {
 }
 
 fn mark_pr_comment_file(input: &str, viewed: bool) {
+    if parse_pr_comments_all_files(input) {
+        mark_all_pr_comment_files(viewed);
+        return;
+    }
     let path = match parse_pr_comments_file_path(input) {
         Ok(path) => path,
         Err(e) => {
@@ -4597,6 +4605,64 @@ fn mark_pr_comment_file(input: &str, viewed: bool) {
         .unwrap_or("unknown error");
     let action = if viewed { "mark viewed" } else { "mark unviewed" };
     eprintln!("{DIM}  /pr_comments: {action} failed: {detail}{RESET}");
+}
+
+fn mark_all_pr_comment_files(viewed: bool) {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /pr_comments: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let batch = crate::commands::code_pr_comments::mark_all_files_viewed(&cwd, "", viewed);
+    let label = if viewed { "viewed" } else { "unviewed" };
+    if batch.total == 0 {
+        let detail = batch
+            .captures
+            .first()
+            .and_then(|(_, capture)| {
+                capture
+                    .error
+                    .as_deref()
+                    .or_else(|| {
+                        let stderr = capture.stderr.trim();
+                        (!stderr.is_empty()).then_some(stderr)
+                    })
+                    .or_else(|| {
+                        let stdout = capture.stdout.trim();
+                        (!stdout.is_empty()).then_some(stdout)
+                    })
+            })
+            .unwrap_or("no changed PR files were returned");
+        eprintln!("{DIM}  /pr_comments: mark all {label} failed: {detail}{RESET}");
+        return;
+    }
+    println!(
+        "{DIM}  marked {}/{} PR file(s) {label}{RESET}",
+        batch.succeeded, batch.total
+    );
+    if batch.succeeded < batch.total {
+        for (path, capture) in batch
+            .captures
+            .iter()
+            .filter(|(_, capture)| capture.error.is_some() || capture.status != Some(0))
+        {
+            let detail = capture
+                .error
+                .as_deref()
+                .or_else(|| {
+                    let stderr = capture.stderr.trim();
+                    (!stderr.is_empty()).then_some(stderr)
+                })
+                .or_else(|| {
+                    let stdout = capture.stdout.trim();
+                    (!stdout.is_empty()).then_some(stdout)
+                })
+                .unwrap_or("unknown error");
+            eprintln!("{DIM}    {path}: {detail}{RESET}");
+        }
+    }
 }
 
 fn create_pr_comment_thread(input: &str) {
@@ -7702,6 +7768,9 @@ mod tests {
         );
         assert_eq!(parse_pr_comments_file_path("src/lib.rs").unwrap(), "src/lib.rs");
         assert!(parse_pr_comments_file_path("").is_err());
+        assert!(parse_pr_comments_all_files("--all"));
+        assert!(parse_pr_comments_all_files("all"));
+        assert!(!parse_pr_comments_all_files("src/lib.rs"));
     }
 
     #[test]

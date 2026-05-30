@@ -27,6 +27,13 @@ pub struct PrCommentsSnapshot {
     pub review_threads: Option<CommandCapture>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrFileViewedBatch {
+    pub total: usize,
+    pub succeeded: usize,
+    pub captures: Vec<(String, CommandCapture)>,
+}
+
 pub fn build_pr_comments_prompt(scope: &str, snapshot: Option<&PrCommentsSnapshot>) -> String {
     let scope = scope.trim();
     let scope_line = if scope.is_empty() {
@@ -238,6 +245,51 @@ pub fn mark_file_viewed(cwd: &Path, scope: &str, path: &str, viewed: bool) -> Co
     run_gh(cwd, &pr_file_viewed_args(&pr_id, path, viewed))
 }
 
+pub fn mark_all_files_viewed(cwd: &Path, scope: &str, viewed: bool) -> PrFileViewedBatch {
+    let selector = pr_selector(scope);
+    let pr_view = run_gh(cwd, &pr_view_args(selector.as_deref()));
+    if !pr_view.success() {
+        return PrFileViewedBatch {
+            total: 0,
+            succeeded: 0,
+            captures: vec![("(pull request)".to_string(), pr_view)],
+        };
+    }
+    let Some(pr_id) = pr_id_from_view(&pr_view) else {
+        return PrFileViewedBatch {
+            total: 0,
+            succeeded: 0,
+            captures: vec![(
+                "(pull request)".to_string(),
+                CommandCapture {
+                    command: pr_view.command,
+                    status: pr_view.status,
+                    stdout: pr_view.stdout,
+                    stderr: pr_view.stderr,
+                    error: Some("pull request node id was not returned by gh pr view".to_string()),
+                },
+            )],
+        };
+    };
+    let paths = pr_changed_file_paths(&pr_view);
+    let mut succeeded = 0;
+    let captures = paths
+        .iter()
+        .map(|path| {
+            let capture = run_gh(cwd, &pr_file_viewed_args(&pr_id, path, viewed));
+            if capture.success() {
+                succeeded += 1;
+            }
+            (path.clone(), capture)
+        })
+        .collect::<Vec<_>>();
+    PrFileViewedBatch {
+        total: paths.len(),
+        succeeded,
+        captures,
+    }
+}
+
 pub fn create_review_thread(
     cwd: &Path,
     scope: &str,
@@ -414,6 +466,29 @@ fn pr_id_from_view(capture: &CommandCapture) -> Option<String> {
     let value: JsonValue = serde_json::from_str(capture.stdout.trim()).ok()?;
     let id = value.get("id")?.as_str()?.trim();
     (!id.is_empty()).then(|| id.to_string())
+}
+
+pub fn pr_changed_file_paths(capture: &CommandCapture) -> Vec<String> {
+    if !capture.success() {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_str::<JsonValue>(capture.stdout.trim()) else {
+        return Vec::new();
+    };
+    value
+        .get("files")
+        .and_then(|files| files.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|file| {
+            file.get("path")
+                .or_else(|| file.get("filename"))
+                .and_then(|path| path.as_str())
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .collect()
 }
 
 fn pr_review_threads_args(pr: &PrReference) -> Vec<String> {
@@ -683,6 +758,22 @@ mod tests {
             error: None,
         };
         assert_eq!(pr_id_from_view(&capture).as_deref(), Some("PR_kwDOABC123"));
+    }
+
+    #[test]
+    fn pr_changed_file_paths_reads_path_and_filename_fields() {
+        let capture = CommandCapture {
+            command: "gh pr view".to_string(),
+            status: Some(0),
+            stdout: r#"{"files":[{"path":"src/lib.rs"},{"filename":"js/app.js"},{"path":""}]}"#
+                .to_string(),
+            stderr: String::new(),
+            error: None,
+        };
+        assert_eq!(
+            pr_changed_file_paths(&capture),
+            vec!["src/lib.rs".to_string(), "js/app.js".to_string()]
+        );
     }
 
     #[test]
