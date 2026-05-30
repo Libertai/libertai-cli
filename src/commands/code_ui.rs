@@ -8327,6 +8327,17 @@ async fn print_doctor(
             ),
             Err(e) => println!("{}", doctor_line(false, "named agents", e.to_string())),
         }
+        match load_background_agent_records() {
+            Ok(records) => println!(
+                "{}",
+                doctor_line(
+                    true,
+                    "background agents",
+                    format_background_agent_doctor_summary(&records, background_agent_status)
+                )
+            ),
+            Err(e) => println!("{}", doctor_line(false, "background agents", e.to_string())),
+        }
         let templates = crate::commands::code_slash_registry::discover(cwd);
         println!(
             "{}",
@@ -8419,6 +8430,17 @@ fn format_agent_doctor_summary(
 ) -> String {
     let worktree = agents.iter().filter(|agent| agent.worktree).count();
     format!("{} loaded ({worktree} worktree default)", agents.len())
+}
+
+fn format_background_agent_doctor_summary(
+    records: &[BackgroundAgentRecord],
+    status: impl Fn(u32) -> BackgroundAgentStatus,
+) -> String {
+    let counts = background_agent_status_counts(records, status);
+    format!(
+        "{} recorded ({} running, {} exited, {} unknown)",
+        counts.total, counts.running, counts.exited, counts.unknown
+    )
 }
 
 fn format_custom_slash_doctor_summary(
@@ -11450,6 +11472,50 @@ mod tests {
         assert_eq!(
             format_agent_doctor_summary(&agents),
             "2 loaded (1 worktree default)"
+        );
+
+        let background_records = vec![
+            BackgroundAgentRecord {
+                pid: 1,
+                name: "running".to_string(),
+                provider: "libertai".to_string(),
+                model: "qwen".to_string(),
+                mode: "normal".to_string(),
+                prompt_preview: "one".to_string(),
+                cwd: "/tmp/project".to_string(),
+                log_path: "/tmp/one.log".to_string(),
+                started_at_ms: 10,
+            },
+            BackgroundAgentRecord {
+                pid: 2,
+                name: "done".to_string(),
+                provider: "libertai".to_string(),
+                model: "qwen".to_string(),
+                mode: "normal".to_string(),
+                prompt_preview: "two".to_string(),
+                cwd: "/tmp/project".to_string(),
+                log_path: "/tmp/two.log".to_string(),
+                started_at_ms: 20,
+            },
+            BackgroundAgentRecord {
+                pid: 3,
+                name: "unknown".to_string(),
+                provider: "libertai".to_string(),
+                model: "qwen".to_string(),
+                mode: "normal".to_string(),
+                prompt_preview: "three".to_string(),
+                cwd: "/tmp/project".to_string(),
+                log_path: "/tmp/three.log".to_string(),
+                started_at_ms: 30,
+            },
+        ];
+        assert_eq!(
+            format_background_agent_doctor_summary(&background_records, |pid| match pid {
+                1 => BackgroundAgentStatus::Running,
+                2 => BackgroundAgentStatus::Exited,
+                _ => BackgroundAgentStatus::Unknown,
+            }),
+            "3 recorded (1 running, 1 exited, 1 unknown)"
         );
 
         let commands = vec![

@@ -143,8 +143,8 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/doctor` command** — REPL users can print a local diagnostic
   report for session state, auth/config, smart approval status,
   remembered approvals, hook event counts, memory/templates/agents,
-  git, MCP registry/exposure availability, scheduled prompt counts, and
-  usage.
+  terminal background-agent status counts, git, MCP registry/exposure
+  availability, scheduled prompt counts, and usage.
 - **CLI `/usage` / `/cost` tool activity** — REPL usage summaries show
   turn counts, token high-water/output totals, and observed per-tool
   call counts/durations for the current session, plus clearly labeled
