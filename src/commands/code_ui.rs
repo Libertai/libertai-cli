@@ -16,7 +16,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1538,9 +1538,27 @@ async fn repl_loop(
                     continue;
                 }
                 if let Some(rest) = trimmed.strip_prefix("/agent ") {
-                    match build_agent_slash_prompt(rest.trim()) {
-                        Ok(prompt) => {
+                    match build_agent_slash_action(rest.trim(), &provider, &model, mode.get()) {
+                        Ok(AgentSlashAction::Foreground(prompt)) => {
                             line = prompt;
+                        }
+                        Ok(AgentSlashAction::Background(launch)) => {
+                            match start_background_agent(&launch) {
+                                Ok(started) => {
+                                    println!(
+                                        "{DIM}  /agent: started background agent `{}` pid {}.{RESET}",
+                                        launch.name, started.pid
+                                    );
+                                    println!(
+                                        "{DIM}  log: {}{RESET}",
+                                        started.log_path.display()
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!("{DIM}  /agent: {e:#}{RESET}");
+                                }
+                            }
+                            continue;
                         }
                         Err(e) => {
                             eprintln!("{DIM}  /agent: {e:#}{RESET}");
@@ -2332,10 +2350,10 @@ fn print_help() {
     println!("{DIM}  /agents   — list named sub-agents (/agents open shows agent paths){RESET}");
     println!("{DIM}  /agents create [--worktree] <name> [description] — create a project sub-agent{RESET}");
     println!("{DIM}  /agents delete <name> — delete the active named sub-agent definition{RESET}");
-    println!("{DIM}  /agent [--worktree] <name> <task> — run a named sub-agent task{RESET}");
     println!(
-        "{DIM}  /agent --background <name> <task> — desktop-only detached agent session{RESET}"
+        "{DIM}  /agent [--worktree|--background] <name> <task> — run a named sub-agent task{RESET}"
     );
+    println!("{DIM}  /agent --background <name> <task> — start a detached terminal agent and write a log under ~/.config/libertai/code-background-agents{RESET}");
     println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
     println!("{DIM}  /theme [system|dark|light|high-contrast] — show terminal theme status{RESET}");
     println!("{DIM}  /export [path] — write this session transcript as Markdown{RESET}");
@@ -5966,16 +5984,154 @@ fn build_custom_slash_prompt(name: &str, args: &str) -> Result<Option<String>> {
     Ok(Some(crate::commands::code_slash_registry::expand(hit, args)))
 }
 
-fn build_agent_slash_prompt(query: &str) -> Result<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentSlashAction {
+    Foreground(String),
+    Background(BackgroundAgentLaunch),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BackgroundAgentLaunch {
+    name: String,
+    provider: String,
+    model: String,
+    mode: Mode,
+    prompt: String,
+    cwd: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StartedBackgroundAgent {
+    pid: u32,
+    log_path: PathBuf,
+}
+
+fn build_agent_slash_action(
+    query: &str,
+    provider: &str,
+    model: &str,
+    mode: Mode,
+) -> Result<AgentSlashAction> {
     let parsed = parse_agent_slash_query(query)?;
-    if parsed.background {
-        anyhow::bail!(
-            "/agent --background is available in the desktop UI; terminal sessions do not yet have a detached child-agent runner"
-        );
-    }
     let cwd = std::env::current_dir().context("resolving cwd")?;
     let agents = crate::commands::code_agents::discover_agents(&cwd)?;
-    build_agent_prompt_from_defs(&parsed, &agents)
+    let prompt = build_agent_prompt_from_defs(&parsed, &agents)?;
+    if parsed.background {
+        Ok(AgentSlashAction::Background(BackgroundAgentLaunch {
+            name: parsed.name.to_string(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            mode,
+            prompt,
+            cwd,
+        }))
+    } else {
+        Ok(AgentSlashAction::Foreground(prompt))
+    }
+}
+
+fn start_background_agent(launch: &BackgroundAgentLaunch) -> Result<StartedBackgroundAgent> {
+    let exe = std::env::current_exe().context("resolving current executable")?;
+    let log_path = background_agent_log_path(&launch.name)?;
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("opening {}", log_path.display()))?;
+    let err_log = log
+        .try_clone()
+        .with_context(|| format!("cloning {}", log_path.display()))?;
+
+    let mut command = background_agent_command(&exe, launch);
+    command
+        .current_dir(&launch.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(err_log));
+    detach_background_command(&mut command);
+    let child = command
+        .spawn()
+        .with_context(|| format!("starting background agent `{}`", launch.name))?;
+    Ok(started_background_agent(child, log_path))
+}
+
+fn started_background_agent(child: Child, log_path: PathBuf) -> StartedBackgroundAgent {
+    StartedBackgroundAgent {
+        pid: child.id(),
+        log_path,
+    }
+}
+
+fn background_agent_command(exe: &Path, launch: &BackgroundAgentLaunch) -> Command {
+    let mut command = Command::new(exe);
+    for arg in background_agent_args(exe, launch) {
+        command.arg(arg);
+    }
+    command
+}
+
+fn background_agent_args(exe: &Path, launch: &BackgroundAgentLaunch) -> Vec<String> {
+    let mut args = Vec::new();
+    if !is_lcode_executable(exe) {
+        args.push("code".to_string());
+    }
+    if !launch.provider.trim().is_empty() {
+        args.push("--provider".to_string());
+        args.push(launch.provider.clone());
+    }
+    if !launch.model.trim().is_empty() {
+        args.push("--model".to_string());
+        args.push(launch.model.clone());
+    }
+    if launch.mode == Mode::Plan {
+        args.push("--plan".to_string());
+    }
+    args.push(launch.prompt.clone());
+    args
+}
+
+fn is_lcode_executable(exe: &Path) -> bool {
+    exe.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem == "lcode")
+}
+
+fn background_agent_log_path(name: &str) -> Result<PathBuf> {
+    let safe_name: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let safe_name = safe_name.trim_matches('-');
+    let safe_name = if safe_name.is_empty() {
+        "agent"
+    } else {
+        safe_name
+    };
+    let started_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(duration_millis_u64)
+        .unwrap_or(0);
+    Ok(crate::config::libertai_config_dir()?
+        .join("code-background-agents")
+        .join(format!("{started_at}-{safe_name}.log")))
+}
+
+fn detach_background_command(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9541,11 +9697,53 @@ mod tests {
     }
 
     #[test]
-    fn build_agent_slash_prompt_rejects_background_in_terminal() {
-        let err = build_agent_slash_prompt("--background reviewer inspect src").unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("terminal sessions do not yet have a detached child-agent runner")
+    fn background_agent_args_target_libertai_or_lcode() {
+        let launch = BackgroundAgentLaunch {
+            name: "reviewer".to_string(),
+            provider: "libertai".to_string(),
+            model: "qwen".to_string(),
+            mode: Mode::Plan,
+            prompt: "Use the task tool".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+        };
+        assert_eq!(
+            background_agent_args(Path::new("/usr/bin/libertai"), &launch),
+            vec![
+                "code",
+                "--provider",
+                "libertai",
+                "--model",
+                "qwen",
+                "--plan",
+                "Use the task tool"
+            ]
+        );
+        assert_eq!(
+            background_agent_args(Path::new("/usr/bin/lcode"), &launch),
+            vec![
+                "--provider",
+                "libertai",
+                "--model",
+                "qwen",
+                "--plan",
+                "Use the task tool"
+            ]
+        );
+    }
+
+    #[test]
+    fn background_agent_args_skip_empty_provider_model_and_accept_edits_flag() {
+        let launch = BackgroundAgentLaunch {
+            name: "reviewer".to_string(),
+            provider: String::new(),
+            model: String::new(),
+            mode: Mode::AcceptEdits,
+            prompt: "Run review".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+        };
+        assert_eq!(
+            background_agent_args(Path::new("/usr/bin/libertai"), &launch),
+            vec!["code", "Run review"]
         );
     }
 
