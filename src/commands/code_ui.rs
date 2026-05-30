@@ -2315,7 +2315,7 @@ fn print_help() {
     println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
     println!("{DIM}  /login [status|libertai|provider] — inspect auth or run libertai login{RESET}");
     println!("{DIM}  /logout [status|libertai|provider] — run libertai logout or explain provider logout{RESET}");
-    println!("{DIM}  /memory   — show project memory (/memory edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
+    println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
     println!("{DIM}  /skills [list|open|enable <name>|disable <name>] — manage code-agent skills for new sessions{RESET}");
     println!("{DIM}  /init [--agent|from-agent append|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}");
     println!("{DIM}  /onboarding [path] — write a local project onboarding guide{RESET}");
@@ -4657,10 +4657,10 @@ fn print_memory(action: &str) {
             return;
         }
     };
-    if action.eq_ignore_ascii_case("edit") {
+    if is_memory_edit_action(action) {
         match crate::commands::code_memory::ensure_memory_file(&cwd) {
             Ok(path) => open_memory_editor(&path),
-            Err(e) => eprintln!("{DIM}  /memory edit: failed: {e:#}{RESET}"),
+            Err(e) => eprintln!("{DIM}  /memory open: failed: {e:#}{RESET}"),
         }
         return;
     }
@@ -4782,6 +4782,13 @@ fn print_memory(action: &str) {
         }
     }
     println!();
+}
+
+fn is_memory_edit_action(action: &str) -> bool {
+    matches!(
+        action.trim().to_ascii_lowercase().as_str(),
+        "open" | "edit" | "editor"
+    )
 }
 
 fn memory_import_source(action: &str) -> Option<&str> {
@@ -7895,6 +7902,16 @@ mod tests {
         );
         assert_eq!(memory_import_source("files"), None);
         assert_eq!(memory_import_source("import"), None);
+    }
+
+    #[test]
+    fn memory_edit_action_accepts_open_aliases() {
+        assert!(is_memory_edit_action("open"));
+        assert!(is_memory_edit_action("edit"));
+        assert!(is_memory_edit_action("editor"));
+        assert!(is_memory_edit_action(" OPEN "));
+        assert!(!is_memory_edit_action(""));
+        assert!(!is_memory_edit_action("path"));
     }
 
     #[test]
