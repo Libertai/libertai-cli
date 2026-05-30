@@ -601,20 +601,94 @@ impl PersistentStdioMcpClient {
     }
 }
 
+struct PersistentHttpMcpClient {
+    client: reqwest::blocking::Client,
+    session_id: Option<String>,
+    next_id: u64,
+}
+
+impl PersistentHttpMcpClient {
+    fn start(server: &crate::config::McpServerConfig, timeout: Duration) -> Result<Self, String> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|e| format!("building MCP HTTP client: {e}"))?;
+        let url = server.url.trim();
+        let (init_response, session_id) = post_mcp_http_message(
+            &client,
+            server,
+            url,
+            &mcp_initialize_request(1),
+            None,
+            1,
+        )?;
+        mcp_response_result(init_response).map_err(|e| format!("MCP initialize failed: {e}"))?;
+        post_mcp_http_notification(
+            &client,
+            server,
+            url,
+            &mcp_initialized_notification(),
+            session_id.as_deref(),
+        )?;
+        Ok(Self {
+            client,
+            session_id,
+            next_id: 2,
+        })
+    }
+
+    fn call(
+        &mut self,
+        server: &crate::config::McpServerConfig,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        let (response, session_id) = post_mcp_http_message(
+            &self.client,
+            server,
+            server.url.trim(),
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params,
+            }),
+            self.session_id.as_deref(),
+            id,
+        )?;
+        if session_id.is_some() {
+            self.session_id = session_id;
+        }
+        mcp_response_result(response)
+    }
+}
+
 static MCP_STDIO_CLIENTS: OnceLock<Mutex<HashMap<String, PersistentStdioMcpClient>>> =
+    OnceLock::new();
+static MCP_HTTP_CLIENTS: OnceLock<Mutex<HashMap<String, PersistentHttpMcpClient>>> =
     OnceLock::new();
 
 fn mcp_stdio_clients() -> &'static Mutex<HashMap<String, PersistentStdioMcpClient>> {
     MCP_STDIO_CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn mcp_http_clients() -> &'static Mutex<HashMap<String, PersistentHttpMcpClient>> {
+    MCP_HTTP_CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub fn reset_mcp_cli_sessions() -> usize {
-    let Ok(mut clients) = mcp_stdio_clients().lock() else {
-        return 0;
-    };
-    let count = clients.len();
-    for (_, client) in clients.drain() {
-        client.shutdown();
+    let mut count = 0;
+    if let Ok(mut clients) = mcp_stdio_clients().lock() {
+        count += clients.len();
+        for (_, client) in clients.drain() {
+            client.shutdown();
+        }
+    }
+    if let Ok(mut clients) = mcp_http_clients().lock() {
+        count += clients.len();
+        clients.clear();
     }
     count
 }
@@ -624,15 +698,19 @@ fn reset_mcp_cli_session_for_config(
     server_name: &str,
     server: &crate::config::McpServerConfig,
 ) -> bool {
-    let key = mcp_stdio_client_key(server_name, server);
-    let Ok(mut clients) = mcp_stdio_clients().lock() else {
-        return false;
-    };
-    let Some(client) = clients.remove(&key) else {
-        return false;
-    };
-    client.shutdown();
-    true
+    let mut removed = false;
+    let stdio_key = mcp_stdio_client_key(server_name, server);
+    if let Ok(mut clients) = mcp_stdio_clients().lock() {
+        if let Some(client) = clients.remove(&stdio_key) {
+            client.shutdown();
+            removed = true;
+        }
+    }
+    let http_key = mcp_http_client_key(server_name, server);
+    if let Ok(mut clients) = mcp_http_clients().lock() {
+        removed |= clients.remove(&http_key).is_some();
+    }
+    removed
 }
 
 fn spawn_async_hook(
@@ -1063,7 +1141,7 @@ pub fn call_mcp_method_with_config(
                 } else {
                     server.transport.trim().to_ascii_lowercase()
                 },
-                call_mcp_http_method(server, method, params, timeout),
+                call_mcp_http_method(server_name, server, method, params, timeout),
             )
         }
     } else if !server.command.trim().is_empty() {
@@ -1150,56 +1228,49 @@ fn mcp_stdio_client_key(server_name: &str, server: &crate::config::McpServerConf
 }
 
 fn call_mcp_http_method(
+    server_name: &str,
     server: &crate::config::McpServerConfig,
     method: &str,
     params: serde_json::Value,
     timeout: Duration,
 ) -> Result<serde_json::Value, String> {
-    let url = server.url.trim();
-    let client = reqwest::blocking::Client::builder()
-        .timeout(timeout)
-        .build()
-        .map_err(|e| format!("building MCP HTTP client: {e}"))?;
-    let init = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "libertai-cli",
-                "version": env!("CARGO_PKG_VERSION"),
-            },
-        },
-    });
-    let (init_response, session_id) = post_mcp_http_message(&client, server, url, &init, None, 1)?;
-    mcp_response_result(init_response).map_err(|e| format!("MCP initialize failed: {e}"))?;
-    post_mcp_http_notification(
-        &client,
-        server,
-        url,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {},
-        }),
-        session_id.as_deref(),
-    )?;
-    let (response, _) = post_mcp_http_message(
-        &client,
-        server,
-        url,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": method,
-            "params": params,
-        }),
-        session_id.as_deref(),
-        2,
-    )?;
-    mcp_response_result(response)
+    let key = mcp_http_client_key(server_name, server);
+    let mut clients = mcp_http_clients()
+        .lock()
+        .map_err(|_| "MCP HTTP session registry is unavailable".to_string())?;
+
+    if !clients.contains_key(&key) {
+        let client = PersistentHttpMcpClient::start(server, timeout)?;
+        clients.insert(key.clone(), client);
+    }
+
+    let result = clients
+        .get_mut(&key)
+        .ok_or_else(|| "MCP HTTP session was not registered".to_string())?
+        .call(server, method, params.clone());
+    if result.is_ok() {
+        return result;
+    }
+
+    clients.remove(&key);
+    let mut client = PersistentHttpMcpClient::start(server, timeout)?;
+    let retry = client.call(server, method, params);
+    if retry.is_ok() {
+        clients.insert(key, client);
+    }
+    retry
+}
+
+fn mcp_http_client_key(server_name: &str, server: &crate::config::McpServerConfig) -> String {
+    let mut headers = server.headers.iter().collect::<Vec<_>>();
+    headers.sort_by(|(left, _), (right, _)| left.cmp(right));
+    json!({
+        "name": server_name,
+        "url": server.url,
+        "transport": server.transport,
+        "headers": headers,
+    })
+    .to_string()
 }
 
 fn call_mcp_legacy_sse_method(
@@ -2714,6 +2785,110 @@ mod tests {
         assert_eq!(second.status, 0, "stderr: {}", second.stderr);
         assert_eq!(second.stdout, "second");
         assert!(reset_mcp_cli_session_for_config("docs-reuse-test", &server));
+    }
+
+    #[test]
+    fn mcp_tool_calls_reuse_streamable_http_session_until_reset() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            for idx in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 8192];
+                let mut text = String::new();
+                loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if text.contains("\r\n\r\n") {
+                        let header_end = text.find("\r\n\r\n").unwrap() + 4;
+                        let headers = &text[..header_end];
+                        let content_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if text.len() >= header_end + content_len {
+                            break;
+                        }
+                    }
+                }
+
+                if idx > 0 {
+                    assert!(
+                        text.contains("mcp-session-id: session-1")
+                            || text.contains("Mcp-Session-Id: session-1"),
+                        "request {idx} did not reuse session id: {text}"
+                    );
+                }
+                let (status, headers, body) = match idx {
+                    0 => (
+                        "200 OK",
+                        "Content-Type: application/json\r\nMcp-Session-Id: session-1\r\n",
+                        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}"#.to_string(),
+                    ),
+                    1 => ("202 Accepted", "", String::new()),
+                    2 => (
+                        "200 OK",
+                        "Content-Type: application/json\r\n",
+                        r#"{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"first http"}],"isError":false}}"#.to_string(),
+                    ),
+                    _ => (
+                        "200 OK",
+                        "Content-Type: application/json\r\n",
+                        r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"second http"}],"isError":false}}"#.to_string(),
+                    ),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let server = McpServerConfig {
+            url: format!("http://{addr}/mcp"),
+            ..McpServerConfig::default()
+        };
+        let cfg = Config {
+            mcp_servers: HashMap::from([("docs-http-reuse-test".to_string(), server.clone())]),
+            ..Config::default()
+        };
+        let first = call_mcp_tool_with_config(
+            &cfg,
+            "docs-http-reuse-test",
+            "search",
+            json!({"query":"one"}),
+            Some(2),
+        );
+        assert_eq!(first.status, 0, "stderr: {}", first.stderr);
+        assert_eq!(first.stdout, "first http");
+        assert_eq!(first.transport, "http");
+
+        let second = call_mcp_tool_with_config(
+            &cfg,
+            "docs-http-reuse-test",
+            "search",
+            json!({"query":"two"}),
+            Some(2),
+        );
+        assert_eq!(second.status, 0, "stderr: {}", second.stderr);
+        assert_eq!(second.stdout, "second http");
+        assert_eq!(second.transport, "http");
+        assert!(reset_mcp_cli_session_for_config(
+            "docs-http-reuse-test",
+            &server
+        ));
+        handle.join().unwrap();
     }
 
     #[test]
