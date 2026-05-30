@@ -6103,7 +6103,7 @@ fn parse_agents_command(input: &str) -> AgentsSlashCommand<'_> {
     if let Some(rest) = raw.strip_prefix("show ") {
         return AgentsSlashCommand::Show(rest.trim());
     }
-    if raw == "open" {
+    if matches!(raw, "open" | "settings" | "edit") {
         return AgentsSlashCommand::Open;
     }
     if raw == "background" || raw == "background list" || raw == "bg" || raw == "bg list" {
@@ -13573,6 +13573,8 @@ mod tests {
             AgentsSlashCommand::Show("reviewer")
         );
         assert_eq!(parse_agents_command("open"), AgentsSlashCommand::Open);
+        assert_eq!(parse_agents_command("settings"), AgentsSlashCommand::Open);
+        assert_eq!(parse_agents_command("edit"), AgentsSlashCommand::Open);
         assert_eq!(
             parse_agents_command("create --worktree reviewer Reviews changes"),
             AgentsSlashCommand::Create("--worktree reviewer Reviews changes")
