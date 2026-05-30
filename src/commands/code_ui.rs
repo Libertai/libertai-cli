@@ -6206,7 +6206,7 @@ fn print_agents() {
     println!();
 }
 
-const AGENTS_USAGE: &str = "/agents [list|status|show <name>|open|settings|edit|background|bg] | /agents background|bg [list|json|show|inspect|show-json|log|kill|stop|prune|clear] | /agents create [--worktree|--same-cwd] <name> [description] | /agents delete|remove <name>";
+const AGENTS_USAGE: &str = "/agents [list|status|show <name>|open|settings|edit|background|bg] | /agents background|bg [list|json|show|inspect|show-json|log|kill|stop [pid|run-id|latest]|prune|clear] | /agents create [--worktree|--same-cwd] <name> [description] | /agents delete|remove <name>";
 
 fn handle_agents_command(input: &str) {
     match parse_agents_command(input) {
@@ -6524,7 +6524,7 @@ fn print_background_agents() {
                 "{DIM}  /agents background show [pid|run-id|latest] inspects one recorded run.{RESET}"
             );
             println!("{DIM}  /agents background json prints machine-readable status.{RESET}");
-            println!("{DIM}  /agents background kill <pid> stops a running background agent.{RESET}");
+            println!("{DIM}  /agents background kill [pid|run-id|latest] stops a running background agent.{RESET}");
             println!("{DIM}  /agents background prune removes exited records from the list.{RESET}");
         }
         Err(e) => eprintln!("{DIM}  /agents: could not read background agents: {e:#}{RESET}"),
@@ -6677,15 +6677,23 @@ fn print_background_agent_log(input: &str) {
 }
 
 fn kill_background_agent(input: &str) {
-    let pid = match parse_background_agent_pid(input) {
-        Ok(pid) => pid,
+    let record = match resolve_background_agent_record(input.trim()) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            eprintln!("{DIM}  /agents: no matching background agent found{RESET}");
+            return;
+        }
         Err(e) => {
             eprintln!("{DIM}  /agents: {e:#}{RESET}");
             return;
         }
     };
+    let pid = record.pid;
     match send_background_agent_kill(pid) {
-        Ok(()) => println!("{DIM}  sent terminate signal to background agent pid {pid}.{RESET}"),
+        Ok(()) => println!(
+            "{DIM}  sent terminate signal to background agent {} (pid {pid}).{RESET}",
+            background_agent_record_id(&record)
+        ),
         Err(e) => eprintln!("{DIM}  /agents: could not stop pid {pid}: {e:#}{RESET}"),
     }
 }
@@ -8096,6 +8104,13 @@ fn load_background_agent_records() -> Result<Vec<BackgroundAgentRecord>> {
 
 fn resolve_background_agent_record(input: &str) -> Result<Option<BackgroundAgentRecord>> {
     let records = load_background_agent_records()?;
+    resolve_background_agent_record_from_records(records, input)
+}
+
+fn resolve_background_agent_record_from_records(
+    records: Vec<BackgroundAgentRecord>,
+    input: &str,
+) -> Result<Option<BackgroundAgentRecord>> {
     if records.is_empty() {
         return Ok(None);
     }
@@ -8126,7 +8141,7 @@ fn retain_running_background_agent_records(
 fn parse_background_agent_pid(input: &str) -> Result<u32> {
     let raw = input.trim();
     if raw.is_empty() {
-        anyhow::bail!("usage: /agents background kill <pid>");
+        anyhow::bail!("usage: /agents background kill [pid|run-id|latest]");
     }
     raw.parse::<u32>()
         .with_context(|| format!("invalid background agent pid `{raw}`"))
@@ -14013,6 +14028,59 @@ mod tests {
         let raw = serde_json::to_string(&payload).unwrap();
         assert!(raw.contains("\"run_id\":\"bg-0-4242\""));
         assert!(raw.contains("\"status\":\"running\""));
+    }
+
+    #[test]
+    fn resolve_background_agent_record_accepts_pid_run_id_and_latest() {
+        let records = vec![
+            BackgroundAgentRecord {
+                pid: 1111,
+                run_id: "bg-10-1111".to_string(),
+                name: "first".to_string(),
+                provider: "libertai".to_string(),
+                model: "qwen".to_string(),
+                mode: "normal".to_string(),
+                prompt_preview: "one".to_string(),
+                cwd: "/tmp/project".to_string(),
+                log_path: "/tmp/one.log".to_string(),
+                started_at_ms: 10,
+                launched_argv: Vec::new(),
+            },
+            BackgroundAgentRecord {
+                pid: 2222,
+                run_id: "bg-20-2222".to_string(),
+                name: "second".to_string(),
+                provider: "libertai".to_string(),
+                model: "qwen".to_string(),
+                mode: "normal".to_string(),
+                prompt_preview: "two".to_string(),
+                cwd: "/tmp/project".to_string(),
+                log_path: "/tmp/two.log".to_string(),
+                started_at_ms: 20,
+                launched_argv: Vec::new(),
+            },
+        ];
+        assert_eq!(
+            resolve_background_agent_record_from_records(records.clone(), "1111")
+                .unwrap()
+                .unwrap()
+                .pid,
+            1111
+        );
+        assert_eq!(
+            resolve_background_agent_record_from_records(records.clone(), "bg-20-2222")
+                .unwrap()
+                .unwrap()
+                .pid,
+            2222
+        );
+        assert_eq!(
+            resolve_background_agent_record_from_records(records, "latest")
+                .unwrap()
+                .unwrap()
+                .pid,
+            2222
+        );
     }
 
     #[test]

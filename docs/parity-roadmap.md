@@ -144,7 +144,7 @@ SDK; those are flagged **(upstream)**.
   metadata, `/agents background show [pid|run-id|latest] --json` emits
   one machine-readable run record, `/agents background log
   [pid|run-id|latest]` tails saved output, and `/agents background kill
-  <pid>` stops a running child process.
+  [pid|run-id|latest]` stops a running child process.
 - **CLI `/doctor` command** — REPL users can print a local diagnostic
   report for session state, auth/config, smart approval status,
   remembered approvals, hook event counts, memory/templates/agents,
@@ -664,7 +664,7 @@ background show [pid|run-id|latest]` inspects one run's
 status/backend/cwd/log/prompt metadata, `/agents background show
 [pid|run-id|latest] --json` emits one machine-readable run record,
 `/agents background log [pid|run-id|latest]` tails their saved output, and
-`/agents background kill <pid>` stops a running child process;
+`/agents background kill [pid|run-id|latest]` stops a running child process;
 `/agents background prune` removes non-running records from the durable
 list. CLI
 `/agents show <name>` inspects a definition with source path, metadata,
