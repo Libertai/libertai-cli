@@ -4331,7 +4331,9 @@ fn parse_reload_command(input: &str) -> ReloadCommand {
 
 fn parse_status_command(input: &str) -> StatusCommand {
     match input.trim().to_ascii_lowercase().as_str() {
-        "" | "status" | "state" | "show" | "info" | "session" => StatusCommand::Session,
+        "" | "status" | "state" | "show" | "info" | "current" | "session" => {
+            StatusCommand::Session
+        }
         _ => StatusCommand::Usage,
     }
 }
@@ -12285,12 +12287,15 @@ mod tests {
     fn status_command_arg_and_parser_capture_session_aliases() {
         assert_eq!(status_command_arg("/status"), Some(""));
         assert_eq!(status_command_arg("/status show"), Some("show"));
+        assert_eq!(status_command_arg("/status current"), Some("current"));
         assert_eq!(status_command_arg("/status session"), Some("session"));
         assert_eq!(status_command_arg("/statusline"), None);
         assert_eq!(parse_status_command(""), StatusCommand::Session);
         assert_eq!(parse_status_command("status"), StatusCommand::Session);
+        assert_eq!(parse_status_command("state"), StatusCommand::Session);
         assert_eq!(parse_status_command("show"), StatusCommand::Session);
         assert_eq!(parse_status_command("info"), StatusCommand::Session);
+        assert_eq!(parse_status_command("current"), StatusCommand::Session);
         assert_eq!(parse_status_command("session"), StatusCommand::Session);
         assert_eq!(parse_status_command("open"), StatusCommand::Usage);
     }

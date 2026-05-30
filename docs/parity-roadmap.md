@@ -202,8 +202,8 @@ SDK; those are flagged **(upstream)**.
   and `/reload config|session|now` handling so common Claude/Pi-style
   utility subcommands do not fall through as agent text.
 - **CLI `/status` aliases** — REPL users get explicit `/status
-  show|info|session` handling for session state so status requests do
-  not fall through as agent text.
+  show|info|current|session` handling for session state so status
+  requests do not fall through as agent text.
 - **CLI `/doctor` aliases** — REPL users get explicit `/doctor
   status|health|diagnostics` handling for local health checks so
   diagnostic requests do not fall through as agent text.
