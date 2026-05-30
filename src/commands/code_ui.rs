@@ -10,13 +10,16 @@
 //! runtime thread; mixing that with a parallel stdin reader is out of
 //! scope); persistent history file; multi-line paste; syntax highlighting.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -36,6 +39,7 @@ use pi::sdk::{
     create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle, Error as PiError,
     RpcForkMessage, ThinkingLevel,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::commands::code_approvals::ApprovalState;
@@ -144,6 +148,14 @@ struct ScheduledRun {
     id: String,
     prompt: String,
     due_at: Instant,
+    due_epoch_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredScheduledRun {
+    id: String,
+    prompt: String,
+    due_epoch_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -604,13 +616,30 @@ async fn repl_loop(
     let mut session_name: Option<String> = None;
     let mut autonomous_queue: VecDeque<String> = VecDeque::new();
     let mut auto_run: Option<AutoRun> = None;
-    let mut scheduled_runs: Vec<ScheduledRun> = Vec::new();
-    let mut next_scheduled_run_id = 1usize;
+    let schedule_store_path = schedule_store_path_for_cwd().ok();
+    let mut scheduled_runs = match schedule_store_path.as_deref() {
+        Some(path) => match load_scheduled_runs(path) {
+            Ok(runs) => runs,
+            Err(err) => {
+                eprintln!("{DIM}  /schedule: could not load saved prompts: {err}.{RESET}");
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+    let mut next_scheduled_run_id = next_scheduled_run_id(&scheduled_runs);
     let mut pr_comment_drafts: Vec<PrCommentDraft> = Vec::new();
     let mut last_shell_command: Option<String> = None;
 
     loop {
         let autonomous_turn = if let Some(prompt) = pop_due_scheduled_prompt(&mut scheduled_runs) {
+            if let Err(err) =
+                persist_scheduled_runs_if_configured(schedule_store_path.as_deref(), &scheduled_runs)
+            {
+                eprintln!(
+                    "{DIM}  /schedule: could not save scheduled prompts: {err}.{RESET}"
+                );
+            }
             Some(prompt)
         } else if let Some(prompt) = autonomous_queue.pop_front() {
             Some(prompt)
@@ -1149,6 +1178,14 @@ async fn repl_loop(
                     let before = scheduled_runs.len();
                     scheduled_runs.retain(|run| run.id != id);
                     if scheduled_runs.len() < before {
+                        if let Err(err) = persist_scheduled_runs_if_configured(
+                            schedule_store_path.as_deref(),
+                            &scheduled_runs,
+                        ) {
+                            eprintln!(
+                                "{DIM}  /schedule: could not save scheduled prompts: {err}.{RESET}"
+                            );
+                        }
                         println!("{DIM}  /schedule: cancelled {id}.{RESET}");
                     } else {
                         println!("{DIM}  /schedule: no scheduled prompt found for {id}.{RESET}");
@@ -1157,6 +1194,14 @@ async fn repl_loop(
                 ScheduleCommand::Clear => {
                     let count = scheduled_runs.len();
                     scheduled_runs.clear();
+                    if let Err(err) = persist_scheduled_runs_if_configured(
+                        schedule_store_path.as_deref(),
+                        &scheduled_runs,
+                    ) {
+                        eprintln!(
+                            "{DIM}  /schedule: could not save scheduled prompts: {err}.{RESET}"
+                        );
+                    }
                     println!(
                         "{DIM}  /schedule: cleared {count} scheduled prompt{}.{RESET}",
                         if count == 1 { "" } else { "s" }
@@ -1169,8 +1214,17 @@ async fn repl_loop(
                         id: id.clone(),
                         prompt: prompt.clone(),
                         due_at: Instant::now() + delay,
+                        due_epoch_ms: now_epoch_ms().saturating_add(duration_millis_u64(delay)),
                     });
                     scheduled_runs.sort_by_key(|run| run.due_at);
+                    if let Err(err) = persist_scheduled_runs_if_configured(
+                        schedule_store_path.as_deref(),
+                        &scheduled_runs,
+                    ) {
+                        eprintln!(
+                            "{DIM}  /schedule: could not save scheduled prompts: {err}.{RESET}"
+                        );
+                    }
                     println!(
                         "{DIM}  /schedule: scheduled {id} in {}.{RESET}",
                         format_schedule_delay(delay)
@@ -3296,6 +3350,98 @@ fn format_schedule_delay(delay: Duration) -> String {
     }
 }
 
+fn schedule_store_path_for_cwd() -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("resolving current directory")?;
+    schedule_store_path_for_project(&cwd)
+}
+
+fn schedule_store_path_for_project(cwd: &Path) -> Result<PathBuf> {
+    let project = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let project_key = project.to_string_lossy();
+    let mut hasher = DefaultHasher::new();
+    project_key.hash(&mut hasher);
+    let hash = hasher.finish();
+    Ok(crate::config::libertai_config_dir()?
+        .join("code-schedules")
+        .join(format!("{hash:016x}.json")))
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(duration_millis_u64)
+        .unwrap_or(0)
+}
+
+fn load_scheduled_runs(path: &Path) -> Result<Vec<ScheduledRun>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("reading schedule store {}", path.display()))?;
+    let stored: Vec<StoredScheduledRun> = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing schedule store {}", path.display()))?;
+    let now_epoch = now_epoch_ms();
+    let now_instant = Instant::now();
+    let mut runs: Vec<ScheduledRun> = stored
+        .into_iter()
+        .filter(|run| !run.id.trim().is_empty() && !run.prompt.trim().is_empty())
+        .map(|run| {
+            let delay = Duration::from_millis(run.due_epoch_ms.saturating_sub(now_epoch));
+            ScheduledRun {
+                id: run.id,
+                prompt: run.prompt,
+                due_at: now_instant + delay,
+                due_epoch_ms: run.due_epoch_ms,
+            }
+        })
+        .collect();
+    runs.sort_by_key(|run| (run.due_at, run.id.clone()));
+    Ok(runs)
+}
+
+fn persist_scheduled_runs_if_configured(
+    path: Option<&Path>,
+    scheduled_runs: &[ScheduledRun],
+) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    persist_scheduled_runs(path, scheduled_runs)
+}
+
+fn persist_scheduled_runs(path: &Path, scheduled_runs: &[ScheduledRun]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating schedule store dir {}", parent.display()))?;
+    }
+    let stored: Vec<StoredScheduledRun> = scheduled_runs
+        .iter()
+        .map(|run| StoredScheduledRun {
+            id: run.id.clone(),
+            prompt: run.prompt.clone(),
+            due_epoch_ms: run.due_epoch_ms,
+        })
+        .collect();
+    let raw = serde_json::to_string_pretty(&stored).context("serializing schedule store")?;
+    fs::write(path, format!("{raw}\n"))
+        .with_context(|| format!("writing schedule store {}", path.display()))?;
+    Ok(())
+}
+
+fn next_scheduled_run_id(scheduled_runs: &[ScheduledRun]) -> usize {
+    scheduled_runs
+        .iter()
+        .filter_map(|run| run.id.strip_prefix("sch_")?.parse::<usize>().ok())
+        .max()
+        .map(|value| value.saturating_add(1))
+        .unwrap_or(1)
+}
+
 fn print_schedule_status(scheduled_runs: &[ScheduledRun]) {
     if scheduled_runs.is_empty() {
         println!("{DIM}  /schedule: no scheduled prompts.{RESET}");
@@ -3332,6 +3478,7 @@ fn scheduled_run_for_test(id: &str, prompt: &str, due_at: Instant) -> ScheduledR
         id: id.to_string(),
         prompt: prompt.to_string(),
         due_at,
+        due_epoch_ms: now_epoch_ms(),
     }
 }
 
@@ -7759,6 +7906,60 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].id, "sch_2");
         assert!(pop_due_scheduled_prompt(&mut runs).is_none());
+    }
+
+    #[test]
+    fn scheduled_runs_round_trip_through_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("schedules").join("project.json");
+        let now = now_epoch_ms();
+        let runs = vec![
+            ScheduledRun {
+                id: "sch_2".to_string(),
+                prompt: "later".to_string(),
+                due_at: Instant::now() + Duration::from_secs(5),
+                due_epoch_ms: now + 5_000,
+            },
+            ScheduledRun {
+                id: "sch_1".to_string(),
+                prompt: "missed".to_string(),
+                due_at: Instant::now(),
+                due_epoch_ms: now.saturating_sub(1_000),
+            },
+        ];
+        persist_scheduled_runs(&path, &runs).unwrap();
+
+        let loaded = load_scheduled_runs(&path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].id, "sch_1");
+        assert_eq!(loaded[0].prompt, "missed");
+        assert!(loaded[0].due_at <= Instant::now() + Duration::from_millis(50));
+        assert_eq!(loaded[1].id, "sch_2");
+        assert_eq!(loaded[1].due_epoch_ms, now + 5_000);
+    }
+
+    #[test]
+    fn next_scheduled_run_id_tracks_restored_ids() {
+        let runs = vec![
+            scheduled_run_for_test("sch_1", "one", Instant::now()),
+            scheduled_run_for_test("sch_9", "nine", Instant::now()),
+            scheduled_run_for_test("manual", "ignored", Instant::now()),
+        ];
+        assert_eq!(next_scheduled_run_id(&runs), 10);
+        assert_eq!(next_scheduled_run_id(&[]), 1);
+    }
+
+    #[test]
+    fn schedule_store_path_is_stable_per_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+
+        let first = schedule_store_path_for_project(&project).unwrap();
+        let second = schedule_store_path_for_project(&project).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.extension().and_then(|value| value.to_str()), Some("json"));
+        assert!(first.to_string_lossy().contains("code-schedules"));
     }
 
     #[test]
