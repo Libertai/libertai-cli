@@ -7316,9 +7316,9 @@ async fn print_doctor(
     println!(
         "{}",
         doctor_line(
-            false,
+            !cfg.mcp_servers.is_empty(),
             "mcp registry",
-            "not persisted in CLI config; desktop owns MCP server discovery/cache"
+            format_mcp_doctor_summary(cfg)
         )
     );
     match crate::config::config_path() {
@@ -7481,6 +7481,19 @@ fn format_schedule_doctor_summary(scheduled_runs: &[ScheduledRun]) -> String {
     format!(
         "{} queued ({} due, {} pending)",
         counts.total, counts.due, counts.pending
+    )
+}
+
+fn format_mcp_doctor_summary(cfg: &LibertaiConfig) -> String {
+    let exposure = mcp_exposure_summary(cfg);
+    format!(
+        "{} configured; mcp_call {}, {} named tool(s), resource reader {}, prompt getter {}, {} subscription candidate(s); CLI calls are short-lived",
+        cfg.mcp_servers.len(),
+        if exposure.mcp_call { "on" } else { "off" },
+        exposure.named_tools,
+        if exposure.resource_reader { "on" } else { "off" },
+        if exposure.prompt_getter { "on" } else { "off" },
+        exposure.subscription_candidates
     )
 }
 
@@ -10356,6 +10369,42 @@ mod tests {
                 prompt_getter: false,
                 subscription_candidates: 0,
             }
+        );
+    }
+
+    #[test]
+    fn doctor_mcp_summary_reports_cli_exposure() {
+        let cfg = LibertaiConfig {
+            mcp_servers: std::collections::HashMap::from([(
+                "docs".to_string(),
+                crate::config::McpServerConfig {
+                    tools: vec![crate::config::McpToolConfig {
+                        name: "search".to_string(),
+                        enabled: true,
+                        ..crate::config::McpToolConfig::default()
+                    }],
+                    resources: vec![crate::config::McpResourceConfig {
+                        uri: "file:///repo/README.md".to_string(),
+                        enabled: true,
+                        ..crate::config::McpResourceConfig::default()
+                    }],
+                    prompts: vec![crate::config::McpPromptConfig {
+                        name: "summarize".to_string(),
+                        enabled: true,
+                        ..crate::config::McpPromptConfig::default()
+                    }],
+                    ..crate::config::McpServerConfig::default()
+                },
+            )]),
+            ..LibertaiConfig::default()
+        };
+        assert_eq!(
+            format_mcp_doctor_summary(&cfg),
+            "1 configured; mcp_call on, 1 named tool(s), resource reader on, prompt getter on, 1 subscription candidate(s); CLI calls are short-lived"
+        );
+        assert_eq!(
+            format_mcp_doctor_summary(&LibertaiConfig::default()),
+            "0 configured; mcp_call off, 0 named tool(s), resource reader off, prompt getter off, 0 subscription candidate(s); CLI calls are short-lived"
         );
     }
 

@@ -76,8 +76,8 @@ SDK; those are flagged **(upstream)**.
   for pi-session state, auth/defaults, smart approvals, remembered
   approvals, hook event counts, project memory plus sidecar/reference
   health, named-agent worktree defaults, custom slash source counts,
-  active code-agent skills, scheduled prompt due/pending counts, git
-  status, and usage.
+  active code-agent skills, MCP native exposure, scheduled prompt
+  due/pending counts, git status, and usage.
 - **CLI `/resume` command** — REPL users can switch to the latest saved
   session for the current cwd or an explicit session JSONL path.
 - **CLI `/fork` command** — REPL users can list forkable user messages
@@ -127,7 +127,8 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/doctor` command** — REPL users can print a local diagnostic
   report for session state, auth/config, smart approval status,
   remembered approvals, hook event counts, memory/templates/agents,
-  git, MCP registry availability, scheduled prompt counts, and usage.
+  git, MCP registry/exposure availability, scheduled prompt counts, and
+  usage.
 - **CLI `/usage` / `/cost` tool activity** — REPL usage summaries show
   turn counts, token high-water/output totals, and observed per-tool
   call counts/durations for the current session, plus clearly labeled
