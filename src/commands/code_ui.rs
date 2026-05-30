@@ -2580,7 +2580,7 @@ fn print_help() {
     println!("{DIM}  {}{RESET}", model_usage_text());
     println!("{DIM}  /name <name> — set this session's display name (also /rename){RESET}");
     println!("{DIM}  /status   — show current REPL session status{RESET}");
-    println!("{DIM}  /doctor   — run a local session/config diagnostic report{RESET}");
+    println!("{DIM}  {} — run a local session/config diagnostic report{RESET}", doctor_usage_text());
     println!("{DIM}  /abort [status|cancel|stop|interrupt] — show how to interrupt the active CLI turn{RESET}");
     println!("{DIM}  /review [scope] — ask the agent to review current code changes{RESET}");
     println!("{DIM}  /security-review [scope] — ask for a focused security review{RESET}");
@@ -2620,7 +2620,7 @@ fn print_help() {
     println!("{DIM}  /hooks    — show configured command hooks (/hook is accepted too){RESET}");
     println!("{DIM}  /mcp      — show terminal MCP support status{RESET}");
     println!("{DIM}  {} — customize the input-bar status line{RESET}", status_line_usage_text());
-    println!("{DIM}  /hotkeys  — show input bar keyboard controls{RESET}");
+    println!("{DIM}  {} — show input bar keyboard controls{RESET}", hotkeys_usage_text());
     println!("{DIM}  /tree [path] — show a bounded project tree{RESET}");
     println!("{DIM}  {} — show recent git commits{RESET}", changelog_usage_text());
     println!("{DIM}  /reload [config|session|now|fresh] — reload config and start a fresh agent session{RESET}");
@@ -2659,7 +2659,7 @@ fn print_help() {
     println!("{DIM}  /export [path] — write this session transcript as Markdown{RESET}");
     println!("{DIM}  /share [path] — write this session transcript as shareable HTML{RESET}");
     println!("{DIM}  /share gist [public|secret] [filename.html] — publish the HTML transcript with gh{RESET}");
-    println!("{DIM}  /output-style <default|concise|explanatory|review|status>{RESET}");
+    println!("{DIM}  {}{RESET}", output_style_usage_text());
     println!("{DIM}  /vim      — show Vim-input status{RESET}");
     println!("{DIM}  /ide      — show IDE integration status{RESET}");
     println!("{DIM}  /bug      — print a bug report template{RESET}");
@@ -4352,6 +4352,10 @@ fn parse_hotkeys_command(input: &str) -> HotkeysCommand {
     }
 }
 
+fn hotkeys_usage_text() -> &'static str {
+    "/hotkeys [status|show|list|help]"
+}
+
 fn parse_reload_command(input: &str) -> ReloadCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "config" | "session" | "now" | "fresh" => ReloadCommand::Session,
@@ -4375,6 +4379,10 @@ fn parse_doctor_command(input: &str) -> DoctorCommand {
         }
         _ => DoctorCommand::Usage,
     }
+}
+
+fn doctor_usage_text() -> &'static str {
+    "/doctor [status|state|show|info|health|diagnostics|diag]"
 }
 
 fn parse_abort_command(input: &str) -> AbortCommand {
@@ -10260,6 +10268,10 @@ fn is_output_style_status_alias(value: &str) -> bool {
     )
 }
 
+fn output_style_usage_text() -> &'static str {
+    "/output-style [default|concise|explanatory|review|status|show|current|info|list]"
+}
+
 fn print_output_style_status(output_style: Option<&str>, unknown: Option<&str>) {
     let cwd = std::env::current_dir().ok();
     let styles = crate::commands::code_output_style::load_styles(cwd.as_deref());
@@ -10825,6 +10837,8 @@ mod tests {
         assert!(is_output_style_status_alias(" SHOW "));
         assert!(!is_output_style_status_alias("review"));
         assert!(!is_output_style_status_alias("missing"));
+        assert!(output_style_usage_text().contains("status|show|current|info|list"));
+        assert!(output_style_usage_text().contains("default|concise|explanatory|review"));
     }
 
     #[test]
@@ -12452,6 +12466,7 @@ mod tests {
         assert_eq!(parse_hotkeys_command("list"), HotkeysCommand::Show);
         assert_eq!(parse_hotkeys_command("help"), HotkeysCommand::Show);
         assert_eq!(parse_hotkeys_command("edit"), HotkeysCommand::Usage);
+        assert!(hotkeys_usage_text().contains("status|show|list|help"));
 
         assert_eq!(reload_command_arg("/reload"), Some(""));
         assert_eq!(reload_command_arg("/reload config"), Some("config"));
@@ -12489,10 +12504,15 @@ mod tests {
         assert_eq!(doctor_command_arg("/doctors"), None);
         assert_eq!(parse_doctor_command(""), DoctorCommand::Run);
         assert_eq!(parse_doctor_command("status"), DoctorCommand::Run);
+        assert_eq!(parse_doctor_command("state"), DoctorCommand::Run);
+        assert_eq!(parse_doctor_command("show"), DoctorCommand::Run);
+        assert_eq!(parse_doctor_command("info"), DoctorCommand::Run);
         assert_eq!(parse_doctor_command("health"), DoctorCommand::Run);
         assert_eq!(parse_doctor_command("diagnostics"), DoctorCommand::Run);
         assert_eq!(parse_doctor_command("diag"), DoctorCommand::Run);
         assert_eq!(parse_doctor_command("open"), DoctorCommand::Usage);
+        assert!(doctor_usage_text().contains("status|state|show|info"));
+        assert!(doctor_usage_text().contains("health|diagnostics|diag"));
     }
 
     #[test]
