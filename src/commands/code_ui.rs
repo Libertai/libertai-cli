@@ -2639,8 +2639,8 @@ fn print_help() {
     println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
     println!("{DIM}  /attach <path> [prompt] — alias for /image{RESET}");
     println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
-    println!("{DIM}  /login [status|show|info|libertai|provider] — inspect auth or run libertai login{RESET}");
-    println!("{DIM}  /logout [status|show|info|libertai|provider] — run libertai logout or explain provider logout{RESET}");
+    println!("{DIM}  {} — inspect auth or run libertai login{RESET}", login_usage_text());
+    println!("{DIM}  {} — run libertai logout or explain provider logout{RESET}", logout_usage_text());
     println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
     println!("{DIM}  /skills [list|status|show <name>|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions{RESET}");
     println!(
@@ -3451,6 +3451,14 @@ enum LoginSlashTarget<'a> {
     Status,
     ProviderStatus(&'a str),
     Provider(&'a str),
+}
+
+fn login_usage_text() -> &'static str {
+    "/login [status|show|info|libertai|account|key|api-key|api|provider|show <provider>|info <provider>|inspect <provider>|provider <provider>]"
+}
+
+fn logout_usage_text() -> &'static str {
+    "/logout [status|show|info|libertai|account|key|api-key|api|provider|show <provider>|info <provider>|inspect <provider>|provider <provider>]"
 }
 
 fn parse_login_slash_target(query: &str) -> LoginSlashTarget<'_> {
@@ -12978,6 +12986,14 @@ mod tests {
             parse_login_slash_target("inspect libertai"),
             LoginSlashTarget::ProviderStatus("libertai")
         );
+        assert!(login_usage_text().contains("account|key|api-key|api"));
+        assert!(login_usage_text().contains("show <provider>"));
+        assert!(login_usage_text().contains("inspect <provider>"));
+        assert!(login_usage_text().contains("provider <provider>"));
+        assert!(logout_usage_text().contains("account|key|api-key|api"));
+        assert!(logout_usage_text().contains("show <provider>"));
+        assert!(logout_usage_text().contains("inspect <provider>"));
+        assert!(logout_usage_text().contains("provider <provider>"));
     }
 
     #[test]
