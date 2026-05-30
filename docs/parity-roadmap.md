@@ -734,8 +734,10 @@ generic `mcp_call` tool when `mcpServers` exist. Terminal config can now
 also preserve cached `tools = [...]` metadata per MCP server and expose
 enabled entries as named `mcp__server__tool` tools, plus cached
 `resources = [...]` and `prompts = [...]` metadata through read-only
-`mcp_read_resource` and `mcp_get_prompt` tools. It still does not keep
-persistent MCP connections. Terminal `/mcp probe --save` and `/mcp refresh`
+`mcp_read_resource` and `mcp_get_prompt` tools. Terminal `/mcp status`
+now reports native exposure coverage for `mcp_call`, named cached tools,
+resource/prompt bridge tools, and resource subscription candidates. It
+still does not keep persistent MCP connections. Terminal `/mcp probe --save` and `/mcp refresh`
 can refresh discovery caches for future code sessions, and `/mcp reset`
 explicitly reports that terminal MCP calls are short-lived while Desktop owns
 the richest stdio/HTTP/SSE live registry today.

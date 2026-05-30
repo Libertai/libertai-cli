@@ -8134,7 +8134,16 @@ fn print_mcp_status(command: McpCommand) {
                     println!("{DIM}  configured servers:{RESET} 0");
                 }
                 Ok(cfg) => {
+                    let exposure = mcp_exposure_summary(&cfg);
                     println!("{DIM}  configured servers:{RESET} {}", cfg.mcp_servers.len());
+                    println!(
+                        "{DIM}  native exposure:{RESET} mcp_call {}, {} named MCP tool(s), mcp_read_resource {}, mcp_get_prompt {}, {} resource subscription candidate(s)",
+                        if exposure.mcp_call { "on" } else { "off" },
+                        exposure.named_tools,
+                        if exposure.resource_reader { "on" } else { "off" },
+                        if exposure.prompt_getter { "on" } else { "off" },
+                        exposure.subscription_candidates
+                    );
                 }
                 Err(e) => {
                     println!("{DIM}  configured servers:{RESET} config load failed: {e:#}");
@@ -8168,6 +8177,45 @@ fn print_mcp_status(command: McpCommand) {
         }
     }
     println!();
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct McpExposureSummary {
+    mcp_call: bool,
+    named_tools: usize,
+    resource_reader: bool,
+    prompt_getter: bool,
+    subscription_candidates: usize,
+}
+
+fn mcp_exposure_summary(cfg: &LibertaiConfig) -> McpExposureSummary {
+    let mut named_tools = 0usize;
+    let mut enabled_resources = 0usize;
+    let mut enabled_prompts = 0usize;
+    for server in cfg.mcp_servers.values() {
+        named_tools += server
+            .tools
+            .iter()
+            .filter(|tool| tool.enabled && !tool.name.trim().is_empty())
+            .count();
+        enabled_resources += server
+            .resources
+            .iter()
+            .filter(|resource| resource.enabled && !resource.uri.trim().is_empty())
+            .count();
+        enabled_prompts += server
+            .prompts
+            .iter()
+            .filter(|prompt| prompt.enabled && !prompt.name.trim().is_empty())
+            .count();
+    }
+    McpExposureSummary {
+        mcp_call: !cfg.mcp_servers.is_empty(),
+        named_tools,
+        resource_reader: enabled_resources > 0,
+        prompt_getter: enabled_prompts > 0,
+        subscription_candidates: enabled_resources,
+    }
 }
 
 fn print_mcp_probe() {
@@ -10160,6 +10208,79 @@ mod tests {
         assert!(!server.resources[0].enabled);
         assert_eq!(server.prompts[0].description, "Summarize docs");
         assert!(!server.prompts[0].enabled);
+    }
+
+    #[test]
+    fn mcp_exposure_summary_reports_native_cli_tools() {
+        let cfg = LibertaiConfig {
+            mcp_servers: std::collections::HashMap::from([
+                (
+                    "docs".to_string(),
+                    crate::config::McpServerConfig {
+                        tools: vec![
+                            crate::config::McpToolConfig {
+                                name: "search".to_string(),
+                                enabled: true,
+                                ..crate::config::McpToolConfig::default()
+                            },
+                            crate::config::McpToolConfig {
+                                name: "disabled".to_string(),
+                                enabled: false,
+                                ..crate::config::McpToolConfig::default()
+                            },
+                        ],
+                        resources: vec![crate::config::McpResourceConfig {
+                            uri: "file:///repo/README.md".to_string(),
+                            enabled: true,
+                            ..crate::config::McpResourceConfig::default()
+                        }],
+                        prompts: vec![crate::config::McpPromptConfig {
+                            name: "summarize".to_string(),
+                            enabled: true,
+                            ..crate::config::McpPromptConfig::default()
+                        }],
+                        ..crate::config::McpServerConfig::default()
+                    },
+                ),
+                (
+                    "empty".to_string(),
+                    crate::config::McpServerConfig {
+                        tools: vec![crate::config::McpToolConfig {
+                            name: "   ".to_string(),
+                            enabled: true,
+                            ..crate::config::McpToolConfig::default()
+                        }],
+                        resources: vec![crate::config::McpResourceConfig {
+                            uri: String::new(),
+                            enabled: true,
+                            ..crate::config::McpResourceConfig::default()
+                        }],
+                        ..crate::config::McpServerConfig::default()
+                    },
+                ),
+            ]),
+            ..LibertaiConfig::default()
+        };
+        assert_eq!(
+            mcp_exposure_summary(&cfg),
+            McpExposureSummary {
+                mcp_call: true,
+                named_tools: 1,
+                resource_reader: true,
+                prompt_getter: true,
+                subscription_candidates: 1,
+            }
+        );
+        assert_eq!(
+            mcp_exposure_summary(&LibertaiConfig::default()),
+            McpExposureSummary {
+                mcp_call: false,
+                named_tools: 0,
+                resource_reader: false,
+                prompt_getter: false,
+                subscription_candidates: 0,
+            }
+        );
     }
 
     #[test]
