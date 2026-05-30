@@ -913,9 +913,7 @@ async fn repl_loop(
             match parse_copy_command(rest) {
                 CopyCommand::LastAssistant => copy_last_assistant(&handle).await,
                 CopyCommand::Usage => {
-                    println!(
-                        "{DIM}  usage:{RESET} /copy, /copy last, /copy latest, or /copy response"
-                    );
+                    println!("{DIM}  usage:{RESET} {}", copy_usage_text());
                 }
             }
             continue;
@@ -2617,7 +2615,7 @@ fn print_help() {
     println!("{DIM}  {} — inspect the bash sandbox profile{RESET}", sandbox_usage_text());
     println!("{DIM}  {} — show token usage for this REPL session{RESET}", usage_slash_usage_text());
     println!("{DIM}  {} — show recent submitted prompts{RESET}", history_usage_text());
-    println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
+    println!("{DIM}  {} — copy the last assistant response to the terminal clipboard{RESET}", copy_usage_text());
     println!("{DIM}  /config [status|show|current|info|path|open|advanced|set <key> <value>|unset <key>] — show or update active config{RESET}");
     println!("{DIM}  /hooks    — show configured command hooks (/hook is accepted too){RESET}");
     println!("{DIM}  /mcp      — show terminal MCP support status{RESET}");
@@ -4341,6 +4339,10 @@ fn parse_copy_command(input: &str) -> CopyCommand {
         }
         _ => CopyCommand::Usage,
     }
+}
+
+fn copy_usage_text() -> &'static str {
+    "/copy [last|latest|response|assistant|assistant-response]"
 }
 
 fn parse_hotkeys_command(input: &str) -> HotkeysCommand {
@@ -12432,8 +12434,15 @@ mod tests {
         assert_eq!(copy_command_arg("/copycat"), None);
         assert_eq!(parse_copy_command(""), CopyCommand::LastAssistant);
         assert_eq!(parse_copy_command("last"), CopyCommand::LastAssistant);
+        assert_eq!(parse_copy_command("latest"), CopyCommand::LastAssistant);
         assert_eq!(parse_copy_command("response"), CopyCommand::LastAssistant);
+        assert_eq!(parse_copy_command("assistant"), CopyCommand::LastAssistant);
+        assert_eq!(
+            parse_copy_command("assistant-response"),
+            CopyCommand::LastAssistant
+        );
         assert_eq!(parse_copy_command("transcript"), CopyCommand::Usage);
+        assert!(copy_usage_text().contains("assistant|assistant-response"));
 
         assert_eq!(hotkeys_command_arg("/hotkeys"), Some(""));
         assert_eq!(hotkeys_command_arg("/hotkeys status"), Some("status"));
