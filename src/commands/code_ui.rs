@@ -2312,7 +2312,7 @@ fn print_help() {
     println!("{DIM}  /resume [path] — resume the latest or specified saved session{RESET}");
     println!("{DIM}  /fork [list|index|id] — fork from a previous user message{RESET}");
     println!("{DIM}  /thinking [off|minimal|low|medium|high|xhigh] — show or set thinking{RESET}");
-    println!("{DIM}  /scoped-models <patterns|clear> — filter /model list and /model next{RESET}");
+    println!("{DIM}  {}{RESET}", scoped_models_usage_text());
     println!("{DIM}  /compact — compact older conversation history now{RESET}");
     println!("{DIM}  /loop [turns] [goal] — run bounded autonomous follow-up turns{RESET}");
     println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|status){RESET}");
@@ -2357,6 +2357,10 @@ fn print_help() {
 
 fn model_usage_text() -> &'static str {
     "/model [status|list|next|prev|model|provider/model]"
+}
+
+fn scoped_models_usage_text() -> &'static str {
+    "/scoped-models <patterns|clear> — filter /model list and /model next|prev"
 }
 
 fn hotkey_lines() -> &'static [&'static str] {
@@ -3285,7 +3289,7 @@ fn print_scoped_model_status(scoped_model_patterns: &[String]) {
         }
     }
     println!(
-        "{DIM}  usage:{RESET} /scoped-models qwen* gemma*, /scoped-models clear, /model list, /model next"
+        "{DIM}  usage:{RESET} /scoped-models qwen* gemma*, /scoped-models clear, /model list, /model next|prev"
     );
     println!();
 }
@@ -9161,6 +9165,10 @@ mod tests {
 
     #[test]
     fn scoped_models_parse_patterns_and_filter_matches() {
+        assert_eq!(
+            scoped_models_usage_text(),
+            "/scoped-models <patterns|clear> — filter /model list and /model next|prev"
+        );
         assert_eq!(scoped_models_command_arg("/scoped-models"), Some(""));
         assert_eq!(
             scoped_models_command_arg("/scoped qwen* gemma*"),
