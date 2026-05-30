@@ -4155,6 +4155,11 @@ fn print_schedule_status(scheduled_runs: &[ScheduledRun]) {
     }
     println!("{BOLD}schedule{RESET}");
     let now = Instant::now();
+    let counts = schedule_status_counts(scheduled_runs, now);
+    println!(
+        "{DIM}  summary:{RESET} {} scheduled, {} due, {} pending",
+        counts.total, counts.due, counts.pending
+    );
     for run in scheduled_runs {
         let remaining = run.due_at.saturating_duration_since(now);
         println!(
@@ -4163,6 +4168,25 @@ fn print_schedule_status(scheduled_runs: &[ScheduledRun]) {
             format_schedule_delay(remaining),
             run.prompt
         );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScheduleStatusCounts {
+    total: usize,
+    due: usize,
+    pending: usize,
+}
+
+fn schedule_status_counts(scheduled_runs: &[ScheduledRun], now: Instant) -> ScheduleStatusCounts {
+    let due = scheduled_runs
+        .iter()
+        .filter(|run| run.due_at <= now)
+        .count();
+    ScheduleStatusCounts {
+        total: scheduled_runs.len(),
+        due,
+        pending: scheduled_runs.len().saturating_sub(due),
     }
 }
 
@@ -10408,6 +10432,24 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].id, "sch_2");
         assert!(pop_due_scheduled_prompt(&mut runs).is_none());
+    }
+
+    #[test]
+    fn schedule_status_counts_split_due_and_pending() {
+        let now = Instant::now();
+        let runs = vec![
+            scheduled_run_for_test("sch_1", "due", now - Duration::from_millis(1)),
+            scheduled_run_for_test("sch_2", "also due", now),
+            scheduled_run_for_test("sch_3", "later", now + Duration::from_secs(5)),
+        ];
+        assert_eq!(
+            schedule_status_counts(&runs, now),
+            ScheduleStatusCounts {
+                total: 3,
+                due: 2,
+                pending: 1,
+            }
+        );
     }
 
     #[test]

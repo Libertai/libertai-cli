@@ -109,10 +109,10 @@ SDK; those are flagged **(upstream)**.
   runs are Ctrl-C stoppable and cap at 25 turns.
 - **CLI `/schedule` command** — REPL users can queue in-process
   follow-up prompts with `/schedule in <delay> <prompt>`, inspect them
-  with `/schedule list` / `/schedule state`, and cancel them with
-  `/schedule cancel <id>` or `/schedule clear`; `/cron` aliases match
-  the desktop composer. Due prompts run between REPL turns; durable
-  detached cron remains out of scope here.
+  with `/schedule list` / `/schedule state` including due/pending
+  counts, and cancel them with `/schedule cancel <id>` or `/schedule
+  clear`; `/cron` aliases match the desktop composer. Due prompts run
+  between REPL turns; durable detached cron remains out of scope here.
 - **Bash background execution** — the upstream `bash` tool accepts
   Claude-style `run_in_background: true` for long-running servers and
   watchers, returning immediately with a PID and temp log path.
