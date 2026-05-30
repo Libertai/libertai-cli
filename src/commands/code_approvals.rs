@@ -96,7 +96,7 @@ pub enum AskOutcome {
 }
 
 /// Result of an agent-requested desktop/user notification.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotifyOutcome {
     /// The UI accepted or displayed the notification.
     Sent,

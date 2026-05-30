@@ -15,7 +15,7 @@ use crossterm::{
     terminal,
 };
 
-use crate::commands::code_approvals::{ApprovalUi, PromptChoice};
+use crate::commands::code_approvals::{ApprovalUi, NotifyOutcome, PromptChoice};
 
 /// RAII guard that enables raw mode on construction and disables it
 /// on drop (including the panic-unwind path).
@@ -50,6 +50,25 @@ impl ApprovalUi for TerminalApprovalUi {
     async fn decide(&self, tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
         prompt(tool_name, preview, always_rule)
     }
+
+    async fn notify(&self, title: &str, body: &str) -> NotifyOutcome {
+        notify_terminal(title, body)
+    }
+}
+
+fn notify_terminal(title: &str, body: &str) -> NotifyOutcome {
+    let title = title.trim();
+    let body = body.trim();
+    if title.is_empty() || body.is_empty() {
+        return NotifyOutcome::Skipped("EMPTY_NOTIFICATION".to_string());
+    }
+    eprint!("\x07");
+    eprintln!();
+    eprintln!("  \x1b[35;1mnotification\x1b[0m \x1b[1m{}\x1b[0m", title);
+    for line in body.lines() {
+        eprintln!("  \x1b[2m│\x1b[0m {}", line);
+    }
+    NotifyOutcome::Sent
 }
 
 /// Block until the user picks allow/always/deny.
@@ -146,5 +165,14 @@ mod tests {
             "\x1b[2m... 12 lines omitted\x1b[0m"
         );
         assert_eq!(style_preview_line(" context"), " context");
+    }
+
+    #[test]
+    fn terminal_notifications_report_sent_for_non_empty_payloads() {
+        assert_eq!(notify_terminal("Done", "Agent turn complete"), NotifyOutcome::Sent);
+        assert_eq!(
+            notify_terminal(" ", "Agent turn complete"),
+            NotifyOutcome::Skipped("EMPTY_NOTIFICATION".to_string())
+        );
     }
 }
