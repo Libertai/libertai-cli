@@ -233,6 +233,12 @@ enum ReloadCommand {
     Usage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusCommand {
+    Session,
+    Usage,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScopedModelsCommand {
     Status,
@@ -908,6 +914,26 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some(rest) = status_command_arg(trimmed) {
+            match parse_status_command(rest) {
+                StatusCommand::Session => {
+                    print_session_status(
+                        &provider,
+                        &model,
+                        mode.get(),
+                        output_style.as_deref(),
+                        &cfg,
+                        usage_summary(&usage_history),
+                    );
+                }
+                StatusCommand::Usage => {
+                    println!(
+                        "{DIM}  usage:{RESET} /status, /status show, /status info, or /status session"
+                    );
+                }
+            }
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
@@ -944,17 +970,6 @@ async fn repl_loop(
             }
             "/name" | "/rename" => {
                 print_name_status(session_name.as_deref());
-                continue;
-            }
-            "/status" => {
-                print_session_status(
-                    &provider,
-                    &model,
-                    mode.get(),
-                    output_style.as_deref(),
-                    &cfg,
-                    usage_summary(&usage_history),
-                );
                 continue;
             }
             "/doctor" => {
@@ -3963,6 +3978,13 @@ fn reload_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
+fn status_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/status" => Some(""),
+        _ => trimmed.strip_prefix("/status ").map(str::trim),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HooksCommand {
     Status,
@@ -4036,6 +4058,13 @@ fn parse_reload_command(input: &str) -> ReloadCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "config" | "session" | "now" | "fresh" => ReloadCommand::Session,
         _ => ReloadCommand::Usage,
+    }
+}
+
+fn parse_status_command(input: &str) -> StatusCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "status" | "state" | "show" | "info" | "session" => StatusCommand::Session,
+        _ => StatusCommand::Usage,
     }
 }
 
@@ -10531,6 +10560,20 @@ mod tests {
         assert_eq!(parse_reload_command("config"), ReloadCommand::Session);
         assert_eq!(parse_reload_command("now"), ReloadCommand::Session);
         assert_eq!(parse_reload_command("auth"), ReloadCommand::Usage);
+    }
+
+    #[test]
+    fn status_command_arg_and_parser_capture_session_aliases() {
+        assert_eq!(status_command_arg("/status"), Some(""));
+        assert_eq!(status_command_arg("/status show"), Some("show"));
+        assert_eq!(status_command_arg("/status session"), Some("session"));
+        assert_eq!(status_command_arg("/statusline"), None);
+        assert_eq!(parse_status_command(""), StatusCommand::Session);
+        assert_eq!(parse_status_command("status"), StatusCommand::Session);
+        assert_eq!(parse_status_command("show"), StatusCommand::Session);
+        assert_eq!(parse_status_command("info"), StatusCommand::Session);
+        assert_eq!(parse_status_command("session"), StatusCommand::Session);
+        assert_eq!(parse_status_command("open"), StatusCommand::Usage);
     }
 
     #[test]

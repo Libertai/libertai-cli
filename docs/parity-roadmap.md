@@ -180,6 +180,9 @@ SDK; those are flagged **(upstream)**.
   explicit `/copy last|latest|response`, `/hotkeys status|show|list`,
   and `/reload config|session|now` handling so common Claude/Pi-style
   utility subcommands do not fall through as agent text.
+- **CLI `/status` aliases** — REPL users get explicit `/status
+  show|info|session` handling for session state so status requests do
+  not fall through as agent text.
 - **CLI `/mode` and `/rename` aliases** — REPL users can use the
   desktop/Claude-style spellings for permission-mode switching and
   session naming.
