@@ -133,8 +133,9 @@ SDK; those are flagged **(upstream)**.
   Claude-style `run_in_background: true` for long-running servers and
   watchers, returning immediately with a PID and temp log path.
 - **CLI `/agent --background` command** — REPL users can start a named
-  sub-agent task in a detached terminal process without blocking the
-  active transcript; the command prints the child PID and a log path under
+  sub-agent task in a detached terminal process, including the
+  `/agent --detached` alias, without blocking the active transcript; the
+  command prints the child PID and a log path under
   `~/.config/libertai/code-background-agents`. `/agents background`
   lists recorded detached runs, `/agents background show [pid|latest]`
   inspects one run's status/backend/cwd/log/prompt metadata, `/agents
@@ -649,9 +650,10 @@ Claude-compatible `.claude/agents/<name>.md`, project
 CLI `/agents` lists discovered definitions, `/agent <name> <task>`
 routes through the active agent with an instruction to call the `task`
 tool for that named sub-agent, and `/agent --background <name> <task>`
-starts a detached terminal child process with PID/log reporting while the
-current REPL remains usable. `/agents background` lists recorded detached
-runs with total/running/exited/unknown status counts, `/agents background
+or `/agent --detached <name> <task>` starts a detached terminal child
+process with PID/log reporting while the current REPL remains usable.
+`/agents background` lists recorded detached runs with
+total/running/exited/unknown status counts, `/agents background
 show [pid|latest]` inspects one run's status/backend/cwd/log/prompt
 metadata, `/agents background log [pid|latest]` tails their saved output,
 and `/agents background kill <pid>` stops a running child process;
