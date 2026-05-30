@@ -6078,7 +6078,7 @@ fn handle_agents_command(input: &str) {
         AgentsSlashCommand::BackgroundKill(rest) => kill_background_agent(rest),
         AgentsSlashCommand::BackgroundPrune => prune_background_agents(),
         AgentsSlashCommand::Usage => {
-            eprintln!("{DIM}  /agents: usage: /agents [list|show <name>|open|background] | /agents background [list|show|log|kill|prune|clear] | /agents create [--worktree] <name> [description] | /agents delete <name>{RESET}");
+            eprintln!("{DIM}  /agents: usage: /agents [list|show <name>|open|background] | /agents background [list|show|log|kill|prune|clear] | /agents create [--worktree|--same-cwd] <name> [description] | /agents delete <name>{RESET}");
         }
     }
 }

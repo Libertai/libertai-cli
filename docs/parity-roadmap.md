@@ -661,7 +661,7 @@ and `/agents background kill <pid>` stops a running child process;
 `/agents background prune` removes non-running records from the durable
 list. CLI
 `/agents show <name>` inspects a definition with source path, metadata,
-and prompt preview, and `/agents create [--worktree] <name>
+and prompt preview, and `/agents create [--worktree|--same-cwd] <name>
 [description]` scaffolds project-local `.libertai/agents/<name>.md`
 definitions. Worktree isolation now uses a detached git worktree when
 possible and a copied temp workspace snapshot outside git. Remaining work
