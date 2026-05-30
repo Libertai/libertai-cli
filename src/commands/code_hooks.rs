@@ -3984,6 +3984,153 @@ mod tests {
     }
 
     #[test]
+    fn mcp_tool_call_refreshes_updated_sse_resource_for_next_read() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            fn accept_with_timeout(listener: &TcpListener) -> TcpStream {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => return stream,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                panic!("timed out accepting legacy SSE refresh test connection");
+                            }
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(e) => panic!("accepting legacy SSE refresh test connection: {e}"),
+                    }
+                }
+            }
+
+            fn write_sse_chunk(stream: &mut impl Write, event: &str) {
+                write!(stream, "{:x}\r\n{}\r\n", event.len(), event).unwrap();
+                stream.flush().unwrap();
+            }
+
+            let mut sse_stream = accept_with_timeout(&listener);
+            let response =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n";
+            sse_stream.write_all(response.as_bytes()).unwrap();
+            write_sse_chunk(
+                &mut sse_stream,
+                &format!("event: endpoint\ndata: http://{addr}/messages\n\n"),
+            );
+            for idx in 0..5 {
+                let mut post_stream = accept_with_timeout(&listener);
+                post_stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut buf = [0u8; 8192];
+                let mut text = String::new();
+                loop {
+                    let n = post_stream.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if text.contains("\r\n\r\n") {
+                        let header_end = text.find("\r\n\r\n").unwrap() + 4;
+                        let headers = &text[..header_end];
+                        let content_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if text.len() >= header_end + content_len {
+                            break;
+                        }
+                    }
+                }
+                let post_response =
+                    "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                post_stream.write_all(post_response.as_bytes()).unwrap();
+                match idx {
+                    0 => write_sse_chunk(
+                        &mut sse_stream,
+                        "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"resources\":{\"subscribe\":true}},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}}}\n\n",
+                    ),
+                    2 => {
+                        assert!(text.contains("resources/subscribe"), "{text}");
+                        assert!(text.contains("file:///repo/context.md"), "{text}");
+                        write_sse_chunk(
+                            &mut sse_stream,
+                            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n",
+                        );
+                    }
+                    3 => {
+                        assert!(text.contains("tools/call"), "{text}");
+                        write_sse_chunk(
+                            &mut sse_stream,
+                            concat!(
+                                "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":{\"uri\":\"file:///repo/context.md\"}}\n\n",
+                                "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"tool ok\"}],\"isError\":false}}\n\n",
+                            ),
+                        );
+                    }
+                    4 => {
+                        assert!(text.contains("resources/read"), "{text}");
+                        assert!(text.contains("file:///repo/context.md"), "{text}");
+                        write_sse_chunk(
+                            &mut sse_stream,
+                            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"contents\":[{\"uri\":\"file:///repo/context.md\",\"mimeType\":\"text/plain\",\"text\":\"fresh sse context\"}]}}\n\n",
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        });
+
+        let server = McpServerConfig {
+            transport: "sse".to_string(),
+            url: format!("http://{addr}/sse"),
+            resources: vec![McpResourceConfig {
+                uri: "file:///repo/context.md".to_string(),
+                ..McpResourceConfig::default()
+            }],
+            ..McpServerConfig::default()
+        };
+        let cfg = Config {
+            mcp_servers: HashMap::from([("docs-sse-refresh-test".to_string(), server.clone())]),
+            ..Config::default()
+        };
+        let run = call_mcp_tool_with_config(
+            &cfg,
+            "docs-sse-refresh-test",
+            "search",
+            json!({"query":"context"}),
+            Some(2),
+        );
+        assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+        assert_eq!(run.stdout, "tool ok");
+        assert_eq!(run.transport, "sse");
+
+        let read = call_mcp_method_with_config(
+            &cfg,
+            "docs-sse-refresh-test",
+            "resources/read",
+            json!({"uri":"file:///repo/context.md"}),
+            Some(2),
+        );
+        assert_eq!(read.status, 0, "stderr: {}", read.stderr);
+        assert!(read.stdout.contains("fresh sse context"));
+        assert!(reset_mcp_cli_session_for_config(
+            "docs-sse-refresh-test",
+            &server
+        ));
+        handle.join().unwrap();
+    }
+
+    #[test]
     fn mcp_tool_calls_reuse_stdio_session_until_reset() {
         let server = McpServerConfig {
             command: "sh".to_string(),
