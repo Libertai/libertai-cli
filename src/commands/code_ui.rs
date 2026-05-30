@@ -291,6 +291,7 @@ enum AutoCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SkillsCommand {
     List,
+    Open,
     Enable(String),
     Disable(String),
 }
@@ -2307,7 +2308,7 @@ fn print_help() {
     println!("{DIM}  /login [status|libertai|provider] — inspect auth or run libertai login{RESET}");
     println!("{DIM}  /logout [status|libertai|provider] — run libertai logout or explain provider logout{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
-    println!("{DIM}  /skills [list|enable <name>|disable <name>] — manage active code-agent skills for new sessions{RESET}");
+    println!("{DIM}  /skills [list|open|enable <name>|disable <name>] — manage code-agent skills for new sessions{RESET}");
     println!("{DIM}  /init [--agent|from-agent append|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}");
     println!("{DIM}  /onboarding [path] — write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
@@ -4989,6 +4990,7 @@ fn print_templates() {
 fn handle_skills_slash(query: &str) -> Result<()> {
     match parse_skills_command(query)? {
         SkillsCommand::List => print_code_skills(),
+        SkillsCommand::Open => print_code_skills_open_hint(),
         SkillsCommand::Enable(name) => {
             code_skills::set_skill_enabled(&name, true)?;
             println!("{DIM}  enabled skill for new sessions: {name}{RESET}");
@@ -5012,6 +5014,9 @@ fn parse_skills_command(query: &str) -> Result<SkillsCommand> {
     {
         return Ok(SkillsCommand::List);
     }
+    if raw.eq_ignore_ascii_case("open") || raw.eq_ignore_ascii_case("settings") {
+        return Ok(SkillsCommand::Open);
+    }
     let Some((head, tail)) = split_first_word(raw) else {
         return Ok(SkillsCommand::List);
     };
@@ -5029,7 +5034,7 @@ fn parse_skills_command(query: &str) -> Result<SkillsCommand> {
             }
             Ok(SkillsCommand::Disable(name.to_string()))
         }
-        _ => anyhow::bail!("usage: /skills [list|enable <name>|disable <name>]"),
+        _ => anyhow::bail!("usage: /skills [list|open|enable <name>|disable <name>]"),
     }
 }
 
@@ -5066,6 +5071,24 @@ fn print_code_skills() {
         println!("{DIM}  changes apply to new sessions; use /reload to start a fresh session now.{RESET}");
         println!("{DIM}  run /skills disable <name> or /skills enable <name>.{RESET}");
     }
+    println!();
+}
+
+fn print_code_skills_open_hint() {
+    let cwd = std::env::current_dir().ok();
+    println!("{BOLD}skills{RESET}");
+    println!("{DIM}  desktop: /skills open jumps to Settings > Skills.{RESET}");
+    if let Some(cwd) = cwd {
+        println!(
+            "{DIM}  terminal: project skills are read from {} and {}{RESET}",
+            cwd.join(".libertai/skills").display(),
+            cwd.join(".claude/skills").display()
+        );
+    } else {
+        println!("{DIM}  terminal: project skills are read from .libertai/skills and .claude/skills.{RESET}");
+    }
+    println!("{DIM}  user skills live under ~/.libertai/skills or ~/.claude/skills.{RESET}");
+    println!("{DIM}  use /skills list, /skills enable <name>, or /skills disable <name>.{RESET}");
     println!();
 }
 
@@ -9402,6 +9425,11 @@ mod tests {
     fn parse_skills_command_accepts_list_and_toggles() {
         assert_eq!(parse_skills_command("").unwrap(), SkillsCommand::List);
         assert_eq!(parse_skills_command("status").unwrap(), SkillsCommand::List);
+        assert_eq!(parse_skills_command("open").unwrap(), SkillsCommand::Open);
+        assert_eq!(
+            parse_skills_command("settings").unwrap(),
+            SkillsCommand::Open
+        );
         assert_eq!(
             parse_skills_command("enable libertai-harness").unwrap(),
             SkillsCommand::Enable("libertai-harness".to_string())
