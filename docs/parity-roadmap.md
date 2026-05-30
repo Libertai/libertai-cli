@@ -817,7 +817,9 @@ env/header values, including transport, target, cache counts, and cached
 tools/resources/prompts. Agent-callable terminal MCP calls also attach
 structured per-call diagnostics to tool details, including operation,
 server, subject, transport, timeout, elapsed time, status, stdout/stderr,
-and raw MCP result data on success.
+and raw MCP result data on success. Terminal MCP clients also advertise
+configured roots during initialize and answer `roots/list` requests from
+stdio and legacy SSE servers.
 
 **Files**: new `src/commands/code_mcp.rs` + transport modules.
 **Effort**: L (2+ weeks).

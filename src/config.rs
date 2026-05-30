@@ -222,6 +222,8 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<McpToolConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<McpResourceConfig>,

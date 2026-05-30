@@ -552,9 +552,9 @@ impl PersistentStdioMcpClient {
             }
         });
 
-        write_mcp_message(&mut stdin, &mcp_initialize_request(1))
+        write_mcp_message(&mut stdin, &mcp_initialize_request_with_roots(1, &server.roots))
             .map_err(|e| format!("writing MCP initialize request: {e}"))?;
-        wait_for_mcp_response(&rx, 1, timeout)
+        wait_for_mcp_response_with_roots(&rx, Some(&mut stdin), &server.roots, 1, timeout)
             .and_then(mcp_response_result)
             .map_err(|e| format!("MCP initialize failed: {e}"))?;
         write_mcp_message(&mut stdin, &mcp_initialized_notification())
@@ -571,6 +571,7 @@ impl PersistentStdioMcpClient {
 
     fn call(
         &mut self,
+        server: &crate::config::McpServerConfig,
         method: &str,
         params: serde_json::Value,
         timeout: Duration,
@@ -587,7 +588,14 @@ impl PersistentStdioMcpClient {
             }),
         )
         .map_err(|e| format!("writing MCP {method} request: {e}"))?;
-        wait_for_mcp_response(&self.rx, id, timeout).and_then(mcp_response_result)
+        wait_for_mcp_response_with_roots(
+            &self.rx,
+            Some(&mut self.stdin),
+            &server.roots,
+            id,
+            timeout,
+        )
+        .and_then(mcp_response_result)
     }
 
     fn shutdown(mut self) {
@@ -618,8 +626,9 @@ impl PersistentHttpMcpClient {
             &client,
             server,
             url,
-            &mcp_initialize_request(1),
+            &mcp_initialize_request_with_roots(1, &server.roots),
             None,
+            &server.roots,
             1,
         )?;
         mcp_response_result(init_response).map_err(|e| format!("MCP initialize failed: {e}"))?;
@@ -656,6 +665,7 @@ impl PersistentHttpMcpClient {
                 "params": params,
             }),
             self.session_id.as_deref(),
+            &server.roots,
             id,
         )?;
         if session_id.is_some() {
@@ -682,8 +692,19 @@ impl PersistentSseMcpClient {
         let stream = open_mcp_sse_stream(&client, server, server.url.trim())?;
         let (rx, reader) = read_mcp_sse_stream(stream);
         let endpoint = wait_for_mcp_sse_endpoint(&rx, server.url.trim(), timeout)?;
-        post_mcp_sse_message(&client, server, &endpoint, &mcp_initialize_request(1))?;
-        wait_for_mcp_sse_response(&rx, 1, timeout)
+        post_mcp_sse_message(
+            &client,
+            server,
+            &endpoint,
+            &mcp_initialize_request_with_roots(1, &server.roots),
+        )?;
+        wait_for_mcp_sse_response_with_roots(
+            &rx,
+            Some((&client, server, endpoint.as_str())),
+            &server.roots,
+            1,
+            timeout,
+        )
             .and_then(mcp_response_result)
             .map_err(|e| format!("MCP initialize failed: {e}"))?;
         post_mcp_sse_message(&client, server, &endpoint, &mcp_initialized_notification())?;
@@ -716,7 +737,14 @@ impl PersistentSseMcpClient {
                 "params": params,
             }),
         )?;
-        wait_for_mcp_sse_response(&self.rx, id, timeout).and_then(mcp_response_result)
+        wait_for_mcp_sse_response_with_roots(
+            &self.rx,
+            Some((&self.client, server, self.endpoint.as_str())),
+            &server.roots,
+            id,
+            timeout,
+        )
+        .and_then(mcp_response_result)
     }
 }
 
@@ -1265,7 +1293,7 @@ fn call_mcp_stdio_method(
     let result = clients
         .get_mut(&key)
         .ok_or_else(|| "MCP stdio session was not registered".to_string())?
-        .call(method, params.clone(), timeout);
+        .call(server, method, params.clone(), timeout);
     if result.is_ok() {
         return result;
     }
@@ -1274,7 +1302,7 @@ fn call_mcp_stdio_method(
         client.shutdown();
     }
     let mut client = PersistentStdioMcpClient::start(server, timeout)?;
-    let retry = client.call(method, params, timeout);
+    let retry = client.call(server, method, params, timeout);
     if retry.is_ok() {
         clients.insert(key, client);
     } else {
@@ -1291,6 +1319,7 @@ fn mcp_stdio_client_key(server_name: &str, server: &crate::config::McpServerConf
         "command": server.command,
         "args": server.args,
         "env": env,
+        "roots": server.roots,
     })
     .to_string()
 }
@@ -1337,6 +1366,7 @@ fn mcp_http_client_key(server_name: &str, server: &crate::config::McpServerConfi
         "url": server.url,
         "transport": server.transport,
         "headers": headers,
+        "roots": server.roots,
     })
     .to_string()
 }
@@ -1383,6 +1413,7 @@ fn mcp_sse_client_key(server_name: &str, server: &crate::config::McpServerConfig
         "url": server.url,
         "transport": server.transport,
         "headers": headers,
+        "roots": server.roots,
     })
     .to_string()
 }
@@ -1422,7 +1453,7 @@ fn run_mcp_http_tool_hook(
         },
     });
     let (init_response, session_id) =
-        match post_mcp_http_message(&client, server, url, &init, None, 1) {
+        match post_mcp_http_message(&client, server, url, &init, None, &server.roots, 1) {
             Ok(response) => response,
             Err(e) => {
                 return HookRun {
@@ -1464,7 +1495,15 @@ fn run_mcp_http_tool_hook(
         },
     });
     let (call_response, _) =
-        match post_mcp_http_message(&client, server, url, &call, session_id.as_deref(), 2) {
+        match post_mcp_http_message(
+            &client,
+            server,
+            url,
+            &call,
+            session_id.as_deref(),
+            &server.roots,
+            2,
+        ) {
             Ok(response) => response,
             Err(e) => {
                 return HookRun {
@@ -1506,6 +1545,7 @@ fn post_mcp_http_message(
     url: &str,
     message: &serde_json::Value,
     session_id: Option<&str>,
+    roots: &[String],
     id: u64,
 ) -> Result<(serde_json::Value, Option<String>), String> {
     let response = send_mcp_http_request(client, server, url, message, session_id)
@@ -1528,7 +1568,15 @@ fn post_mcp_http_message(
         return Err(format!("HTTP {status}: {}", body.trim()));
     }
     let value = if content_type.contains("text/event-stream") {
-        parse_mcp_sse_response(&body, id)?
+        parse_mcp_http_sse_response_with_roots(
+            client,
+            server,
+            url,
+            session_id.as_deref(),
+            roots,
+            &body,
+            id,
+        )?
     } else if body.trim().is_empty() {
         return Err("empty MCP HTTP response".to_string());
     } else {
@@ -1578,7 +1626,15 @@ fn send_mcp_http_request(
     request.send()
 }
 
-fn parse_mcp_sse_response(body: &str, id: u64) -> Result<serde_json::Value, String> {
+fn parse_mcp_http_sse_response_with_roots(
+    client: &reqwest::blocking::Client,
+    server: &crate::config::McpServerConfig,
+    url: &str,
+    session_id: Option<&str>,
+    roots: &[String],
+    body: &str,
+    id: u64,
+) -> Result<serde_json::Value, String> {
     let mut data_lines = Vec::new();
     for line in body.lines() {
         if let Some(data) = line.strip_prefix("data:") {
@@ -1591,6 +1647,17 @@ fn parse_mcp_sse_response(body: &str, id: u64) -> Result<serde_json::Value, Stri
         }
         let value: serde_json::Value = serde_json::from_str(data)
             .map_err(|e| format!("invalid MCP HTTP SSE data: {e}"))?;
+        if is_roots_list_request(&value) {
+            send_mcp_http_request(
+                client,
+                server,
+                url,
+                &roots_list_response(value["id"].clone(), roots),
+                session_id,
+            )
+            .map_err(|e| e.to_string())?;
+            continue;
+        }
         if value.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
             return Ok(value);
         }
@@ -1833,19 +1900,46 @@ fn wait_for_mcp_sse_response(
     id: u64,
     timeout: Duration,
 ) -> Result<serde_json::Value, String> {
-    let event = wait_for_mcp_sse_event(rx, timeout, |event| {
-        serde_json::from_str::<serde_json::Value>(&event.data)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("id")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|found| found == id)
-            })
-            .unwrap_or(false)
-    })?;
-    serde_json::from_str::<serde_json::Value>(&event.data)
-        .map_err(|e| format!("invalid MCP SSE JSON response: {e}"))
+    wait_for_mcp_sse_response_with_roots(rx, None, &[], id, timeout)
+}
+
+fn wait_for_mcp_sse_response_with_roots(
+    rx: &mpsc::Receiver<SseEvent>,
+    responder: Option<(
+        &reqwest::blocking::Client,
+        &crate::config::McpServerConfig,
+        &str,
+    )>,
+    roots: &[String],
+    id: u64,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("timed out waiting for SSE event".to_string());
+        }
+        let event = rx
+            .recv_timeout(remaining)
+            .map_err(|_| "timed out waiting for SSE event".to_string())?;
+        let value = serde_json::from_str::<serde_json::Value>(&event.data)
+            .map_err(|e| format!("invalid MCP SSE JSON response: {e}"))?;
+        if is_roots_list_request(&value) {
+            if let Some((client, server, endpoint)) = responder {
+                post_mcp_sse_message(
+                    client,
+                    server,
+                    endpoint,
+                    &roots_list_response(value["id"].clone(), roots),
+                )?;
+            }
+            continue;
+        }
+        if value.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
+            return Ok(value);
+        }
+    }
 }
 
 fn wait_for_mcp_sse_event<F>(
@@ -1879,21 +1973,28 @@ fn resolve_mcp_sse_endpoint(base_url: &str, endpoint: &str) -> Result<String, St
     base.join(endpoint).map(|url| url.to_string()).map_err(|e| e.to_string())
 }
 
-fn write_mcp_message(stdin: &mut impl Write, value: &serde_json::Value) -> std::io::Result<()> {
+fn write_mcp_message<W: Write + ?Sized>(
+    stdin: &mut W,
+    value: &serde_json::Value,
+) -> std::io::Result<()> {
     let mut line = serde_json::to_string(value).map_err(std::io::Error::other)?;
     line.push('\n');
     stdin.write_all(line.as_bytes())?;
     stdin.flush()
 }
 
-fn mcp_initialize_request(id: u64) -> serde_json::Value {
+fn mcp_initialize_request_with_roots(id: u64, roots: &[String]) -> serde_json::Value {
+    let mut capabilities = serde_json::Map::new();
+    if roots.iter().any(|root| !root.trim().is_empty()) {
+        capabilities.insert("roots".to_string(), json!({ "listChanged": true }));
+    }
     json!({
         "jsonrpc": "2.0",
         "id": id,
         "method": "initialize",
         "params": {
             "protocolVersion": "2025-03-26",
-            "capabilities": {},
+            "capabilities": serde_json::Value::Object(capabilities),
             "clientInfo": {
                 "name": "libertai-cli",
                 "version": env!("CARGO_PKG_VERSION"),
@@ -1915,6 +2016,16 @@ fn wait_for_mcp_response(
     id: u64,
     timeout: Duration,
 ) -> Result<serde_json::Value, String> {
+    wait_for_mcp_response_with_roots(rx, None, &[], id, timeout)
+}
+
+fn wait_for_mcp_response_with_roots(
+    rx: &mpsc::Receiver<String>,
+    mut stdin: Option<&mut dyn Write>,
+    roots: &[String],
+    id: u64,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1926,6 +2037,13 @@ fn wait_for_mcp_response(
             .map_err(|_| format!("timed out waiting for response id {id}"))?;
         let value: serde_json::Value = serde_json::from_str(&line)
             .map_err(|e| format!("invalid JSON-RPC message from MCP server: {e}"))?;
+        if is_roots_list_request(&value) {
+            if let Some(stdin) = stdin.as_deref_mut() {
+                write_mcp_message(stdin, &roots_list_response(value["id"].clone(), roots))
+                    .map_err(|e| format!("writing MCP roots/list response: {e}"))?;
+            }
+            continue;
+        }
         if value.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
             return Ok(value);
         }
@@ -1940,6 +2058,61 @@ fn mcp_response_result(response: serde_json::Value) -> Result<serde_json::Value,
         .get("result")
         .cloned()
         .ok_or_else(|| "missing result".to_string())
+}
+
+fn is_roots_list_request(value: &serde_json::Value) -> bool {
+    value.get("method").and_then(serde_json::Value::as_str) == Some("roots/list")
+        && value.get("id").is_some()
+        && value.get("result").is_none()
+        && value.get("error").is_none()
+}
+
+fn roots_list_response(id: serde_json::Value, roots: &[String]) -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "roots": roots.iter()
+                .filter_map(|root| root_entry(root))
+                .collect::<Vec<_>>()
+        }
+    })
+}
+
+fn root_entry(root: &str) -> Option<serde_json::Value> {
+    let trimmed = root.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "uri": root_uri(trimmed),
+        "name": root_name(trimmed),
+    }))
+}
+
+fn root_uri(root: &str) -> String {
+    if root.contains("://") {
+        return root.to_string();
+    }
+    url::Url::from_file_path(std::path::Path::new(root))
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| root.to_string())
+}
+
+fn root_name(root: &str) -> String {
+    if let Some(name) = std::path::Path::new(root)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+    {
+        return name.to_string();
+    }
+    root.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(root)
+        .to_string()
 }
 
 fn mcp_tool_output_text(result: &serde_json::Value) -> String {
@@ -2725,6 +2898,28 @@ mod tests {
     }
 
     #[test]
+    fn mcp_initialize_advertises_roots_when_configured() {
+        let init = mcp_initialize_request_with_roots(1, &["file:///repo".to_string()]);
+        assert_eq!(init["params"]["capabilities"]["roots"]["listChanged"], true);
+        let empty = mcp_initialize_request_with_roots(1, &[]);
+        assert!(empty["params"]["capabilities"].get("roots").is_none());
+    }
+
+    #[test]
+    fn mcp_roots_list_response_renders_uri_and_path_roots() {
+        let response = roots_list_response(
+            json!(99),
+            &["file:///repo".to_string(), "/tmp/docs".to_string()],
+        );
+        let roots = response["result"]["roots"].as_array().unwrap();
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0]["uri"], "file:///repo");
+        assert_eq!(roots[0]["name"], "repo");
+        assert_eq!(roots[1]["name"], "docs");
+        assert!(roots[1]["uri"].as_str().unwrap().starts_with("file:///tmp/docs"));
+    }
+
+    #[test]
     fn mcp_tool_hook_calls_stdio_server() {
         let hook = HookCommandConfig {
             hook_type: "mcp_tool".to_string(),
@@ -2793,6 +2988,46 @@ mod tests {
         assert_eq!(run.status, 0, "stderr: {}", run.stderr);
         assert!(run.stdout.contains("hello docs"));
         reset_mcp_cli_session_for_config("docs-resource-test", &server);
+    }
+
+    #[test]
+    fn mcp_tool_call_answers_stdio_roots_list_request() {
+        let server = McpServerConfig {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                concat!(
+                    "read init; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}}}'; ",
+                    "read initialized; ",
+                    "read call; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"roots/list\",\"params\":{}}'; ",
+                    "read roots; ",
+                    "case \"$roots\" in ",
+                    "*'file:///repo'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"roots ok\"}],\"isError\":false}}' ;; ",
+                    "*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32000,\"message\":\"missing roots\"}}' ;; ",
+                    "esac;"
+                )
+                .to_string(),
+            ],
+            roots: vec!["file:///repo".to_string()],
+            env: HashMap::new(),
+            ..McpServerConfig::default()
+        };
+        let cfg = Config {
+            mcp_servers: HashMap::from([("docs-roots-test".to_string(), server.clone())]),
+            ..Config::default()
+        };
+        let run = call_mcp_tool_with_config(
+            &cfg,
+            "docs-roots-test",
+            "search",
+            json!({"query":"roots"}),
+            Some(2),
+        );
+        assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+        assert_eq!(run.stdout, "roots ok");
+        assert!(reset_mcp_cli_session_for_config("docs-roots-test", &server));
     }
 
     #[test]
