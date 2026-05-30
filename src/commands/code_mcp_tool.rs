@@ -8,7 +8,7 @@ use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::config::Config;
+use crate::config::{Config, McpToolConfig};
 
 const NAME: &str = "mcp_call";
 const LABEL: &str = "Call MCP tool";
@@ -33,6 +33,45 @@ pub struct McpCallTool {
 impl McpCallTool {
     pub fn new(cfg: Arc<Config>) -> Self {
         Self { cfg }
+    }
+}
+
+pub struct NamedMcpTool {
+    name: String,
+    label: String,
+    description: String,
+    parameters: serde_json::Value,
+    cfg: Arc<Config>,
+    server: String,
+    tool: String,
+}
+
+impl NamedMcpTool {
+    fn new(cfg: Arc<Config>, server: &str, tool: &McpToolConfig) -> Option<Self> {
+        let tool_name = tool.name.trim();
+        if tool_name.is_empty() || !tool.enabled {
+            return None;
+        }
+        let name = named_mcp_tool_name(server, tool_name)?;
+        let description = if tool.description.trim().is_empty() {
+            format!("Call MCP tool `{tool_name}` on configured server `{server}`.")
+        } else {
+            tool.description.trim().to_string()
+        };
+        let parameters = tool
+            .input_schema
+            .clone()
+            .filter(|schema| schema.is_object())
+            .unwrap_or_else(default_named_tool_schema);
+        Some(Self {
+            name,
+            label: format!("MCP {server}/{tool_name}"),
+            description,
+            parameters,
+            cfg,
+            server: server.to_string(),
+            tool: tool_name.to_string(),
+        })
     }
 }
 
@@ -129,6 +168,123 @@ impl Tool for McpCallTool {
     }
 }
 
+#[async_trait]
+impl Tool for NamedMcpTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        self.parameters.clone()
+    }
+
+    async fn execute(
+        &self,
+        _tool_call_id: &str,
+        input: serde_json::Value,
+        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+    ) -> PiResult<ToolExecution> {
+        let run = crate::commands::code_hooks::call_mcp_tool_with_config(
+            self.cfg.as_ref(),
+            &self.server,
+            &self.tool,
+            input,
+            None,
+        );
+        let details = json!({
+            "operation": "tools/call",
+            "server": self.server,
+            "tool": self.tool,
+            "status": run.status,
+            "stdout": run.stdout,
+            "stderr": run.stderr,
+        });
+        if run.status == 0 {
+            Ok(output(false, run.stdout, Some(details)))
+        } else {
+            let message = if run.stderr.trim().is_empty() {
+                run.stdout
+            } else {
+                run.stderr
+            };
+            Ok(output(true, message, Some(details)))
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+}
+
+pub fn named_mcp_tools(cfg: Arc<Config>) -> Vec<Box<dyn Tool>> {
+    let mut servers = cfg.mcp_servers.keys().cloned().collect::<Vec<_>>();
+    servers.sort();
+    let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+    for server in servers {
+        let Some(server_cfg) = cfg.mcp_servers.get(&server) else {
+            continue;
+        };
+        for tool in &server_cfg.tools {
+            if let Some(named) = NamedMcpTool::new(Arc::clone(&cfg), &server, tool) {
+                tools.push(Box::new(named));
+            }
+        }
+    }
+    tools
+}
+
+fn named_mcp_tool_name(server: &str, tool: &str) -> Option<String> {
+    let server = sanitize_tool_segment(server);
+    let tool = sanitize_tool_segment(tool);
+    if server.is_empty() || tool.is_empty() {
+        None
+    } else {
+        Some(format!("mcp__{server}__{tool}"))
+    }
+}
+
+fn sanitize_tool_segment(value: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_underscore = false;
+    for ch in value.chars() {
+        let next = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if ch == '_' || ch == '-' || ch.is_ascii_whitespace() {
+            Some('_')
+        } else {
+            None
+        };
+        let Some(ch) = next else {
+            continue;
+        };
+        if ch == '_' {
+            if last_was_underscore {
+                continue;
+            }
+            last_was_underscore = true;
+        } else {
+            last_was_underscore = false;
+        }
+        out.push(ch);
+    }
+    out.trim_matches('_').to_string()
+}
+
+fn default_named_tool_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true
+    })
+}
+
 fn output(is_error: bool, text: String, details: Option<serde_json::Value>) -> ToolExecution {
     ToolOutput {
         content: vec![ContentBlock::Text(TextContent::new(text))],
@@ -184,5 +340,52 @@ mod tests {
                 .join("\n");
             assert!(text.contains("MCP hook server `github` is not configured"));
         });
+    }
+
+    #[test]
+    fn named_mcp_tools_register_enabled_cached_tools() {
+        let cfg = Arc::new(Config {
+            mcp_servers: std::collections::HashMap::from([(
+                "GitHub Docs".to_string(),
+                crate::config::McpServerConfig {
+                    tools: vec![
+                        McpToolConfig {
+                            name: "search-docs".to_string(),
+                            description: "Search docs".to_string(),
+                            input_schema: Some(json!({
+                                "type": "object",
+                                "properties": {
+                                    "query": { "type": "string" }
+                                },
+                                "required": ["query"]
+                            })),
+                            ..McpToolConfig::default()
+                        },
+                        McpToolConfig {
+                            name: "admin".to_string(),
+                            enabled: false,
+                            ..McpToolConfig::default()
+                        },
+                    ],
+                    ..crate::config::McpServerConfig::default()
+                },
+            )]),
+            ..Config::default()
+        });
+        let tools = named_mcp_tools(cfg);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name(), "mcp__github_docs__search_docs");
+        assert_eq!(tools[0].description(), "Search docs");
+        assert_eq!(tools[0].parameters()["required"], json!(["query"]));
+        assert!(!tools[0].is_read_only());
+    }
+
+    #[test]
+    fn named_mcp_tool_name_sanitizes_segments() {
+        assert_eq!(
+            named_mcp_tool_name("GitHub Docs", "search-docs").as_deref(),
+            Some("mcp__github_docs__search_docs")
+        );
+        assert_eq!(named_mcp_tool_name("!!!", "search").as_deref(), None);
     }
 }

@@ -221,6 +221,43 @@ pub struct McpServerConfig {
     pub url: String,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<McpToolConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpToolConfig {
+    pub name: String,
+    #[serde(default = "default_mcp_tool_enabled", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(
+        default,
+        rename = "inputSchema",
+        alias = "input_schema",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub input_schema: Option<serde_json::Value>,
+}
+
+impl Default for McpToolConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            enabled: true,
+            description: String::new(),
+            input_schema: None,
+        }
+    }
+}
+
+fn default_mcp_tool_enabled() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -995,4 +1032,43 @@ pub fn mask_key(key: &str) -> String {
     let prefix: String = key.chars().take(4).collect();
     let suffix: String = key.chars().skip(len - 4).collect();
     format!("{prefix}****{suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn mcp_server_config_preserves_cached_tools() {
+        let raw = r#"
+            [mcpServers.docs]
+            command = "server"
+
+            [[mcpServers.docs.tools]]
+            name = "search"
+            description = "Search docs"
+
+            input_schema = { type = "object", required = ["query"] }
+
+            [[mcpServers.docs.tools]]
+            name = "admin"
+            enabled = false
+        "#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        let server = cfg.mcp_servers.get("docs").unwrap();
+        assert_eq!(server.tools.len(), 2);
+        assert_eq!(server.tools[0].name, "search");
+        assert!(server.tools[0].enabled);
+        assert_eq!(server.tools[0].description, "Search docs");
+        assert_eq!(
+            server.tools[0].input_schema.as_ref().unwrap()["required"],
+            json!(["query"])
+        );
+        assert!(!server.tools[1].enabled);
+
+        let encoded = toml::to_string(&cfg).unwrap();
+        assert!(encoded.contains("[[mcpServers.docs.tools]]"));
+        assert!(encoded.contains("inputSchema"));
+    }
 }

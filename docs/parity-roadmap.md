@@ -678,8 +678,8 @@ Unknown/less-common hook fields
 are flattened into each hook row and round-trip through TOML config saves.
 `/hooks` and `libertai status` report configured runnable hooks.
 
-Remaining work: any pi-level typed hook dispatcher and the live CLI MCP
-tool/resource/prompt registry.
+Remaining work: any pi-level typed hook dispatcher and CLI MCP resource/prompt
+cache tools.
 
 **Files**: `src/config.rs`,
 `src/commands/code_hooks.rs`,
@@ -694,9 +694,11 @@ SSE MCP clients for MCP-tool hook handlers configured through
 `mcpServers`, terminal `/mcp probe` can initialize configured stdio,
 Streamable HTTP, and legacy SSE servers and list their tools/resources/prompts
 for diagnostics, and native CLI sessions now register an approval-gated
-generic `mcp_call` tool when `mcpServers` exist. It still does not expose
-named `mcp__server__tool` entries or live resource/prompt cache tools to
-the agent. Desktop owns the full stdio/HTTP/SSE live registry today.
+generic `mcp_call` tool when `mcpServers` exist. Terminal config can now
+also preserve cached `tools = [...]` metadata per MCP server and expose
+enabled entries as named `mcp__server__tool` tools. It still does not
+expose live resource/prompt cache tools to the agent. Desktop owns the full
+stdio/HTTP/SSE live registry today.
 
 **Files**: new `src/commands/code_mcp.rs` + transport modules.
 **Effort**: L (2+ weeks).
