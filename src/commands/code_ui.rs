@@ -2640,7 +2640,7 @@ fn print_help() {
     println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|stop|status|state; also /autorun, /continuous){RESET}");
     println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|status|state|cancel|clear|stop; also /cron){RESET}");
     println!("{DIM}  /send [target message] — show terminal inter-session send status{RESET}");
-    println!("{DIM}  /notify on|off|status|test — turn-complete terminal notifications{RESET}");
+    println!("{DIM}  /notify on|enable|enabled|off|disable|disabled|clear|status|state|show|test|ping — turn-complete terminal notifications{RESET}");
     println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
     println!("{DIM}  /attach <path> [prompt] — alias for /image{RESET}");
     println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
@@ -4358,7 +4358,7 @@ fn parse_notify_command(input: &str) -> NotifyCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "state" | "show" => NotifyCommand::Status,
         "on" | "enable" | "enabled" => NotifyCommand::On,
-        "off" | "disable" | "disabled" => NotifyCommand::Off,
+        "off" | "disable" | "disabled" | "clear" => NotifyCommand::Off,
         "test" | "ping" => NotifyCommand::Test,
         _ => NotifyCommand::Usage,
     }
@@ -4379,7 +4379,7 @@ fn handle_notify_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Result<()>
             crate::commands::code_term::notify_terminal("LibertAI Code", "Notification test");
         }
         NotifyCommand::Usage => {
-            eprintln!("{DIM}  usage: /notify [on|off|status|test]{RESET}");
+            eprintln!("{DIM}  usage: /notify [on|enable|enabled|off|disable|disabled|clear|status|state|show|test|ping]{RESET}");
         }
     }
     Ok(())
@@ -11935,14 +11935,21 @@ mod tests {
         assert_eq!(notify_command_arg("/notify"), Some(""));
         assert_eq!(notify_command_arg("/notify on"), Some("on"));
         assert_eq!(notify_command_arg("/notifications status"), Some("status"));
+        assert_eq!(notify_command_arg("/notifications clear"), Some("clear"));
         assert_eq!(notify_command_arg("/notifier"), None);
         assert_eq!(parse_notify_command(""), NotifyCommand::Status);
         assert_eq!(parse_notify_command("status"), NotifyCommand::Status);
+        assert_eq!(parse_notify_command("state"), NotifyCommand::Status);
+        assert_eq!(parse_notify_command("show"), NotifyCommand::Status);
         assert_eq!(parse_notify_command("on"), NotifyCommand::On);
         assert_eq!(parse_notify_command("enable"), NotifyCommand::On);
+        assert_eq!(parse_notify_command("enabled"), NotifyCommand::On);
         assert_eq!(parse_notify_command("off"), NotifyCommand::Off);
         assert_eq!(parse_notify_command("disable"), NotifyCommand::Off);
+        assert_eq!(parse_notify_command("disabled"), NotifyCommand::Off);
+        assert_eq!(parse_notify_command("clear"), NotifyCommand::Off);
         assert_eq!(parse_notify_command("test"), NotifyCommand::Test);
+        assert_eq!(parse_notify_command("ping"), NotifyCommand::Test);
         assert_eq!(parse_notify_command("wat"), NotifyCommand::Usage);
     }
 
