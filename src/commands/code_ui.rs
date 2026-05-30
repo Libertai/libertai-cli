@@ -6688,14 +6688,15 @@ fn print_code_skills_open_hint() {
     println!("{DIM}  desktop: /skills open jumps to Settings > Skills.{RESET}");
     if let Some(cwd) = cwd {
         println!(
-            "{DIM}  terminal: project skills are read from {} and {}{RESET}",
+            "{DIM}  terminal: project skills are read from {}, {}, and {}{RESET}",
+            cwd.join(".claude/skills").display(),
             cwd.join(".libertai/skills").display(),
-            cwd.join(".claude/skills").display()
+            cwd.join(".agents/skills").display()
         );
     } else {
-        println!("{DIM}  terminal: project skills are read from .libertai/skills and .claude/skills.{RESET}");
+        println!("{DIM}  terminal: project skills are read from .claude/skills, .libertai/skills, and .agents/skills.{RESET}");
     }
-    println!("{DIM}  user skills live under ~/.libertai/skills or ~/.claude/skills.{RESET}");
+    println!("{DIM}  user skills live under ~/.claude/skills or ~/.config/libertai/skills.{RESET}");
     println!("{DIM}  use /skills list, /skills enable <name>, or /skills disable <name>.{RESET}");
     println!();
 }

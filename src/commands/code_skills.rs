@@ -213,6 +213,12 @@ fn collect_matching_skills(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Ve
 
     if let Some(cwd) = cwd {
         load_skill_dir(
+            &cwd.join(".claude").join("skills"),
+            SkillSourceKind::Project,
+            pillar,
+            &mut skills,
+        )?;
+        load_skill_dir(
             &cwd.join(".libertai").join("skills"),
             SkillSourceKind::Project,
             pillar,
@@ -227,6 +233,12 @@ fn collect_matching_skills(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Ve
     }
 
     if let Some(home) = dirs::home_dir() {
+        load_skill_dir(
+            &home.join(".claude").join("skills"),
+            SkillSourceKind::User,
+            pillar,
+            &mut skills,
+        )?;
         load_skill_dir(
             &home.join(".config").join("libertai").join("skills"),
             SkillSourceKind::User,
@@ -550,6 +562,31 @@ mod tests {
         assert_eq!(entry.source_kind, "user");
         assert_eq!(entry.path.as_deref(), Some(Path::new("/tmp/proposed-skill")));
         assert!(entry.agent_created);
+    }
+
+    #[test]
+    fn project_claude_skill_root_is_loaded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_dir = dir.path().join(".claude/skills/claude-review");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: claude-review\ndescription: Claude-compatible review skill.\nmetadata:\n  libertai.pillars: code\n---\nPrefer focused review findings.\n",
+        )
+        .expect("write skill");
+
+        let entries = skill_inventory(SkillPillar::Code, Some(dir.path())).expect("inventory");
+        let skill = entries
+            .iter()
+            .find(|skill| skill.name == "claude-review")
+            .expect(".claude skill");
+        assert_eq!(skill.source_kind, "project");
+        assert!(skill
+            .path
+            .as_ref()
+            .expect("path")
+            .ends_with(".claude/skills/claude-review"));
+        assert!(skill.body.contains("Prefer focused review findings."));
     }
 
     #[test]
