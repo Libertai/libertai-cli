@@ -86,7 +86,8 @@ SDK; those are flagged **(upstream)**.
   `/share gist [public|secret] [filename.html]`.
 - **CLI `/onboarding` command** — REPL users can generate a local
   Markdown onboarding guide from repo facts, commands, structure, and
-  existing AGENTS/CLAUDE guidance.
+  existing AGENTS/CLAUDE guidance, or publish it through the authenticated
+  GitHub CLI with `/onboarding gist [public|secret] [filename.md]`.
 - **CLI `/compact` command** — REPL users can trigger pi's explicit
   compaction pass from the REPL, with optional user notes threaded
   into the summarization prompt.

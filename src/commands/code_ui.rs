@@ -2070,6 +2070,7 @@ fn print_help() {
     println!("{DIM}  /skills [list|enable <name>|disable <name>] — manage active code-agent skills for new sessions{RESET}");
     println!("{DIM}  /init [--agent] [notes] — create or draft AGENTS.md guidance{RESET}");
     println!("{DIM}  /onboarding [path] — write a local project onboarding guide{RESET}");
+    println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
     println!("{DIM}  /agents create [--worktree] <name> [description] — create a project sub-agent{RESET}");
     println!("{DIM}  /agent [--worktree] <name> <task> — run a named sub-agent task{RESET}");
@@ -2873,7 +2874,12 @@ async fn share_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
             }
         }
         ShareTarget::Gist { public, filename } => {
-            match publish_share_gist(&html, public, &filename) {
+            match publish_gist(
+                &html,
+                public,
+                &filename,
+                "LibertAI Code shared transcript",
+            ) {
                 Ok(url) => println!("{DIM}  share gist created: {url}{RESET}"),
                 Err(e) => eprintln!("{DIM}  /share gist: {e:#}{RESET}"),
             }
@@ -2968,13 +2974,13 @@ fn sanitize_gist_filename(raw: &str) -> String {
     }
 }
 
-fn publish_share_gist(html: &str, public: bool, filename: &str) -> Result<String> {
+fn publish_gist(content: &str, public: bool, filename: &str, desc: &str) -> Result<String> {
     let mut child = Command::new("gh")
         .args(["gist", "create", "-"])
         .arg("--filename")
         .arg(filename)
         .arg("--desc")
-        .arg("LibertAI Code shared transcript")
+        .arg(desc)
         .arg(if public { "--public" } else { "--secret" })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2985,8 +2991,8 @@ fn publish_share_gist(html: &str, public: bool, filename: &str) -> Result<String
         .stdin
         .as_mut()
         .context("could not open gh stdin")?
-        .write_all(html.as_bytes())
-        .context("could not send transcript HTML to gh")?;
+        .write_all(content.as_bytes())
+        .context("could not send content to gh")?;
     let output = child
         .wait_with_output()
         .context("gh gist create did not finish")?;
@@ -3509,11 +3515,13 @@ fn write_onboarding_guide(path: Option<&str>) {
             return;
         }
     };
-    let path = path
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("libertai-onboarding.md"));
+    let target = match parse_onboarding_target(path) {
+        Ok(target) => target,
+        Err(e) => {
+            eprintln!("{DIM}  /onboarding: {e:#}{RESET}");
+            return;
+        }
+    };
     let guide = match crate::commands::code_init::onboarding_guide(&cwd) {
         Ok(guide) => guide,
         Err(e) => {
@@ -3521,22 +3529,70 @@ fn write_onboarding_guide(path: Option<&str>) {
             return;
         }
     };
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!(
-                "{DIM}  /onboarding: could not create {}: {e}{RESET}",
-                parent.display()
-            );
-            return;
+    match target {
+        OnboardingTarget::File(path) => {
+            if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "{DIM}  /onboarding: could not create {}: {e}{RESET}",
+                        parent.display()
+                    );
+                    return;
+                }
+            }
+            match std::fs::write(&path, guide) {
+                Ok(()) => println!("{DIM}  onboarding guide written: {}{RESET}", path.display()),
+                Err(e) => eprintln!(
+                    "{DIM}  /onboarding: could not write {}: {e}{RESET}",
+                    path.display()
+                ),
+            }
+        }
+        OnboardingTarget::Gist { public, filename } => {
+            match publish_gist(&guide, public, &filename, "LibertAI Code onboarding guide") {
+                Ok(url) => println!("{DIM}  onboarding gist created: {url}{RESET}"),
+                Err(e) => eprintln!("{DIM}  /onboarding gist: {e:#}{RESET}"),
+            }
         }
     }
-    match std::fs::write(&path, guide) {
-        Ok(()) => println!("{DIM}  onboarding guide written: {}{RESET}", path.display()),
-        Err(e) => eprintln!(
-            "{DIM}  /onboarding: could not write {}: {e}{RESET}",
-            path.display()
-        ),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OnboardingTarget {
+    File(PathBuf),
+    Gist { public: bool, filename: String },
+}
+
+fn parse_onboarding_target(path: Option<&str>) -> Result<OnboardingTarget> {
+    let raw = path.unwrap_or("").trim();
+    if raw.is_empty() {
+        return Ok(OnboardingTarget::File(PathBuf::from("libertai-onboarding.md")));
     }
+    let Some(rest) = raw.strip_prefix("gist") else {
+        return Ok(OnboardingTarget::File(PathBuf::from(raw)));
+    };
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return Ok(OnboardingTarget::File(PathBuf::from(raw)));
+    }
+    let mut public = false;
+    let mut filename_parts = Vec::new();
+    for part in rest.split_whitespace() {
+        match part.to_ascii_lowercase().as_str() {
+            "public" | "--public" => public = true,
+            "secret" | "private" | "--secret" | "--private" => public = false,
+            other if other.starts_with('-') => {
+                anyhow::bail!("unknown gist option `{part}`; use /onboarding gist [public|secret] [filename.md]");
+            }
+            _ => filename_parts.push(part),
+        }
+    }
+    let filename = filename_parts.join("-");
+    let filename = sanitize_gist_filename(if filename.trim().is_empty() {
+        "libertai-onboarding.md"
+    } else {
+        filename.trim()
+    });
+    Ok(OnboardingTarget::Gist { public, filename })
 }
 
 fn init_candidate_preview(path: &str, existing: &str, candidate: &str) -> String {
@@ -7035,6 +7091,33 @@ mod tests {
             }
         );
         assert!(parse_share_target(Some("gist --wat")).is_err());
+    }
+
+    #[test]
+    fn onboarding_target_uses_default_path_or_gist() {
+        assert_eq!(
+            parse_onboarding_target(None).unwrap(),
+            OnboardingTarget::File(PathBuf::from("libertai-onboarding.md"))
+        );
+        assert_eq!(
+            parse_onboarding_target(Some("docs/team.md")).unwrap(),
+            OnboardingTarget::File(PathBuf::from("docs/team.md"))
+        );
+        assert_eq!(
+            parse_onboarding_target(Some("gist")).unwrap(),
+            OnboardingTarget::Gist {
+                public: false,
+                filename: "libertai-onboarding.md".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_onboarding_target(Some("gist public team guide.md")).unwrap(),
+            OnboardingTarget::Gist {
+                public: true,
+                filename: "team-guide.md".to_string(),
+            }
+        );
+        assert!(parse_onboarding_target(Some("gist --wat")).is_err());
     }
 
     #[test]
