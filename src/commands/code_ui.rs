@@ -5474,32 +5474,78 @@ fn init_candidate_preview(path: &str, existing: &str, candidate: &str) -> String
         path, existing, candidate,
     ));
     out.push('\n');
-    let sections = init_candidate_sections(candidate);
+    let sections = init_candidate_section_summaries(existing, candidate);
     if !sections.is_empty() {
         out.push_str("\n  candidate sections:\n");
         for (idx, section) in sections.iter().enumerate() {
-            out.push_str(&format!("  {}. {section}\n", idx + 1));
+            out.push_str(&format!("  {}. {} — {}\n", idx + 1, section.title, section.status));
         }
     }
     out.push_str("\n  Review the candidate against the existing AGENTS.md and merge only verified repo facts.\n");
     out
 }
 
-fn init_candidate_sections(candidate: &str) -> Vec<String> {
-    let mut sections = Vec::new();
-    let mut has_preamble = false;
-    for line in candidate.replace("\r\n", "\n").lines() {
-        if let Some(title) = line.trim().strip_prefix("## ") {
-            let title = title.trim();
-            if !title.is_empty() {
-                sections.push(title.to_string());
-            }
-        } else if !line.trim().is_empty() && sections.is_empty() && !has_preamble {
-            sections.push("Preamble".to_string());
-            has_preamble = true;
-        }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InitSectionSummary {
+    title: String,
+    status: String,
+}
+
+fn init_candidate_section_summaries(existing: &str, candidate: &str) -> Vec<InitSectionSummary> {
+    let existing_sections = split_init_markdown_sections(existing);
+    split_init_markdown_sections(candidate)
+        .into_iter()
+        .filter(|section| !is_init_candidate_preamble(&section.content) || section.title.is_none())
+        .map(|section| {
+            let title = section
+                .title
+                .as_deref()
+                .unwrap_or("Preamble")
+                .trim()
+                .to_string();
+            let status = init_candidate_section_status(&existing_sections, &section);
+            InitSectionSummary { title, status }
+        })
+        .collect()
+}
+
+fn init_candidate_section_status(
+    existing_sections: &[InitMarkdownSection],
+    candidate: &InitMarkdownSection,
+) -> String {
+    let Some(title) = candidate.title.as_deref() else {
+        return "new preamble".to_string();
+    };
+    let Some(existing) = existing_sections.iter().find(|section| {
+        section
+            .title
+            .as_deref()
+            .is_some_and(|existing_title| existing_title.eq_ignore_ascii_case(title))
+    }) else {
+        return "new section".to_string();
+    };
+    let existing_lines = existing
+        .content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter(|line| !line.trim_start().starts_with("## "))
+        .map(normalize_init_line)
+        .collect::<std::collections::BTreeSet<_>>();
+    let additions = candidate
+        .content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter(|line| !line.trim_start().starts_with("## "))
+        .filter(|line| !existing_lines.contains(&normalize_init_line(line)))
+        .count();
+    if additions > 0 {
+        return format!("adds {additions} line{}", if additions == 1 { "" } else { "s" });
     }
-    sections
+    if normalize_init_line(&existing.content) == normalize_init_line(&candidate.content) {
+        "unchanged".to_string()
+    } else {
+        "reorders or rewrites existing lines".to_string()
+    }
 }
 
 fn print_memory(action: &str) {
@@ -10276,9 +10322,37 @@ mod tests {
         assert!(preview.contains("-custom guidance"));
         assert!(preview.contains("+## Build & test"));
         assert!(preview.contains("candidate sections:"));
-        assert!(preview.contains("1. Preamble"));
-        assert!(preview.contains("2. Build & test"));
+        assert!(preview.contains("1. Preamble — new preamble"));
+        assert!(preview.contains("2. Build & test — new section"));
         assert!(preview.contains("merge only verified repo facts"));
+    }
+
+    #[test]
+    fn init_candidate_section_summaries_label_new_and_added_lines() {
+        let existing = "# Demo\n\n## Build\n- cargo test\n\n## Style\n- Use rustfmt\n";
+        let candidate = "# Candidate\n\n## Build\n- cargo test\n- cargo clippy\n\n## Style\n- Use rustfmt\n\n## Deploy\n- ship manually\n";
+        let summaries = init_candidate_section_summaries(existing, candidate);
+        assert_eq!(
+            summaries,
+            vec![
+                InitSectionSummary {
+                    title: "Preamble".to_string(),
+                    status: "new preamble".to_string(),
+                },
+                InitSectionSummary {
+                    title: "Build".to_string(),
+                    status: "adds 1 line".to_string(),
+                },
+                InitSectionSummary {
+                    title: "Style".to_string(),
+                    status: "unchanged".to_string(),
+                },
+                InitSectionSummary {
+                    title: "Deploy".to_string(),
+                    status: "new section".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]

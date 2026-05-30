@@ -476,7 +476,8 @@ unified diff before any overwrite request. The initializer also exposes a no-wri
 candidate generator so desktop can show a merge candidate when
 guidance already exists, and CLI `/init` prints that same no-write
 candidate with a diff against the existing file and a numbered section
-index when it leaves an existing `AGENTS.md` unchanged. The generated file
+index plus per-section impact labels (new section, unchanged, or added
+lines) when it leaves an existing `AGENTS.md` unchanged. The generated file
 is deterministic and based on visible repo docs/manifests
 (`README.md`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`)
 plus common directory names. It now parses README title/summary,
@@ -490,8 +491,9 @@ the resulting file before applying, and CLI `/init from-agent preview
 [append|merge|merge-lines] sections N[,M]` plus `/init from-agent
 append|merge|merge-lines sections N[,M]` support numbered-section
 review/apply flows alongside the desktop merge modal.
-Remaining work is richer interactive review controls around
-agent-written prose.
+The desktop merge modal shows the same per-section impact labels beside
+the selectable generated sections. Remaining work is richer interactive
+review controls around agent-written prose.
 
 ### 2E. `!` shell prefix in REPL
 
