@@ -25,6 +25,7 @@ pub const DEFAULT_SMART_APPROVAL_MODEL: &str = DEFAULT_FAST_MODEL;
 pub const DEFAULT_CODE_AUTO_COMPACTION_ENABLED: bool = true;
 pub const DEFAULT_CODE_COMPACTION_RESERVE_TOKENS: u32 = 16_384;
 pub const DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS: u32 = 20_000;
+pub const DEFAULT_CODE_TURN_NOTIFICATIONS: bool = false;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -97,6 +98,11 @@ pub struct Config {
         skip_serializing_if = "is_default_code_compaction_keep_recent_tokens"
     )]
     pub code_compaction_keep_recent_tokens: u32,
+    #[serde(
+        default = "default_code_turn_notifications",
+        skip_serializing_if = "is_default_code_turn_notifications"
+    )]
+    pub code_turn_notifications: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub status_line_template: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -184,6 +190,9 @@ fn is_default_code_compaction_reserve_tokens(v: &u32) -> bool {
 }
 fn is_default_code_compaction_keep_recent_tokens(v: &u32) -> bool {
     *v == DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS
+}
+fn is_default_code_turn_notifications(v: &bool) -> bool {
+    *v == DEFAULT_CODE_TURN_NOTIFICATIONS
 }
 
 impl Default for LauncherDefaults {
@@ -803,6 +812,9 @@ fn default_code_compaction_reserve_tokens() -> u32 {
 fn default_code_compaction_keep_recent_tokens() -> u32 {
     DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS
 }
+fn default_code_turn_notifications() -> bool {
+    DEFAULT_CODE_TURN_NOTIFICATIONS
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -822,6 +834,7 @@ impl Default for Config {
             code_auto_compaction_enabled: DEFAULT_CODE_AUTO_COMPACTION_ENABLED,
             code_compaction_reserve_tokens: DEFAULT_CODE_COMPACTION_RESERVE_TOKENS,
             code_compaction_keep_recent_tokens: DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS,
+            code_turn_notifications: DEFAULT_CODE_TURN_NOTIFICATIONS,
             status_line_template: String::new(),
             status_line_command: String::new(),
             hooks: HooksConfig::default(),

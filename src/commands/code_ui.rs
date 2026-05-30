@@ -174,6 +174,15 @@ enum ScheduleCommand {
     Usage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotifyCommand {
+    Status,
+    On,
+    Off,
+    Test,
+    Usage,
+}
+
 #[derive(Debug, Default)]
 struct ToolActivityTracker {
     active: HashMap<String, (String, Instant)>,
@@ -715,6 +724,12 @@ async fn repl_loop(
             print_usage_export(usage_summary(&usage_history), &tool_activity, format);
             continue;
         }
+        if let Some(rest) = notify_command_arg(trimmed) {
+            if let Err(e) = handle_notify_command(rest, &mut cfg) {
+                eprintln!("{DIM}  /notify: {e:#}{RESET}");
+            }
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
@@ -788,6 +803,12 @@ async fn repl_loop(
                     .map(|tracker| tracker.summary())
                     .unwrap_or_default();
                 print_usage_summary(usage_summary(&usage_history), &tool_activity);
+                continue;
+            }
+            "/notify" | "/notifications" => {
+                if let Err(e) = handle_notify_command("", &mut cfg) {
+                    eprintln!("{DIM}  /notify: {e:#}{RESET}");
+                }
                 continue;
             }
             "/history" => {
@@ -1624,6 +1645,12 @@ async fn repl_loop(
                     msg.usage.input,
                     msg.usage.output,
                 );
+                if cfg.code_turn_notifications && !is_autonomous {
+                    crate::commands::code_term::notify_terminal(
+                        "LibertAI Code",
+                        "Agent turn complete",
+                    );
+                }
                 if matches!(mode.get(), Mode::Plan) && prompt_plan_exit_handoff()? {
                     mode.set(Mode::Normal);
                     println!(
@@ -2199,6 +2226,7 @@ fn print_help() {
     println!("{DIM}  /loop [turns] [goal] — run bounded autonomous follow-up turns{RESET}");
     println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|status){RESET}");
     println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|cancel|clear){RESET}");
+    println!("{DIM}  /notify on|off|status|test — turn-complete terminal notifications{RESET}");
     println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
     println!("{DIM}  /attach <path> [prompt] — alias for /image{RESET}");
     println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
@@ -3328,6 +3356,70 @@ fn schedule_command_arg(trimmed: &str) -> Option<&str> {
             .or_else(|| trimmed.strip_prefix("/cron "))
             .map(str::trim),
     }
+}
+
+fn notify_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/notify" | "/notifications" => Some(""),
+        _ => trimmed
+            .strip_prefix("/notify ")
+            .or_else(|| trimmed.strip_prefix("/notifications "))
+            .map(str::trim),
+    }
+}
+
+fn parse_notify_command(input: &str) -> NotifyCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "status" | "state" | "show" => NotifyCommand::Status,
+        "on" | "enable" | "enabled" => NotifyCommand::On,
+        "off" | "disable" | "disabled" => NotifyCommand::Off,
+        "test" | "ping" => NotifyCommand::Test,
+        _ => NotifyCommand::Usage,
+    }
+}
+
+fn handle_notify_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Result<()> {
+    match parse_notify_command(raw) {
+        NotifyCommand::Status => print_notify_status(cfg),
+        NotifyCommand::On => {
+            set_turn_notifications(cfg, true)?;
+            println!("{DIM}  /notify: turn-complete terminal notifications enabled.{RESET}");
+        }
+        NotifyCommand::Off => {
+            set_turn_notifications(cfg, false)?;
+            println!("{DIM}  /notify: turn-complete terminal notifications disabled.{RESET}");
+        }
+        NotifyCommand::Test => {
+            crate::commands::code_term::notify_terminal("LibertAI Code", "Notification test");
+        }
+        NotifyCommand::Usage => {
+            eprintln!("{DIM}  usage: /notify [on|off|status|test]{RESET}");
+        }
+    }
+    Ok(())
+}
+
+fn set_turn_notifications(cfg: &mut Arc<LibertaiConfig>, enabled: bool) -> Result<()> {
+    let mut next = cfg.as_ref().clone();
+    next.code_turn_notifications = enabled;
+    crate::config::save(&next).context("save config")?;
+    *cfg = Arc::new(next);
+    Ok(())
+}
+
+fn print_notify_status(cfg: &LibertaiConfig) {
+    println!(
+        "{DIM}  turn notifications:{RESET} {}",
+        if cfg.code_turn_notifications {
+            "on"
+        } else {
+            "off"
+        }
+    );
+    println!(
+        "{DIM}  agent push notifications:{RESET} terminal bell + visible notification block"
+    );
+    println!("{DIM}  usage:{RESET} /notify on, /notify off, /notify status, /notify test");
 }
 
 fn parse_schedule_command(input: &str) -> ScheduleCommand {
@@ -7938,6 +8030,22 @@ mod tests {
         assert_eq!(schedule_command_arg("/cron list"), Some("list"));
         assert_eq!(schedule_command_arg("/cron state"), Some("state"));
         assert_eq!(schedule_command_arg("/scheduler"), None);
+    }
+
+    #[test]
+    fn notify_command_arg_and_parser_match_desktop_contract() {
+        assert_eq!(notify_command_arg("/notify"), Some(""));
+        assert_eq!(notify_command_arg("/notify on"), Some("on"));
+        assert_eq!(notify_command_arg("/notifications status"), Some("status"));
+        assert_eq!(notify_command_arg("/notifier"), None);
+        assert_eq!(parse_notify_command(""), NotifyCommand::Status);
+        assert_eq!(parse_notify_command("status"), NotifyCommand::Status);
+        assert_eq!(parse_notify_command("on"), NotifyCommand::On);
+        assert_eq!(parse_notify_command("enable"), NotifyCommand::On);
+        assert_eq!(parse_notify_command("off"), NotifyCommand::Off);
+        assert_eq!(parse_notify_command("disable"), NotifyCommand::Off);
+        assert_eq!(parse_notify_command("test"), NotifyCommand::Test);
+        assert_eq!(parse_notify_command("wat"), NotifyCommand::Usage);
     }
 
     #[test]

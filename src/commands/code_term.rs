@@ -56,7 +56,7 @@ impl ApprovalUi for TerminalApprovalUi {
     }
 }
 
-fn notify_terminal(title: &str, body: &str) -> NotifyOutcome {
+pub(crate) fn notify_terminal(title: &str, body: &str) -> NotifyOutcome {
     let title = title.trim();
     let body = body.trim();
     if title.is_empty() || body.is_empty() {
