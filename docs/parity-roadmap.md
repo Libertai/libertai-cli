@@ -623,10 +623,12 @@ targets against the session cwd. Full file-per-memory storage is deferred.
 
 Shipped: CLI and desktop discover project `.claude/commands`,
 `.libertai/commands`, and legacy `.liberclaw/commands`, plus user
-`~/.claude/commands` and `~/.config/libertai/commands`. Each Markdown
-file becomes a prompt template; frontmatter may define `description:`
-and `argHint:`. CLI and desktop support `/template <name> [args]` and
-direct `/<name> [args]` dispatch with `{{args}}` substitution.
+`~/.claude/commands` and `~/.config/libertai/commands`. Markdown files
+are discovered recursively; nested paths keep their slash name, so
+`commands/team/review.md` becomes `/team/review`. Each file becomes a
+prompt template; frontmatter may define `description:` and `argHint:`.
+CLI and desktop support `/template <name> [args]` and direct
+`/<name> [args]` dispatch with `{{args}}` substitution.
 
 **Files**: `src/commands/code_slash_registry.rs`, `src/commands/code_ui.rs`.
 

@@ -6183,7 +6183,7 @@ fn parse_direct_custom_slash(trimmed: &str) -> Option<(&str, &str)> {
     let (name, args) = raw
         .split_once(char::is_whitespace)
         .map_or((raw, ""), |(name, args)| (name, args.trim()));
-    if name.is_empty() || name.contains('/') {
+    if name.is_empty() {
         None
     } else {
         Some((name, args))
@@ -10991,6 +10991,10 @@ mod tests {
     #[test]
     fn parse_direct_custom_slash_parses_name_and_args() {
         assert_eq!(parse_direct_custom_slash("/review src"), Some(("review", "src")));
+        assert_eq!(
+            parse_direct_custom_slash("/team/review src"),
+            Some(("team/review", "src"))
+        );
         assert_eq!(parse_direct_custom_slash("/review"), Some(("review", "")));
         assert_eq!(parse_direct_custom_slash("review"), None);
     }
