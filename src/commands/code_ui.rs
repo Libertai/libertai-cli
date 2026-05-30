@@ -4288,7 +4288,7 @@ fn parse_mcp_command(input: &str) -> McpCommand {
 
 fn parse_vim_command(input: &str) -> VimCommand {
     match input.trim().to_ascii_lowercase().as_str() {
-        "" | "status" | "state" | "show" => VimCommand::Status,
+        "" | "status" | "state" | "show" | "current" | "info" => VimCommand::Status,
         "on" | "enable" | "enabled" | "true" => VimCommand::Enable,
         "off" | "disable" | "disabled" | "false" => VimCommand::Disable,
         _ => VimCommand::Usage,
@@ -4470,6 +4470,11 @@ fn print_theme_status(command: ThemeCommand) {
     }
 }
 
+const VIM_USAGE: &str =
+    "/vim [status|state|show|current|info|on|enable|enabled|true|off|disable|disabled|false]";
+const IDE_USAGE: &str = "/ide [status|state|show|open|settings|edit]";
+const BUG_USAGE: &str = "/bug [report|template|status|show]";
+
 fn print_vim_status(command: VimCommand) {
     println!("{BOLD}vim{RESET}");
     match command {
@@ -4497,7 +4502,7 @@ fn print_vim_status(command: VimCommand) {
             println!("{DIM}  /vim off:{RESET} disabled for this terminal session.");
         }
         VimCommand::Usage => {
-            println!("{DIM}  usage:{RESET} /vim, /vim status, /vim on, or /vim off");
+            println!("{DIM}  usage:{RESET} {VIM_USAGE}");
         }
     }
 }
@@ -4545,7 +4550,7 @@ fn print_ide_status(command: IdeCommand) {
             );
         }
         IdeCommand::Usage => {
-            println!("{DIM}  usage:{RESET} /ide, /ide status, or /ide open");
+            println!("{DIM}  usage:{RESET} {IDE_USAGE}");
         }
     }
 }
@@ -4561,7 +4566,7 @@ fn print_bug_command(
         BugCommand::Template => print_bug_template(provider, model, mode, output_style),
         BugCommand::Usage => {
             println!("{BOLD}bug report{RESET}");
-            println!("{DIM}  usage:{RESET} /bug, /bug report, /bug template, or /bug status");
+            println!("{DIM}  usage:{RESET} {BUG_USAGE}");
         }
     }
 }
@@ -12277,11 +12282,20 @@ mod tests {
         assert_eq!(vim_command_arg("/vimrc"), None);
         assert_eq!(parse_vim_command(""), VimCommand::Status);
         assert_eq!(parse_vim_command("status"), VimCommand::Status);
+        assert_eq!(parse_vim_command("current"), VimCommand::Status);
+        assert_eq!(parse_vim_command("info"), VimCommand::Status);
         assert_eq!(parse_vim_command("on"), VimCommand::Enable);
         assert_eq!(parse_vim_command("enable"), VimCommand::Enable);
+        assert_eq!(parse_vim_command("enabled"), VimCommand::Enable);
+        assert_eq!(parse_vim_command("true"), VimCommand::Enable);
         assert_eq!(parse_vim_command("off"), VimCommand::Disable);
         assert_eq!(parse_vim_command("disable"), VimCommand::Disable);
+        assert_eq!(parse_vim_command("disabled"), VimCommand::Disable);
+        assert_eq!(parse_vim_command("false"), VimCommand::Disable);
         assert_eq!(parse_vim_command("toggle"), VimCommand::Usage);
+        assert!(VIM_USAGE.contains("current|info"));
+        assert!(VIM_USAGE.contains("enable|enabled|true"));
+        assert!(VIM_USAGE.contains("disable|disabled|false"));
     }
 
     #[test]
@@ -12336,9 +12350,14 @@ mod tests {
         assert_eq!(ide_command_arg("/idea"), None);
         assert_eq!(parse_ide_command(""), IdeCommand::Status);
         assert_eq!(parse_ide_command("status"), IdeCommand::Status);
+        assert_eq!(parse_ide_command("state"), IdeCommand::Status);
+        assert_eq!(parse_ide_command("show"), IdeCommand::Status);
         assert_eq!(parse_ide_command("open"), IdeCommand::Open);
         assert_eq!(parse_ide_command("settings"), IdeCommand::Open);
+        assert_eq!(parse_ide_command("edit"), IdeCommand::Open);
         assert_eq!(parse_ide_command("install"), IdeCommand::Usage);
+        assert!(IDE_USAGE.contains("state|show"));
+        assert!(IDE_USAGE.contains("settings|edit"));
     }
 
     #[test]
@@ -12351,7 +12370,9 @@ mod tests {
         assert_eq!(parse_bug_command("report"), BugCommand::Template);
         assert_eq!(parse_bug_command("template"), BugCommand::Template);
         assert_eq!(parse_bug_command("status"), BugCommand::Template);
+        assert_eq!(parse_bug_command("show"), BugCommand::Template);
         assert_eq!(parse_bug_command("open"), BugCommand::Usage);
+        assert!(BUG_USAGE.contains("report|template|status|show"));
     }
 
     #[test]
