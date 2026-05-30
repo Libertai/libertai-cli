@@ -239,6 +239,12 @@ enum StatusCommand {
     Usage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorCommand {
+    Run,
+    Usage,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScopedModelsCommand {
     Status,
@@ -934,6 +940,30 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some(rest) = doctor_command_arg(trimmed) {
+            match parse_doctor_command(rest) {
+                DoctorCommand::Run => {
+                    print_doctor(
+                        &handle,
+                        &provider,
+                        &model,
+                        mode.get(),
+                        output_style.as_deref(),
+                        &cfg,
+                        &approvals,
+                        &scheduled_runs,
+                        usage_summary(&usage_history),
+                    )
+                    .await;
+                }
+                DoctorCommand::Usage => {
+                    println!(
+                        "{DIM}  usage:{RESET} /doctor, /doctor status, /doctor health, or /doctor diagnostics"
+                    );
+                }
+            }
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
@@ -970,21 +1000,6 @@ async fn repl_loop(
             }
             "/name" | "/rename" => {
                 print_name_status(session_name.as_deref());
-                continue;
-            }
-            "/doctor" => {
-                print_doctor(
-                    &handle,
-                    &provider,
-                    &model,
-                    mode.get(),
-                    output_style.as_deref(),
-                    &cfg,
-                    &approvals,
-                    &scheduled_runs,
-                    usage_summary(&usage_history),
-                )
-                .await;
                 continue;
             }
             "/abort" => {
@@ -3985,6 +4000,13 @@ fn status_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
+fn doctor_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/doctor" => Some(""),
+        _ => trimmed.strip_prefix("/doctor ").map(str::trim),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HooksCommand {
     Status,
@@ -4065,6 +4087,15 @@ fn parse_status_command(input: &str) -> StatusCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "state" | "show" | "info" | "session" => StatusCommand::Session,
         _ => StatusCommand::Usage,
+    }
+}
+
+fn parse_doctor_command(input: &str) -> DoctorCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "status" | "state" | "show" | "info" | "health" | "diagnostics" | "diag" => {
+            DoctorCommand::Run
+        }
+        _ => DoctorCommand::Usage,
     }
 }
 
@@ -10574,6 +10605,20 @@ mod tests {
         assert_eq!(parse_status_command("info"), StatusCommand::Session);
         assert_eq!(parse_status_command("session"), StatusCommand::Session);
         assert_eq!(parse_status_command("open"), StatusCommand::Usage);
+    }
+
+    #[test]
+    fn doctor_command_arg_and_parser_capture_diagnostic_aliases() {
+        assert_eq!(doctor_command_arg("/doctor"), Some(""));
+        assert_eq!(doctor_command_arg("/doctor status"), Some("status"));
+        assert_eq!(doctor_command_arg("/doctor diagnostics"), Some("diagnostics"));
+        assert_eq!(doctor_command_arg("/doctors"), None);
+        assert_eq!(parse_doctor_command(""), DoctorCommand::Run);
+        assert_eq!(parse_doctor_command("status"), DoctorCommand::Run);
+        assert_eq!(parse_doctor_command("health"), DoctorCommand::Run);
+        assert_eq!(parse_doctor_command("diagnostics"), DoctorCommand::Run);
+        assert_eq!(parse_doctor_command("diag"), DoctorCommand::Run);
+        assert_eq!(parse_doctor_command("open"), DoctorCommand::Usage);
     }
 
     #[test]

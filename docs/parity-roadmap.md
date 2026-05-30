@@ -183,6 +183,9 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/status` aliases** — REPL users get explicit `/status
   show|info|session` handling for session state so status requests do
   not fall through as agent text.
+- **CLI `/doctor` aliases** — REPL users get explicit `/doctor
+  status|health|diagnostics` handling for local health checks so
+  diagnostic requests do not fall through as agent text.
 - **CLI `/mode` and `/rename` aliases** — REPL users can use the
   desktop/Claude-style spellings for permission-mode switching and
   session naming.
