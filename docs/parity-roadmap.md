@@ -80,7 +80,9 @@ SDK; those are flagged **(upstream)**.
   thinking level with `/thinking <off|minimal|low|medium|high|xhigh>`
   plus `/think` and `/t` aliases.
 - **CLI `/share` command** — REPL users can write a self-contained
-  HTML transcript with `/share [path]` for local sharing/review.
+  HTML transcript with `/share [path]` for local sharing/review or
+  publish it through the authenticated GitHub CLI with
+  `/share gist [public|secret] [filename.html]`.
 - **CLI `/onboarding` command** — REPL users can generate a local
   Markdown onboarding guide from repo facts, commands, structure, and
   existing AGENTS/CLAUDE guidance.

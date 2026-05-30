@@ -2076,6 +2076,7 @@ fn print_help() {
     println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
     println!("{DIM}  /export [path] — write this session transcript as Markdown{RESET}");
     println!("{DIM}  /share [path] — write this session transcript as shareable HTML{RESET}");
+    println!("{DIM}  /share gist [public|secret] [filename.html] — publish the HTML transcript with gh{RESET}");
     println!("{DIM}  /output-style <default|concise|explanatory|review|status>{RESET}");
     println!("{DIM}  /vim      — show Vim-input status{RESET}");
     println!("{DIM}  /ide      — show IDE integration status{RESET}");
@@ -2839,8 +2840,8 @@ async fn export_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
 }
 
 async fn share_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
-    let path = match share_path(path) {
-        Ok(path) => path,
+    let target = match parse_share_target(path) {
+        Ok(target) => target,
         Err(e) => {
             eprintln!("{DIM}  /share: {e:#}{RESET}");
             return;
@@ -2854,15 +2855,28 @@ async fn share_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
         }
     };
     let html = render_html_transcript(&messages);
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("{DIM}  /share: could not create {}: {e}{RESET}", parent.display());
-            return;
+    match target {
+        ShareTarget::File(path) => {
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "{DIM}  /share: could not create {}: {e}{RESET}",
+                        parent.display()
+                    );
+                    return;
+                }
+            }
+            match std::fs::write(&path, html) {
+                Ok(()) => println!("{DIM}  share HTML written: {}{RESET}", path.display()),
+                Err(e) => eprintln!("{DIM}  /share: could not write {}: {e}{RESET}", path.display()),
+            }
         }
-    }
-    match std::fs::write(&path, html) {
-        Ok(()) => println!("{DIM}  share HTML written: {}{RESET}", path.display()),
-        Err(e) => eprintln!("{DIM}  /share: could not write {}: {e}{RESET}", path.display()),
+        ShareTarget::Gist { public, filename } => {
+            match publish_share_gist(&html, public, &filename) {
+                Ok(url) => println!("{DIM}  share gist created: {url}{RESET}"),
+                Err(e) => eprintln!("{DIM}  /share gist: {e:#}{RESET}"),
+            }
+        }
     }
 }
 
@@ -2893,12 +2907,101 @@ fn export_path(path: Option<&str>) -> Result<PathBuf> {
     Ok(PathBuf::from(raw))
 }
 
-fn share_path(path: Option<&str>) -> Result<PathBuf> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShareTarget {
+    File(PathBuf),
+    Gist { public: bool, filename: String },
+}
+
+fn parse_share_target(path: Option<&str>) -> Result<ShareTarget> {
     let raw = path.unwrap_or("").trim();
     if raw.is_empty() {
-        return Ok(PathBuf::from("libertai-share.html"));
+        return Ok(ShareTarget::File(PathBuf::from("libertai-share.html")));
     }
-    Ok(PathBuf::from(raw))
+    let Some(rest) = raw.strip_prefix("gist") else {
+        return Ok(ShareTarget::File(PathBuf::from(raw)));
+    };
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return Ok(ShareTarget::File(PathBuf::from(raw)));
+    }
+    let mut public = false;
+    let mut filename_parts = Vec::new();
+    for part in rest.split_whitespace() {
+        match part.to_ascii_lowercase().as_str() {
+            "public" | "--public" => public = true,
+            "secret" | "private" | "--secret" | "--private" => public = false,
+            other if other.starts_with('-') => {
+                anyhow::bail!("unknown gist option `{part}`; use /share gist [public|secret] [filename.html]");
+            }
+            _ => filename_parts.push(part),
+        }
+    }
+    let filename = filename_parts.join("-");
+    let filename = sanitize_gist_filename(if filename.trim().is_empty() {
+        "libertai-share.html"
+    } else {
+        filename.trim()
+    });
+    Ok(ShareTarget::Gist { public, filename })
+}
+
+fn sanitize_gist_filename(raw: &str) -> String {
+    let name = Path::new(raw)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("libertai-share.html")
+        .trim();
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+            out.push(ch);
+        } else {
+            out.push('-');
+        }
+    }
+    let out = out.trim_matches('-');
+    if out.is_empty() {
+        "libertai-share.html".to_string()
+    } else {
+        out.chars().take(96).collect()
+    }
+}
+
+fn publish_share_gist(html: &str, public: bool, filename: &str) -> Result<String> {
+    let mut child = Command::new("gh")
+        .args(["gist", "create", "-"])
+        .arg("--filename")
+        .arg(filename)
+        .arg("--desc")
+        .arg("LibertAI Code shared transcript")
+        .arg(if public { "--public" } else { "--secret" })
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("could not start `gh`; install GitHub CLI and run `gh auth login`")?;
+    child
+        .stdin
+        .as_mut()
+        .context("could not open gh stdin")?
+        .write_all(html.as_bytes())
+        .context("could not send transcript HTML to gh")?;
+    let output = child
+        .wait_with_output()
+        .context("gh gist create did not finish")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "gh gist create failed{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.trim().to_string())
 }
 
 fn compact_command_notes(trimmed: &str) -> Option<&str> {
@@ -6907,15 +7010,30 @@ mod tests {
     }
 
     #[test]
-    fn share_path_uses_default_or_custom_path() {
+    fn share_target_uses_default_or_custom_path() {
         assert_eq!(
-            share_path(None).unwrap(),
-            PathBuf::from("libertai-share.html")
+            parse_share_target(None).unwrap(),
+            ShareTarget::File(PathBuf::from("libertai-share.html"))
         );
         assert_eq!(
-            share_path(Some("out/session.html")).unwrap(),
-            PathBuf::from("out/session.html")
+            parse_share_target(Some("out/session.html")).unwrap(),
+            ShareTarget::File(PathBuf::from("out/session.html"))
         );
+        assert_eq!(
+            parse_share_target(Some("gist")).unwrap(),
+            ShareTarget::Gist {
+                public: false,
+                filename: "libertai-share.html".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_share_target(Some("gist public team notes.html")).unwrap(),
+            ShareTarget::Gist {
+                public: true,
+                filename: "team-notes.html".to_string(),
+            }
+        );
+        assert!(parse_share_target(Some("gist --wat")).is_err());
     }
 
     #[test]
