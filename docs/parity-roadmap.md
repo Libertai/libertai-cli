@@ -780,7 +780,10 @@ resource/prompt bridge tools, and resource subscription candidates. It
 still does not keep persistent MCP connections. Terminal `/mcp probe --save` and `/mcp refresh`
 can refresh discovery caches for future code sessions, and `/mcp reset`
 explicitly reports that terminal MCP calls are short-lived while Desktop owns
-the richest stdio/HTTP/SSE live registry today.
+the richest stdio/HTTP/SSE live registry today. Terminal `/mcp show
+<server>` inspects one configured server without exposing secret
+env/header values, including transport, target, cache counts, and cached
+tools/resources/prompts.
 
 **Files**: new `src/commands/code_mcp.rs` + transport modules.
 **Effort**: L (2+ weeks).

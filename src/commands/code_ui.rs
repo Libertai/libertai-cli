@@ -184,9 +184,10 @@ enum NotifyCommand {
     Usage,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum McpCommand {
     Status,
+    Show(String),
     Probe,
     ProbeSave,
     Reset,
@@ -4120,9 +4121,24 @@ fn parse_hooks_command(input: &str) -> HooksCommand {
 }
 
 fn parse_mcp_command(input: &str) -> McpCommand {
-    let normalized = input.trim().to_ascii_lowercase();
+    let raw = input.trim();
+    if let Some((head, tail)) = split_first_word(raw) {
+        if matches!(
+            head.to_ascii_lowercase().as_str(),
+            "show" | "server" | "inspect"
+        ) {
+            let name = tail.trim();
+            if !name.is_empty() && name.split_whitespace().count() == 1 {
+                return McpCommand::Show(name.to_string());
+            }
+            return McpCommand::Usage;
+        }
+    }
+    let normalized = raw.to_ascii_lowercase();
     match normalized.as_str() {
-        "" | "status" | "list" | "state" | "diagnostics" | "diag" => McpCommand::Status,
+        "" | "status" | "list" | "state" | "diagnostics" | "diag" | "show" => {
+            McpCommand::Status
+        }
         "probe" | "probes" => McpCommand::Probe,
         "refresh" | "probe --save" | "probe save" | "probe --write" | "probe write" => {
             McpCommand::ProbeSave
@@ -7690,7 +7706,10 @@ fn open_memory_editor(path: &Path) {
 }
 
 fn quote_for_sh(path: &Path) -> String {
-    let raw = path.to_string_lossy();
+    quote_sh_string(path.to_string_lossy().as_ref())
+}
+
+fn quote_sh_string(raw: &str) -> String {
     format!("'{}'", raw.replace('\'', "'\\''"))
 }
 
@@ -8878,6 +8897,7 @@ fn print_mcp_status(command: McpCommand) {
             );
             println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp probe --save|--write, /mcp refresh, /mcp reset, /mcp open");
         }
+        McpCommand::Show(name) => print_mcp_server_details(&name),
         McpCommand::Probe => print_mcp_probe(),
         McpCommand::ProbeSave => print_mcp_probe_save(),
         McpCommand::Reset => {
@@ -8894,10 +8914,173 @@ fn print_mcp_status(command: McpCommand) {
             );
         }
         McpCommand::Usage => {
-            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp probe --save|--write, /mcp refresh, /mcp reset, /mcp open, or /mcp edit");
+            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp show <server>, /mcp probe, /mcp probe --save|--write, /mcp refresh, /mcp reset, /mcp open, or /mcp edit");
         }
     }
     println!();
+}
+
+fn print_mcp_server_details(name: &str) {
+    let cfg = match crate::config::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("{DIM}  /mcp: config load failed: {e:#}{RESET}");
+            return;
+        }
+    };
+    let Some((server_name, server)) = cfg
+        .mcp_servers
+        .iter()
+        .find(|(server_name, _)| server_name.as_str() == name)
+        .or_else(|| {
+            cfg.mcp_servers
+                .iter()
+                .find(|(server_name, _)| server_name.starts_with(name))
+        })
+    else {
+        eprintln!("{DIM}  /mcp: no configured server found for `{name}`{RESET}");
+        return;
+    };
+    print!("{}", format_mcp_server_details(server_name, server));
+}
+
+fn format_mcp_server_details(name: &str, server: &crate::config::McpServerConfig) -> String {
+    let transport = if server.transport.trim().is_empty() {
+        "stdio"
+    } else {
+        server.transport.trim()
+    };
+    let target = mcp_server_target(server);
+    let enabled_tools = server
+        .tools
+        .iter()
+        .filter(|tool| tool.enabled && !tool.name.trim().is_empty())
+        .count();
+    let enabled_resources = server
+        .resources
+        .iter()
+        .filter(|resource| resource.enabled && !resource.uri.trim().is_empty())
+        .count();
+    let enabled_prompts = server
+        .prompts
+        .iter()
+        .filter(|prompt| prompt.enabled && !prompt.name.trim().is_empty())
+        .count();
+    let mut out = format!(
+        "{BOLD}mcp server: {name}{RESET}\n  transport: {transport}\n  target: {target}\n  env vars: {}\n  headers: {}\n  cache: {} tool(s), {} resource(s), {} prompt(s)\n  enabled cache: {enabled_tools}/{} tool(s), {enabled_resources}/{} resource(s), {enabled_prompts}/{} prompt(s)\n\n",
+        server.env.len(),
+        server.headers.len(),
+        server.tools.len(),
+        server.resources.len(),
+        server.prompts.len(),
+        server.tools.len(),
+        server.resources.len(),
+        server.prompts.len(),
+    );
+    append_mcp_tool_details(&mut out, &server.tools);
+    append_mcp_resource_details(&mut out, &server.resources);
+    append_mcp_prompt_details(&mut out, &server.prompts);
+    out.push_str(&format!(
+        "{DIM}  run /mcp probe --save to refresh cached tools/resources/prompts for `{name}`.{RESET}\n\n"
+    ));
+    out
+}
+
+fn mcp_server_target(server: &crate::config::McpServerConfig) -> String {
+    if !server.url.trim().is_empty() {
+        return server.url.trim().to_string();
+    }
+    if server.command.trim().is_empty() {
+        return "(no target)".to_string();
+    }
+    let mut parts = vec![server.command.trim().to_string()];
+    parts.extend(server.args.iter().map(|arg| quote_sh_string(arg)));
+    parts.join(" ")
+}
+
+fn append_mcp_tool_details(out: &mut String, tools: &[crate::config::McpToolConfig]) {
+    out.push_str(&format!("{BOLD}tools{RESET}\n"));
+    if tools.is_empty() {
+        out.push_str("  (none cached)\n\n");
+        return;
+    }
+    for tool in tools.iter().take(12) {
+        let marker = if tool.enabled { "on" } else { "off" };
+        let desc = if tool.description.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" - {}", truncate_chars(tool.description.trim(), 100))
+        };
+        out.push_str(&format!("  - [{}] {}{}\n", marker, tool.name, desc));
+    }
+    if tools.len() > 12 {
+        out.push_str(&format!("  - ... {} more tool(s)\n", tools.len() - 12));
+    }
+    out.push('\n');
+}
+
+fn append_mcp_resource_details(out: &mut String, resources: &[crate::config::McpResourceConfig]) {
+    out.push_str(&format!("{BOLD}resources{RESET}\n"));
+    if resources.is_empty() {
+        out.push_str("  (none cached)\n\n");
+        return;
+    }
+    for resource in resources.iter().take(12) {
+        let marker = if resource.enabled { "on" } else { "off" };
+        let label = if resource.name.trim().is_empty() {
+            resource.uri.as_str()
+        } else {
+            resource.name.as_str()
+        };
+        let mime = if resource.mime_type.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", resource.mime_type.trim())
+        };
+        out.push_str(&format!("  - [{}] {}{} - {}\n", marker, label, mime, resource.uri));
+    }
+    if resources.len() > 12 {
+        out.push_str(&format!("  - ... {} more resource(s)\n", resources.len() - 12));
+    }
+    out.push('\n');
+}
+
+fn append_mcp_prompt_details(out: &mut String, prompts: &[crate::config::McpPromptConfig]) {
+    out.push_str(&format!("{BOLD}prompts{RESET}\n"));
+    if prompts.is_empty() {
+        out.push_str("  (none cached)\n\n");
+        return;
+    }
+    for prompt in prompts.iter().take(12) {
+        let marker = if prompt.enabled { "on" } else { "off" };
+        let args = prompt
+            .arguments
+            .iter()
+            .filter(|arg| !arg.name.trim().is_empty())
+            .map(|arg| {
+                if arg.required {
+                    format!("{}*", arg.name)
+                } else {
+                    arg.name.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let args = if args.is_empty() {
+            String::new()
+        } else {
+            format!(" args: {}", args.join(", "))
+        };
+        let desc = if prompt.description.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" - {}", truncate_chars(prompt.description.trim(), 100))
+        };
+        out.push_str(&format!("  - [{}] {}{}{}\n", marker, prompt.name, desc, args));
+    }
+    if prompts.len() > 12 {
+        out.push_str(&format!("  - ... {} more prompt(s)\n", prompts.len() - 12));
+    }
+    out.push('\n');
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11073,10 +11256,19 @@ mod tests {
     fn mcp_command_arg_and_parser_report_terminal_status() {
         assert_eq!(mcp_command_arg("/mcp"), Some(""));
         assert_eq!(mcp_command_arg("/mcp status"), Some("status"));
+        assert_eq!(mcp_command_arg("/mcp show docs"), Some("show docs"));
         assert_eq!(mcp_command_arg("/mcp open"), Some("open"));
         assert_eq!(mcp_command_arg("/mc"), None);
         assert_eq!(parse_mcp_command(""), McpCommand::Status);
         assert_eq!(parse_mcp_command("list"), McpCommand::Status);
+        assert_eq!(
+            parse_mcp_command("show docs"),
+            McpCommand::Show("docs".to_string())
+        );
+        assert_eq!(
+            parse_mcp_command("inspect github"),
+            McpCommand::Show("github".to_string())
+        );
         assert_eq!(parse_mcp_command("diagnostics"), McpCommand::Status);
         assert_eq!(parse_mcp_command("probe"), McpCommand::Probe);
         assert_eq!(parse_mcp_command("probe --save"), McpCommand::ProbeSave);
@@ -11088,6 +11280,66 @@ mod tests {
         assert_eq!(parse_mcp_command("settings"), McpCommand::Open);
         assert_eq!(parse_mcp_command("edit"), McpCommand::Open);
         assert_eq!(parse_mcp_command("remote"), McpCommand::Usage);
+    }
+
+    #[test]
+    fn format_mcp_server_details_lists_cache_without_secret_values() {
+        let server = crate::config::McpServerConfig {
+            transport: "stdio".to_string(),
+            command: "npx".to_string(),
+            args: vec!["-y".to_string(), "@modelcontextprotocol/server-docs".to_string()],
+            env: std::collections::HashMap::from([(
+                "DOCS_TOKEN".to_string(),
+                "secret".to_string(),
+            )]),
+            headers: std::collections::HashMap::from([(
+                "Authorization".to_string(),
+                "Bearer secret".to_string(),
+            )]),
+            tools: vec![
+                crate::config::McpToolConfig {
+                    name: "search".to_string(),
+                    enabled: true,
+                    description: "Search docs".to_string(),
+                    ..crate::config::McpToolConfig::default()
+                },
+                crate::config::McpToolConfig {
+                    name: "admin".to_string(),
+                    enabled: false,
+                    ..crate::config::McpToolConfig::default()
+                },
+            ],
+            resources: vec![crate::config::McpResourceConfig {
+                uri: "file:///repo/README.md".to_string(),
+                enabled: true,
+                name: "README".to_string(),
+                mime_type: "text/markdown".to_string(),
+                ..crate::config::McpResourceConfig::default()
+            }],
+            prompts: vec![crate::config::McpPromptConfig {
+                name: "summarize".to_string(),
+                enabled: true,
+                description: "Summarize docs".to_string(),
+                arguments: vec![crate::config::McpPromptArgumentConfig {
+                    name: "topic".to_string(),
+                    required: true,
+                    ..crate::config::McpPromptArgumentConfig::default()
+                }],
+            }],
+            ..crate::config::McpServerConfig::default()
+        };
+        let details = format_mcp_server_details("docs", &server);
+        assert!(details.contains("mcp server: docs"));
+        assert!(details.contains("target: npx '-y' '@modelcontextprotocol/server-docs'"));
+        assert!(details.contains("env vars: 1"));
+        assert!(details.contains("headers: 1"));
+        assert!(details.contains("enabled cache: 1/2 tool(s), 1/1 resource(s), 1/1 prompt(s)"));
+        assert!(details.contains("[on] search - Search docs"));
+        assert!(details.contains("[off] admin"));
+        assert!(details.contains("[on] README (text/markdown) - file:///repo/README.md"));
+        assert!(details.contains("[on] summarize - Summarize docs args: topic*"));
+        assert!(!details.contains("secret"));
+        assert!(!details.contains("Bearer"));
     }
 
     #[test]
