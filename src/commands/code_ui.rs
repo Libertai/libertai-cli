@@ -8144,7 +8144,7 @@ fn print_mcp_status(command: McpCommand) {
             println!(
                 "{DIM}  tools:{RESET} CLI executes generic mcp_call, cached named mcp__server__tool entries, mcp_read_resource, mcp_get_prompt, and MCP-tool hook handlers from mcpServers"
             );
-            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp probe --save, /mcp refresh, /mcp reset, /mcp open");
+            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp probe --save|--write, /mcp refresh, /mcp reset, /mcp open");
         }
         McpCommand::Probe => print_mcp_probe(),
         McpCommand::ProbeSave => print_mcp_probe_save(),
@@ -8162,7 +8162,7 @@ fn print_mcp_status(command: McpCommand) {
             );
         }
         McpCommand::Usage => {
-            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp probe --save, /mcp refresh, /mcp reset, /mcp open, or /mcp edit");
+            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp probe --save|--write, /mcp refresh, /mcp reset, /mcp open, or /mcp edit");
         }
     }
     println!();
@@ -10086,6 +10086,7 @@ mod tests {
         assert_eq!(parse_mcp_command("diagnostics"), McpCommand::Status);
         assert_eq!(parse_mcp_command("probe"), McpCommand::Probe);
         assert_eq!(parse_mcp_command("probe --save"), McpCommand::ProbeSave);
+        assert_eq!(parse_mcp_command("probe --write"), McpCommand::ProbeSave);
         assert_eq!(parse_mcp_command("refresh"), McpCommand::ProbeSave);
         assert_eq!(parse_mcp_command("reset"), McpCommand::Reset);
         assert_eq!(parse_mcp_command("reset-sessions"), McpCommand::Reset);
