@@ -805,14 +805,13 @@ enabled entries as named `mcp__server__tool` tools, plus cached
 `mcp_read_resource` and `mcp_get_prompt` tools. Terminal `/mcp status`
 now reports native exposure coverage for `mcp_call`, named cached tools,
 resource/prompt bridge tools, and resource subscription candidates. It
-keeps initialized stdio and Streamable HTTP MCP sessions alive across agent-callable
+keeps initialized stdio, Streamable HTTP, and legacy SSE MCP sessions alive across agent-callable
 `mcp_call`, cached `mcp__server__tool`, `mcp_read_resource`, and
 `mcp_get_prompt` calls until `/mcp reset` or process exit, including
-`Mcp-Session-Id` reuse for Streamable HTTP servers. Legacy SSE calls
-remain per-call in the terminal. Terminal
+`Mcp-Session-Id` reuse for Streamable HTTP servers. Terminal
 `/mcp probe --save` and `/mcp refresh` can refresh discovery caches for
-future code sessions, and `/mcp reset` closes live terminal stdio and
-Streamable HTTP MCP sessions. Terminal `/mcp show
+future code sessions, and `/mcp reset` closes live terminal stdio,
+Streamable HTTP, and legacy SSE MCP sessions. Terminal `/mcp show
 <server>` inspects one configured server without exposing secret
 env/header values, including transport, target, cache counts, and cached
 tools/resources/prompts. Agent-callable terminal MCP calls also attach

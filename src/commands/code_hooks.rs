@@ -665,10 +665,66 @@ impl PersistentHttpMcpClient {
     }
 }
 
+struct PersistentSseMcpClient {
+    client: reqwest::blocking::Client,
+    endpoint: String,
+    rx: mpsc::Receiver<SseEvent>,
+    _reader: thread::JoinHandle<()>,
+    next_id: u64,
+}
+
+impl PersistentSseMcpClient {
+    fn start(server: &crate::config::McpServerConfig, timeout: Duration) -> Result<Self, String> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|e| format!("building MCP SSE client: {e}"))?;
+        let stream = open_mcp_sse_stream(&client, server, server.url.trim())?;
+        let (rx, reader) = read_mcp_sse_stream(stream);
+        let endpoint = wait_for_mcp_sse_endpoint(&rx, server.url.trim(), timeout)?;
+        post_mcp_sse_message(&client, server, &endpoint, &mcp_initialize_request(1))?;
+        wait_for_mcp_sse_response(&rx, 1, timeout)
+            .and_then(mcp_response_result)
+            .map_err(|e| format!("MCP initialize failed: {e}"))?;
+        post_mcp_sse_message(&client, server, &endpoint, &mcp_initialized_notification())?;
+        Ok(Self {
+            client,
+            endpoint,
+            rx,
+            _reader: reader,
+            next_id: 2,
+        })
+    }
+
+    fn call(
+        &mut self,
+        server: &crate::config::McpServerConfig,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        post_mcp_sse_message(
+            &self.client,
+            server,
+            &self.endpoint,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params,
+            }),
+        )?;
+        wait_for_mcp_sse_response(&self.rx, id, timeout).and_then(mcp_response_result)
+    }
+}
+
 static MCP_STDIO_CLIENTS: OnceLock<Mutex<HashMap<String, PersistentStdioMcpClient>>> =
     OnceLock::new();
 static MCP_HTTP_CLIENTS: OnceLock<Mutex<HashMap<String, PersistentHttpMcpClient>>> =
     OnceLock::new();
+static MCP_SSE_CLIENTS: OnceLock<Mutex<HashMap<String, PersistentSseMcpClient>>> = OnceLock::new();
 
 fn mcp_stdio_clients() -> &'static Mutex<HashMap<String, PersistentStdioMcpClient>> {
     MCP_STDIO_CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -676,6 +732,10 @@ fn mcp_stdio_clients() -> &'static Mutex<HashMap<String, PersistentStdioMcpClien
 
 fn mcp_http_clients() -> &'static Mutex<HashMap<String, PersistentHttpMcpClient>> {
     MCP_HTTP_CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn mcp_sse_clients() -> &'static Mutex<HashMap<String, PersistentSseMcpClient>> {
+    MCP_SSE_CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub fn reset_mcp_cli_sessions() -> usize {
@@ -687,6 +747,10 @@ pub fn reset_mcp_cli_sessions() -> usize {
         }
     }
     if let Ok(mut clients) = mcp_http_clients().lock() {
+        count += clients.len();
+        clients.clear();
+    }
+    if let Ok(mut clients) = mcp_sse_clients().lock() {
         count += clients.len();
         clients.clear();
     }
@@ -709,6 +773,10 @@ fn reset_mcp_cli_session_for_config(
     let http_key = mcp_http_client_key(server_name, server);
     if let Ok(mut clients) = mcp_http_clients().lock() {
         removed |= clients.remove(&http_key).is_some();
+    }
+    let sse_key = mcp_sse_client_key(server_name, server);
+    if let Ok(mut clients) = mcp_sse_clients().lock() {
+        removed |= clients.remove(&sse_key).is_some();
     }
     removed
 }
@@ -1132,7 +1200,7 @@ pub fn call_mcp_method_with_config(
         if server.transport.trim().eq_ignore_ascii_case("sse") {
             (
                 "sse".to_string(),
-                call_mcp_legacy_sse_method(server, method, params, timeout),
+                call_mcp_legacy_sse_method(server_name, server, method, params, timeout),
             )
         } else {
             (
@@ -1274,62 +1342,49 @@ fn mcp_http_client_key(server_name: &str, server: &crate::config::McpServerConfi
 }
 
 fn call_mcp_legacy_sse_method(
+    server_name: &str,
     server: &crate::config::McpServerConfig,
     method: &str,
     params: serde_json::Value,
     timeout: Duration,
 ) -> Result<serde_json::Value, String> {
-    let url = server.url.trim();
-    let client = reqwest::blocking::Client::builder()
-        .timeout(timeout)
-        .build()
-        .map_err(|e| format!("building MCP SSE client: {e}"))?;
-    let stream = open_mcp_sse_stream(&client, server, url)?;
-    let (rx, _reader) = read_mcp_sse_stream(stream);
-    let endpoint = wait_for_mcp_sse_endpoint(&rx, url, timeout)?;
-    post_mcp_sse_message(
-        &client,
-        server,
-        &endpoint,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "libertai-cli",
-                    "version": env!("CARGO_PKG_VERSION"),
-                },
-            },
-        }),
-    )?;
-    wait_for_mcp_sse_response(&rx, 1, timeout)
-        .and_then(mcp_response_result)
-        .map_err(|e| format!("MCP initialize failed: {e}"))?;
-    post_mcp_sse_message(
-        &client,
-        server,
-        &endpoint,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {},
-        }),
-    )?;
-    post_mcp_sse_message(
-        &client,
-        server,
-        &endpoint,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": method,
-            "params": params,
-        }),
-    )?;
-    wait_for_mcp_sse_response(&rx, 2, timeout).and_then(mcp_response_result)
+    let key = mcp_sse_client_key(server_name, server);
+    let mut clients = mcp_sse_clients()
+        .lock()
+        .map_err(|_| "MCP SSE session registry is unavailable".to_string())?;
+
+    if !clients.contains_key(&key) {
+        let client = PersistentSseMcpClient::start(server, timeout)?;
+        clients.insert(key.clone(), client);
+    }
+
+    let result = clients
+        .get_mut(&key)
+        .ok_or_else(|| "MCP SSE session was not registered".to_string())?
+        .call(server, method, params.clone(), timeout);
+    if result.is_ok() {
+        return result;
+    }
+
+    clients.remove(&key);
+    let mut client = PersistentSseMcpClient::start(server, timeout)?;
+    let retry = client.call(server, method, params, timeout);
+    if retry.is_ok() {
+        clients.insert(key, client);
+    }
+    retry
+}
+
+fn mcp_sse_client_key(server_name: &str, server: &crate::config::McpServerConfig) -> String {
+    let mut headers = server.headers.iter().collect::<Vec<_>>();
+    headers.sort_by(|(left, _), (right, _)| left.cmp(right));
+    json!({
+        "name": server_name,
+        "url": server.url,
+        "transport": server.transport,
+        "headers": headers,
+    })
+    .to_string()
 }
 
 fn run_mcp_http_tool_hook(
@@ -2976,6 +3031,131 @@ mod tests {
         handle.join().unwrap();
         assert_eq!(run.status, 0, "stderr: {}", run.stderr);
         assert_eq!(run.stdout, "http policy ok");
+    }
+
+    #[test]
+    fn mcp_tool_calls_reuse_legacy_sse_session_until_reset() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            fn accept_with_timeout(listener: &TcpListener) -> TcpStream {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => return stream,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                panic!("timed out accepting legacy SSE test connection");
+                            }
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(e) => panic!("accepting legacy SSE test connection: {e}"),
+                    }
+                }
+            }
+
+            fn write_sse_chunk(stream: &mut impl Write, event: &str) {
+                write!(stream, "{:x}\r\n{}\r\n", event.len(), event).unwrap();
+                stream.flush().unwrap();
+            }
+
+            let mut sse_stream = accept_with_timeout(&listener);
+            let response =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n";
+            sse_stream.write_all(response.as_bytes()).unwrap();
+            write_sse_chunk(
+                &mut sse_stream,
+                &format!("event: endpoint\ndata: http://{addr}/messages\n\n"),
+            );
+            for idx in 0..4 {
+                let mut post_stream = accept_with_timeout(&listener);
+                post_stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut buf = [0u8; 8192];
+                let mut text = String::new();
+                loop {
+                    let n = post_stream.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if text.contains("\r\n\r\n") {
+                        let header_end = text.find("\r\n\r\n").unwrap() + 4;
+                        let headers = &text[..header_end];
+                        let content_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if text.len() >= header_end + content_len {
+                            break;
+                        }
+                    }
+                }
+                let post_response =
+                    "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                post_stream.write_all(post_response.as_bytes()).unwrap();
+                match idx {
+                    0 => write_sse_chunk(
+                        &mut sse_stream,
+                        "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{}}}\n\n",
+                    ),
+                    2 => write_sse_chunk(
+                        &mut sse_stream,
+                        "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"first sse\"}],\"isError\":false}}\n\n",
+                    ),
+                    3 => write_sse_chunk(
+                        &mut sse_stream,
+                        "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"second sse\"}],\"isError\":false}}\n\n",
+                    ),
+                    _ => {}
+                }
+            }
+        });
+
+        let server = McpServerConfig {
+            transport: "sse".to_string(),
+            url: format!("http://{addr}/sse"),
+            ..McpServerConfig::default()
+        };
+        let cfg = Config {
+            mcp_servers: HashMap::from([("docs-sse-reuse-test".to_string(), server.clone())]),
+            ..Config::default()
+        };
+        let first = call_mcp_tool_with_config(
+            &cfg,
+            "docs-sse-reuse-test",
+            "search",
+            json!({"query":"one"}),
+            Some(2),
+        );
+        assert_eq!(first.status, 0, "stderr: {}", first.stderr);
+        assert_eq!(first.stdout, "first sse");
+        assert_eq!(first.transport, "sse");
+
+        let second = call_mcp_tool_with_config(
+            &cfg,
+            "docs-sse-reuse-test",
+            "search",
+            json!({"query":"two"}),
+            Some(2),
+        );
+        assert_eq!(second.status, 0, "stderr: {}", second.stderr);
+        assert_eq!(second.stdout, "second sse");
+        assert_eq!(second.transport, "sse");
+        assert!(reset_mcp_cli_session_for_config(
+            "docs-sse-reuse-test",
+            &server
+        ));
+        handle.join().unwrap();
     }
 
     #[test]
