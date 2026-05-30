@@ -210,6 +210,8 @@ impl Default for LauncherDefaults {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub transport: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,

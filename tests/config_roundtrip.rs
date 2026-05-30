@@ -103,6 +103,7 @@ fn save_then_load_preserves_fields() {
         mcp_servers: std::collections::HashMap::from([(
             "policy".to_string(),
             McpServerConfig {
+                transport: "http".into(),
                 command: "node".into(),
                 args: vec!["servers/policy.mjs".into()],
                 env: std::collections::HashMap::from([(
@@ -184,6 +185,7 @@ fn save_then_load_preserves_fields() {
     assert_eq!(round.hooks.notification.len(), 1);
     assert_eq!(round.hooks.notification[0].command, "scripts/notification.sh");
     let policy_server = round.mcp_servers.get("policy").unwrap();
+    assert_eq!(policy_server.transport, "http");
     assert_eq!(policy_server.command, "node");
     assert_eq!(policy_server.args, vec!["servers/policy.mjs".to_string()]);
     assert_eq!(
