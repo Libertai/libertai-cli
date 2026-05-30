@@ -3755,7 +3755,7 @@ enum HooksCommand {
 fn parse_hooks_command(input: &str) -> HooksCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "list" | "state" | "diagnostics" | "diag" => HooksCommand::Status,
-        "open" | "settings" => HooksCommand::Open,
+        "open" | "settings" | "edit" => HooksCommand::Open,
         _ => HooksCommand::Usage,
     }
 }
@@ -3763,7 +3763,7 @@ fn parse_hooks_command(input: &str) -> HooksCommand {
 fn parse_mcp_command(input: &str) -> McpCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "list" | "state" | "diagnostics" | "diag" => McpCommand::Status,
-        "open" | "settings" => McpCommand::Open,
+        "open" | "settings" | "edit" => McpCommand::Open,
         _ => McpCommand::Usage,
     }
 }
@@ -7098,7 +7098,7 @@ fn print_hooks_command(cfg: &LibertaiConfig, command: HooksCommand) {
         HooksCommand::Open => print_hooks_open_hint(),
         HooksCommand::Usage => {
             println!("{BOLD}hooks{RESET}");
-            println!("{DIM}  usage:{RESET} /hooks, /hooks status, or /hooks open");
+            println!("{DIM}  usage:{RESET} /hooks, /hooks status, /hooks open, or /hooks edit");
             println!();
         }
     }
@@ -7127,7 +7127,7 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     println!("{DIM}  Notification hooks run after agent-requested push notifications.{RESET}");
     println!("{DIM}  lifecycle hooks warn on nonzero exit and do not block the session.{RESET}");
     println!("{DIM}  command, HTTP, prompt, and agent hook handlers are executed natively; MCP-tool handlers are not.{RESET}");
-    println!("{DIM}  usage:{RESET} /hooks, /hooks status, /hooks open");
+    println!("{DIM}  usage:{RESET} /hooks, /hooks status, /hooks open, /hooks edit");
     println!();
 }
 
@@ -7160,7 +7160,7 @@ fn print_mcp_status(command: McpCommand) {
             );
         }
         McpCommand::Usage => {
-            println!("{DIM}  usage:{RESET} /mcp, /mcp status, or /mcp open");
+            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp open, or /mcp edit");
         }
     }
     println!();
@@ -8794,7 +8794,7 @@ mod tests {
         assert_eq!(parse_hooks_command("diagnostics"), HooksCommand::Status);
         assert_eq!(parse_hooks_command("open"), HooksCommand::Open);
         assert_eq!(parse_hooks_command("settings"), HooksCommand::Open);
-        assert_eq!(parse_hooks_command("edit"), HooksCommand::Usage);
+        assert_eq!(parse_hooks_command("edit"), HooksCommand::Open);
     }
 
     #[test]
@@ -8808,6 +8808,7 @@ mod tests {
         assert_eq!(parse_mcp_command("diagnostics"), McpCommand::Status);
         assert_eq!(parse_mcp_command("open"), McpCommand::Open);
         assert_eq!(parse_mcp_command("settings"), McpCommand::Open);
+        assert_eq!(parse_mcp_command("edit"), McpCommand::Open);
         assert_eq!(parse_mcp_command("probe"), McpCommand::Usage);
     }
 
