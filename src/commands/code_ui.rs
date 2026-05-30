@@ -11241,7 +11241,7 @@ mod tests {
     fn model_slash_command_cycles_scoped_models() {
         assert_eq!(
             model_usage_text(),
-            "/model [status|list|next|prev|model|provider/model]"
+            "/model [status|show|current|list|ls|next|cycle|prev|previous|back|model|provider/model]"
         );
         assert_eq!(parse_model_slash_command(""), ModelSlashCommand::Status);
         assert_eq!(parse_model_slash_command("list"), ModelSlashCommand::List);
