@@ -6896,7 +6896,28 @@ fn model_token_rates(model: &str) -> Option<(f64, f64)> {
         (&["gpt-4.1"], 2.00, 8.00),
         (&["o1-mini"], 1.10, 4.40),
         (&["o1"], 15.00, 60.00),
-        (&["qwen3-coder-480b", "qwen3-coder"], 1.00, 3.00),
+        (
+            &["qwen3.6-35b-a3b", "qwen3.6 35b a3b", "qwen3-6-35b-a3b"],
+            0.15,
+            1.00,
+        ),
+        (&["qwen3.6-27b", "qwen3.6 27b", "qwen3-6-27b"], 0.32, 3.20),
+        (
+            &[
+                "qwen3.5-122b-a10b",
+                "qwen3.5 122b a10b",
+                "qwen3-5-122b-a10b",
+            ],
+            0.40,
+            2.00,
+        ),
+        (
+            &["qwen3.5-35b-a3b", "qwen3.5 35b a3b", "qwen3-5-35b-a3b"],
+            0.25,
+            2.00,
+        ),
+        (&["qwen3-coder-480b"], 1.00, 3.00),
+        (&["qwen3-coder"], 0.22, 0.95),
         (&["deepseek-v3"], 0.50, 1.50),
         (&["glm-4.6"], 0.40, 1.20),
         (&["llama-3.3", "llama 3.3"], 0.30, 0.90),
@@ -8124,6 +8145,21 @@ mod tests {
         );
         assert_eq!(rows[0].estimated_tokens, 15);
         assert_eq!(rows[0].estimated_cost, None);
+    }
+
+    #[test]
+    fn model_token_rates_cover_current_libertai_defaults() {
+        assert_eq!(
+            model_token_rates(crate::config::DEFAULT_CODE_MODEL),
+            Some((0.15, 1.00))
+        );
+        assert_eq!(
+            model_token_rates(crate::config::DEFAULT_CHAT_MODEL),
+            Some((0.40, 2.00))
+        );
+        assert_eq!(model_token_rates("qwen3-coder-480b"), Some((1.00, 3.00)));
+        assert_eq!(model_token_rates("qwen3-coder"), Some((0.22, 0.95)));
+        assert_eq!(model_token_rates("local-model"), None);
     }
 
     #[test]
