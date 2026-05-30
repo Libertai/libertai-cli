@@ -1317,7 +1317,9 @@ async fn repl_loop(
                     );
                 }
                 ScheduleCommand::Usage => {
-                    eprintln!("{DIM}  usage: /schedule in 10m follow up, /schedule list, /schedule cancel <id>, or /schedule clear{RESET}");
+                    eprintln!(
+                        "{DIM}  usage: /schedule in 10m follow up, /schedule list|status|state, /schedule cancel <id>, or /schedule clear|stop (also /cron){RESET}"
+                    );
                 }
             }
             continue;
@@ -2411,7 +2413,7 @@ fn print_help() {
     println!("{DIM}  /compact — compact older conversation history now{RESET}");
     println!("{DIM}  /loop [turns] [goal] — run bounded autonomous follow-up turns{RESET}");
     println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|stop|status|state; also /autorun, /continuous){RESET}");
-    println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|cancel|clear){RESET}");
+    println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|status|state|cancel|clear|stop; also /cron){RESET}");
     println!("{DIM}  /send [target message] — show terminal inter-session send status{RESET}");
     println!("{DIM}  /notify on|off|status|test — turn-complete terminal notifications{RESET}");
     println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
@@ -9989,6 +9991,7 @@ mod tests {
         );
         assert_eq!(schedule_command_arg("/cron list"), Some("list"));
         assert_eq!(schedule_command_arg("/cron state"), Some("state"));
+        assert_eq!(schedule_command_arg("/cron stop"), Some("stop"));
         assert_eq!(schedule_command_arg("/scheduler"), None);
     }
 
@@ -10198,12 +10201,14 @@ mod tests {
     fn parse_schedule_command_matches_desktop_contract() {
         assert_eq!(parse_schedule_command(""), ScheduleCommand::Status);
         assert_eq!(parse_schedule_command("list"), ScheduleCommand::Status);
+        assert_eq!(parse_schedule_command("status"), ScheduleCommand::Status);
         assert_eq!(parse_schedule_command("state"), ScheduleCommand::Status);
         assert_eq!(
             parse_schedule_command("cancel sch_2"),
             ScheduleCommand::Cancel("sch_2".to_string())
         );
         assert_eq!(parse_schedule_command("clear"), ScheduleCommand::Clear);
+        assert_eq!(parse_schedule_command("stop"), ScheduleCommand::Clear);
         assert!(matches!(
             parse_schedule_command("cancel sch_2 extra"),
             ScheduleCommand::Usage
