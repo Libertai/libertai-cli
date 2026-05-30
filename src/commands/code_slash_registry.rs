@@ -289,16 +289,20 @@ fn load_file(root: &Path, path: &Path, source: CommandSource) -> Option<CustomCo
         return None;
     }
     let mut description = None;
+    let mut when_to_use = None;
     let mut arg_hint = None;
     let mut argument_names = Vec::new();
     for (key, value) in frontmatter {
         match key.as_str() {
             "description" => description = Some(value),
+            "when_to_use" | "when-to-use" => when_to_use = Some(value),
             "argHint" | "arg_hint" | "arg-hint" | "argument-hint" => arg_hint = Some(value),
             "arguments" => argument_names = parse_argument_names(&value),
+            "user-invocable" if is_false(&value) => return None,
             _ => {}
         }
     }
+    let description = prompt_description(description, when_to_use, body);
     Some(CustomCommand {
         name,
         namespace: command_namespace(root, path),
@@ -336,7 +340,7 @@ fn load_skill_file(dir: &Path, path: &Path, source: CommandSource) -> Option<Cus
             _ => {}
         }
     }
-    let description = skill_description(description, when_to_use, body);
+    let description = prompt_description(description, when_to_use, body);
     Some(CustomCommand {
         name,
         namespace: None,
@@ -349,7 +353,7 @@ fn load_skill_file(dir: &Path, path: &Path, source: CommandSource) -> Option<Cus
     })
 }
 
-fn skill_description(
+fn prompt_description(
     description: Option<String>,
     when_to_use: Option<String>,
     body: &str,
@@ -597,16 +601,33 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         write(
             &temp.path().join(".claude/commands/review.md"),
-            "---\narguments: [path, priority]\n---\nReview $path at $priority",
+            "---\narguments: [path, priority]\nwhen_to_use: Use for focused review.\n---\nReview $path at $priority",
         );
 
         let cmds = discover_with_home(temp.path(), None, None);
 
         assert_eq!(cmds[0].argument_names, vec!["path", "priority"]);
         assert_eq!(
+            cmds[0].description.as_deref(),
+            Some("Review $path at $priority Use for focused review.")
+        );
+        assert_eq!(
             expand(&cmds[0], r#"src/lib.rs "high priority""#),
             "Review src/lib.rs at high priority"
         );
+    }
+
+    #[test]
+    fn user_invocable_false_commands_are_hidden() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            &temp.path().join(".claude/commands/hidden.md"),
+            "---\ndescription: Hidden\nuser-invocable: false\n---\nHidden command",
+        );
+
+        let cmds = discover_with_home(temp.path(), None, None);
+
+        assert!(cmds.is_empty());
     }
 
     #[test]

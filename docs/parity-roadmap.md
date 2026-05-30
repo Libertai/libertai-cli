@@ -631,10 +631,10 @@ and `~/.config/libertai/skills/<name>/SKILL.md` are also invocable as
 are discovered recursively; nested paths are shown as namespace metadata,
 so `commands/team/audit.md` appears as `/audit` from the `team`
 namespace. Each file becomes a prompt template; frontmatter may define
-`description:` and `argHint:`; skill entrypoints also append `when_to_use`
-to the slash description and fall back to the first body paragraph when
-`description:` is omitted. `user-invocable: false` skill entrypoints are
-hidden from slash invocation. CLI and desktop support
+`description:` and `argHint:`. Command and skill entrypoints append
+`when_to_use` to the slash description and fall back to the first body
+paragraph when `description:` is omitted. `user-invocable: false`
+entrypoints are hidden from slash invocation. CLI and desktop support
 `/template <name> [args]` and direct `/<name> [args]` dispatch with
 Claude-style `$ARGUMENTS`,
 `$ARGUMENTS[0]`, `$0` / `$1` positional arguments, implicit
