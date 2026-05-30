@@ -10144,7 +10144,7 @@ fn handle_output_style(raw: &str, output_style: &mut Option<String>) {
     } else {
         value
     };
-    if key.eq_ignore_ascii_case("status") || key.eq_ignore_ascii_case("list") {
+    if is_output_style_status_alias(key) {
         print_output_style_status(output_style.as_deref(), None);
         return;
     }
@@ -10159,6 +10159,13 @@ fn handle_output_style(raw: &str, output_style: &mut Option<String>) {
         Some(style.name)
     };
     print_output_style_status(output_style.as_deref(), None);
+}
+
+fn is_output_style_status_alias(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "status" | "show" | "current" | "info" | "list"
+    )
 }
 
 fn print_output_style_status(output_style: Option<&str>, unknown: Option<&str>) {
@@ -10716,6 +10723,16 @@ mod tests {
             Some("review".to_string())
         );
         assert!(crate::commands::code_output_style::find_style("missing", None).is_none());
+    }
+
+    #[test]
+    fn output_style_status_aliases_match_desktop_palette() {
+        for alias in ["status", "show", "current", "info", "list"] {
+            assert!(is_output_style_status_alias(alias), "{alias}");
+        }
+        assert!(is_output_style_status_alias(" SHOW "));
+        assert!(!is_output_style_status_alias("review"));
+        assert!(!is_output_style_status_alias("missing"));
     }
 
     #[test]

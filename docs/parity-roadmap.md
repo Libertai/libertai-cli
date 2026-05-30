@@ -257,7 +257,8 @@ SDK; those are flagged **(upstream)**.
   UI; non-notification clients report a skipped result instead of failing.
 - **File-backed output styles** — `/output-style` keeps built-in
   response styles and discovers Markdown styles from project/user
-  `.claude/output-styles` and `.libertai/output-styles` roots.
+  `.claude/output-styles` and `.libertai/output-styles` roots, with
+  `/output-style status|show|current|info|list` aliases for inspection.
 - **CLI status line customization** — `/statusline <template>` persists
   a terminal input-bar template with Claude-style tokens for project,
   path, backend/model, mode, output style, token count, and context use;
