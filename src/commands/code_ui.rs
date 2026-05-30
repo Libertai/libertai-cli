@@ -215,6 +215,24 @@ enum BugCommand {
     Usage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyCommand {
+    LastAssistant,
+    Usage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotkeysCommand {
+    Show,
+    Usage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReloadCommand {
+    Session,
+    Usage,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScopedModelsCommand {
     Status,
@@ -831,6 +849,65 @@ async fn repl_loop(
             );
             continue;
         }
+        if let Some(rest) = copy_command_arg(trimmed) {
+            match parse_copy_command(rest) {
+                CopyCommand::LastAssistant => copy_last_assistant(&handle).await,
+                CopyCommand::Usage => {
+                    println!(
+                        "{DIM}  usage:{RESET} /copy, /copy last, /copy latest, or /copy response"
+                    );
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = hotkeys_command_arg(trimmed) {
+            match parse_hotkeys_command(rest) {
+                HotkeysCommand::Show => print_hotkeys(),
+                HotkeysCommand::Usage => {
+                    println!(
+                        "{DIM}  usage:{RESET} /hotkeys, /hotkeys status, /hotkeys show, or /hotkeys list"
+                    );
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = reload_command_arg(trimmed) {
+            match parse_reload_command(rest) {
+                ReloadCommand::Session => {
+                    match reload_repl_session(
+                        "reloaded config",
+                        &mut provider,
+                        &mut model,
+                        &mut cfg,
+                        mode.clone(),
+                        Arc::clone(&approvals),
+                        bash_command_wrapper.clone(),
+                    )
+                    .await
+                    {
+                        Ok(next) => {
+                            drop(session_hooks);
+                            handle = next;
+                            session_hooks =
+                                crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(
+                                    &cfg,
+                                ));
+                            usage_history.clear();
+                            update_bar_status(|status| {
+                                status.output_style = output_style.clone()
+                            });
+                        }
+                        Err(e) => eprintln!("{DIM}  /reload: {e:#}{RESET}"),
+                    }
+                }
+                ReloadCommand::Usage => {
+                    println!(
+                        "{DIM}  usage:{RESET} /reload, /reload config, /reload session, or /reload now"
+                    );
+                }
+            }
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
@@ -921,10 +998,6 @@ async fn repl_loop(
                 print_history(&history, HISTORY_DEFAULT_LIMIT);
                 continue;
             }
-            "/copy" => {
-                copy_last_assistant(&handle).await;
-                continue;
-            }
             "/config" | "/settings" => {
                 print_config_status(&cfg);
                 continue;
@@ -937,42 +1010,12 @@ async fn repl_loop(
                 print_status_line_status(&cfg);
                 continue;
             }
-            "/hotkeys" => {
-                print_hotkeys();
-                continue;
-            }
             "/tree" => {
                 print_project_tree(None);
                 continue;
             }
             "/changelog" => {
                 print_changelog(CHANGELOG_DEFAULT_LIMIT);
-                continue;
-            }
-            "/reload" => {
-                match reload_repl_session(
-                    "reloaded config",
-                    &mut provider,
-                    &mut model,
-                    &mut cfg,
-                    mode.clone(),
-                    Arc::clone(&approvals),
-                    bash_command_wrapper.clone(),
-                )
-                .await
-                {
-                    Ok(next) => {
-                        drop(session_hooks);
-                        handle = next;
-                        session_hooks =
-                            crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(
-                                &cfg,
-                            ));
-                        usage_history.clear();
-                        update_bar_status(|status| status.output_style = output_style.clone());
-                    }
-                    Err(e) => eprintln!("{DIM}  /reload: {e:#}{RESET}"),
-                }
                 continue;
             }
             "/login" => {
@@ -3899,6 +3942,27 @@ fn bug_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
+fn copy_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/copy" => Some(""),
+        _ => trimmed.strip_prefix("/copy ").map(str::trim),
+    }
+}
+
+fn hotkeys_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/hotkeys" => Some(""),
+        _ => trimmed.strip_prefix("/hotkeys ").map(str::trim),
+    }
+}
+
+fn reload_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/reload" => Some(""),
+        _ => trimmed.strip_prefix("/reload ").map(str::trim),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HooksCommand {
     Status,
@@ -3949,6 +4013,29 @@ fn parse_bug_command(input: &str) -> BugCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "report" | "template" | "status" | "show" => BugCommand::Template,
         _ => BugCommand::Usage,
+    }
+}
+
+fn parse_copy_command(input: &str) -> CopyCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "last" | "latest" | "response" | "assistant" | "assistant-response" => {
+            CopyCommand::LastAssistant
+        }
+        _ => CopyCommand::Usage,
+    }
+}
+
+fn parse_hotkeys_command(input: &str) -> HotkeysCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "status" | "show" | "list" | "help" => HotkeysCommand::Show,
+        _ => HotkeysCommand::Usage,
+    }
+}
+
+fn parse_reload_command(input: &str) -> ReloadCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "config" | "session" | "now" | "fresh" => ReloadCommand::Session,
+        _ => ReloadCommand::Usage,
     }
 }
 
@@ -10414,6 +10501,36 @@ mod tests {
         assert_eq!(parse_bug_command("template"), BugCommand::Template);
         assert_eq!(parse_bug_command("status"), BugCommand::Template);
         assert_eq!(parse_bug_command("open"), BugCommand::Usage);
+    }
+
+    #[test]
+    fn copy_hotkeys_reload_command_args_capture_aliases() {
+        assert_eq!(copy_command_arg("/copy"), Some(""));
+        assert_eq!(copy_command_arg("/copy last"), Some("last"));
+        assert_eq!(copy_command_arg("/copy latest"), Some("latest"));
+        assert_eq!(copy_command_arg("/copycat"), None);
+        assert_eq!(parse_copy_command(""), CopyCommand::LastAssistant);
+        assert_eq!(parse_copy_command("last"), CopyCommand::LastAssistant);
+        assert_eq!(parse_copy_command("response"), CopyCommand::LastAssistant);
+        assert_eq!(parse_copy_command("transcript"), CopyCommand::Usage);
+
+        assert_eq!(hotkeys_command_arg("/hotkeys"), Some(""));
+        assert_eq!(hotkeys_command_arg("/hotkeys status"), Some("status"));
+        assert_eq!(hotkeys_command_arg("/hotkeys show"), Some("show"));
+        assert_eq!(hotkeys_command_arg("/hotkey"), None);
+        assert_eq!(parse_hotkeys_command(""), HotkeysCommand::Show);
+        assert_eq!(parse_hotkeys_command("list"), HotkeysCommand::Show);
+        assert_eq!(parse_hotkeys_command("help"), HotkeysCommand::Show);
+        assert_eq!(parse_hotkeys_command("edit"), HotkeysCommand::Usage);
+
+        assert_eq!(reload_command_arg("/reload"), Some(""));
+        assert_eq!(reload_command_arg("/reload config"), Some("config"));
+        assert_eq!(reload_command_arg("/reload session"), Some("session"));
+        assert_eq!(reload_command_arg("/reloader"), None);
+        assert_eq!(parse_reload_command(""), ReloadCommand::Session);
+        assert_eq!(parse_reload_command("config"), ReloadCommand::Session);
+        assert_eq!(parse_reload_command("now"), ReloadCommand::Session);
+        assert_eq!(parse_reload_command("auth"), ReloadCommand::Usage);
     }
 
     #[test]

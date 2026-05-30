@@ -176,6 +176,10 @@ SDK; those are flagged **(upstream)**.
 - **CLI `/bug` command** — REPL users get explicit `/bug report`,
   `/bug template`, and `/bug status` aliases for the diagnostic block so
   bug-report requests do not fall through as agent text.
+- **CLI `/copy`, `/hotkeys`, and `/reload` aliases** — REPL users get
+  explicit `/copy last|latest|response`, `/hotkeys status|show|list`,
+  and `/reload config|session|now` handling so common Claude/Pi-style
+  utility subcommands do not fall through as agent text.
 - **CLI `/mode` and `/rename` aliases** — REPL users can use the
   desktop/Claude-style spellings for permission-mode switching and
   session naming.
