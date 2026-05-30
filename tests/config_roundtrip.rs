@@ -115,6 +115,7 @@ fn save_then_load_preserves_fields() {
                     "Authorization".to_string(),
                     "Bearer test".to_string(),
                 )]),
+                ..McpServerConfig::default()
             },
         )]),
         ..Default::default()

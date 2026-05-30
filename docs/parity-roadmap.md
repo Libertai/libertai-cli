@@ -416,11 +416,13 @@ local-command set. Add help routing so `/help` includes pi's commands.
 **Files**: `src/commands/code_ui.rs` (input parsing → pi dispatcher),
 `src/commands/code.rs` (one-shot mode flag handling).
 **Effort**: M (1 day, mostly plumbing).
-**Desktop note**: partly shipped on desktop already
-(`/compact /thinking /reload /export /theme` per desktop commit
-`fcff279`, later extended with `/status /config /output-style /vim
-/ide /bug`); the remaining palette commands and shared dispatcher
-plumbing are still TODO.
+**Desktop note**: common and diagnostic slash commands are now wired in
+the desktop composer and command palette, including direct Settings-tab
+targets for account, backends, defaults, agents, skills, hooks, MCP,
+approvals, appearance, sandbox, and advanced. The remaining work here is
+deeper Claude-specific semantics and any future decision to delegate
+unknown typed `/foo` lines into pi's slash dispatcher instead of handling
+them locally.
 
 ### 2F. Native `/init`
 

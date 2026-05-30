@@ -303,7 +303,16 @@ enum SkillsCommand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigSettingsTarget {
+    Account,
     Backends,
+    Defaults,
+    Agents,
+    Skills,
+    Hooks,
+    Mcp,
+    Approvals,
+    Appearance,
+    Sandbox,
     Advanced,
 }
 
@@ -7626,7 +7635,21 @@ fn handle_repl_config_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Resul
 
 fn parse_config_settings_target(action: &str) -> Option<ConfigSettingsTarget> {
     match action.trim().to_ascii_lowercase().as_str() {
-        "open" | "settings" | "backends" | "backend" => Some(ConfigSettingsTarget::Backends),
+        "account" | "accounts" | "login" | "auth" | "key" | "api" => {
+            Some(ConfigSettingsTarget::Account)
+        }
+        "open" | "settings" | "backends" | "backend" | "provider" | "providers" | "model"
+        | "models" => Some(ConfigSettingsTarget::Backends),
+        "defaults" | "default" => Some(ConfigSettingsTarget::Defaults),
+        "agents" | "agent" | "sub-agents" | "subagents" => Some(ConfigSettingsTarget::Agents),
+        "skills" | "skill" => Some(ConfigSettingsTarget::Skills),
+        "hooks" | "hook" => Some(ConfigSettingsTarget::Hooks),
+        "mcp" | "mcp-server" | "mcp-servers" => Some(ConfigSettingsTarget::Mcp),
+        "approvals" | "approval" | "permissions" | "permission" => {
+            Some(ConfigSettingsTarget::Approvals)
+        }
+        "appearance" | "theme" | "themes" => Some(ConfigSettingsTarget::Appearance),
+        "sandbox" | "bash-sandbox" | "bash sandbox" => Some(ConfigSettingsTarget::Sandbox),
         "advanced" | "advance" => Some(ConfigSettingsTarget::Advanced),
         _ => None,
     }
@@ -7636,6 +7659,13 @@ fn print_config_settings_target(target: ConfigSettingsTarget) -> Result<()> {
     let path = crate::config::config_path().context("resolve config path")?;
     println!("{BOLD}config{RESET}");
     match target {
+        ConfigSettingsTarget::Account => {
+            println!("{DIM}  desktop: /settings account jumps to Settings > Account.{RESET}");
+            println!(
+                "{DIM}  terminal: LibertAI account auth lives in {}; use /login status, /login, or /logout for terminal auth.{RESET}",
+                path.display()
+            );
+        }
         ConfigSettingsTarget::Backends => {
             println!(
                 "{DIM}  desktop: /config open jumps to Settings > Backends for provider keys.{RESET}"
@@ -7645,6 +7675,55 @@ fn print_config_settings_target(target: ConfigSettingsTarget) -> Result<()> {
                 path.display()
             );
             println!("{DIM}  use /login status to inspect terminal auth state.{RESET}");
+        }
+        ConfigSettingsTarget::Defaults => {
+            println!("{DIM}  desktop: /settings defaults jumps to Settings > Defaults.{RESET}");
+            println!(
+                "{DIM}  terminal: default provider/model and scoped-model defaults live in {}; use /model and /scoped-models for session-local changes.{RESET}",
+                path.display()
+            );
+        }
+        ConfigSettingsTarget::Agents => {
+            println!("{DIM}  desktop: /settings agents jumps to Settings > Sub-agents.{RESET}");
+            println!(
+                "{DIM}  terminal: use /agents, /agents open, /agent, and /agents background for named sub-agent workflows.{RESET}"
+            );
+        }
+        ConfigSettingsTarget::Skills => {
+            println!("{DIM}  desktop: /settings skills jumps to Settings > Skills.{RESET}");
+            println!(
+                "{DIM}  terminal: use /skills, /skills enable <name>, and /skills disable <name> for future sessions.{RESET}"
+            );
+        }
+        ConfigSettingsTarget::Hooks => {
+            println!("{DIM}  desktop: /settings hooks jumps to Settings > Hooks.{RESET}");
+            println!(
+                "{DIM}  terminal: use /hooks status, /hooks open, and config.toml hook rows for CLI hook management.{RESET}"
+            );
+        }
+        ConfigSettingsTarget::Mcp => {
+            println!("{DIM}  desktop: /settings mcp jumps to Settings > MCP servers.{RESET}");
+            println!(
+                "{DIM}  terminal: use /mcp status, /mcp probe, /mcp probe --save, /mcp refresh, and config.toml mcpServers rows.{RESET}"
+            );
+        }
+        ConfigSettingsTarget::Approvals => {
+            println!("{DIM}  desktop: /settings approvals jumps to Settings > Approvals.{RESET}");
+            println!(
+                "{DIM}  terminal: use /permissions, /permissions open, or /forget to inspect and clear remembered allow rules.{RESET}"
+            );
+        }
+        ConfigSettingsTarget::Appearance => {
+            println!("{DIM}  desktop: /settings appearance jumps to Settings > Appearance.{RESET}");
+            println!(
+                "{DIM}  terminal: use /theme to inspect desktop appearance support; terminal colors are controlled by your emulator.{RESET}"
+            );
+        }
+        ConfigSettingsTarget::Sandbox => {
+            println!("{DIM}  desktop: /settings sandbox jumps to Settings > Bash sandbox.{RESET}");
+            println!(
+                "{DIM}  terminal: use /sandbox info; sandbox policy is fixed for the active REPL and changes require restart.{RESET}"
+            );
         }
         ConfigSettingsTarget::Advanced => {
             println!("{DIM}  desktop: /settings advanced jumps to Settings > Advanced.{RESET}");
@@ -9617,12 +9696,48 @@ mod tests {
     #[test]
     fn parse_config_settings_target_accepts_desktop_settings_aliases() {
         assert_eq!(
+            parse_config_settings_target("account"),
+            Some(ConfigSettingsTarget::Account)
+        );
+        assert_eq!(
             parse_config_settings_target("open"),
             Some(ConfigSettingsTarget::Backends)
         );
         assert_eq!(
             parse_config_settings_target("backends"),
             Some(ConfigSettingsTarget::Backends)
+        );
+        assert_eq!(
+            parse_config_settings_target("defaults"),
+            Some(ConfigSettingsTarget::Defaults)
+        );
+        assert_eq!(
+            parse_config_settings_target("agents"),
+            Some(ConfigSettingsTarget::Agents)
+        );
+        assert_eq!(
+            parse_config_settings_target("skills"),
+            Some(ConfigSettingsTarget::Skills)
+        );
+        assert_eq!(
+            parse_config_settings_target("hooks"),
+            Some(ConfigSettingsTarget::Hooks)
+        );
+        assert_eq!(
+            parse_config_settings_target("mcp"),
+            Some(ConfigSettingsTarget::Mcp)
+        );
+        assert_eq!(
+            parse_config_settings_target("approvals"),
+            Some(ConfigSettingsTarget::Approvals)
+        );
+        assert_eq!(
+            parse_config_settings_target("appearance"),
+            Some(ConfigSettingsTarget::Appearance)
+        );
+        assert_eq!(
+            parse_config_settings_target("sandbox"),
+            Some(ConfigSettingsTarget::Sandbox)
         );
         assert_eq!(
             parse_config_settings_target("advanced"),
