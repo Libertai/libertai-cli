@@ -6065,6 +6065,8 @@ fn print_agents() {
     println!();
 }
 
+const AGENTS_USAGE: &str = "/agents [list|status|show <name>|open|settings|edit|background|bg] | /agents background|bg [list|show|inspect|log|kill|stop|prune|clear] | /agents create [--worktree|--same-cwd] <name> [description] | /agents delete|remove <name>";
+
 fn handle_agents_command(input: &str) {
     match parse_agents_command(input) {
         AgentsSlashCommand::List => print_agents(),
@@ -6078,7 +6080,7 @@ fn handle_agents_command(input: &str) {
         AgentsSlashCommand::BackgroundKill(rest) => kill_background_agent(rest),
         AgentsSlashCommand::BackgroundPrune => prune_background_agents(),
         AgentsSlashCommand::Usage => {
-            eprintln!("{DIM}  /agents: usage: /agents [list|show <name>|open|background] | /agents background [list|show|log|kill|prune|clear] | /agents create [--worktree|--same-cwd] <name> [description] | /agents delete <name>{RESET}");
+            eprintln!("{DIM}  /agents: usage: {AGENTS_USAGE}{RESET}");
         }
     }
 }
@@ -13654,6 +13656,10 @@ mod tests {
             parse_agents_command("remove reviewer"),
             AgentsSlashCommand::Delete("reviewer")
         );
+        assert!(AGENTS_USAGE.contains("settings|edit"));
+        assert!(AGENTS_USAGE.contains("background|bg"));
+        assert!(AGENTS_USAGE.contains("kill|stop"));
+        assert!(AGENTS_USAGE.contains("delete|remove"));
     }
 
     #[test]
