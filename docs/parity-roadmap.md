@@ -627,7 +627,8 @@ Shipped: the `task` tool accepts `subagent_type` and discovers
 Claude-compatible `.claude/agents/<name>.md`, project
 `.libertai/agents/<name>.md`, user `~/.claude/agents`, and user
 `~/.config/libertai/agents`. Agent files carry frontmatter for
-`description:`, `tools:`, and `model:` plus a body system prompt.
+`description:`, `tools:`, and `model:` plus a body system prompt;
+`tools:` / `allowed-tools:` accepts inline values or YAML block lists.
 CLI `/agents` lists discovered definitions, `/agent <name> <task>`
 routes through the active agent with an instruction to call the `task`
 tool for that named sub-agent, and `/agent --background <name> <task>`

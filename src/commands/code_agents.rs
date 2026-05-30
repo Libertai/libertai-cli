@@ -149,19 +149,37 @@ pub(crate) fn parse_agent_md(
     let mut tools = None;
     let mut model = None;
     let mut worktree = false;
+    let mut list_key: Option<&str> = None;
 
     for raw in frontmatter.lines() {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') || raw.starts_with(' ') || raw.starts_with('\t') {
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        if raw.starts_with(' ') || raw.starts_with('\t') {
+            if matches!(list_key, Some("tools" | "allowed-tools")) {
+                if let Some(item) = parse_yaml_list_item(line) {
+                    tools.get_or_insert_with(Vec::new).push(item);
+                }
+            }
+            continue;
+        }
+        list_key = None;
         let Some((k, v)) = split_key_value(line) else {
             continue;
         };
         match k {
             "name" => name = Some(unquote(v)),
             "description" => description = Some(unquote(v)),
-            "tools" | "allowed-tools" => tools = Some(parse_list(v)),
+            "tools" | "allowed-tools" => {
+                let parsed = parse_list(v);
+                if parsed.is_empty() {
+                    list_key = Some(k);
+                    tools.get_or_insert_with(Vec::new);
+                } else {
+                    tools = Some(parsed);
+                }
+            }
             "model" => model = Some(unquote(v)),
             "worktree" => worktree = parse_bool(v),
             "isolation" => worktree = unquote(v).eq_ignore_ascii_case("worktree"),
@@ -233,6 +251,12 @@ fn parse_list(value: &str) -> Vec<String> {
         .map(|s| unquote(s).trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+fn parse_yaml_list_item(line: &str) -> Option<String> {
+    let item = line.trim().strip_prefix('-')?.trim();
+    let item = unquote(item).trim().to_string();
+    (!item.is_empty()).then_some(item)
 }
 
 fn parse_bool(value: &str) -> bool {
@@ -308,6 +332,55 @@ mod tests {
         )
         .expect("parse");
         assert!(agent.worktree);
+    }
+
+    #[test]
+    fn parses_agent_tools_block_list() {
+        let agent = parse_agent_md(
+            concat!(
+                "---\n",
+                "name: reviewer\n",
+                "description: Reviews changes\n",
+                "tools:\n",
+                "  - read\n",
+                "  - grep\n",
+                "  - 'find'\n",
+                "allowed-tools:\n",
+                "  - ls\n",
+                "---\n",
+                "Focus on correctness."
+            ),
+            Some("reviewer"),
+            AgentSource::User(PathBuf::from("/tmp/agents")),
+        )
+        .expect("parse");
+
+        assert_eq!(
+            agent.tools,
+            Some(vec!["read".into(), "grep".into(), "find".into(), "ls".into()])
+        );
+
+        let agent = parse_agent_md(
+            concat!(
+                "---\n",
+                "name: reviewer\n",
+                "description: Reviews changes\n",
+                "tools:\n",
+                "  - read\n",
+                "  - grep\n",
+                "  - 'find'\n",
+                "---\n",
+                "Focus on correctness."
+            ),
+            Some("reviewer"),
+            AgentSource::User(PathBuf::from("/tmp/agents")),
+        )
+        .expect("parse");
+
+        assert_eq!(
+            agent.tools,
+            Some(vec!["read".into(), "grep".into(), "find".into()])
+        );
     }
 
     #[test]
