@@ -1515,7 +1515,9 @@ async fn repl_loop(
                 }
             } else {
                 if trimmed == "/agent" {
-                    println!("{DIM}  usage: /agent [--worktree] <name> <task>{RESET}");
+                    println!(
+                        "{DIM}  usage: /agent [--worktree|--background] <name> <task>{RESET}"
+                    );
                     continue;
                 }
                 if let Some(rest) = trimmed.strip_prefix("/agent ") {
@@ -2312,6 +2314,9 @@ fn print_help() {
     println!("{DIM}  /agents   — list named sub-agents{RESET}");
     println!("{DIM}  /agents create [--worktree] <name> [description] — create a project sub-agent{RESET}");
     println!("{DIM}  /agent [--worktree] <name> <task> — run a named sub-agent task{RESET}");
+    println!(
+        "{DIM}  /agent --background <name> <task> — desktop-only detached agent session{RESET}"
+    );
     println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
     println!("{DIM}  /export [path] — write this session transcript as Markdown{RESET}");
     println!("{DIM}  /share [path] — write this session transcript as shareable HTML{RESET}");
@@ -5718,6 +5723,11 @@ fn build_custom_slash_prompt(name: &str, args: &str) -> Result<Option<String>> {
 
 fn build_agent_slash_prompt(query: &str) -> Result<String> {
     let parsed = parse_agent_slash_query(query)?;
+    if parsed.background {
+        anyhow::bail!(
+            "/agent --background is available in the desktop UI; terminal sessions do not yet have a detached child-agent runner"
+        );
+    }
     let cwd = std::env::current_dir().context("resolving cwd")?;
     let agents = crate::commands::code_agents::discover_agents(&cwd)?;
     build_agent_prompt_from_defs(&parsed, &agents)
@@ -5728,6 +5738,7 @@ struct AgentSlashQuery<'a> {
     name: &'a str,
     task: &'a str,
     isolation: Option<AgentSlashIsolation>,
+    background: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5776,10 +5787,11 @@ enum AgentSlashIsolation {
 fn parse_agent_slash_query(query: &str) -> Result<AgentSlashQuery<'_>> {
     let raw = query.trim();
     let mut isolation = None;
+    let mut background = false;
     let mut rest = raw;
     loop {
         let Some((head, tail)) = split_first_word(rest) else {
-            anyhow::bail!("usage: /agent [--worktree] <name> <task>");
+            anyhow::bail!("usage: /agent [--worktree|--background] <name> <task>");
         };
         match head {
             "--worktree" | "--isolation=worktree" => {
@@ -5790,21 +5802,26 @@ fn parse_agent_slash_query(query: &str) -> Result<AgentSlashQuery<'_>> {
                 isolation = Some(AgentSlashIsolation::SameCwd);
                 rest = tail.trim_start();
             }
+            "--background" | "--detached" => {
+                background = true;
+                rest = tail.trim_start();
+            }
             _ => break,
         }
     }
     let Some((name, task)) = rest.split_once(char::is_whitespace) else {
-        anyhow::bail!("usage: /agent [--worktree] <name> <task>");
+        anyhow::bail!("usage: /agent [--worktree|--background] <name> <task>");
     };
     let name = name.trim();
     let task = task.trim();
     if name.is_empty() || task.is_empty() {
-        anyhow::bail!("usage: /agent [--worktree] <name> <task>");
+        anyhow::bail!("usage: /agent [--worktree|--background] <name> <task>");
     }
     Ok(AgentSlashQuery {
         name,
         task,
         isolation,
+        background,
     })
 }
 
@@ -9007,7 +9024,8 @@ mod tests {
             AgentSlashQuery {
                 name: "reviewer",
                 task: "inspect src",
-                isolation: None
+                isolation: None,
+                background: false,
             }
         );
         assert_eq!(
@@ -9015,7 +9033,8 @@ mod tests {
             AgentSlashQuery {
                 name: "reviewer",
                 task: "inspect src",
-                isolation: Some(AgentSlashIsolation::Worktree)
+                isolation: Some(AgentSlashIsolation::Worktree),
+                background: false,
             }
         );
         assert_eq!(
@@ -9023,7 +9042,8 @@ mod tests {
             AgentSlashQuery {
                 name: "reviewer",
                 task: "inspect src",
-                isolation: Some(AgentSlashIsolation::Worktree)
+                isolation: Some(AgentSlashIsolation::Worktree),
+                background: false,
             }
         );
         assert_eq!(
@@ -9031,11 +9051,39 @@ mod tests {
             AgentSlashQuery {
                 name: "reviewer",
                 task: "inspect src",
-                isolation: Some(AgentSlashIsolation::SameCwd)
+                isolation: Some(AgentSlashIsolation::SameCwd),
+                background: false,
+            }
+        );
+        assert_eq!(
+            parse_agent_slash_query("--background reviewer inspect src").unwrap(),
+            AgentSlashQuery {
+                name: "reviewer",
+                task: "inspect src",
+                isolation: None,
+                background: true
+            }
+        );
+        assert_eq!(
+            parse_agent_slash_query("--worktree --detached reviewer inspect src").unwrap(),
+            AgentSlashQuery {
+                name: "reviewer",
+                task: "inspect src",
+                isolation: Some(AgentSlashIsolation::Worktree),
+                background: true
             }
         );
         assert!(parse_agent_slash_query("reviewer").is_err());
         assert!(parse_agent_slash_query("reviewer   ").is_err());
+    }
+
+    #[test]
+    fn build_agent_slash_prompt_rejects_background_in_terminal() {
+        let err = build_agent_slash_prompt("--background reviewer inspect src").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("terminal sessions do not yet have a detached child-agent runner")
+        );
     }
 
     #[test]
@@ -9163,6 +9211,7 @@ mod tests {
                 name: "rev",
                 task: "check the diff",
                 isolation: None,
+                background: false,
             },
             &agents,
         )
@@ -9189,6 +9238,7 @@ mod tests {
                 name: "reviewer",
                 task: "check the diff",
                 isolation: Some(AgentSlashIsolation::Worktree),
+                background: false,
             },
             &agents,
         )
@@ -9215,6 +9265,7 @@ mod tests {
                 name: "reviewer",
                 task: "check the diff",
                 isolation: None,
+                background: false,
             },
             &agents,
         )
@@ -9226,6 +9277,7 @@ mod tests {
                 name: "reviewer",
                 task: "check the diff",
                 isolation: Some(AgentSlashIsolation::SameCwd),
+                background: false,
             },
             &agents,
         )
