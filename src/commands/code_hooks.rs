@@ -692,6 +692,9 @@ fn run_mcp_tool_hook_with_config(
             stderr: format!("MCP hook server `{server_name}` is not configured"),
         };
     };
+    if !server.url.trim().is_empty() {
+        return run_mcp_http_tool_hook(server_name, server, hook, payload);
+    }
     if server.command.trim().is_empty() {
         return HookRun {
             status: 1,
@@ -849,6 +852,217 @@ fn run_mcp_tool_hook_with_config(
             stderr_text
         },
     }
+}
+
+fn run_mcp_http_tool_hook(
+    server_name: &str,
+    server: &crate::config::McpServerConfig,
+    hook: &HookCommandConfig,
+    payload: &serde_json::Value,
+) -> HookRun {
+    let url = server.url.trim();
+    let timeout = Duration::from_secs(hook.timeout.filter(|secs| *secs > 0).unwrap_or(30));
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("building MCP HTTP client: {e}"),
+            };
+        }
+    };
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "libertai-cli",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+        },
+    });
+    let (init_response, session_id) =
+        match post_mcp_http_message(&client, server, url, &init, None, 1) {
+            Ok(response) => response,
+            Err(e) => {
+                return HookRun {
+                    status: 1,
+                    stdout: String::new(),
+                    stderr: format!("MCP HTTP initialize failed for `{server_name}`: {e}"),
+                };
+            }
+        };
+    if let Err(e) = mcp_response_result(init_response) {
+        return HookRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: format!("MCP HTTP initialize failed for `{server_name}`: {e}"),
+        };
+    }
+    let initialized = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {},
+    });
+    if let Err(e) =
+        post_mcp_http_notification(&client, server, url, &initialized, session_id.as_deref())
+    {
+        return HookRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: format!("MCP HTTP initialized notification failed for `{server_name}`: {e}"),
+        };
+    }
+    let input = hook.input.clone().unwrap_or_else(|| payload.clone());
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": hook.tool.trim(),
+            "arguments": input,
+        },
+    });
+    let (call_response, _) =
+        match post_mcp_http_message(&client, server, url, &call, session_id.as_deref(), 2) {
+            Ok(response) => response,
+            Err(e) => {
+                return HookRun {
+                    status: 1,
+                    stdout: String::new(),
+                    stderr: format!("MCP HTTP tools/call failed for `{server_name}`: {e}"),
+                };
+            }
+        };
+    let response = match mcp_response_result(call_response) {
+        Ok(response) => response,
+        Err(e) => {
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("MCP HTTP tools/call failed for `{server_name}`: {e}"),
+            };
+        }
+    };
+    let stdout = mcp_tool_output_text(&response);
+    let is_error = response
+        .get("isError")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    HookRun {
+        status: if is_error { 1 } else { 0 },
+        stdout,
+        stderr: if is_error {
+            mcp_tool_output_text(&response)
+        } else {
+            String::new()
+        },
+    }
+}
+
+fn post_mcp_http_message(
+    client: &reqwest::blocking::Client,
+    server: &crate::config::McpServerConfig,
+    url: &str,
+    message: &serde_json::Value,
+    session_id: Option<&str>,
+    id: u64,
+) -> Result<(serde_json::Value, Option<String>), String> {
+    let response = send_mcp_http_request(client, server, url, message, session_id)
+        .map_err(|e| e.to_string())?;
+    let session_id = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| session_id.map(str::to_string));
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let body = response.text().map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {}", body.trim()));
+    }
+    let value = if content_type.contains("text/event-stream") {
+        parse_mcp_sse_response(&body, id)?
+    } else if body.trim().is_empty() {
+        return Err("empty MCP HTTP response".to_string());
+    } else {
+        serde_json::from_str::<serde_json::Value>(body.trim())
+            .map_err(|e| format!("invalid MCP HTTP JSON response: {e}"))?
+    };
+    Ok((value, session_id))
+}
+
+fn post_mcp_http_notification(
+    client: &reqwest::blocking::Client,
+    server: &crate::config::McpServerConfig,
+    url: &str,
+    message: &serde_json::Value,
+    session_id: Option<&str>,
+) -> Result<(), String> {
+    let response = send_mcp_http_request(client, server, url, message, session_id)
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body = response.text().map_err(|e| e.to_string())?;
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("HTTP {status}: {}", body.trim()))
+    }
+}
+
+fn send_mcp_http_request(
+    client: &reqwest::blocking::Client,
+    server: &crate::config::McpServerConfig,
+    url: &str,
+    message: &serde_json::Value,
+    session_id: Option<&str>,
+) -> reqwest::Result<reqwest::blocking::Response> {
+    let mut request = client
+        .post(url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(reqwest::header::ACCEPT, "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2025-03-26")
+        .json(message);
+    if let Some(session_id) = session_id {
+        request = request.header("mcp-session-id", session_id);
+    }
+    for (name, value) in &server.headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    request.send()
+}
+
+fn parse_mcp_sse_response(body: &str, id: u64) -> Result<serde_json::Value, String> {
+    let mut data_lines = Vec::new();
+    for line in body.lines() {
+        if let Some(data) = line.strip_prefix("data:") {
+            data_lines.push(data.trim_start());
+        }
+    }
+    for data in data_lines {
+        if data == "[DONE]" {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(data)
+            .map_err(|e| format!("invalid MCP HTTP SSE data: {e}"))?;
+        if value.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
+            return Ok(value);
+        }
+    }
+    Err(format!("missing MCP HTTP SSE response id {id}"))
 }
 
 fn write_mcp_message(stdin: &mut impl Write, value: &serde_json::Value) -> std::io::Result<()> {
@@ -1659,6 +1873,7 @@ mod tests {
                         .to_string(),
                     ],
                     env: HashMap::new(),
+                    ..McpServerConfig::default()
                 },
             )]),
             ..Config::default()
@@ -1666,6 +1881,93 @@ mod tests {
         let run = run_mcp_tool_hook_with_config(&hook, &json!({"event":"PreToolUse"}), &cfg);
         assert_eq!(run.status, 0);
         assert_eq!(run.stdout, "policy ok");
+    }
+
+    #[test]
+    fn mcp_tool_hook_calls_streamable_http_server() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            for idx in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 8192];
+                let mut text = String::new();
+                loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if text.contains("\r\n\r\n") {
+                        let header_end = text.find("\r\n\r\n").unwrap() + 4;
+                        let headers = &text[..header_end];
+                        let content_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if text.len() >= header_end + content_len {
+                            break;
+                        }
+                    }
+                }
+                assert!(
+                    text.contains("authorization: Bearer test")
+                        || text.contains("Authorization: Bearer test")
+                );
+                let (status, headers, body) = match idx {
+                    0 => (
+                        "200 OK",
+                        "Content-Type: application/json\r\nMcp-Session-Id: session-1\r\n",
+                        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}"#.to_string(),
+                    ),
+                    1 => ("202 Accepted", "", String::new()),
+                    _ => (
+                        "200 OK",
+                        "Content-Type: text/event-stream\r\n",
+                        "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"http policy ok\"}],\"isError\":false}}\n\n".to_string(),
+                    ),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let hook = HookCommandConfig {
+            hook_type: "mcp_tool".to_string(),
+            server: "policy".to_string(),
+            tool: "check".to_string(),
+            input: Some(json!({"level":"strict"})),
+            timeout: Some(2),
+            ..HookCommandConfig::default()
+        };
+        let cfg = Config {
+            mcp_servers: HashMap::from([(
+                "policy".to_string(),
+                McpServerConfig {
+                    url: format!("http://{addr}/mcp"),
+                    headers: HashMap::from([(
+                        "Authorization".to_string(),
+                        "Bearer test".to_string(),
+                    )]),
+                    ..McpServerConfig::default()
+                },
+            )]),
+            ..Config::default()
+        };
+        let run = run_mcp_tool_hook_with_config(&hook, &json!({"event":"PreToolUse"}), &cfg);
+        handle.join().unwrap();
+        assert_eq!(run.status, 0);
+        assert_eq!(run.stdout, "http policy ok");
     }
 
     #[test]

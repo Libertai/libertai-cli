@@ -659,13 +659,14 @@ session/event/index, and named `source`, `statusMessage`, plus
 preserved metadata keys are also listed in `/hooks`. CLI MCP-tool hook rows use
 `type = "mcp_tool"` plus Claude-imported `type = "mcp-tool"` aliases,
 `server`, `tool`, and optional JSON `input` metadata, launching stdio
-servers configured under `mcpServers` and calling the named tool through
-MCP `initialize` plus `tools/call`. Unknown/less-common hook fields
+servers or POSTing Streamable HTTP servers configured under `mcpServers`
+and calling the named tool through MCP `initialize` plus `tools/call`.
+Unknown/less-common hook fields
 are flattened into each hook row and round-trip through TOML config saves.
 `/hooks` and `libertai status` report configured runnable hooks.
 
-Remaining work: any pi-level typed hook dispatcher and broader HTTP/SSE
-MCP hook transports in the terminal CLI.
+Remaining work: any pi-level typed hook dispatcher and legacy SSE MCP hook
+transport in the terminal CLI.
 
 **Files**: `src/config.rs`,
 `src/commands/code_hooks.rs`,
@@ -675,10 +676,10 @@ MCP hook transports in the terminal CLI.
 ### 5B. MCP support
 
 Spawn user-configured MCP servers (stdio/HTTP/SSE), expose their tools
-to the agent. The CLI now has a narrow stdio MCP client for MCP-tool hook
-handlers configured through `mcpServers`, but it still does not expose a
-live MCP tool/resource/prompt registry to the agent. Desktop owns the full
-stdio/HTTP/SSE live registry today.
+to the agent. The CLI now has narrow stdio and Streamable HTTP MCP clients
+for MCP-tool hook handlers configured through `mcpServers`, but it still
+does not expose a live MCP tool/resource/prompt registry to the agent.
+Desktop owns the full stdio/HTTP/SSE live registry today.
 
 **Files**: new `src/commands/code_mcp.rs` + transport modules.
 **Effort**: L (2+ weeks).

@@ -7209,13 +7209,13 @@ fn print_mcp_status(command: McpCommand) {
     println!("{BOLD}mcp{RESET}");
     match command {
         McpCommand::Status => {
-            println!("{DIM}  terminal registry:{RESET} stdio mcpServers from config.toml are available to MCP-tool hooks");
+            println!("{DIM}  terminal registry:{RESET} stdio and Streamable HTTP mcpServers from config.toml are available to MCP-tool hooks");
             println!("{DIM}  native CLI tools:{RESET} no live MCP tool/resource/prompt registry yet");
             println!(
                 "{DIM}  desktop:{RESET} Settings > MCP owns stdio/HTTP/SSE server discovery, probing, tool/resource/prompt caches, and named mcp__server__tool exposure"
             );
             println!(
-                "{DIM}  hooks:{RESET} CLI executes stdio MCP-tool hook handlers from mcpServers; HTTP/SSE MCP and live named tools remain desktop-owned"
+                "{DIM}  hooks:{RESET} CLI executes stdio and Streamable HTTP MCP-tool hook handlers from mcpServers; legacy SSE MCP and live named tools remain desktop-owned"
             );
             println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp open");
         }

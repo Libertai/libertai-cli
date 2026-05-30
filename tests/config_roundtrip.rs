@@ -109,6 +109,11 @@ fn save_then_load_preserves_fields() {
                     "POLICY_LEVEL".to_string(),
                     "strict".to_string(),
                 )]),
+                url: "https://policy.example.test/mcp".into(),
+                headers: std::collections::HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer test".to_string(),
+                )]),
             },
         )]),
         ..Default::default()
@@ -184,6 +189,11 @@ fn save_then_load_preserves_fields() {
     assert_eq!(
         policy_server.env.get("POLICY_LEVEL").map(String::as_str),
         Some("strict")
+    );
+    assert_eq!(policy_server.url, "https://policy.example.test/mcp");
+    assert_eq!(
+        policy_server.headers.get("Authorization").map(String::as_str),
+        Some("Bearer test")
     );
 }
 
