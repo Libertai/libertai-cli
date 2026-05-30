@@ -183,6 +183,13 @@ enum NotifyCommand {
     Usage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpCommand {
+    Status,
+    Open,
+    Usage,
+}
+
 #[derive(Debug, Default)]
 struct ToolActivityTracker {
     active: HashMap<String, (String, Instant)>,
@@ -730,6 +737,10 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some(rest) = mcp_command_arg(trimmed) {
+            print_mcp_status(parse_mcp_command(rest));
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
@@ -825,6 +836,10 @@ async fn repl_loop(
             }
             "/hooks" => {
                 print_hooks_status(&cfg);
+                continue;
+            }
+            "/mcp" => {
+                print_mcp_status(McpCommand::Status);
                 continue;
             }
             "/statusline" | "/status-line" => {
@@ -2202,6 +2217,7 @@ fn print_help() {
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
     println!("{DIM}  /config [path|set <key> <value>|unset <key>] — show or update active config{RESET}");
     println!("{DIM}  /hooks    — show configured command hooks{RESET}");
+    println!("{DIM}  /mcp      — show terminal MCP support status{RESET}");
     println!(
         "{DIM}  /statusline <template|command <shell>|reset> — customize the input-bar status line{RESET}"
     );
@@ -3355,6 +3371,21 @@ fn notify_command_arg(trimmed: &str) -> Option<&str> {
             .strip_prefix("/notify ")
             .or_else(|| trimmed.strip_prefix("/notifications "))
             .map(str::trim),
+    }
+}
+
+fn mcp_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/mcp" => Some(""),
+        _ => trimmed.strip_prefix("/mcp ").map(str::trim),
+    }
+}
+
+fn parse_mcp_command(input: &str) -> McpCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "status" | "list" | "state" | "diagnostics" | "diag" => McpCommand::Status,
+        "open" | "settings" => McpCommand::Open,
+        _ => McpCommand::Usage,
     }
 }
 
@@ -6555,6 +6586,32 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     println!();
 }
 
+fn print_mcp_status(command: McpCommand) {
+    println!("{BOLD}mcp{RESET}");
+    match command {
+        McpCommand::Status => {
+            println!("{DIM}  terminal registry:{RESET} not configured");
+            println!("{DIM}  native CLI tools:{RESET} no live MCP client registry yet");
+            println!(
+                "{DIM}  desktop:{RESET} Settings > MCP owns stdio/HTTP/SSE server discovery, probing, tool/resource/prompt caches, and named mcp__server__tool exposure"
+            );
+            println!(
+                "{DIM}  hooks:{RESET} CLI preserves MCP-tool hook metadata but does not execute MCP-tool hook handlers yet"
+            );
+            println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp open");
+        }
+        McpCommand::Open => {
+            println!(
+                "{DIM}  /mcp open:{RESET} open Desktop Settings > MCP for live server management. The terminal CLI has no MCP settings pane."
+            );
+        }
+        McpCommand::Usage => {
+            println!("{DIM}  usage:{RESET} /mcp, /mcp status, or /mcp open");
+        }
+    }
+    println!();
+}
+
 fn count_runnable_hooks(hooks: &[crate::config::HookCommandConfig]) -> usize {
     hooks
         .iter()
@@ -8142,6 +8199,20 @@ mod tests {
         assert_eq!(parse_notify_command("disable"), NotifyCommand::Off);
         assert_eq!(parse_notify_command("test"), NotifyCommand::Test);
         assert_eq!(parse_notify_command("wat"), NotifyCommand::Usage);
+    }
+
+    #[test]
+    fn mcp_command_arg_and_parser_report_terminal_status() {
+        assert_eq!(mcp_command_arg("/mcp"), Some(""));
+        assert_eq!(mcp_command_arg("/mcp status"), Some("status"));
+        assert_eq!(mcp_command_arg("/mcp open"), Some("open"));
+        assert_eq!(mcp_command_arg("/mc"), None);
+        assert_eq!(parse_mcp_command(""), McpCommand::Status);
+        assert_eq!(parse_mcp_command("list"), McpCommand::Status);
+        assert_eq!(parse_mcp_command("diagnostics"), McpCommand::Status);
+        assert_eq!(parse_mcp_command("open"), McpCommand::Open);
+        assert_eq!(parse_mcp_command("settings"), McpCommand::Open);
+        assert_eq!(parse_mcp_command("probe"), McpCommand::Usage);
     }
 
     #[test]
