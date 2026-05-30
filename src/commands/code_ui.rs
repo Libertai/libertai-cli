@@ -296,6 +296,12 @@ enum SkillsCommand {
     Disable(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigSettingsTarget {
+    Backends,
+    Advanced,
+}
+
 /// Process-global because the Ctrl-C handler (spawned by the `ctrlc`
 /// crate on a separate thread) needs to reach both pieces of state
 /// without a reference chain.
@@ -2283,7 +2289,7 @@ fn print_help() {
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost; /usage export [json|csv]){RESET}");
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
-    println!("{DIM}  /config [path|set <key> <value>|unset <key>] — show or update active config{RESET}");
+    println!("{DIM}  /config [path|open|advanced|set <key> <value>|unset <key>] — show or update active config{RESET}");
     println!("{DIM}  /hooks    — show configured command hooks (/hooks open shows settings target){RESET}");
     println!("{DIM}  /mcp      — show terminal MCP support status{RESET}");
     println!(
@@ -6847,6 +6853,10 @@ fn handle_repl_config_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Resul
         println!("{DIM}  config path: {}{RESET}", path.display());
         return Ok(());
     }
+    if let Some(target) = parse_config_settings_target(action) {
+        print_config_settings_target(target)?;
+        return Ok(());
+    }
 
     let mut parts = action.splitn(3, char::is_whitespace);
     let verb = parts.next().unwrap_or("");
@@ -6870,6 +6880,43 @@ fn handle_repl_config_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Resul
         }
         _ => print_config_status(cfg),
     }
+    Ok(())
+}
+
+fn parse_config_settings_target(action: &str) -> Option<ConfigSettingsTarget> {
+    match action.trim().to_ascii_lowercase().as_str() {
+        "open" | "settings" | "backends" | "backend" => Some(ConfigSettingsTarget::Backends),
+        "advanced" | "advance" => Some(ConfigSettingsTarget::Advanced),
+        _ => None,
+    }
+}
+
+fn print_config_settings_target(target: ConfigSettingsTarget) -> Result<()> {
+    let path = crate::config::config_path().context("resolve config path")?;
+    println!("{BOLD}config{RESET}");
+    match target {
+        ConfigSettingsTarget::Backends => {
+            println!(
+                "{DIM}  desktop: /config open jumps to Settings > Backends for provider keys.{RESET}"
+            );
+            println!(
+                "{DIM}  terminal: LibertAI account auth lives in {}; provider-specific keys are managed in desktop Settings > Backends.{RESET}",
+                path.display()
+            );
+            println!("{DIM}  use /login status to inspect terminal auth state.{RESET}");
+        }
+        ConfigSettingsTarget::Advanced => {
+            println!("{DIM}  desktop: /settings advanced jumps to Settings > Advanced.{RESET}");
+            println!(
+                "{DIM}  terminal: shared advanced config lives in {}; use /config set or /config unset for supported keys.{RESET}",
+                path.display()
+            );
+            println!(
+                "{DIM}  supported REPL keys include code_turn_notifications, code_auto_compaction_enabled, smart_approval_enabled, and smart_approval_model.{RESET}"
+            );
+        }
+    }
+    println!();
     Ok(())
 }
 
@@ -8592,6 +8639,24 @@ mod tests {
         assert_eq!(parse_notify_command("disable"), NotifyCommand::Off);
         assert_eq!(parse_notify_command("test"), NotifyCommand::Test);
         assert_eq!(parse_notify_command("wat"), NotifyCommand::Usage);
+    }
+
+    #[test]
+    fn parse_config_settings_target_accepts_desktop_settings_aliases() {
+        assert_eq!(
+            parse_config_settings_target("open"),
+            Some(ConfigSettingsTarget::Backends)
+        );
+        assert_eq!(
+            parse_config_settings_target("backends"),
+            Some(ConfigSettingsTarget::Backends)
+        );
+        assert_eq!(
+            parse_config_settings_target("advanced"),
+            Some(ConfigSettingsTarget::Advanced)
+        );
+        assert_eq!(parse_config_settings_target("path"), None);
+        assert_eq!(parse_config_settings_target("set code_turn_notifications true"), None);
     }
 
     #[test]
