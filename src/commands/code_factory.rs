@@ -27,6 +27,7 @@ use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi, T
 use crate::commands::code_aux::{smart_approval_from_config, SmartApproval};
 use crate::commands::code_ask_user::AskUserTool;
 use crate::commands::code_guardrail::{GuardrailTool, ToolGuardrailState};
+use crate::commands::code_mcp_tool::McpCallTool;
 use crate::commands::code_notification::PushNotificationTool;
 use crate::commands::code_path_safety::{
     is_path_mutation_tool, safe_root_from_env, PathSafetyTool,
@@ -143,6 +144,9 @@ pub struct FactoryFeatures {
     pub path_safety: bool,
     /// Enable agent-callable user notifications.
     pub notifications: bool,
+    /// Enable the generic agent-callable MCP bridge for configured
+    /// terminal `mcpServers`.
+    pub mcp: bool,
 }
 
 impl FactoryFeatures {
@@ -161,6 +165,7 @@ impl FactoryFeatures {
             guardrails: true,
             path_safety: true,
             notifications: true,
+            mcp: true,
         }
     }
 }
@@ -255,6 +260,65 @@ impl LibertaiToolFactory {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct AllowingUi;
+
+    #[async_trait]
+    impl ApprovalUi for AllowingUi {
+        async fn decide(
+            &self,
+            _tool_name: &str,
+            _preview: &str,
+            _always_rule: &str,
+        ) -> crate::commands::code_approvals::PromptChoice {
+            crate::commands::code_approvals::PromptChoice::Allow
+        }
+    }
+
+    #[test]
+    fn factory_registers_mcp_call_when_servers_are_configured() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(LibertaiConfig {
+            mcp_servers: std::collections::HashMap::from([(
+                "github".to_string(),
+                crate::config::McpServerConfig {
+                    command: "server".to_string(),
+                    ..crate::config::McpServerConfig::default()
+                },
+            )]),
+            ..LibertaiConfig::default()
+        });
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            Some(cfg),
+        );
+        let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
+        assert!(registry.get("mcp_call").is_some());
+    }
+
+    #[test]
+    fn factory_skips_mcp_call_without_servers() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(LibertaiConfig::default());
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            Some(cfg),
+        );
+        let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
+        assert!(registry.get("mcp_call").is_none());
+    }
+}
+
 impl ToolFactory for LibertaiToolFactory {
     fn create_tool_registry(&self, enabled: &[&str], cwd: &Path, config: &PiConfig) -> ToolRegistry {
         // 1. Snapshot pi's default tools for the enabled set. We don't
@@ -323,6 +387,22 @@ impl ToolFactory for LibertaiToolFactory {
                 PushNotificationTool::new(Arc::clone(&self.ui))
                     .with_config(self.libertai_cfg.clone()),
             ));
+        }
+
+        if self.features.mcp {
+            if let Some(cfg) = self.libertai_cfg.as_ref() {
+                if !cfg.mcp_servers.is_empty() {
+                    let mcp_call = ApprovalTool::new(
+                        Box::new(McpCallTool::new(Arc::clone(cfg))),
+                        Arc::clone(&self.approvals),
+                        self.mode.clone(),
+                        Arc::clone(&self.ui),
+                    )
+                    .with_policy(self.tool_policy.clone())
+                    .with_smart_approval(self.smart_approval.clone());
+                    wrapped.push(Box::new(mcp_call));
+                }
+            }
         }
 
         //    - `notebook_read` / `notebook_edit` / `notebook_execute`:

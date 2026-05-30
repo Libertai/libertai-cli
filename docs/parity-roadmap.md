@@ -691,11 +691,12 @@ tool/resource/prompt registry.
 Spawn user-configured MCP servers (stdio/HTTP/SSE), expose their tools
 to the agent. The CLI now has narrow stdio, Streamable HTTP, and legacy
 SSE MCP clients for MCP-tool hook handlers configured through
-`mcpServers`, and terminal `/mcp probe` can initialize configured stdio,
+`mcpServers`, terminal `/mcp probe` can initialize configured stdio,
 Streamable HTTP, and legacy SSE servers and list their tools/resources/prompts
-for diagnostics. It still does not expose a live MCP tool/resource/prompt
-registry to the agent. Desktop owns the full stdio/HTTP/SSE live registry
-today.
+for diagnostics, and native CLI sessions now register an approval-gated
+generic `mcp_call` tool when `mcpServers` exist. It still does not expose
+named `mcp__server__tool` entries or live resource/prompt cache tools to
+the agent. Desktop owns the full stdio/HTTP/SSE live registry today.
 
 **Files**: new `src/commands/code_mcp.rs` + transport modules.
 **Effort**: L (2+ weeks).

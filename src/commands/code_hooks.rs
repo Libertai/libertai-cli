@@ -495,6 +495,13 @@ struct HookRun {
     stderr: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpToolCallRun {
+    pub status: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 fn spawn_async_hook(
     hook: &HookCommandConfig,
     cwd: &std::path::Path,
@@ -855,6 +862,29 @@ fn run_mcp_tool_hook_with_config(
         } else {
             stderr_text
         },
+    }
+}
+
+pub fn call_mcp_tool_with_config(
+    cfg: &Config,
+    server: &str,
+    tool: &str,
+    arguments: serde_json::Value,
+    timeout: Option<u64>,
+) -> McpToolCallRun {
+    let hook = HookCommandConfig {
+        hook_type: "mcp_tool".to_string(),
+        server: server.to_string(),
+        tool: tool.to_string(),
+        input: Some(arguments),
+        timeout,
+        ..HookCommandConfig::default()
+    };
+    let run = run_mcp_tool_hook_with_config(&hook, &serde_json::Value::Null, cfg);
+    McpToolCallRun {
+        status: run.status,
+        stdout: run.stdout,
+        stderr: run.stderr,
     }
 }
 

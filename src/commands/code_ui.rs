@@ -7642,7 +7642,7 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     println!("{DIM}  SubagentStop hooks run after task-tool subagents finish.{RESET}");
     println!("{DIM}  Notification hooks run after agent-requested push notifications.{RESET}");
     println!("{DIM}  lifecycle hooks warn on nonzero exit and do not block the session.{RESET}");
-    println!("{DIM}  command, HTTP, prompt, and agent hook handlers are executed natively; MCP-tool handlers are not.{RESET}");
+    println!("{DIM}  command, HTTP, MCP-tool, prompt, and agent hook handlers are executed natively.{RESET}");
     println!("{DIM}  usage:{RESET} /hooks, /hooks status, /hooks open, /hooks edit");
     println!();
 }
@@ -7660,8 +7660,8 @@ fn print_mcp_status(command: McpCommand) {
     println!("{BOLD}mcp{RESET}");
     match command {
         McpCommand::Status => {
-            println!("{DIM}  terminal registry:{RESET} stdio, Streamable HTTP, and legacy SSE mcpServers from config.toml are available to MCP-tool hooks");
-            println!("{DIM}  native CLI tools:{RESET} no live MCP tool/resource/prompt registry yet");
+            println!("{DIM}  terminal registry:{RESET} stdio, Streamable HTTP, and legacy SSE mcpServers from config.toml are available to MCP-tool hooks and mcp_call");
+            println!("{DIM}  native CLI tools:{RESET} generic mcp_call is registered when mcpServers exist; named MCP tools/resources/prompts are not live yet");
             match crate::config::load() {
                 Ok(cfg) if cfg.mcp_servers.is_empty() => {
                     println!("{DIM}  configured servers:{RESET} 0");
@@ -7677,7 +7677,7 @@ fn print_mcp_status(command: McpCommand) {
                 "{DIM}  desktop:{RESET} Settings > MCP owns stdio/HTTP/SSE server discovery, probing, tool/resource/prompt caches, and named mcp__server__tool exposure"
             );
             println!(
-                "{DIM}  hooks:{RESET} CLI executes stdio, Streamable HTTP, and legacy SSE MCP-tool hook handlers from mcpServers; live named tools remain desktop-owned"
+                "{DIM}  tools:{RESET} CLI executes generic mcp_call plus MCP-tool hook handlers from mcpServers; live named tools remain desktop-owned"
             );
             println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp open");
         }
@@ -7726,7 +7726,7 @@ fn print_mcp_probe() {
         }
     }
     println!(
-        "{DIM}  note:{RESET} /mcp probe is terminal discovery only; live named mcp__server__tool registration is still desktop-owned."
+        "{DIM}  note:{RESET} /mcp probe is terminal discovery only; generic mcp_call can call configured servers, but live named mcp__server__tool registration is still desktop-owned."
     );
 }
 
