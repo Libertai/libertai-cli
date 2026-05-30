@@ -850,6 +850,7 @@ async fn repl_loop(
                     output_style.as_deref(),
                     &cfg,
                     &approvals,
+                    &scheduled_runs,
                     usage_summary(&usage_history),
                 )
                 .await;
@@ -7220,6 +7221,7 @@ async fn print_doctor(
     output_style: Option<&str>,
     cfg: &LibertaiConfig,
     approvals: &ApprovalState,
+    scheduled_runs: &[ScheduledRun],
     usage: Option<UsageSummary>,
 ) {
     let cwd = std::env::current_dir();
@@ -7387,6 +7389,15 @@ async fn print_doctor(
         }
     }
 
+    println!(
+        "{}",
+        doctor_line(
+            true,
+            "scheduled prompts",
+            format_schedule_doctor_summary(scheduled_runs)
+        )
+    );
+
     match usage {
         Some(summary) => println!(
             "{}",
@@ -7463,6 +7474,14 @@ fn format_skill_doctor_summary(
 ) -> String {
     let enabled = skills.iter().filter(|skill| skill.enabled).count();
     format!("{enabled}/{} enabled", skills.len())
+}
+
+fn format_schedule_doctor_summary(scheduled_runs: &[ScheduledRun]) -> String {
+    let counts = schedule_status_counts(scheduled_runs, Instant::now());
+    format!(
+        "{} queued ({} due, {} pending)",
+        counts.total, counts.due, counts.pending
+    )
 }
 
 fn format_memory_reference_summary(
@@ -10450,6 +10469,19 @@ mod tests {
                 pending: 1,
             }
         );
+    }
+
+    #[test]
+    fn doctor_schedule_summary_reports_queued_due_and_pending() {
+        let now = Instant::now();
+        let runs = vec![
+            scheduled_run_for_test("sch_1", "due", now - Duration::from_millis(1)),
+            scheduled_run_for_test("sch_2", "later", now + Duration::from_secs(5)),
+        ];
+        let summary = format_schedule_doctor_summary(&runs);
+        assert!(summary.contains("2 queued"));
+        assert!(summary.contains("1 due"));
+        assert!(summary.contains("1 pending"));
     }
 
     #[test]
