@@ -2311,7 +2311,7 @@ fn print_help() {
     println!("{DIM}  /init [--agent|from-agent append|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}");
     println!("{DIM}  /onboarding [path] — write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
-    println!("{DIM}  /agents   — list named sub-agents{RESET}");
+    println!("{DIM}  /agents   — list named sub-agents (/agents open shows agent paths){RESET}");
     println!("{DIM}  /agents create [--worktree] <name> [description] — create a project sub-agent{RESET}");
     println!("{DIM}  /agent [--worktree] <name> <task> — run a named sub-agent task{RESET}");
     println!(
@@ -4856,16 +4856,52 @@ fn print_agents() {
 }
 
 fn handle_agents_command(input: &str) {
+    match parse_agents_command(input) {
+        AgentsSlashCommand::List => print_agents(),
+        AgentsSlashCommand::Open => print_agents_open_hint(),
+        AgentsSlashCommand::Create(rest) => create_agent_from_slash(rest),
+        AgentsSlashCommand::Usage => {
+            eprintln!("{DIM}  /agents: usage: /agents [list|open] | /agents create [--worktree] <name> [description]{RESET}");
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentsSlashCommand<'a> {
+    List,
+    Open,
+    Create(&'a str),
+    Usage,
+}
+
+fn parse_agents_command(input: &str) -> AgentsSlashCommand<'_> {
     let raw = input.trim();
     if raw.is_empty() || raw == "list" {
-        print_agents();
-        return;
+        return AgentsSlashCommand::List;
+    }
+    if raw == "open" {
+        return AgentsSlashCommand::Open;
     }
     if let Some(rest) = raw.strip_prefix("create ") {
-        create_agent_from_slash(rest.trim());
-        return;
+        return AgentsSlashCommand::Create(rest.trim());
     }
-    eprintln!("{DIM}  /agents: usage: /agents [list] | /agents create [--worktree] <name> [description]{RESET}");
+    AgentsSlashCommand::Usage
+}
+
+fn print_agents_open_hint() {
+    let cwd = std::env::current_dir().ok();
+    println!("{BOLD}agents management{RESET}");
+    println!("{DIM}  desktop: /agents open jumps to Settings > Agents.{RESET}");
+    if let Some(cwd) = cwd {
+        println!(
+            "{DIM}  terminal: edit project agents in {} or {}{RESET}",
+            cwd.join(".libertai/agents").display(),
+            cwd.join(".claude/agents").display()
+        );
+    } else {
+        println!("{DIM}  terminal: edit .libertai/agents or .claude/agents in this project.{RESET}");
+    }
+    println!("{DIM}  user agents live under ~/.libertai/agents or ~/.claude/agents.{RESET}");
 }
 
 fn create_agent_from_slash(input: &str) {
@@ -9105,6 +9141,18 @@ mod tests {
             }
         );
         assert!(parse_agents_create_query("").is_err());
+    }
+
+    #[test]
+    fn parse_agents_command_accepts_list_open_and_create() {
+        assert_eq!(parse_agents_command(""), AgentsSlashCommand::List);
+        assert_eq!(parse_agents_command("list"), AgentsSlashCommand::List);
+        assert_eq!(parse_agents_command("open"), AgentsSlashCommand::Open);
+        assert_eq!(
+            parse_agents_command("create --worktree reviewer Reviews changes"),
+            AgentsSlashCommand::Create("--worktree reviewer Reviews changes")
+        );
+        assert_eq!(parse_agents_command("delete reviewer"), AgentsSlashCommand::Usage);
     }
 
     #[test]
