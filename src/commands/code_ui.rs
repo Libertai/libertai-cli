@@ -2353,7 +2353,7 @@ fn print_help() {
     println!("{DIM}  /logout [status|libertai|provider] — run libertai logout or explain provider logout{RESET}");
     println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
     println!("{DIM}  /skills [list|open|enable <name>|disable <name>] — manage code-agent skills for new sessions{RESET}");
-    println!("{DIM}  /init [--agent|from-agent append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}");
+    println!("{DIM}  /init [--agent|from-agent preview merge-lines|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}");
     println!("{DIM}  /onboarding|/onboard [save|path] — write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
     println!("{DIM}  /agents   — list named sub-agents (/agents open shows agent paths){RESET}");
