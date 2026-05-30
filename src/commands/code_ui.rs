@@ -4113,15 +4113,29 @@ fn abort_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum HooksCommand {
     Status,
     Open,
+    Show(String),
     Usage,
 }
 
 fn parse_hooks_command(input: &str) -> HooksCommand {
-    match input.trim().to_ascii_lowercase().as_str() {
+    let raw = input.trim();
+    if let Some((head, tail)) = split_first_word(raw) {
+        if matches!(
+            head.to_ascii_lowercase().as_str(),
+            "show" | "event" | "inspect"
+        ) {
+            let event = tail.trim();
+            if !event.is_empty() && event.split_whitespace().count() == 1 {
+                return HooksCommand::Show(event.to_string());
+            }
+            return HooksCommand::Usage;
+        }
+    }
+    match raw.to_ascii_lowercase().as_str() {
         "" | "status" | "list" | "state" | "diagnostics" | "diag" => HooksCommand::Status,
         "open" | "settings" | "edit" => HooksCommand::Open,
         _ => HooksCommand::Usage,
@@ -8960,9 +8974,10 @@ fn print_hooks_command(cfg: &LibertaiConfig, command: HooksCommand) {
     match command {
         HooksCommand::Status => print_hooks_status(cfg),
         HooksCommand::Open => print_hooks_open_hint(),
+        HooksCommand::Show(event) => print_hook_event_details(cfg, &event),
         HooksCommand::Usage => {
             println!("{BOLD}hooks{RESET}");
-            println!("{DIM}  usage:{RESET} /hooks, /hooks status, /hooks open, or /hooks edit");
+            println!("{DIM}  usage:{RESET} /hooks, /hooks status, /hooks show <event>, /hooks open, or /hooks edit");
             println!();
         }
     }
@@ -8991,8 +9006,58 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     println!("{DIM}  Notification hooks run after agent-requested push notifications.{RESET}");
     println!("{DIM}  lifecycle hooks warn on nonzero exit and do not block the session.{RESET}");
     println!("{DIM}  command, HTTP, MCP-tool, prompt, and agent hook handlers are executed natively.{RESET}");
-    println!("{DIM}  usage:{RESET} /hooks, /hooks status, /hooks open, /hooks edit");
+    println!("{DIM}  usage:{RESET} /hooks, /hooks status, /hooks show <event>, /hooks open, /hooks edit");
     println!();
+}
+
+fn print_hook_event_details(cfg: &LibertaiConfig, event: &str) {
+    match hooks_for_event(cfg, event) {
+        Some((canonical, hooks)) => print!("{}", format_hook_event_details(canonical, hooks)),
+        None => {
+            eprintln!("{DIM}  /hooks: no known hook event `{event}`{RESET}");
+            eprintln!(
+                "{DIM}  events:{RESET} UserPromptSubmit, PreToolUse, PostToolUse, SubagentStop, SessionStart, Stop, SessionEnd, Notification"
+            );
+        }
+    }
+}
+
+fn hooks_for_event<'a>(
+    cfg: &'a LibertaiConfig,
+    event: &str,
+) -> Option<(&'static str, &'a [crate::config::HookCommandConfig])> {
+    match normalize_hook_event(event)?.as_str() {
+        "userpromptsubmit" => Some(("UserPromptSubmit", &cfg.hooks.user_prompt_submit)),
+        "pretooluse" => Some(("PreToolUse", &cfg.hooks.pre_tool_use)),
+        "posttooluse" => Some(("PostToolUse", &cfg.hooks.post_tool_use)),
+        "subagentstop" => Some(("SubagentStop", &cfg.hooks.subagent_stop)),
+        "sessionstart" => Some(("SessionStart", &cfg.hooks.session_start)),
+        "stop" => Some(("Stop", &cfg.hooks.stop)),
+        "sessionend" => Some(("SessionEnd", &cfg.hooks.session_end)),
+        "notification" => Some(("Notification", &cfg.hooks.notification)),
+        _ => None,
+    }
+}
+
+fn normalize_hook_event(event: &str) -> Option<String> {
+    let key = event
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    let normalized = match key.as_str() {
+        "userpromptsubmit" | "promptsubmit" | "prompt" => "userpromptsubmit",
+        "pretooluse" | "pretool" | "pre" => "pretooluse",
+        "posttooluse" | "posttool" | "post" => "posttooluse",
+        "subagentstop" | "subagent" => "subagentstop",
+        "sessionstart" | "start" => "sessionstart",
+        "stop" => "stop",
+        "sessionend" | "end" => "sessionend",
+        "notification" | "notify" => "notification",
+        _ => return None,
+    };
+    Some(normalized.to_string())
 }
 
 fn print_hooks_open_hint() {
@@ -9555,6 +9620,145 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
             continue_on_block,
             target
         );
+    }
+}
+
+fn format_hook_event_details(event: &str, hooks: &[crate::config::HookCommandConfig]) -> String {
+    let enabled = hooks.iter().filter(|hook| hook.enabled).count();
+    let async_count = hooks.iter().filter(|hook| hook.async_hook).count();
+    let once_count = hooks.iter().filter(|hook| hook.once).count();
+    let continue_count = hooks.iter().filter(|hook| hook.continue_on_block).count();
+    let mut out = format!(
+        "{BOLD}hooks: {event}{RESET}\n  configured: {} ({} enabled)\n  flags: {} async, {} once, {} continueOnBlock\n",
+        hooks.len(),
+        enabled,
+        async_count,
+        once_count,
+        continue_count
+    );
+    let types = hook_type_summary(hooks);
+    let types = if types.is_empty() {
+        "none"
+    } else {
+        types.as_str()
+    };
+    out.push_str(&format!("  types: {types}\n\n"));
+    if hooks.is_empty() {
+        out.push_str(&format!("{DIM}  no {event} hooks configured{RESET}\n\n"));
+        return out;
+    }
+    for (idx, hook) in hooks.iter().enumerate() {
+        let marker = if hook.enabled { "on" } else { "off" };
+        let matcher = if hook.matcher.trim().is_empty() {
+            "*"
+        } else {
+            hook.matcher.trim()
+        };
+        let hook_type_key = normalized_hook_type(&hook.hook_type);
+        let hook_type = if hook.hook_type.trim().is_empty() {
+            "command"
+        } else {
+            hook_type_key.as_str()
+        };
+        let target = hook_target_display(hook);
+        out.push_str(&format!(
+            "  {}. [{}] type={} matcher={} target={}\n",
+            idx + 1,
+            marker,
+            hook_type,
+            matcher,
+            target
+        ));
+        if !hook.if_condition.trim().is_empty() {
+            out.push_str(&format!("     if: {}\n", hook.if_condition.trim()));
+        }
+        if !hook.source.trim().is_empty() {
+            out.push_str(&format!("     source: {}\n", hook.source.trim()));
+        }
+        if let Some(timeout) = hook.timeout {
+            out.push_str(&format!("     timeout: {timeout}s\n"));
+        }
+        if hook.async_hook || hook.async_rewake || hook.once || hook.continue_on_block {
+            let mut flags = Vec::new();
+            if hook.async_hook {
+                flags.push("async");
+            }
+            if hook.async_rewake {
+                flags.push("asyncRewake");
+            }
+            if hook.once {
+                flags.push("once");
+            }
+            if hook.continue_on_block {
+                flags.push("continueOnBlock");
+            }
+            out.push_str(&format!("     flags: {}\n", flags.join(", ")));
+        }
+        if !hook.status_message.trim().is_empty() {
+            out.push_str(&format!("     statusMessage: {}\n", hook.status_message.trim()));
+        }
+        if hook_type_key == "http" {
+            out.push_str(&format!(
+                "     http metadata: {} header(s), {} allowed env var(s)\n",
+                hook.headers.len(),
+                hook.allowed_env_vars.len()
+            ));
+        }
+        if hook_type_key == "mcp_tool" {
+            let input = if hook.input.is_some() { "yes" } else { "no" };
+            out.push_str(&format!("     mcp input: {input}\n"));
+        }
+        let metadata = hook_extra_metadata_label(hook);
+        if let Some(keys) = metadata.strip_prefix(", metadata=") {
+            out.push_str(&format!("     metadata: {keys}\n"));
+        }
+    }
+    out.push('\n');
+    out
+}
+
+fn hook_type_summary(hooks: &[crate::config::HookCommandConfig]) -> String {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for hook in hooks {
+        let hook_type_key = normalized_hook_type(&hook.hook_type);
+        let hook_type = if hook.hook_type.trim().is_empty() {
+            "command"
+        } else {
+            hook_type_key.as_str()
+        };
+        *counts.entry(hook_type.to_string()).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(kind, count)| format!("{kind} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn hook_target_display(hook: &crate::config::HookCommandConfig) -> String {
+    let hook_type_key = normalized_hook_type(&hook.hook_type);
+    if hook_type_key == "http" {
+        if hook.url.trim().is_empty() {
+            "(no url)".to_string()
+        } else {
+            hook.url.trim().to_string()
+        }
+    } else if hook_type_key == "prompt" || hook_type_key == "agent" {
+        if hook.prompt.trim().is_empty() {
+            "(no prompt)".to_string()
+        } else {
+            truncate_chars(hook.prompt.trim(), 120)
+        }
+    } else if hook_type_key == "mcp_tool" {
+        if hook.server.trim().is_empty() || hook.tool.trim().is_empty() {
+            "(no mcp tool)".to_string()
+        } else {
+            format!("{}:{}", hook.server.trim(), hook.tool.trim())
+        }
+    } else if hook.command.trim().is_empty() {
+        "(no command)".to_string()
+    } else {
+        crate::commands::code_hooks::hook_command_display(hook)
     }
 }
 
@@ -11453,6 +11657,60 @@ mod tests {
         assert_eq!(parse_hooks_command("open"), HooksCommand::Open);
         assert_eq!(parse_hooks_command("settings"), HooksCommand::Open);
         assert_eq!(parse_hooks_command("edit"), HooksCommand::Open);
+        assert_eq!(
+            parse_hooks_command("show PreToolUse"),
+            HooksCommand::Show("PreToolUse".to_string())
+        );
+        assert_eq!(
+            parse_hooks_command("inspect notification"),
+            HooksCommand::Show("notification".to_string())
+        );
+        assert_eq!(parse_hooks_command("show"), HooksCommand::Usage);
+        assert_eq!(parse_hooks_command("show pre post"), HooksCommand::Usage);
+    }
+
+    #[test]
+    fn hook_event_details_expands_one_event_without_secret_values() {
+        let hooks = vec![
+            crate::config::HookCommandConfig {
+                hook_type: "http".to_string(),
+                url: "https://hooks.example/pre".to_string(),
+                headers: std::collections::HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer secret-token".to_string(),
+                )]),
+                allowed_env_vars: vec!["TOKEN".to_string()],
+                matcher: "Bash(*)".to_string(),
+                source: "project".to_string(),
+                timeout: Some(7),
+                continue_on_block: true,
+                extra: std::collections::BTreeMap::from([(
+                    "reviewPolicy".to_string(),
+                    serde_json::json!("strict"),
+                )]),
+                ..Default::default()
+            },
+            crate::config::HookCommandConfig {
+                enabled: false,
+                hook_type: "mcp-tool".to_string(),
+                server: "policy".to_string(),
+                tool: "check".to_string(),
+                input: Some(serde_json::json!({"level": "strict"})),
+                ..Default::default()
+            },
+        ];
+
+        let details = format_hook_event_details("PreToolUse", &hooks);
+        assert!(details.contains("hooks: PreToolUse"));
+        assert!(details.contains("configured: 2 (1 enabled)"));
+        assert!(details.contains("types: http 1, mcp_tool 1"));
+        assert!(details.contains("matcher=Bash(*) target=https://hooks.example/pre"));
+        assert!(details.contains("http metadata: 1 header(s), 1 allowed env var(s)"));
+        assert!(details.contains("metadata: reviewPolicy"));
+        assert!(details.contains("target=policy:check"));
+        assert!(details.contains("mcp input: yes"));
+        assert!(!details.contains("secret-token"));
+        assert!(!details.contains("Authorization"));
     }
 
     #[test]

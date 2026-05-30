@@ -757,7 +757,11 @@ configured under `mcpServers` and calling the named tool through MCP
 `initialize` plus `tools/call`.
 Unknown/less-common hook fields
 are flattened into each hook row and round-trip through TOML config saves.
-`/hooks` and `libertai status` report configured runnable hooks.
+`/hooks` and `libertai status` report configured runnable hooks, and
+`/hooks show <event>` expands one event bucket with per-row matcher,
+target, flag, timeout, source, status-message, HTTP header/env counts,
+MCP input presence, and preserved metadata keys without printing secret
+header or environment values.
 
 Remaining work: any pi-level typed hook dispatcher and persistent/live CLI MCP
 connection management.
