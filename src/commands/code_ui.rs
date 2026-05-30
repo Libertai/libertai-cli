@@ -771,6 +771,10 @@ async fn repl_loop(
             print_mcp_status(parse_mcp_command(rest));
             continue;
         }
+        if let Some(rest) = send_command_arg(trimmed) {
+            print_send_status(rest);
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
@@ -2309,6 +2313,7 @@ fn print_help() {
     println!("{DIM}  /loop [turns] [goal] — run bounded autonomous follow-up turns{RESET}");
     println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|status){RESET}");
     println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|cancel|clear){RESET}");
+    println!("{DIM}  /send [target message] — show terminal inter-session send status{RESET}");
     println!("{DIM}  /notify on|off|status|test — turn-complete terminal notifications{RESET}");
     println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
     println!("{DIM}  /attach <path> [prompt] — alias for /image{RESET}");
@@ -3718,6 +3723,16 @@ fn onboarding_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
+fn send_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/send" | "/send-message" => Some(""),
+        _ => trimmed
+            .strip_prefix("/send ")
+            .or_else(|| trimmed.strip_prefix("/send-message "))
+            .map(str::trim),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HooksCommand {
     Status,
@@ -3793,6 +3808,26 @@ fn print_notify_status(cfg: &LibertaiConfig) {
         "{DIM}  agent push notifications:{RESET} terminal bell + visible notification block"
     );
     println!("{DIM}  usage:{RESET} /notify on, /notify off, /notify status, /notify test");
+}
+
+fn print_send_status(rest: &str) {
+    let requested = rest.trim();
+    println!("{BOLD}send message{RESET}");
+    println!(
+        "{DIM}  desktop:{RESET} /send <session> <message> can relay prompts into another open idle desktop session."
+    );
+    println!(
+        "{DIM}  terminal:{RESET} this REPL has one active session and no desktop session registry to target."
+    );
+    if !requested.is_empty() {
+        println!(
+            "{DIM}  ignored target/message:{RESET} {}",
+            requested.replace('\n', " ")
+        );
+    }
+    println!(
+        "{DIM}  remaining gap:{RESET} pi-level streaming child-agent bus or detached inter-agent scheduler."
+    );
 }
 
 fn parse_schedule_command(input: &str) -> ScheduleCommand {
@@ -8760,6 +8795,18 @@ mod tests {
             Some("save guide.md")
         );
         assert_eq!(onboarding_command_arg("/oneboarding save"), None);
+    }
+
+    #[test]
+    fn send_command_arg_accepts_desktop_alias() {
+        assert_eq!(send_command_arg("/send"), Some(""));
+        assert_eq!(send_command_arg("/send worker finish tests"), Some("worker finish tests"));
+        assert_eq!(send_command_arg("/send-message"), Some(""));
+        assert_eq!(
+            send_command_arg("/send-message worker finish tests"),
+            Some("worker finish tests")
+        );
+        assert_eq!(send_command_arg("/sender worker finish tests"), None);
     }
 
     #[test]
