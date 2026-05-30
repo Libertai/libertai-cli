@@ -2429,7 +2429,7 @@ fn print_help() {
         "{DIM}  /agent [--worktree|--background] <name> <task> — run a named sub-agent task{RESET}"
     );
     println!("{DIM}  /agent --background <name> <task> — start a detached terminal agent and write a log under ~/.config/libertai/code-background-agents{RESET}");
-    println!("{DIM}  /agents background [list|log|kill] — inspect or stop terminal background agents{RESET}");
+    println!("{DIM}  /agents background [list|log|kill|prune|clear] — inspect, stop, or prune terminal background agents{RESET}");
     println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
     println!("{DIM}  /theme [system|dark|light|high-contrast] — show terminal theme status{RESET}");
     println!("{DIM}  /export [path] — write this session transcript as Markdown{RESET}");
@@ -5275,8 +5275,9 @@ fn handle_agents_command(input: &str) {
         AgentsSlashCommand::BackgroundList => print_background_agents(),
         AgentsSlashCommand::BackgroundLog(rest) => print_background_agent_log(rest),
         AgentsSlashCommand::BackgroundKill(rest) => kill_background_agent(rest),
+        AgentsSlashCommand::BackgroundPrune => prune_background_agents(),
         AgentsSlashCommand::Usage => {
-            eprintln!("{DIM}  /agents: usage: /agents [list|open|background] | /agents create [--worktree] <name> [description] | /agents delete <name>{RESET}");
+            eprintln!("{DIM}  /agents: usage: /agents [list|open|background] | /agents background [list|log|kill|prune|clear] | /agents create [--worktree] <name> [description] | /agents delete <name>{RESET}");
         }
     }
 }
@@ -5290,6 +5291,7 @@ enum AgentsSlashCommand<'a> {
     BackgroundList,
     BackgroundLog(&'a str),
     BackgroundKill(&'a str),
+    BackgroundPrune,
     Usage,
 }
 
@@ -5317,6 +5319,12 @@ fn parse_agents_command(input: &str) -> AgentsSlashCommand<'_> {
         .or_else(|| raw.strip_prefix("bg stop"))
     {
         return AgentsSlashCommand::BackgroundKill(rest.trim());
+    }
+    if matches!(
+        raw,
+        "background prune" | "bg prune" | "background clear" | "bg clear"
+    ) {
+        return AgentsSlashCommand::BackgroundPrune;
     }
     if let Some(rest) = raw.strip_prefix("create ") {
         return AgentsSlashCommand::Create(rest.trim());
@@ -5426,6 +5434,7 @@ fn print_background_agents() {
             }
             println!("{DIM}  /agents background log [pid|latest] shows the saved output.{RESET}");
             println!("{DIM}  /agents background kill <pid> stops a running background agent.{RESET}");
+            println!("{DIM}  /agents background prune removes exited records from the list.{RESET}");
         }
         Err(e) => eprintln!("{DIM}  /agents: could not read background agents: {e:#}{RESET}"),
     }
@@ -5470,6 +5479,31 @@ fn kill_background_agent(input: &str) {
     match send_background_agent_kill(pid) {
         Ok(()) => println!("{DIM}  sent terminate signal to background agent pid {pid}.{RESET}"),
         Err(e) => eprintln!("{DIM}  /agents: could not stop pid {pid}: {e:#}{RESET}"),
+    }
+}
+
+fn prune_background_agents() {
+    match load_background_agent_records() {
+        Ok(records) if records.is_empty() => {
+            println!("{DIM}  /agents background prune: no terminal background agents recorded.{RESET}");
+        }
+        Ok(records) => {
+            let original = records.len();
+            let kept = retain_running_background_agent_records(records, background_agent_status);
+            let removed = original.saturating_sub(kept.len());
+            match rewrite_background_agent_records(&kept) {
+                Ok(()) => {
+                    println!(
+                        "{DIM}  /agents background prune: removed {removed} non-running record{}; kept {} running record{}.{RESET}",
+                        if removed == 1 { "" } else { "s" },
+                        kept.len(),
+                        if kept.len() == 1 { "" } else { "s" }
+                    );
+                }
+                Err(e) => eprintln!("{DIM}  /agents: could not prune records: {e:#}{RESET}"),
+            }
+        }
+        Err(e) => eprintln!("{DIM}  /agents: could not read background agents: {e:#}{RESET}"),
     }
 }
 
@@ -6634,6 +6668,30 @@ fn persist_background_agent_record(record: &BackgroundAgentRecord) -> Result<()>
     Ok(())
 }
 
+fn rewrite_background_agent_records(records: &[BackgroundAgentRecord]) -> Result<()> {
+    let path = background_agent_records_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    if records.is_empty() {
+        if path.exists() {
+            fs::write(&path, "").with_context(|| format!("writing {}", path.display()))?;
+        }
+        return Ok(());
+    }
+    let mut raw = String::new();
+    for record in records {
+        raw.push_str(
+            &serde_json::to_string(record)
+                .with_context(|| format!("serializing background record {}", record.pid))?,
+        );
+        raw.push('\n');
+    }
+    fs::write(&path, raw).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
 fn load_background_agent_records() -> Result<Vec<BackgroundAgentRecord>> {
     let path = background_agent_records_path()?;
     if !path.exists() {
@@ -6663,6 +6721,16 @@ fn resolve_background_agent_record(input: &str) -> Result<Option<BackgroundAgent
     }
     let pid = parse_background_agent_pid(input)?;
     Ok(records.into_iter().rev().find(|record| record.pid == pid))
+}
+
+fn retain_running_background_agent_records(
+    records: Vec<BackgroundAgentRecord>,
+    status: impl Fn(u32) -> BackgroundAgentStatus,
+) -> Vec<BackgroundAgentRecord> {
+    records
+        .into_iter()
+        .filter(|record| matches!(status(record.pid), BackgroundAgentStatus::Running))
+        .collect()
 }
 
 fn parse_background_agent_pid(input: &str) -> Result<u32> {
@@ -10798,6 +10866,14 @@ mod tests {
             parse_agents_command("bg stop 123"),
             AgentsSlashCommand::BackgroundKill("123")
         );
+        assert_eq!(
+            parse_agents_command("background prune"),
+            AgentsSlashCommand::BackgroundPrune
+        );
+        assert_eq!(
+            parse_agents_command("bg clear"),
+            AgentsSlashCommand::BackgroundPrune
+        );
     }
 
     #[test]
@@ -10822,6 +10898,43 @@ mod tests {
         assert_eq!(record.log_path, "/tmp/reviewer.log");
         assert_eq!(record.prompt_preview, "Run review with details");
         assert!(record.started_at_ms > 0);
+    }
+
+    #[test]
+    fn retain_running_background_agent_records_prunes_finished_runs() {
+        let records = vec![
+            BackgroundAgentRecord {
+                pid: 1,
+                name: "running".to_string(),
+                provider: "libertai".to_string(),
+                model: "qwen".to_string(),
+                mode: "normal".to_string(),
+                prompt_preview: "one".to_string(),
+                cwd: "/tmp/project".to_string(),
+                log_path: "/tmp/one.log".to_string(),
+                started_at_ms: 10,
+            },
+            BackgroundAgentRecord {
+                pid: 2,
+                name: "done".to_string(),
+                provider: "libertai".to_string(),
+                model: "qwen".to_string(),
+                mode: "normal".to_string(),
+                prompt_preview: "two".to_string(),
+                cwd: "/tmp/project".to_string(),
+                log_path: "/tmp/two.log".to_string(),
+                started_at_ms: 20,
+            },
+        ];
+        let kept = retain_running_background_agent_records(records, |pid| {
+            if pid == 1 {
+                BackgroundAgentStatus::Running
+            } else {
+                BackgroundAgentStatus::Exited
+            }
+        });
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].pid, 1);
     }
 
     #[test]
