@@ -5422,6 +5422,11 @@ fn print_background_agents() {
         }
         Ok(records) => {
             println!("{BOLD}background agents{RESET}");
+            let counts = background_agent_status_counts(&records, background_agent_status);
+            println!(
+                "{DIM}  summary:{RESET} {} recorded, {} running, {} exited, {} unknown",
+                counts.total, counts.running, counts.exited, counts.unknown
+            );
             for record in records.iter().rev().take(20) {
                 let status = background_agent_status(record.pid);
                 println!(
@@ -6489,6 +6494,14 @@ enum BackgroundAgentStatus {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BackgroundAgentStatusCounts {
+    total: usize,
+    running: usize,
+    exited: usize,
+    unknown: usize,
+}
+
 impl BackgroundAgentStatus {
     fn label(self) -> &'static str {
         match self {
@@ -6497,6 +6510,26 @@ impl BackgroundAgentStatus {
             BackgroundAgentStatus::Unknown => "unknown",
         }
     }
+}
+
+fn background_agent_status_counts(
+    records: &[BackgroundAgentRecord],
+    status: impl Fn(u32) -> BackgroundAgentStatus,
+) -> BackgroundAgentStatusCounts {
+    let mut counts = BackgroundAgentStatusCounts {
+        total: records.len(),
+        running: 0,
+        exited: 0,
+        unknown: 0,
+    };
+    for record in records {
+        match status(record.pid) {
+            BackgroundAgentStatus::Running => counts.running += 1,
+            BackgroundAgentStatus::Exited => counts.exited += 1,
+            BackgroundAgentStatus::Unknown => counts.unknown += 1,
+        }
+    }
+    counts
 }
 
 fn build_agent_slash_action(
@@ -11072,6 +11105,58 @@ mod tests {
         });
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].pid, 1);
+    }
+
+    #[test]
+    fn background_agent_status_counts_summarize_records() {
+        let records = vec![
+            BackgroundAgentRecord {
+                pid: 1,
+                name: "running".to_string(),
+                provider: "libertai".to_string(),
+                model: "qwen".to_string(),
+                mode: "normal".to_string(),
+                prompt_preview: "one".to_string(),
+                cwd: "/tmp/project".to_string(),
+                log_path: "/tmp/one.log".to_string(),
+                started_at_ms: 10,
+            },
+            BackgroundAgentRecord {
+                pid: 2,
+                name: "done".to_string(),
+                provider: "libertai".to_string(),
+                model: "qwen".to_string(),
+                mode: "normal".to_string(),
+                prompt_preview: "two".to_string(),
+                cwd: "/tmp/project".to_string(),
+                log_path: "/tmp/two.log".to_string(),
+                started_at_ms: 20,
+            },
+            BackgroundAgentRecord {
+                pid: 3,
+                name: "unknown".to_string(),
+                provider: "libertai".to_string(),
+                model: "qwen".to_string(),
+                mode: "normal".to_string(),
+                prompt_preview: "three".to_string(),
+                cwd: "/tmp/project".to_string(),
+                log_path: "/tmp/three.log".to_string(),
+                started_at_ms: 30,
+            },
+        ];
+        assert_eq!(
+            background_agent_status_counts(&records, |pid| match pid {
+                1 => BackgroundAgentStatus::Running,
+                2 => BackgroundAgentStatus::Exited,
+                _ => BackgroundAgentStatus::Unknown,
+            }),
+            BackgroundAgentStatusCounts {
+                total: 3,
+                running: 1,
+                exited: 1,
+                unknown: 1,
+            }
+        );
     }
 
     #[test]
