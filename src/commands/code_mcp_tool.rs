@@ -8,7 +8,7 @@ use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::config::{Config, McpToolConfig};
+use crate::config::{Config, McpPromptConfig, McpResourceConfig, McpToolConfig};
 
 const NAME: &str = "mcp_call";
 const LABEL: &str = "Call MCP tool";
@@ -26,11 +26,49 @@ struct McpCallInput {
     timeout: Option<u64>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct McpReadResourceInput {
+    server: String,
+    uri: String,
+    #[serde(default)]
+    timeout: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct McpGetPromptInput {
+    server: String,
+    name: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
+    #[serde(default)]
+    timeout: Option<u64>,
+}
+
 pub struct McpCallTool {
     cfg: Arc<Config>,
 }
 
+pub struct McpReadResourceTool {
+    cfg: Arc<Config>,
+}
+
+pub struct McpGetPromptTool {
+    cfg: Arc<Config>,
+}
+
 impl McpCallTool {
+    pub fn new(cfg: Arc<Config>) -> Self {
+        Self { cfg }
+    }
+}
+
+impl McpReadResourceTool {
+    pub fn new(cfg: Arc<Config>) -> Self {
+        Self { cfg }
+    }
+}
+
+impl McpGetPromptTool {
     pub fn new(cfg: Arc<Config>) -> Self {
         Self { cfg }
     }
@@ -169,6 +207,125 @@ impl Tool for McpCallTool {
 }
 
 #[async_trait]
+impl Tool for McpReadResourceTool {
+    fn name(&self) -> &str {
+        "mcp_read_resource"
+    }
+
+    fn label(&self) -> &str {
+        "Read MCP resource"
+    }
+
+    fn description(&self) -> &str {
+        "Read a cached resource from a configured MCP server. Requires a server name and resource URI."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "server": { "type": "string", "description": "Configured MCP server name from mcpServers." },
+                "uri": { "type": "string", "description": "Resource URI advertised by the MCP server." },
+                "timeout": { "type": "integer", "minimum": 1, "maximum": 300 }
+            },
+            "required": ["server", "uri"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        _tool_call_id: &str,
+        input: serde_json::Value,
+        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+    ) -> PiResult<ToolExecution> {
+        let parsed: McpReadResourceInput = match serde_json::from_value(input) {
+            Ok(value) => value,
+            Err(e) => return Ok(output(true, format!("invalid `mcp_read_resource` payload: {e}"), None)),
+        };
+        let server = parsed.server.trim();
+        let uri = parsed.uri.trim();
+        if server.is_empty() || uri.is_empty() {
+            return Ok(output(true, "`mcp_read_resource` requires non-empty `server` and `uri` fields".to_string(), None));
+        }
+        let run = crate::commands::code_hooks::call_mcp_method_with_config(
+            self.cfg.as_ref(),
+            server,
+            "resources/read",
+            json!({ "uri": uri }),
+            parsed.timeout,
+        );
+        Ok(mcp_run_output("resources/read", server, uri, run))
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+#[async_trait]
+impl Tool for McpGetPromptTool {
+    fn name(&self) -> &str {
+        "mcp_get_prompt"
+    }
+
+    fn label(&self) -> &str {
+        "Get MCP prompt"
+    }
+
+    fn description(&self) -> &str {
+        "Get a cached prompt from a configured MCP server. Requires a server name, prompt name, and optional arguments."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "server": { "type": "string", "description": "Configured MCP server name from mcpServers." },
+                "name": { "type": "string", "description": "Prompt name advertised by the MCP server." },
+                "arguments": { "type": "object", "description": "Optional prompt arguments." },
+                "timeout": { "type": "integer", "minimum": 1, "maximum": 300 }
+            },
+            "required": ["server", "name"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        _tool_call_id: &str,
+        input: serde_json::Value,
+        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+    ) -> PiResult<ToolExecution> {
+        let parsed: McpGetPromptInput = match serde_json::from_value(input) {
+            Ok(value) => value,
+            Err(e) => return Ok(output(true, format!("invalid `mcp_get_prompt` payload: {e}"), None)),
+        };
+        let server = parsed.server.trim();
+        let name = parsed.name.trim();
+        if server.is_empty() || name.is_empty() {
+            return Ok(output(true, "`mcp_get_prompt` requires non-empty `server` and `name` fields".to_string(), None));
+        }
+        let arguments = parsed
+            .arguments
+            .as_object()
+            .cloned()
+            .map(serde_json::Value::Object)
+            .unwrap_or_else(|| json!({}));
+        let run = crate::commands::code_hooks::call_mcp_method_with_config(
+            self.cfg.as_ref(),
+            server,
+            "prompts/get",
+            json!({ "name": name, "arguments": arguments }),
+            parsed.timeout,
+        );
+        Ok(mcp_run_output("prompts/get", server, name, run))
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+#[async_trait]
 impl Tool for NamedMcpTool {
     fn name(&self) -> &str {
         &self.name
@@ -241,6 +398,33 @@ pub fn named_mcp_tools(cfg: Arc<Config>) -> Vec<Box<dyn Tool>> {
     tools
 }
 
+pub fn cached_mcp_context_tools(cfg: Arc<Config>) -> Vec<Box<dyn Tool>> {
+    let has_resources = cfg
+        .mcp_servers
+        .values()
+        .any(|server| server.resources.iter().any(enabled_resource));
+    let has_prompts = cfg
+        .mcp_servers
+        .values()
+        .any(|server| server.prompts.iter().any(enabled_prompt));
+    let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+    if has_resources {
+        tools.push(Box::new(McpReadResourceTool::new(Arc::clone(&cfg))));
+    }
+    if has_prompts {
+        tools.push(Box::new(McpGetPromptTool::new(cfg)));
+    }
+    tools
+}
+
+fn enabled_resource(resource: &McpResourceConfig) -> bool {
+    resource.enabled && !resource.uri.trim().is_empty()
+}
+
+fn enabled_prompt(prompt: &McpPromptConfig) -> bool {
+    prompt.enabled && !prompt.name.trim().is_empty()
+}
+
 fn named_mcp_tool_name(server: &str, tool: &str) -> Option<String> {
     let server = sanitize_tool_segment(server);
     let tool = sanitize_tool_segment(tool);
@@ -292,6 +476,32 @@ fn output(is_error: bool, text: String, details: Option<serde_json::Value>) -> T
         is_error,
     }
     .into()
+}
+
+fn mcp_run_output(
+    operation: &str,
+    server: &str,
+    subject: &str,
+    run: crate::commands::code_hooks::McpToolCallRun,
+) -> ToolExecution {
+    let details = json!({
+        "operation": operation,
+        "server": server,
+        "subject": subject,
+        "status": run.status,
+        "stdout": run.stdout,
+        "stderr": run.stderr,
+    });
+    if run.status == 0 {
+        output(false, run.stdout, Some(details))
+    } else {
+        let message = if run.stderr.trim().is_empty() {
+            run.stdout
+        } else {
+            run.stderr
+        };
+        output(true, message, Some(details))
+    }
 }
 
 #[cfg(test)]
@@ -378,6 +588,67 @@ mod tests {
         assert_eq!(tools[0].description(), "Search docs");
         assert_eq!(tools[0].parameters()["required"], json!(["query"]));
         assert!(!tools[0].is_read_only());
+    }
+
+    #[test]
+    fn cached_mcp_context_tools_register_from_cached_resources_and_prompts() {
+        let cfg = Arc::new(Config {
+            mcp_servers: std::collections::HashMap::from([(
+                "docs".to_string(),
+                crate::config::McpServerConfig {
+                    resources: vec![
+                        McpResourceConfig {
+                            uri: "file:///repo/README.md".to_string(),
+                            ..McpResourceConfig::default()
+                        },
+                        McpResourceConfig {
+                            uri: "file:///repo/private.md".to_string(),
+                            enabled: false,
+                            ..McpResourceConfig::default()
+                        },
+                    ],
+                    prompts: vec![McpPromptConfig {
+                        name: "summarize".to_string(),
+                        ..McpPromptConfig::default()
+                    }],
+                    ..crate::config::McpServerConfig::default()
+                },
+            )]),
+            ..Config::default()
+        });
+        let tools = cached_mcp_context_tools(cfg);
+        let names = tools.iter().map(|tool| tool.name()).collect::<Vec<_>>();
+        assert_eq!(names, vec!["mcp_read_resource", "mcp_get_prompt"]);
+        assert!(tools.iter().all(|tool| tool.is_read_only()));
+    }
+
+    #[test]
+    fn mcp_read_resource_reports_missing_server_as_tool_error() {
+        asupersync::test_utils::run_test(|| async {
+            let tool = McpReadResourceTool::new(Arc::new(Config::default()));
+            let execution = tool
+                .execute(
+                    "call-1",
+                    json!({ "server": "docs", "uri": "file:///repo/README.md" }),
+                    None,
+                )
+                .await
+                .unwrap();
+            let pi::sdk::ToolExecution::Done(output) = execution else {
+                panic!("expected done output");
+            };
+            assert!(output.is_error);
+            let text = output
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("MCP server `docs` is not configured"));
+        });
     }
 
     #[test]

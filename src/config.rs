@@ -223,6 +223,10 @@ pub struct McpServerConfig {
     pub headers: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<McpToolConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<McpResourceConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<McpPromptConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,6 +254,62 @@ impl Default for McpToolConfig {
             input_schema: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpResourceConfig {
+    pub uri: String,
+    #[serde(default = "default_mcp_tool_enabled", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, rename = "mimeType", alias = "mime_type", skip_serializing_if = "String::is_empty")]
+    pub mime_type: String,
+}
+
+impl Default for McpResourceConfig {
+    fn default() -> Self {
+        Self {
+            uri: String::new(),
+            enabled: true,
+            name: String::new(),
+            description: String::new(),
+            mime_type: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpPromptConfig {
+    pub name: String,
+    #[serde(default = "default_mcp_tool_enabled", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<McpPromptArgumentConfig>,
+}
+
+impl Default for McpPromptConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            enabled: true,
+            description: String::new(),
+            arguments: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpPromptArgumentConfig {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub required: bool,
 }
 
 fn default_mcp_tool_enabled() -> bool {
@@ -1054,6 +1114,19 @@ mod tests {
             [[mcpServers.docs.tools]]
             name = "admin"
             enabled = false
+
+            [[mcpServers.docs.resources]]
+            uri = "file:///repo/README.md"
+            name = "README"
+            mimeType = "text/markdown"
+
+            [[mcpServers.docs.prompts]]
+            name = "summarize"
+            description = "Summarize docs"
+
+            [[mcpServers.docs.prompts.arguments]]
+            name = "topic"
+            required = true
         "#;
         let cfg: Config = toml::from_str(raw).unwrap();
         let server = cfg.mcp_servers.get("docs").unwrap();
@@ -1066,9 +1139,16 @@ mod tests {
             json!(["query"])
         );
         assert!(!server.tools[1].enabled);
+        assert_eq!(server.resources[0].uri, "file:///repo/README.md");
+        assert_eq!(server.resources[0].mime_type, "text/markdown");
+        assert_eq!(server.prompts[0].name, "summarize");
+        assert_eq!(server.prompts[0].arguments[0].name, "topic");
+        assert!(server.prompts[0].arguments[0].required);
 
         let encoded = toml::to_string(&cfg).unwrap();
         assert!(encoded.contains("[[mcpServers.docs.tools]]"));
+        assert!(encoded.contains("[[mcpServers.docs.resources]]"));
+        assert!(encoded.contains("[[mcpServers.docs.prompts]]"));
         assert!(encoded.contains("inputSchema"));
     }
 }

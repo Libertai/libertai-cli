@@ -27,7 +27,7 @@ use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi, T
 use crate::commands::code_aux::{smart_approval_from_config, SmartApproval};
 use crate::commands::code_ask_user::AskUserTool;
 use crate::commands::code_guardrail::{GuardrailTool, ToolGuardrailState};
-use crate::commands::code_mcp_tool::{named_mcp_tools, McpCallTool};
+use crate::commands::code_mcp_tool::{cached_mcp_context_tools, named_mcp_tools, McpCallTool};
 use crate::commands::code_notification::PushNotificationTool;
 use crate::commands::code_path_safety::{
     is_path_mutation_tool, safe_root_from_env, PathSafetyTool,
@@ -333,6 +333,39 @@ mod tests {
     }
 
     #[test]
+    fn factory_registers_cached_mcp_resource_and_prompt_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(LibertaiConfig {
+            mcp_servers: std::collections::HashMap::from([(
+                "docs".to_string(),
+                crate::config::McpServerConfig {
+                    command: "server".to_string(),
+                    resources: vec![crate::config::McpResourceConfig {
+                        uri: "file:///repo/README.md".to_string(),
+                        ..crate::config::McpResourceConfig::default()
+                    }],
+                    prompts: vec![crate::config::McpPromptConfig {
+                        name: "summarize".to_string(),
+                        ..crate::config::McpPromptConfig::default()
+                    }],
+                    ..crate::config::McpServerConfig::default()
+                },
+            )]),
+            ..LibertaiConfig::default()
+        });
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            Some(cfg),
+        );
+        let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
+        assert!(registry.get("mcp_read_resource").is_some());
+        assert!(registry.get("mcp_get_prompt").is_some());
+    }
+
+    #[test]
     fn factory_skips_mcp_call_without_servers() {
         let temp = tempfile::tempdir().unwrap();
         let cfg = Arc::new(LibertaiConfig::default());
@@ -440,6 +473,9 @@ impl ToolFactory for LibertaiToolFactory {
                         .with_policy(self.tool_policy.clone())
                         .with_smart_approval(self.smart_approval.clone());
                         wrapped.push(Box::new(named));
+                    }
+                    for tool in cached_mcp_context_tools(Arc::clone(cfg)) {
+                        wrapped.push(tool);
                     }
                 }
             }

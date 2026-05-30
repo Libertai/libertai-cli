@@ -888,6 +888,257 @@ pub fn call_mcp_tool_with_config(
     }
 }
 
+pub fn call_mcp_method_with_config(
+    cfg: &Config,
+    server_name: &str,
+    method: &str,
+    params: serde_json::Value,
+    timeout: Option<u64>,
+) -> McpToolCallRun {
+    let server_name = server_name.trim();
+    let method = method.trim();
+    if server_name.is_empty() || method.is_empty() {
+        return McpToolCallRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: "MCP call requires server and method".to_string(),
+        };
+    }
+    let Some(server) = cfg.mcp_servers.get(server_name) else {
+        return McpToolCallRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: format!("MCP server `{server_name}` is not configured"),
+        };
+    };
+    let timeout = Duration::from_secs(timeout.filter(|secs| *secs > 0).unwrap_or(30));
+    let result = if !server.url.trim().is_empty() {
+        if server.transport.trim().eq_ignore_ascii_case("sse") {
+            call_mcp_legacy_sse_method(server, method, params, timeout)
+        } else {
+            call_mcp_http_method(server, method, params, timeout)
+        }
+    } else if !server.command.trim().is_empty() {
+        call_mcp_stdio_method(server, method, params, timeout)
+    } else {
+        Err(format!("MCP server `{server_name}` has no command or url"))
+    };
+    match result {
+        Ok(result) => McpToolCallRun {
+            status: 0,
+            stdout: mcp_result_output_text(&result),
+            stderr: String::new(),
+        },
+        Err(e) => McpToolCallRun {
+            status: 1,
+            stdout: String::new(),
+            stderr: format!("MCP {method} failed for `{server_name}`: {e}"),
+        },
+    }
+}
+
+fn call_mcp_stdio_method(
+    server: &crate::config::McpServerConfig,
+    method: &str,
+    params: serde_json::Value,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let mut cmd = Command::new(server.command.trim());
+    cmd.args(&server.args)
+        .envs(&server.env)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn MCP server: {e}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "MCP server did not expose stdin".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "MCP server did not expose stdout".to_string())?;
+    let (tx, rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        let _ = tx.send(trimmed.to_string());
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let result = (|| {
+        let init = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "libertai-cli",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            },
+        });
+        write_mcp_message(&mut stdin, &init)
+            .map_err(|e| format!("writing MCP initialize request: {e}"))?;
+        wait_for_mcp_response(&rx, 1, timeout)
+            .and_then(mcp_response_result)
+            .map_err(|e| format!("MCP initialize failed: {e}"))?;
+        write_mcp_message(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {},
+            }),
+        )
+        .map_err(|e| format!("writing MCP initialized notification: {e}"))?;
+        write_mcp_message(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": method,
+                "params": params,
+            }),
+        )
+        .map_err(|e| format!("writing MCP {method} request: {e}"))?;
+        wait_for_mcp_response(&rx, 2, timeout).and_then(mcp_response_result)
+    })();
+    let _ = stdin.flush();
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = reader.join();
+    result
+}
+
+fn call_mcp_http_method(
+    server: &crate::config::McpServerConfig,
+    method: &str,
+    params: serde_json::Value,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let url = server.url.trim();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| format!("building MCP HTTP client: {e}"))?;
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "libertai-cli",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+        },
+    });
+    let (init_response, session_id) = post_mcp_http_message(&client, server, url, &init, None, 1)?;
+    mcp_response_result(init_response).map_err(|e| format!("MCP initialize failed: {e}"))?;
+    post_mcp_http_notification(
+        &client,
+        server,
+        url,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {},
+        }),
+        session_id.as_deref(),
+    )?;
+    let (response, _) = post_mcp_http_message(
+        &client,
+        server,
+        url,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": method,
+            "params": params,
+        }),
+        session_id.as_deref(),
+        2,
+    )?;
+    mcp_response_result(response)
+}
+
+fn call_mcp_legacy_sse_method(
+    server: &crate::config::McpServerConfig,
+    method: &str,
+    params: serde_json::Value,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let url = server.url.trim();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| format!("building MCP SSE client: {e}"))?;
+    let stream = open_mcp_sse_stream(&client, server, url)?;
+    let (rx, _reader) = read_mcp_sse_stream(stream);
+    let endpoint = wait_for_mcp_sse_endpoint(&rx, url, timeout)?;
+    post_mcp_sse_message(
+        &client,
+        server,
+        &endpoint,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "libertai-cli",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            },
+        }),
+    )?;
+    wait_for_mcp_sse_response(&rx, 1, timeout)
+        .and_then(mcp_response_result)
+        .map_err(|e| format!("MCP initialize failed: {e}"))?;
+    post_mcp_sse_message(
+        &client,
+        server,
+        &endpoint,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {},
+        }),
+    )?;
+    post_mcp_sse_message(
+        &client,
+        server,
+        &endpoint,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": method,
+            "params": params,
+        }),
+    )?;
+    wait_for_mcp_sse_response(&rx, 2, timeout).and_then(mcp_response_result)
+}
+
 fn run_mcp_http_tool_hook(
     server_name: &str,
     server: &crate::config::McpServerConfig,
@@ -1437,6 +1688,29 @@ fn mcp_tool_output_text(result: &serde_json::Value) -> String {
         })
         .filter(|text| !text.trim().is_empty())
         .unwrap_or_else(|| result.to_string())
+}
+
+fn mcp_result_output_text(result: &serde_json::Value) -> String {
+    if result.get("content").is_some() {
+        return mcp_tool_output_text(result);
+    }
+    if let Some(messages) = result.get("messages").and_then(serde_json::Value::as_array) {
+        let text = messages
+            .iter()
+            .filter_map(|message| message.get("content"))
+            .filter_map(|content| {
+                content
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| content.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.trim().is_empty() {
+            return text;
+        }
+    }
+    result.to_string()
 }
 
 fn expand_allowed_env_vars(value: &str, allowed_env_vars: &[String]) -> String {
@@ -2162,6 +2436,23 @@ mod tests {
     }
 
     #[test]
+    fn mcp_result_output_text_reads_prompt_messages() {
+        let result = json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": { "type": "text", "text": "summarize this" }
+                },
+                {
+                    "role": "assistant",
+                    "content": { "type": "text", "text": "ok" }
+                }
+            ]
+        });
+        assert_eq!(mcp_result_output_text(&result), "summarize this\nok");
+    }
+
+    #[test]
     fn mcp_tool_hook_calls_stdio_server() {
         let hook = HookCommandConfig {
             hook_type: "mcp_tool".to_string(),
@@ -2196,6 +2487,41 @@ mod tests {
         let run = run_mcp_tool_hook_with_config(&hook, &json!({"event":"PreToolUse"}), &cfg);
         assert_eq!(run.status, 0, "stderr: {}", run.stderr);
         assert_eq!(run.stdout, "policy ok");
+    }
+
+    #[test]
+    fn mcp_method_call_reads_stdio_resource() {
+        let cfg = Config {
+            mcp_servers: HashMap::from([(
+                "docs".to_string(),
+                McpServerConfig {
+                    command: "sh".to_string(),
+                    args: vec![
+                        "-c".to_string(),
+                        concat!(
+                            "read init; ",
+                            "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}}}'; ",
+                            "read initialized; ",
+                            "read call; ",
+                            "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"contents\":[{\"uri\":\"file:///repo/README.md\",\"mimeType\":\"text/markdown\",\"text\":\"hello docs\"}]}}';"
+                        )
+                        .to_string(),
+                    ],
+                    env: HashMap::new(),
+                    ..McpServerConfig::default()
+                },
+            )]),
+            ..Config::default()
+        };
+        let run = call_mcp_method_with_config(
+            &cfg,
+            "docs",
+            "resources/read",
+            json!({"uri":"file:///repo/README.md"}),
+            Some(2),
+        );
+        assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+        assert!(run.stdout.contains("hello docs"));
     }
 
     #[test]

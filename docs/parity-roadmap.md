@@ -678,8 +678,8 @@ Unknown/less-common hook fields
 are flattened into each hook row and round-trip through TOML config saves.
 `/hooks` and `libertai status` report configured runnable hooks.
 
-Remaining work: any pi-level typed hook dispatcher and CLI MCP resource/prompt
-cache tools.
+Remaining work: any pi-level typed hook dispatcher and persistent/live CLI MCP
+connection management.
 
 **Files**: `src/config.rs`,
 `src/commands/code_hooks.rs`,
@@ -696,9 +696,11 @@ Streamable HTTP, and legacy SSE servers and list their tools/resources/prompts
 for diagnostics, and native CLI sessions now register an approval-gated
 generic `mcp_call` tool when `mcpServers` exist. Terminal config can now
 also preserve cached `tools = [...]` metadata per MCP server and expose
-enabled entries as named `mcp__server__tool` tools. It still does not
-expose live resource/prompt cache tools to the agent. Desktop owns the full
-stdio/HTTP/SSE live registry today.
+enabled entries as named `mcp__server__tool` tools, plus cached
+`resources = [...]` and `prompts = [...]` metadata through read-only
+`mcp_read_resource` and `mcp_get_prompt` tools. It still does not keep
+persistent MCP connections or live-refresh terminal discovery caches.
+Desktop owns the richest stdio/HTTP/SSE live registry today.
 
 **Files**: new `src/commands/code_mcp.rs` + transport modules.
 **Effort**: L (2+ weeks).

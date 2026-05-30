@@ -7661,7 +7661,7 @@ fn print_mcp_status(command: McpCommand) {
     match command {
         McpCommand::Status => {
             println!("{DIM}  terminal registry:{RESET} stdio, Streamable HTTP, and legacy SSE mcpServers from config.toml are available to MCP-tool hooks, mcp_call, and cached named MCP tools");
-            println!("{DIM}  native CLI tools:{RESET} generic mcp_call is registered when mcpServers exist; cached tools[] entries register as mcp__server__tool names");
+            println!("{DIM}  native CLI tools:{RESET} generic mcp_call is registered when mcpServers exist; cached tools[] register as mcp__server__tool names, resources[] as mcp_read_resource, and prompts[] as mcp_get_prompt");
             match crate::config::load() {
                 Ok(cfg) if cfg.mcp_servers.is_empty() => {
                     println!("{DIM}  configured servers:{RESET} 0");
@@ -7674,10 +7674,10 @@ fn print_mcp_status(command: McpCommand) {
                 }
             }
             println!(
-                "{DIM}  desktop:{RESET} Settings > MCP owns stdio/HTTP/SSE server discovery, probing, and richer tool/resource/prompt cache management"
+                "{DIM}  desktop:{RESET} Settings > MCP owns stdio/HTTP/SSE server discovery, probing, and richer cache management"
             );
             println!(
-                "{DIM}  tools:{RESET} CLI executes generic mcp_call, cached named mcp__server__tool entries, and MCP-tool hook handlers from mcpServers"
+                "{DIM}  tools:{RESET} CLI executes generic mcp_call, cached named mcp__server__tool entries, mcp_read_resource, mcp_get_prompt, and MCP-tool hook handlers from mcpServers"
             );
             println!("{DIM}  usage:{RESET} /mcp, /mcp status, /mcp probe, /mcp open");
         }
@@ -7726,7 +7726,7 @@ fn print_mcp_probe() {
         }
     }
     println!(
-        "{DIM}  note:{RESET} /mcp probe is terminal discovery only; generic mcp_call and cached tools[] named entries can call configured servers, but resource/prompt cache tools are still desktop-owned."
+        "{DIM}  note:{RESET} /mcp probe is terminal discovery only; generic mcp_call plus cached tool/resource/prompt entries can call configured servers."
     );
 }
 
