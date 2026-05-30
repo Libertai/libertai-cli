@@ -1435,6 +1435,10 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = thinking_command_arg(trimmed) {
+            if is_thinking_status_arg(rest) {
+                print_thinking_status(&handle);
+                continue;
+            }
             match parse_thinking_level(rest) {
                 Ok(level) => match handle.set_thinking_level(level).await {
                     Ok(()) => println!("{DIM}  → thinking set to {level}{RESET}"),
@@ -2368,6 +2372,13 @@ fn thinking_command_arg(input: &str) -> Option<&str> {
     None
 }
 
+fn is_thinking_status_arg(input: &str) -> bool {
+    matches!(
+        input.trim().to_ascii_lowercase().as_str(),
+        "" | "status" | "show" | "current" | "info"
+    )
+}
+
 fn mode_command_arg(input: &str) -> Option<(&str, &str)> {
     for command in ["/permissions", "/mode"] {
         if input == command {
@@ -2392,7 +2403,7 @@ fn name_command_arg(input: &str) -> Option<(&str, &str)> {
 fn parse_thinking_level(input: &str) -> Result<ThinkingLevel> {
     let raw = input.trim();
     if raw.is_empty() {
-        anyhow::bail!("usage: /thinking <off|minimal|low|medium|high|xhigh>");
+        anyhow::bail!("usage: /thinking [status|show|current|off|minimal|low|medium|high|xhigh]");
     }
     raw.parse::<ThinkingLevel>()
         .map_err(|_| anyhow::anyhow!("unknown thinking level `{raw}`"))
@@ -2403,7 +2414,7 @@ fn print_thinking_status(handle: &AgentSessionHandle) {
     println!("{BOLD}thinking{RESET}");
     println!("{DIM}  current:{RESET} {current}");
     println!("{DIM}  supported:{RESET} off, minimal, low, medium, high, xhigh");
-    println!("{DIM}  usage:{RESET} /thinking <level> (also /think or /t)");
+    println!("{DIM}  usage:{RESET} /thinking [status|show|current|level] (also /think or /t)");
 }
 
 /// Render a previously-saved conversation in the same shape the live REPL
@@ -10371,10 +10382,19 @@ mod tests {
     #[test]
     fn thinking_command_arg_accepts_aliases() {
         assert_eq!(thinking_command_arg("/thinking high"), Some("high"));
+        assert_eq!(thinking_command_arg("/thinking status"), Some("status"));
         assert_eq!(thinking_command_arg("/think low"), Some("low"));
+        assert_eq!(thinking_command_arg("/think show"), Some("show"));
         assert_eq!(thinking_command_arg("/t medium"), Some("medium"));
+        assert_eq!(thinking_command_arg("/t current"), Some("current"));
         assert_eq!(thinking_command_arg("/thinking"), None);
         assert_eq!(thinking_command_arg("/theme high"), None);
+        assert!(is_thinking_status_arg(""));
+        assert!(is_thinking_status_arg("status"));
+        assert!(is_thinking_status_arg("show"));
+        assert!(is_thinking_status_arg("current"));
+        assert!(is_thinking_status_arg("info"));
+        assert!(!is_thinking_status_arg("high"));
     }
 
     #[test]
