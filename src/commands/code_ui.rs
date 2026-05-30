@@ -1072,26 +1072,16 @@ async fn repl_loop(
         // Slash commands that take an argument (handled here, not in
         // the match above, since `match` doesn't pattern-match prefixes).
         if let Some(rest) = trimmed.strip_prefix("/config ") {
-            let action = rest.trim();
-            if action.eq_ignore_ascii_case("path") {
-                match crate::config::config_path() {
-                    Ok(path) => println!("{DIM}  config path: {}{RESET}", path.display()),
-                    Err(e) => eprintln!("{DIM}  /config path: {e:#}{RESET}"),
-                }
-            } else {
-                print_config_status(&cfg);
+            match handle_repl_config_command(rest, &mut cfg) {
+                Ok(()) => {}
+                Err(e) => eprintln!("{DIM}  /config: {e:#}{RESET}"),
             }
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/settings ") {
-            let action = rest.trim();
-            if action.eq_ignore_ascii_case("path") {
-                match crate::config::config_path() {
-                    Ok(path) => println!("{DIM}  config path: {}{RESET}", path.display()),
-                    Err(e) => eprintln!("{DIM}  /settings path: {e:#}{RESET}"),
-                }
-            } else {
-                print_config_status(&cfg);
+            match handle_repl_config_command(rest, &mut cfg) {
+                Ok(()) => {}
+                Err(e) => eprintln!("{DIM}  /settings: {e:#}{RESET}"),
             }
             continue;
         }
@@ -2210,7 +2200,7 @@ fn print_help() {
     println!("{DIM}  /usage    — show token usage for this REPL session (also /cost; /usage export [json|csv]){RESET}");
     println!("{DIM}  /history [count] — show recent submitted prompts{RESET}");
     println!("{DIM}  /copy     — copy the last assistant response to the terminal clipboard{RESET}");
-    println!("{DIM}  /config   — show active configuration summary (/settings is an alias){RESET}");
+    println!("{DIM}  /config [path|set <key> <value>|unset <key>] — show or update active config{RESET}");
     println!("{DIM}  /hooks    — show configured command hooks{RESET}");
     println!(
         "{DIM}  /statusline <template|command <shell>|reset> — customize the input-bar status line{RESET}"
@@ -6407,6 +6397,14 @@ fn print_config_status(cfg: &LibertaiConfig) {
         cfg.code_compaction_reserve_tokens,
         cfg.code_compaction_keep_recent_tokens
     );
+    println!(
+        "{DIM}  turn notifications:{RESET} {}",
+        if cfg.code_turn_notifications {
+            "on"
+        } else {
+            "off"
+        }
+    );
     let user_prompt_hooks = count_runnable_hooks(&cfg.hooks.user_prompt_submit);
     let pre_tool_hooks = count_runnable_hooks(&cfg.hooks.pre_tool_use);
     let post_tool_hooks = count_runnable_hooks(&cfg.hooks.post_tool_use);
@@ -6428,9 +6426,107 @@ fn print_config_status(cfg: &LibertaiConfig) {
         None => println!("{DIM}  auth:{RESET} not logged in"),
     }
     println!(
-        "{DIM}  edit:{RESET} libertai config show|path|set|unset, or use the desktop settings UI"
+        "{DIM}  edit:{RESET} /config set <key> <value>, /config unset <key>, or libertai config set|unset"
     );
     println!();
+}
+
+fn handle_repl_config_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Result<()> {
+    let action = raw.trim();
+    if action.is_empty()
+        || action.eq_ignore_ascii_case("show")
+        || action.eq_ignore_ascii_case("status")
+    {
+        print_config_status(cfg);
+        return Ok(());
+    }
+    if action.eq_ignore_ascii_case("path") {
+        let path = crate::config::config_path()?;
+        println!("{DIM}  config path: {}{RESET}", path.display());
+        return Ok(());
+    }
+
+    let mut parts = action.splitn(3, char::is_whitespace);
+    let verb = parts.next().unwrap_or("");
+    match verb {
+        "set" => {
+            let key = parts.next().unwrap_or("").trim();
+            let value = parts.next().unwrap_or("").trim();
+            if key.is_empty() || value.is_empty() {
+                anyhow::bail!("usage: /config set <key> <value>");
+            }
+            set_repl_config_value(cfg, key, value)?;
+            println!("{DIM}  config updated: {key} = {value}{RESET}");
+        }
+        "unset" | "reset" => {
+            let key = parts.next().unwrap_or("").trim();
+            if key.is_empty() || parts.next().is_some() {
+                anyhow::bail!("usage: /config unset <key>");
+            }
+            unset_repl_config_value(cfg, key)?;
+            println!("{DIM}  config reset: {key}{RESET}");
+        }
+        _ => print_config_status(cfg),
+    }
+    Ok(())
+}
+
+fn set_repl_config_value(cfg: &mut Arc<LibertaiConfig>, key: &str, value: &str) -> Result<()> {
+    let mut next = cfg.as_ref().clone();
+    match key {
+        "code_turn_notifications" => {
+            next.code_turn_notifications = value.parse::<bool>().with_context(|| {
+                format!("code_turn_notifications must be true or false, got {value}")
+            })?;
+        }
+        "code_auto_compaction_enabled" => {
+            next.code_auto_compaction_enabled = value.parse::<bool>().with_context(|| {
+                format!("code_auto_compaction_enabled must be true or false, got {value}")
+            })?;
+        }
+        "smart_approval_enabled" => {
+            next.smart_approval_enabled = value.parse::<bool>().with_context(|| {
+                format!("smart_approval_enabled must be true or false, got {value}")
+            })?;
+        }
+        "smart_approval_model" => {
+            if value.trim().is_empty() {
+                anyhow::bail!("smart_approval_model must not be empty");
+            }
+            next.smart_approval_model = value.to_string();
+        }
+        _ => anyhow::bail!(
+            "unsupported REPL config key `{key}`; use `libertai config set {key} <value>` outside the REPL"
+        ),
+    }
+    crate::config::save(&next).context("save config")?;
+    *cfg = Arc::new(next);
+    Ok(())
+}
+
+fn unset_repl_config_value(cfg: &mut Arc<LibertaiConfig>, key: &str) -> Result<()> {
+    let mut next = cfg.as_ref().clone();
+    match key {
+        "code_turn_notifications" => {
+            next.code_turn_notifications = crate::config::DEFAULT_CODE_TURN_NOTIFICATIONS;
+        }
+        "code_auto_compaction_enabled" => {
+            next.code_auto_compaction_enabled =
+                crate::config::DEFAULT_CODE_AUTO_COMPACTION_ENABLED;
+        }
+        "smart_approval_enabled" => {
+            next.smart_approval_enabled = crate::config::DEFAULT_SMART_APPROVAL_ENABLED;
+        }
+        "smart_approval_model" => {
+            next.smart_approval_model = crate::config::DEFAULT_SMART_APPROVAL_MODEL.to_string();
+        }
+        _ => anyhow::bail!(
+            "unsupported REPL config key `{key}`; use `libertai config unset {key}` outside the REPL"
+        ),
+    }
+    crate::config::save(&next).context("save config")?;
+    *cfg = Arc::new(next);
+    Ok(())
 }
 
 fn print_hooks_status(cfg: &LibertaiConfig) {

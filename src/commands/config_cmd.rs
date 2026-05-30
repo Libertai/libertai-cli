@@ -5,8 +5,9 @@ use crate::config::{
     self, config_path, mask_key, DEFAULT_API_BASE, DEFAULT_CHAT_MODEL, DEFAULT_CHECK_FOR_UPDATES,
     DEFAULT_CODE_AUTO_COMPACTION_ENABLED, DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS,
     DEFAULT_CODE_COMPACTION_RESERVE_TOKENS, DEFAULT_CODE_MODEL, DEFAULT_CODE_PROVIDER,
-    DEFAULT_FAST_MODEL, DEFAULT_HTTP_TIMEOUT_SECS, DEFAULT_IMAGE_MODEL, DEFAULT_OPUS_MODEL,
-    DEFAULT_SMART_APPROVAL_ENABLED, DEFAULT_SMART_APPROVAL_MODEL,
+    DEFAULT_CODE_TURN_NOTIFICATIONS, DEFAULT_FAST_MODEL, DEFAULT_HTTP_TIMEOUT_SECS,
+    DEFAULT_IMAGE_MODEL, DEFAULT_OPUS_MODEL, DEFAULT_SMART_APPROVAL_ENABLED,
+    DEFAULT_SMART_APPROVAL_MODEL,
 };
 
 pub fn run(action: ConfigAction) -> Result<()> {
@@ -87,6 +88,11 @@ fn set(key: &str, value: &str) -> Result<()> {
             cfg.code_compaction_keep_recent_tokens =
                 parse_positive_u32("code_compaction_keep_recent_tokens", value)?;
         }
+        "code_turn_notifications" => {
+            cfg.code_turn_notifications = value.parse::<bool>().with_context(|| {
+                format!("code_turn_notifications must be true or false, got {value}")
+            })?;
+        }
         k if k.starts_with("auth.") => bail!(
             "'{k}' is managed by `libertai login`; edit manually at {} if you know what you're doing",
             config_path()?.display()
@@ -118,6 +124,7 @@ fn unset(key: &str) -> Result<()> {
             cfg.code_auto_compaction_enabled = DEFAULT_CODE_AUTO_COMPACTION_ENABLED;
             cfg.code_compaction_reserve_tokens = DEFAULT_CODE_COMPACTION_RESERVE_TOKENS;
             cfg.code_compaction_keep_recent_tokens = DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS;
+            cfg.code_turn_notifications = DEFAULT_CODE_TURN_NOTIFICATIONS;
             cfg.hooks = Default::default();
         }
         "api_base" => cfg.api_base = DEFAULT_API_BASE.into(),
@@ -149,6 +156,7 @@ fn unset(key: &str) -> Result<()> {
         "code_compaction_keep_recent_tokens" => {
             cfg.code_compaction_keep_recent_tokens = DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS
         }
+        "code_turn_notifications" => cfg.code_turn_notifications = DEFAULT_CODE_TURN_NOTIFICATIONS,
         "hooks" => cfg.hooks = Default::default(),
         k if k.starts_with("auth.") => bail!(
             "'{k}' is managed by `libertai login`/`libertai logout`; unset is not supported"
