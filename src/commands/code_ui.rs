@@ -1045,7 +1045,7 @@ async fn repl_loop(
                 print_init_project(None);
                 continue;
             }
-            "/onboarding" => {
+            "/onboarding" | "/onboard" => {
                 write_onboarding_guide(None);
                 continue;
             }
@@ -1437,8 +1437,8 @@ async fn repl_loop(
             share_transcript(&handle, Some(rest.trim())).await;
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("/onboarding ") {
-            write_onboarding_guide(Some(rest.trim()));
+        if let Some(rest) = onboarding_command_arg(trimmed) {
+            write_onboarding_guide(Some(rest));
             continue;
         }
         if let Some(rest) = pr_comments_draft_arg(trimmed) {
@@ -2318,7 +2318,7 @@ fn print_help() {
     println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
     println!("{DIM}  /skills [list|open|enable <name>|disable <name>] — manage code-agent skills for new sessions{RESET}");
     println!("{DIM}  /init [--agent|from-agent append|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}");
-    println!("{DIM}  /onboarding [save|path] — write a local project onboarding guide{RESET}");
+    println!("{DIM}  /onboarding|/onboard [save|path] — write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
     println!("{DIM}  /agents   — list named sub-agents (/agents open shows agent paths){RESET}");
     println!("{DIM}  /agents create [--worktree] <name> [description] — create a project sub-agent{RESET}");
@@ -3705,6 +3705,16 @@ fn mcp_command_arg(trimmed: &str) -> Option<&str> {
     match trimmed {
         "/mcp" => Some(""),
         _ => trimmed.strip_prefix("/mcp ").map(str::trim),
+    }
+}
+
+fn onboarding_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/onboarding" | "/onboard" => Some(""),
+        _ => trimmed
+            .strip_prefix("/onboarding ")
+            .or_else(|| trimmed.strip_prefix("/onboard "))
+            .map(str::trim),
     }
 }
 
@@ -8738,6 +8748,18 @@ mod tests {
         assert_eq!(parse_mcp_command("open"), McpCommand::Open);
         assert_eq!(parse_mcp_command("settings"), McpCommand::Open);
         assert_eq!(parse_mcp_command("probe"), McpCommand::Usage);
+    }
+
+    #[test]
+    fn onboarding_command_arg_accepts_desktop_alias() {
+        assert_eq!(onboarding_command_arg("/onboarding"), Some(""));
+        assert_eq!(onboarding_command_arg("/onboarding save"), Some("save"));
+        assert_eq!(onboarding_command_arg("/onboard"), Some(""));
+        assert_eq!(
+            onboarding_command_arg("/onboard save guide.md"),
+            Some("save guide.md")
+        );
+        assert_eq!(onboarding_command_arg("/oneboarding save"), None);
     }
 
     #[test]
