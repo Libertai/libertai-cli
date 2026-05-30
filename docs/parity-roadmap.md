@@ -814,7 +814,10 @@ future code sessions, and `/mcp reset` closes live terminal stdio MCP
 sessions. Terminal `/mcp show
 <server>` inspects one configured server without exposing secret
 env/header values, including transport, target, cache counts, and cached
-tools/resources/prompts.
+tools/resources/prompts. Agent-callable terminal MCP calls also attach
+structured per-call diagnostics to tool details, including operation,
+server, subject, transport, timeout, elapsed time, status, stdout/stderr,
+and raw MCP result data on success.
 
 **Files**: new `src/commands/code_mcp.rs` + transport modules.
 **Effort**: L (2+ weeks).

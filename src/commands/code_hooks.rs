@@ -495,11 +495,15 @@ struct HookRun {
     stderr: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct McpToolCallRun {
     pub status: i32,
     pub stdout: String,
     pub stderr: String,
+    pub transport: String,
+    pub timeout_ms: u64,
+    pub elapsed_ms: u64,
+    pub raw: Option<serde_json::Value>,
 }
 
 struct PersistentStdioMcpClient {
@@ -1027,6 +1031,10 @@ pub fn call_mcp_method_with_config(
             status: 1,
             stdout: String::new(),
             stderr: "MCP call requires server and method".to_string(),
+            transport: String::new(),
+            timeout_ms: 0,
+            elapsed_ms: 0,
+            raw: None,
         };
     }
     let Some(server) = cfg.mcp_servers.get(server_name) else {
@@ -1034,30 +1042,59 @@ pub fn call_mcp_method_with_config(
             status: 1,
             stdout: String::new(),
             stderr: format!("MCP server `{server_name}` is not configured"),
+            transport: String::new(),
+            timeout_ms: 0,
+            elapsed_ms: 0,
+            raw: None,
         };
     };
     let timeout = Duration::from_secs(timeout.filter(|secs| *secs > 0).unwrap_or(30));
-    let result = if !server.url.trim().is_empty() {
+    let started = Instant::now();
+    let (transport, result) = if !server.url.trim().is_empty() {
         if server.transport.trim().eq_ignore_ascii_case("sse") {
-            call_mcp_legacy_sse_method(server, method, params, timeout)
+            (
+                "sse".to_string(),
+                call_mcp_legacy_sse_method(server, method, params, timeout),
+            )
         } else {
-            call_mcp_http_method(server, method, params, timeout)
+            (
+                if server.transport.trim().is_empty() {
+                    "http".to_string()
+                } else {
+                    server.transport.trim().to_ascii_lowercase()
+                },
+                call_mcp_http_method(server, method, params, timeout),
+            )
         }
     } else if !server.command.trim().is_empty() {
-        call_mcp_stdio_method(server_name, server, method, params, timeout)
+        (
+            "stdio".to_string(),
+            call_mcp_stdio_method(server_name, server, method, params, timeout),
+        )
     } else {
-        Err(format!("MCP server `{server_name}` has no command or url"))
+        (
+            String::new(),
+            Err(format!("MCP server `{server_name}` has no command or url")),
+        )
     };
     match result {
         Ok(result) => McpToolCallRun {
             status: 0,
             stdout: mcp_result_output_text(&result),
             stderr: String::new(),
+            transport,
+            timeout_ms: timeout.as_millis() as u64,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            raw: Some(result),
         },
         Err(e) => McpToolCallRun {
             status: 1,
             stdout: String::new(),
             stderr: format!("MCP {method} failed for `{server_name}`: {e}"),
+            transport,
+            timeout_ms: timeout.as_millis() as u64,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            raw: None,
         },
     }
 }

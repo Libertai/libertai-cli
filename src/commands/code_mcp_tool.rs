@@ -181,14 +181,7 @@ impl Tool for McpCallTool {
             parsed.arguments,
             timeout,
         );
-        let details = json!({
-            "operation": "tools/call",
-            "server": server,
-            "tool": tool,
-            "status": run.status,
-            "stdout": run.stdout,
-            "stderr": run.stderr,
-        });
+        let details = mcp_run_details("tools/call", server, "tool", tool, &run);
         if run.status == 0 {
             Ok(output(false, run.stdout, Some(details)))
         } else {
@@ -254,7 +247,7 @@ impl Tool for McpReadResourceTool {
             json!({ "uri": uri }),
             parsed.timeout,
         );
-        Ok(mcp_run_output("resources/read", server, uri, run))
+        Ok(mcp_run_output("resources/read", server, "uri", uri, run))
     }
 
     fn is_read_only(&self) -> bool {
@@ -317,7 +310,7 @@ impl Tool for McpGetPromptTool {
             json!({ "name": name, "arguments": arguments }),
             parsed.timeout,
         );
-        Ok(mcp_run_output("prompts/get", server, name, run))
+        Ok(mcp_run_output("prompts/get", server, "prompt", name, run))
     }
 
     fn is_read_only(&self) -> bool {
@@ -356,14 +349,7 @@ impl Tool for NamedMcpTool {
             input,
             None,
         );
-        let details = json!({
-            "operation": "tools/call",
-            "server": self.server,
-            "tool": self.tool,
-            "status": run.status,
-            "stdout": run.stdout,
-            "stderr": run.stderr,
-        });
+        let details = mcp_run_details("tools/call", &self.server, "tool", &self.tool, &run);
         if run.status == 0 {
             Ok(output(false, run.stdout, Some(details)))
         } else {
@@ -481,17 +467,11 @@ fn output(is_error: bool, text: String, details: Option<serde_json::Value>) -> T
 fn mcp_run_output(
     operation: &str,
     server: &str,
+    subject_key: &str,
     subject: &str,
     run: crate::commands::code_hooks::McpToolCallRun,
 ) -> ToolExecution {
-    let details = json!({
-        "operation": operation,
-        "server": server,
-        "subject": subject,
-        "status": run.status,
-        "stdout": run.stdout,
-        "stderr": run.stderr,
-    });
+    let details = mcp_run_details(operation, server, subject_key, subject, &run);
     if run.status == 0 {
         output(false, run.stdout, Some(details))
     } else {
@@ -502,6 +482,35 @@ fn mcp_run_output(
         };
         output(true, message, Some(details))
     }
+}
+
+fn mcp_run_details(
+    operation: &str,
+    server: &str,
+    subject_key: &str,
+    subject: &str,
+    run: &crate::commands::code_hooks::McpToolCallRun,
+) -> serde_json::Value {
+    let mut details = serde_json::Map::new();
+    details.insert("kind".to_string(), json!("mcp_call_diagnostics"));
+    details.insert("operation".to_string(), json!(operation));
+    details.insert(
+        "status".to_string(),
+        json!(if run.status == 0 { "ok" } else { "error" }),
+    );
+    details.insert("server".to_string(), json!(server));
+    details.insert(subject_key.to_string(), json!(subject));
+    if !run.transport.trim().is_empty() {
+        details.insert("transport".to_string(), json!(run.transport));
+    }
+    details.insert("timeoutMs".to_string(), json!(run.timeout_ms));
+    details.insert("elapsedMs".to_string(), json!(run.elapsed_ms));
+    details.insert("stdout".to_string(), json!(run.stdout));
+    details.insert("stderr".to_string(), json!(run.stderr));
+    if let Some(raw) = &run.raw {
+        details.insert("raw".to_string(), raw.clone());
+    }
+    serde_json::Value::Object(details)
 }
 
 #[cfg(test)]
@@ -649,6 +658,29 @@ mod tests {
                 .join("\n");
             assert!(text.contains("MCP server `docs` is not configured"));
         });
+    }
+
+    #[test]
+    fn mcp_run_details_match_desktop_diagnostics_shape() {
+        let run = crate::commands::code_hooks::McpToolCallRun {
+            status: 0,
+            stdout: "ok".to_string(),
+            stderr: String::new(),
+            transport: "stdio".to_string(),
+            timeout_ms: 30_000,
+            elapsed_ms: 12,
+            raw: Some(json!({"content":[{"type":"text","text":"ok"}]})),
+        };
+        let details = mcp_run_details("tools/call", "docs", "tool", "search", &run);
+        assert_eq!(details["kind"], json!("mcp_call_diagnostics"));
+        assert_eq!(details["operation"], json!("tools/call"));
+        assert_eq!(details["status"], json!("ok"));
+        assert_eq!(details["server"], json!("docs"));
+        assert_eq!(details["tool"], json!("search"));
+        assert_eq!(details["transport"], json!("stdio"));
+        assert_eq!(details["timeoutMs"], json!(30_000));
+        assert_eq!(details["elapsedMs"], json!(12));
+        assert_eq!(details["raw"]["content"][0]["text"], json!("ok"));
     }
 
     #[test]
