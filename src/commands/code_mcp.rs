@@ -63,7 +63,7 @@ fn probe_server(name: &str, server: &McpServerConfig, timeout: Duration) -> McpS
     let transport = mcp_transport_label(server);
     let result = if !server.url.trim().is_empty() {
         if server.transport.trim().eq_ignore_ascii_case("sse") {
-            Err("legacy SSE probing is not implemented in the terminal CLI yet".to_string())
+            probe_legacy_sse_server(server, timeout)
         } else {
             probe_http_server(server, timeout)
         }
@@ -271,6 +271,200 @@ fn probe_http_server(
         }
     }
     Ok(inventory)
+}
+
+fn probe_legacy_sse_server(
+    server: &McpServerConfig,
+    timeout: Duration,
+) -> Result<McpInventory, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = server.url.trim();
+    let stream = open_mcp_sse_stream(&client, server, url)?;
+    let (rx, _reader) = read_mcp_sse_stream(stream);
+    let endpoint = wait_for_mcp_sse_endpoint(&rx, url, timeout)?;
+    post_mcp_sse_message(&client, server, &endpoint, &initialize_request(1))?;
+    let init = wait_for_mcp_sse_response(&rx, 1, timeout)?;
+    mcp_response_result(init).map_err(|e| format!("initialize failed: {e}"))?;
+    post_mcp_sse_message(&client, server, &endpoint, &initialized_notification())?;
+
+    let mut inventory = McpInventory::default();
+    for request in [
+        ("tools/list", 2_u64, "tools"),
+        ("resources/list", 3_u64, "resources"),
+        ("prompts/list", 4_u64, "prompts"),
+    ] {
+        let (method, id, key) = request;
+        match post_mcp_sse_message(&client, server, &endpoint, &list_request(id, method))
+            .and_then(|()| wait_for_mcp_sse_response(&rx, id, timeout))
+            .and_then(mcp_response_result)
+        {
+            Ok(result) => inventory.extend(key, &result),
+            Err(e) => inventory.diagnostics.push(format!("{method}: {e}")),
+        }
+    }
+    Ok(inventory)
+}
+
+fn open_mcp_sse_stream(
+    client: &reqwest::blocking::Client,
+    server: &McpServerConfig,
+    url: &str,
+) -> Result<reqwest::blocking::Response, String> {
+    let mut request = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .header("mcp-protocol-version", "2025-03-26");
+    for (name, value) in &server.headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    let response = request.send().map_err(|e| e.to_string())?;
+    let status = response.status();
+    if status.is_success() {
+        Ok(response)
+    } else {
+        Err(format!("HTTP {status}"))
+    }
+}
+
+fn post_mcp_sse_message(
+    client: &reqwest::blocking::Client,
+    server: &McpServerConfig,
+    endpoint: &str,
+    message: &serde_json::Value,
+) -> Result<(), String> {
+    let mut request = client
+        .post(endpoint)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header("mcp-protocol-version", "2025-03-26")
+        .json(message);
+    for (name, value) in &server.headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    let response = request.send().map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body = response.text().map_err(|e| e.to_string())?;
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("HTTP {status}: {}", body.trim()))
+    }
+}
+
+#[derive(Debug)]
+struct SseEvent {
+    event: String,
+    data: String,
+}
+
+fn read_mcp_sse_stream(
+    response: reqwest::blocking::Response,
+) -> (mpsc::Receiver<SseEvent>, thread::JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut reader = BufReader::new(response);
+        let mut line = String::new();
+        let mut event = String::new();
+        let mut data = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
+                    if trimmed.is_empty() {
+                        if !event.is_empty() || !data.is_empty() {
+                            let _ = tx.send(SseEvent {
+                                event: if event.is_empty() {
+                                    "message".to_string()
+                                } else {
+                                    event.clone()
+                                },
+                                data: data.join("\n"),
+                            });
+                            event.clear();
+                            data.clear();
+                        }
+                        continue;
+                    }
+                    if let Some(value) = trimmed.strip_prefix("event:") {
+                        event = value.trim_start().to_string();
+                    } else if let Some(value) = trimmed.strip_prefix("data:") {
+                        data.push(value.trim_start().to_string());
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (rx, reader)
+}
+
+fn wait_for_mcp_sse_endpoint(
+    rx: &mpsc::Receiver<SseEvent>,
+    base_url: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let event = wait_for_mcp_sse_event(rx, timeout, |event| {
+        event.event == "endpoint" || event.data.starts_with('/') || event.data.starts_with("http")
+    })?;
+    resolve_mcp_sse_endpoint(base_url, event.data.trim())
+}
+
+fn wait_for_mcp_sse_response(
+    rx: &mpsc::Receiver<SseEvent>,
+    id: u64,
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let event = wait_for_mcp_sse_event(rx, timeout, |event| {
+        serde_json::from_str::<serde_json::Value>(&event.data)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("id")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|found| found == id)
+            })
+            .unwrap_or(false)
+    })?;
+    serde_json::from_str::<serde_json::Value>(&event.data)
+        .map_err(|e| format!("invalid MCP SSE JSON response: {e}"))
+}
+
+fn wait_for_mcp_sse_event<F>(
+    rx: &mpsc::Receiver<SseEvent>,
+    timeout: Duration,
+    mut matches: F,
+) -> Result<SseEvent, String>
+where
+    F: FnMut(&SseEvent) -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("timed out waiting for SSE event".to_string());
+        }
+        let event = rx
+            .recv_timeout(remaining)
+            .map_err(|_| "timed out waiting for SSE event".to_string())?;
+        if matches(&event) {
+            return Ok(event);
+        }
+    }
+}
+
+fn resolve_mcp_sse_endpoint(base_url: &str, endpoint: &str) -> Result<String, String> {
+    if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        return Ok(endpoint.to_string());
+    }
+    let base = url::Url::parse(base_url).map_err(|e| e.to_string())?;
+    base.join(endpoint)
+        .map(|url| url.to_string())
+        .map_err(|e| e.to_string())
 }
 
 impl McpInventory {
@@ -507,5 +701,134 @@ mod tests {
         assert_eq!(report.servers[0].transport, "stdio");
         assert_eq!(report.servers[0].status, McpProbeStatus::Error);
         assert!(report.servers[0].diagnostics[0].contains("no command or url"));
+    }
+
+    #[test]
+    fn probe_legacy_sse_server_lists_inventory() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+
+        fn accept_with_timeout(listener: &TcpListener) -> TcpStream {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => return stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            panic!("timed out accepting legacy SSE probe connection");
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("accepting legacy SSE probe connection: {e}"),
+                }
+            }
+        }
+
+        fn write_sse_chunk(stream: &mut impl Write, event: &str) {
+            write!(stream, "{:x}\r\n{}\r\n", event.len(), event).unwrap();
+            stream.flush().unwrap();
+        }
+
+        fn read_request(stream: &mut TcpStream) -> String {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut buf = [0u8; 8192];
+            let mut text = String::new();
+            loop {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if text.contains("\r\n\r\n") {
+                    let header_end = text.find("\r\n\r\n").unwrap() + 4;
+                    let headers = &text[..header_end];
+                    let content_len = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if text.len() >= header_end + content_len {
+                        break;
+                    }
+                }
+            }
+            text
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut sse_stream = accept_with_timeout(&listener);
+            let response =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n";
+            sse_stream.write_all(response.as_bytes()).unwrap();
+            write_sse_chunk(
+                &mut sse_stream,
+                &format!("event: endpoint\ndata: http://{addr}/messages\n\n"),
+            );
+
+            for idx in 0..5 {
+                let mut post_stream = accept_with_timeout(&listener);
+                let request = read_request(&mut post_stream);
+                let post_response =
+                    "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                post_stream.write_all(post_response.as_bytes()).unwrap();
+                let event = match idx {
+                    0 => Some(
+                        "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{}}}\n\n",
+                    ),
+                    2 => {
+                        assert!(request.contains("\"method\":\"tools/list\""));
+                        Some(
+                            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"search\"}]}}\n\n",
+                        )
+                    }
+                    3 => {
+                        assert!(request.contains("\"method\":\"resources/list\""));
+                        Some(
+                            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"resources\":[{\"uri\":\"file:///tmp/a\"}]}}\n\n",
+                        )
+                    }
+                    4 => {
+                        assert!(request.contains("\"method\":\"prompts/list\""));
+                        Some(
+                            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"prompts\":[{\"name\":\"review\"}]}}\n\n",
+                        )
+                    }
+                    _ => None,
+                };
+                if let Some(event) = event {
+                    write_sse_chunk(&mut sse_stream, event);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        });
+
+        let cfg = Config {
+            mcp_servers: std::collections::HashMap::from([(
+                "policy".to_string(),
+                McpServerConfig {
+                    transport: "sse".to_string(),
+                    url: format!("http://{addr}/sse"),
+                    ..McpServerConfig::default()
+                },
+            )]),
+            ..Config::default()
+        };
+        let report = probe_configured_servers(&cfg, Duration::from_secs(2));
+        handle.join().unwrap();
+        assert_eq!(report.servers.len(), 1);
+        let server = &report.servers[0];
+        assert_eq!(server.status, McpProbeStatus::Ok, "{:?}", server.diagnostics);
+        assert_eq!(server.transport, "legacy-sse");
+        assert_eq!(server.tools, vec!["search"]);
+        assert_eq!(server.resources, vec!["file:///tmp/a"]);
+        assert_eq!(server.prompts, vec!["review"]);
     }
 }
