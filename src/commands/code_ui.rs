@@ -1016,9 +1016,7 @@ async fn repl_loop(
             match parse_abort_command(rest) {
                 AbortCommand::Status => println!("{}", abort_status_message()),
                 AbortCommand::Usage => {
-                    println!(
-                        "{DIM}  usage:{RESET} /abort, /abort status, /abort cancel, or /abort stop"
-                    );
+                    println!("{DIM}  usage:{RESET} {}", abort_usage_text());
                 }
             }
             continue;
@@ -2586,7 +2584,7 @@ fn print_help() {
     println!("{DIM}  /name <name> — set this session's display name (also /rename){RESET}");
     println!("{DIM}  /status   — show current REPL session status{RESET}");
     println!("{DIM}  /doctor   — run a local session/config diagnostic report{RESET}");
-    println!("{DIM}  /abort    — show how to interrupt the active CLI turn{RESET}");
+    println!("{DIM}  /abort [status|cancel|stop|interrupt] — show how to interrupt the active CLI turn{RESET}");
     println!("{DIM}  /review [scope] — ask the agent to review current code changes{RESET}");
     println!("{DIM}  /security-review [scope] — ask for a focused security review{RESET}");
     println!("{DIM}  /pr_comments [scope] — ask the agent to inspect PR review comments{RESET}");
@@ -4354,6 +4352,10 @@ fn parse_abort_command(input: &str) -> AbortCommand {
         }
         _ => AbortCommand::Usage,
     }
+}
+
+fn abort_usage_text() -> &'static str {
+    "/abort, /abort status, /abort cancel, /abort stop, or /abort interrupt"
 }
 
 fn parse_notify_command(input: &str) -> NotifyCommand {
@@ -12359,6 +12361,7 @@ mod tests {
         assert_eq!(parse_abort_command("stop"), AbortCommand::Status);
         assert_eq!(parse_abort_command("interrupt"), AbortCommand::Status);
         assert_eq!(parse_abort_command("open"), AbortCommand::Usage);
+        assert!(abort_usage_text().contains("/abort interrupt"));
     }
 
     #[test]
