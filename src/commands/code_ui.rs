@@ -10447,6 +10447,9 @@ mod tests {
                 description: String::new(),
                 allowed_tools: None,
                 source: "builtin".to_string(),
+                source_kind: "builtin".to_string(),
+                path: None,
+                agent_created: false,
                 enabled: true,
             },
             crate::commands::code_skills::SkillInventoryEntry {
@@ -10454,6 +10457,9 @@ mod tests {
                 description: String::new(),
                 allowed_tools: None,
                 source: "project".to_string(),
+                source_kind: "project".to_string(),
+                path: Some(PathBuf::from("/tmp/project-review")),
+                agent_created: false,
                 enabled: false,
             },
         ];

@@ -53,12 +53,32 @@ pub enum SkillSource {
     User(PathBuf),
 }
 
+impl SkillSource {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Project(_) => "project",
+            Self::User(_) => "user",
+        }
+    }
+
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Builtin => None,
+            Self::Project(path) | Self::User(path) => Some(path.as_path()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillInventoryEntry {
     pub name: String,
     pub description: String,
     pub allowed_tools: Option<String>,
     pub source: String,
+    pub source_kind: String,
+    pub path: Option<PathBuf>,
+    pub agent_created: bool,
     pub enabled: bool,
 }
 
@@ -145,12 +165,23 @@ pub fn skill_inventory(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Vec<Sk
     let disabled = load_disabled_skill_names()?;
     Ok(collect_matching_skills(pillar, cwd)?
         .into_iter()
-        .map(|skill| SkillInventoryEntry {
-            enabled: !disabled.contains(&skill.name),
-            name: skill.name,
-            description: skill.description,
-            allowed_tools: skill.allowed_tools,
-            source: source_label(&skill.source),
+        .map(|skill| {
+            let agent_created = skill
+                .metadata
+                .get("libertai.created_by")
+                .or_else(|| skill.metadata.get("libertai.created-by"))
+                .map(|value| value.eq_ignore_ascii_case("agent"))
+                .unwrap_or(false);
+            SkillInventoryEntry {
+                enabled: !disabled.contains(&skill.name),
+                name: skill.name,
+                description: skill.description,
+                allowed_tools: skill.allowed_tools,
+                source: source_label(&skill.source),
+                source_kind: skill.source.kind().to_string(),
+                path: skill.source.path().map(Path::to_path_buf),
+                agent_created,
+            }
         })
         .collect())
 }
@@ -457,12 +488,23 @@ mod tests {
         let entries = collect_matching_skills(SkillPillar::Code, None)
             .expect("skills")
             .into_iter()
-            .map(|skill| SkillInventoryEntry {
-                enabled: !disabled.contains(&skill.name),
-                name: skill.name,
-                description: skill.description,
-                allowed_tools: skill.allowed_tools,
-                source: source_label(&skill.source),
+            .map(|skill| {
+                let agent_created = skill
+                    .metadata
+                    .get("libertai.created_by")
+                    .or_else(|| skill.metadata.get("libertai.created-by"))
+                    .map(|value| value.eq_ignore_ascii_case("agent"))
+                    .unwrap_or(false);
+                SkillInventoryEntry {
+                    enabled: !disabled.contains(&skill.name),
+                    name: skill.name,
+                    description: skill.description,
+                    allowed_tools: skill.allowed_tools,
+                    source: source_label(&skill.source),
+                    source_kind: skill.source.kind().to_string(),
+                    path: skill.source.path().map(Path::to_path_buf),
+                    agent_created,
+                }
             })
             .collect::<Vec<_>>();
 
@@ -476,6 +518,34 @@ mod tests {
             .find(|skill| skill.name == "libertai-code-workflow")
             .expect("workflow");
         assert!(workflow.enabled);
+    }
+
+    #[test]
+    fn inventory_entry_carries_source_metadata() {
+        let skill = parse_skill_md(
+            "---\nname: proposed-skill\ndescription: Proposed skill.\nmetadata:\n  libertai.pillars: code\n  libertai.created_by: agent\n---\n# Body\n",
+            Some("proposed-skill"),
+            SkillSource::User(PathBuf::from("/tmp/proposed-skill")),
+        )
+        .expect("parse");
+        let entry = SkillInventoryEntry {
+            enabled: true,
+            name: skill.name,
+            description: skill.description,
+            allowed_tools: skill.allowed_tools,
+            source: source_label(&skill.source),
+            source_kind: skill.source.kind().to_string(),
+            path: skill.source.path().map(Path::to_path_buf),
+            agent_created: skill
+                .metadata
+                .get("libertai.created_by")
+                .map(|value| value.eq_ignore_ascii_case("agent"))
+                .unwrap_or(false),
+        };
+
+        assert_eq!(entry.source_kind, "user");
+        assert_eq!(entry.path.as_deref(), Some(Path::new("/tmp/proposed-skill")));
+        assert!(entry.agent_created);
     }
 
     #[test]
