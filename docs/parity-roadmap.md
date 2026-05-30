@@ -92,6 +92,10 @@ SDK; those are flagged **(upstream)**.
   Markdown onboarding guide from repo facts, commands, structure, and
   existing AGENTS/CLAUDE guidance, or publish it through the authenticated
   GitHub CLI with `/onboarding gist [public|secret] [filename.md]`.
+- **CLI `/init from-agent merge-lines`** — REPL users can apply the
+  latest assistant-proposed fenced `AGENTS.md candidate` by appending
+  only new lines inside matching `##` sections, preserving existing
+  section text instead of replacing whole headings.
 - **CLI `/compact` command** — REPL users can trigger pi's explicit
   compaction pass from the REPL, with optional user notes threaded
   into the summarization prompt.
@@ -437,8 +441,12 @@ is deterministic and based on visible repo docs/manifests
 plus common directory names. It now parses README title/summary,
 manifest names, exact package script bodies, Go modules, common config
 files such as Dockerfile / GitHub Actions / Makefile, and
-CONTRIBUTING/EditorConfig guidance. Remaining work is richer interactive
-merge application around agent-written prose.
+CONTRIBUTING/EditorConfig guidance. CLI and desktop
+`/init from-agent merge-lines` can now apply an assistant-proposed
+candidate by appending only new lines inside matching `##` sections,
+which gives a finer merge path for model-written guidance without
+replacing whole headings. Remaining work is richer interactive review
+controls around agent-written prose.
 
 ### 2E. `!` shell prefix in REPL
 
