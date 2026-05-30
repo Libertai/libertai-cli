@@ -209,6 +209,12 @@ enum IdeCommand {
     Usage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BugCommand {
+    Template,
+    Usage,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScopedModelsCommand {
     Status,
@@ -815,6 +821,16 @@ async fn repl_loop(
             print_ide_status(parse_ide_command(rest));
             continue;
         }
+        if let Some(rest) = bug_command_arg(trimmed) {
+            print_bug_command(
+                parse_bug_command(rest),
+                &provider,
+                &model,
+                mode.get(),
+                output_style.as_deref(),
+            );
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
@@ -1116,10 +1132,6 @@ async fn repl_loop(
             }
             "/mention" => {
                 println!("{DIM}  usage: /mention <path> [prompt]{RESET}");
-                continue;
-            }
-            "/bug" => {
-                print_bug_template(&provider, &model, mode.get(), output_style.as_deref());
                 continue;
             }
             "/clear" | "/new" => {
@@ -3880,6 +3892,13 @@ fn ide_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
+fn bug_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/bug" => Some(""),
+        _ => trimmed.strip_prefix("/bug ").map(str::trim),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HooksCommand {
     Status,
@@ -3923,6 +3942,13 @@ fn parse_ide_command(input: &str) -> IdeCommand {
         "" | "status" | "state" | "show" => IdeCommand::Status,
         "open" | "settings" | "edit" => IdeCommand::Open,
         _ => IdeCommand::Usage,
+    }
+}
+
+fn parse_bug_command(input: &str) -> BugCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "report" | "template" | "status" | "show" => BugCommand::Template,
+        _ => BugCommand::Usage,
     }
 }
 
@@ -4063,6 +4089,22 @@ fn print_ide_status(command: IdeCommand) {
         }
         IdeCommand::Usage => {
             println!("{DIM}  usage:{RESET} /ide, /ide status, or /ide open");
+        }
+    }
+}
+
+fn print_bug_command(
+    command: BugCommand,
+    provider: &str,
+    model: &str,
+    mode: Mode,
+    output_style: Option<&str>,
+) {
+    match command {
+        BugCommand::Template => print_bug_template(provider, model, mode, output_style),
+        BugCommand::Usage => {
+            println!("{BOLD}bug report{RESET}");
+            println!("{DIM}  usage:{RESET} /bug, /bug report, /bug template, or /bug status");
         }
     }
 }
@@ -10359,6 +10401,19 @@ mod tests {
         assert_eq!(parse_ide_command("open"), IdeCommand::Open);
         assert_eq!(parse_ide_command("settings"), IdeCommand::Open);
         assert_eq!(parse_ide_command("install"), IdeCommand::Usage);
+    }
+
+    #[test]
+    fn bug_command_arg_and_parser_capture_template_aliases() {
+        assert_eq!(bug_command_arg("/bug"), Some(""));
+        assert_eq!(bug_command_arg("/bug report"), Some("report"));
+        assert_eq!(bug_command_arg("/bug template"), Some("template"));
+        assert_eq!(bug_command_arg("/bugfix"), None);
+        assert_eq!(parse_bug_command(""), BugCommand::Template);
+        assert_eq!(parse_bug_command("report"), BugCommand::Template);
+        assert_eq!(parse_bug_command("template"), BugCommand::Template);
+        assert_eq!(parse_bug_command("status"), BugCommand::Template);
+        assert_eq!(parse_bug_command("open"), BugCommand::Usage);
     }
 
     #[test]

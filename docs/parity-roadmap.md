@@ -173,6 +173,9 @@ SDK; those are flagged **(upstream)**.
   `/ide status`, and `/ide open` handling so IDE integration requests
   report the current terminal/desktop handoff instead of falling through
   as agent text.
+- **CLI `/bug` command** — REPL users get explicit `/bug report`,
+  `/bug template`, and `/bug status` aliases for the diagnostic block so
+  bug-report requests do not fall through as agent text.
 - **CLI `/mode` and `/rename` aliases** — REPL users can use the
   desktop/Claude-style spellings for permission-mode switching and
   session naming.
