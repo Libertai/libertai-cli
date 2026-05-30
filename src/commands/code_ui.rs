@@ -2410,7 +2410,7 @@ fn print_help() {
     println!("{DIM}  {}{RESET}", scoped_models_usage_text());
     println!("{DIM}  /compact — compact older conversation history now{RESET}");
     println!("{DIM}  /loop [turns] [goal] — run bounded autonomous follow-up turns{RESET}");
-    println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|status){RESET}");
+    println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|stop|status|state; also /autorun, /continuous){RESET}");
     println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|cancel|clear){RESET}");
     println!("{DIM}  /send [target message] — show terminal inter-session send status{RESET}");
     println!("{DIM}  /notify on|off|status|test — turn-complete terminal notifications{RESET}");
@@ -9976,6 +9976,7 @@ mod tests {
         assert_eq!(auto_command_arg("/auto on 5 ship it"), Some("on 5 ship it"));
         assert_eq!(auto_command_arg("/autorun status"), Some("status"));
         assert_eq!(auto_command_arg("/continuous off"), Some("off"));
+        assert_eq!(auto_command_arg("/continuous state"), Some("state"));
         assert_eq!(auto_command_arg("/automatic"), None);
     }
 
@@ -10308,7 +10309,10 @@ mod tests {
     fn parse_auto_command_defaults_clamps_and_keeps_goal() {
         assert_eq!(parse_auto_command(""), AutoCommand::Status);
         assert_eq!(parse_auto_command("status"), AutoCommand::Status);
+        assert_eq!(parse_auto_command("state"), AutoCommand::Status);
         assert_eq!(parse_auto_command("off"), AutoCommand::Off);
+        assert_eq!(parse_auto_command("stop"), AutoCommand::Off);
+        assert_eq!(parse_auto_command("cancel"), AutoCommand::Off);
         assert_eq!(
             parse_auto_command("on 30 finish parity"),
             AutoCommand::On {
