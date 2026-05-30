@@ -2575,10 +2575,10 @@ fn print_help() {
     println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
     println!(
-        "{DIM}  /permissions [default|acceptEdits|accept-edits|plan|open|forget|bypassPermissions]{RESET}"
+        "{DIM}  /permissions [status|show|current|info|default|acceptEdits|accept-edits|plan|open|forget|bypassPermissions]{RESET}"
     );
     println!(
-        "{DIM}  /mode [default|acceptEdits|accept-edits|plan] — alias for /permissions{RESET}"
+        "{DIM}  /mode [status|show|current|default|acceptEdits|accept-edits|plan] — alias for /permissions{RESET}"
     );
     println!("{DIM}  {}{RESET}", model_usage_text());
     println!("{DIM}  /name <name> — set this session's display name (also /rename){RESET}");
@@ -3256,7 +3256,7 @@ fn detect_supported_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
 
 fn parse_permissions_command(input: &str) -> PermissionsCommand {
     match input.trim().to_ascii_lowercase().as_str() {
-        "" | "show" | "status" => PermissionsCommand::Show,
+        "" | "show" | "status" | "current" | "info" => PermissionsCommand::Show,
         "open" | "settings" | "approvals" => PermissionsCommand::Open,
         "default" | "normal" => PermissionsCommand::Set(Mode::Normal),
         "acceptedits" | "accept-edits" | "accept_edits" => {
@@ -12821,6 +12821,9 @@ mod tests {
     fn parse_permissions_command_handles_management_actions() {
         assert_eq!(parse_permissions_command(""), PermissionsCommand::Show);
         assert_eq!(parse_permissions_command("status"), PermissionsCommand::Show);
+        assert_eq!(parse_permissions_command("show"), PermissionsCommand::Show);
+        assert_eq!(parse_permissions_command("current"), PermissionsCommand::Show);
+        assert_eq!(parse_permissions_command("info"), PermissionsCommand::Show);
         assert_eq!(parse_permissions_command("open"), PermissionsCommand::Open);
         assert_eq!(
             parse_permissions_command("approvals"),
