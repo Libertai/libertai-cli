@@ -2466,6 +2466,9 @@ fn truncate_chars(text: &str, max: usize) -> String {
 }
 
 fn thinking_command_arg(input: &str) -> Option<&str> {
+    if matches!(input, "/thinking" | "/think" | "/t") {
+        return Some("");
+    }
     for prefix in ["/thinking ", "/think ", "/t "] {
         if let Some(rest) = input.strip_prefix(prefix) {
             return Some(rest.trim());
@@ -11844,7 +11847,9 @@ mod tests {
         assert_eq!(thinking_command_arg("/think show"), Some("show"));
         assert_eq!(thinking_command_arg("/t medium"), Some("medium"));
         assert_eq!(thinking_command_arg("/t current"), Some("current"));
-        assert_eq!(thinking_command_arg("/thinking"), None);
+        assert_eq!(thinking_command_arg("/thinking"), Some(""));
+        assert_eq!(thinking_command_arg("/think"), Some(""));
+        assert_eq!(thinking_command_arg("/t"), Some(""));
         assert_eq!(thinking_command_arg("/theme high"), None);
         assert!(is_thinking_status_arg(""));
         assert!(is_thinking_status_arg("status"));
