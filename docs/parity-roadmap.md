@@ -519,7 +519,8 @@ desktop composer escape and reuses the same bash wrapper argv when
 stdout/stderr/exit summaries are now attached to the next text prompt
 so the agent can reason from quick local shell checks without rerunning
 them.
-**Desktop note**: shipped on desktop (composer commit `7029b1b`).
+**Desktop note**: shipped on desktop, including `!!` repeat and
+next-prompt shell-output context.
 
 ---
 
