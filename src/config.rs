@@ -626,9 +626,13 @@ struct HookGroupDefaults {
     if_condition: String,
     enabled: bool,
     async_hook: bool,
+    continue_on_block: bool,
+    once: bool,
+    async_rewake: bool,
     timeout: Option<u64>,
     source: String,
     status_message: String,
+    shell: String,
     extra: BTreeMap<String, serde_json::Value>,
 }
 
@@ -657,6 +661,15 @@ fn deserialize_hook_rows(
             if defaults.async_hook {
                 child.async_hook = true;
             }
+            if defaults.continue_on_block {
+                child.continue_on_block = true;
+            }
+            if defaults.once {
+                child.once = true;
+            }
+            if defaults.async_rewake {
+                child.async_rewake = true;
+            }
             if child.timeout.is_none() {
                 child.timeout = defaults.timeout;
             }
@@ -665,6 +678,9 @@ fn deserialize_hook_rows(
             }
             if child.status_message.trim().is_empty() {
                 child.status_message = defaults.status_message.clone();
+            }
+            if child.shell.trim().is_empty() {
+                child.shell = defaults.shell.clone();
             }
             for (key, value) in &defaults.extra {
                 child.extra.entry(key.clone()).or_insert_with(|| value.clone());
@@ -702,6 +718,9 @@ fn hook_group_defaults(
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true),
         async_hook: json_bool_field(row, "async") || json_bool_field(row, "asyncHook"),
+        continue_on_block: json_bool_field(row, "continueOnBlock"),
+        once: json_bool_field(row, "once"),
+        async_rewake: json_bool_field(row, "asyncRewake"),
         timeout: timeout_from_json_value(row)?,
         source: row
             .get("source")
@@ -710,6 +729,11 @@ fn hook_group_defaults(
             .to_string(),
         status_message: row
             .get("statusMessage")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        shell: row
+            .get("shell")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string(),
@@ -788,9 +812,13 @@ fn is_known_hook_group_field(key: &str) -> bool {
             | "hooks"
             | "async"
             | "asyncHook"
+            | "continueOnBlock"
+            | "once"
+            | "asyncRewake"
             | "timeout"
             | "source"
             | "statusMessage"
+            | "shell"
     )
 }
 

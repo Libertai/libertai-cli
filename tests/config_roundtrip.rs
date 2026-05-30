@@ -293,6 +293,10 @@ if = "Bash(rm *)"
 timeout = "11"
 source = "project"
 asyncHook = true
+continueOnBlock = true
+once = true
+asyncRewake = true
+shell = "bash"
 teamFlag = "shared"
 
 [[hooks.PreToolUse.hooks]]
@@ -315,6 +319,10 @@ timeout = 3
     assert_eq!(command.timeout, Some(11));
     assert_eq!(command.source, "project");
     assert!(command.async_hook);
+    assert!(command.continue_on_block);
+    assert!(command.once);
+    assert!(command.async_rewake);
+    assert_eq!(command.shell, "bash");
     assert_eq!(command.extra.get("teamFlag"), Some(&json!("shared")));
 
     let http = &cfg.hooks.pre_tool_use[1];
@@ -325,10 +333,18 @@ timeout = 3
     assert_eq!(http.timeout, Some(3));
     assert_eq!(http.source, "project");
     assert!(http.async_hook);
+    assert!(http.continue_on_block);
+    assert!(http.once);
+    assert!(http.async_rewake);
+    assert_eq!(http.shell, "bash");
 
     let rendered = toml::to_string_pretty(&cfg).unwrap();
     assert!(rendered.contains(r#"matcher = "bash|write""#));
     assert!(rendered.contains(r#"command = "scripts/pre-tool-use.sh""#));
+    assert!(rendered.contains("continueOnBlock = true"));
+    assert!(rendered.contains("once = true"));
+    assert!(rendered.contains("asyncRewake = true"));
+    assert!(rendered.contains(r#"shell = "bash""#));
     assert!(!rendered.contains("[[hooks.PreToolUse.hooks]]"));
 }
 
