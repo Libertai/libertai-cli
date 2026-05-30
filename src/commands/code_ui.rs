@@ -2263,7 +2263,7 @@ fn print_help() {
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
     println!("{DIM}  /permissions [default|acceptEdits|plan|open|forget]{RESET}");
     println!("{DIM}  /mode [default|acceptEdits|plan] — alias for /permissions{RESET}");
-    println!("{DIM}  /model [model|provider/model]{RESET}");
+    println!("{DIM}  {}{RESET}", model_usage_text());
     println!("{DIM}  /name <name> — set this session's display name (also /rename){RESET}");
     println!("{DIM}  /status   — show current REPL session status{RESET}");
     println!("{DIM}  /doctor   — run a local session/config diagnostic report{RESET}");
@@ -2353,6 +2353,10 @@ fn print_help() {
     println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
     println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");
     println!();
+}
+
+fn model_usage_text() -> &'static str {
+    "/model [status|list|next|prev|model|provider/model]"
 }
 
 fn hotkey_lines() -> &'static [&'static str] {
@@ -3303,7 +3307,7 @@ fn print_model_status(
     } else {
         println!("{DIM}  scoped models:{RESET} {}", scoped_model_patterns.join(", "));
     }
-    println!("{DIM}  usage:{RESET} /model <model|provider/model>, /model list, /model next");
+    println!("{DIM}  usage:{RESET} {}", model_usage_text());
 }
 
 fn print_model_list(cfg: &LibertaiConfig, provider: &str, scoped_model_patterns: &[String]) {
@@ -9197,6 +9201,10 @@ mod tests {
 
     #[test]
     fn model_slash_command_cycles_scoped_models() {
+        assert_eq!(
+            model_usage_text(),
+            "/model [status|list|next|prev|model|provider/model]"
+        );
         assert_eq!(parse_model_slash_command(""), ModelSlashCommand::Status);
         assert_eq!(parse_model_slash_command("list"), ModelSlashCommand::List);
         assert_eq!(parse_model_slash_command("next"), ModelSlashCommand::Next);
