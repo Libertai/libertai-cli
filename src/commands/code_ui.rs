@@ -169,6 +169,7 @@ struct PrCommentDraft {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScheduleCommand {
     Status,
+    Show(String),
     Cancel(String),
     Clear,
     Add { delay: Duration, prompt: String },
@@ -1402,6 +1403,7 @@ async fn repl_loop(
         if let Some(rest) = schedule_command_arg(trimmed) {
             match parse_schedule_command(rest) {
                 ScheduleCommand::Status => print_schedule_status(&scheduled_runs),
+                ScheduleCommand::Show(id) => print_schedule_details(&scheduled_runs, &id),
                 ScheduleCommand::Cancel(id) => {
                     let before = scheduled_runs.len();
                     scheduled_runs.retain(|run| run.id != id);
@@ -1460,7 +1462,7 @@ async fn repl_loop(
                 }
                 ScheduleCommand::Usage => {
                     eprintln!(
-                        "{DIM}  usage: /schedule in 10m follow up, /schedule list|status|state, /schedule cancel <id>, or /schedule clear|stop (also /cron){RESET}"
+                        "{DIM}  usage: /schedule in 10m follow up, /schedule list|status|state, /schedule show <id>, /schedule cancel <id>, or /schedule clear|stop (also /cron){RESET}"
                     );
                 }
             }
@@ -4507,6 +4509,13 @@ fn parse_schedule_command(input: &str) -> ScheduleCommand {
     match head {
         "list" | "status" | "state" => ScheduleCommand::Status,
         "clear" | "stop" => ScheduleCommand::Clear,
+        "show" | "inspect" => {
+            if rest.is_empty() || rest.split_whitespace().nth(1).is_some() {
+                ScheduleCommand::Usage
+            } else {
+                ScheduleCommand::Show(rest.to_string())
+            }
+        }
         "cancel" | "delete" | "rm" => {
             if rest.is_empty() || rest.split_whitespace().nth(1).is_some() {
                 ScheduleCommand::Usage
@@ -4694,6 +4703,24 @@ fn print_schedule_status(scheduled_runs: &[ScheduledRun]) {
             run.prompt
         );
     }
+}
+
+fn print_schedule_details(scheduled_runs: &[ScheduledRun], id: &str) {
+    println!("{BOLD}schedule: {id}{RESET}");
+    let Some(run) = scheduled_runs.iter().find(|run| run.id == id) else {
+        println!("{DIM}  no scheduled prompt found for {id}.{RESET}");
+        return;
+    };
+    let now = Instant::now();
+    let remaining = run.due_at.saturating_duration_since(now);
+    let state = if run.due_at <= now { "due" } else { "pending" };
+    println!("{DIM}  state:{RESET} {state}");
+    println!(
+        "{DIM}  due in:{RESET} {}",
+        format_schedule_delay(remaining)
+    );
+    println!("{DIM}  due epoch ms:{RESET} {}", run.due_epoch_ms);
+    println!("{DIM}  prompt:{RESET} {}", run.prompt.replace('\n', " "));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12243,6 +12270,14 @@ mod tests {
         assert_eq!(parse_schedule_command("status"), ScheduleCommand::Status);
         assert_eq!(parse_schedule_command("state"), ScheduleCommand::Status);
         assert_eq!(
+            parse_schedule_command("show sch_2"),
+            ScheduleCommand::Show("sch_2".to_string())
+        );
+        assert_eq!(
+            parse_schedule_command("inspect sch_2"),
+            ScheduleCommand::Show("sch_2".to_string())
+        );
+        assert_eq!(
             parse_schedule_command("cancel sch_2"),
             ScheduleCommand::Cancel("sch_2".to_string())
         );
@@ -12250,6 +12285,10 @@ mod tests {
         assert_eq!(parse_schedule_command("stop"), ScheduleCommand::Clear);
         assert!(matches!(
             parse_schedule_command("cancel sch_2 extra"),
+            ScheduleCommand::Usage
+        ));
+        assert!(matches!(
+            parse_schedule_command("show sch_2 extra"),
             ScheduleCommand::Usage
         ));
         assert_eq!(
