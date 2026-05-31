@@ -1118,7 +1118,7 @@ async fn repl_loop(
         if let Some(rest) = help_command_arg(trimmed) {
             match parse_help_command(rest) {
                 HelpCommand::Show => print_help(),
-                HelpCommand::Json => print_help_json(),
+                HelpCommand::Json => print_help_json(rest),
                 HelpCommand::Usage => println!("{DIM}  usage:{RESET} {}", help_usage_text()),
             }
             continue;
@@ -3174,7 +3174,7 @@ fn help_command_rows() -> &'static [(&'static str, &'static [&'static str], &'st
     ]
 }
 
-fn help_json_payload() -> serde_json::Value {
+fn help_json_payload(query: &str) -> serde_json::Value {
     let commands: Vec<serde_json::Value> = help_command_rows()
         .iter()
         .map(|(name, aliases, description)| {
@@ -3190,6 +3190,7 @@ fn help_json_payload() -> serde_json::Value {
         "surface": "terminal",
         "command": "help",
         "aliases": ["help"],
+        "query": query.trim(),
         "commands": commands,
         "supported_actions": ["status", "show", "list", "commands", "json", "--json", "status --json", "show --json", "list --json", "commands --json"],
     })
@@ -3250,8 +3251,8 @@ fn help_command_arg_hint(command: &str) -> &'static str {
     }
 }
 
-fn print_help_json() {
-    match serde_json::to_string_pretty(&help_json_payload()) {
+fn print_help_json(query: &str) {
+    match serde_json::to_string_pretty(&help_json_payload(query)) {
         Ok(raw) => println!("{raw}"),
         Err(err) => eprintln!("{DIM}  failed to render help JSON: {err}{RESET}"),
     }
@@ -17100,10 +17101,11 @@ mod tests {
         assert_eq!(parse_help_command("commands --json"), HelpCommand::Json);
         assert!(help_usage_text().contains("list|commands|json|--json"));
         assert!(help_usage_text().contains("show --json|list --json|commands --json"));
-        let payload = help_json_payload();
+        let payload = help_json_payload("commands --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "help");
         assert_eq!(payload["aliases"][0], "help");
+        assert_eq!(payload["query"], "commands --json");
         assert!(payload["supported_actions"]
             .as_array()
             .unwrap()
