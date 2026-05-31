@@ -1126,7 +1126,7 @@ async fn repl_loop(
         if let Some(rest) = forget_command_arg(trimmed) {
             match parse_forget_command(rest) {
                 ForgetCommand::Status => print_forget_status(&approvals),
-                ForgetCommand::Json => print_forget_json(&approvals),
+                ForgetCommand::Json => print_forget_json(&approvals, rest),
                 ForgetCommand::Usage => println!("{DIM}  usage:{RESET} {}", forget_usage_text()),
             }
             continue;
@@ -1134,7 +1134,7 @@ async fn repl_loop(
         if let Some((command, rest)) = exit_command_arg(trimmed) {
             match parse_exit_command(rest) {
                 ExitCommand::Status => print_exit_status(command),
-                ExitCommand::Json => print_exit_json(command),
+                ExitCommand::Json => print_exit_json(command, rest),
                 ExitCommand::Usage => println!("{DIM}  usage:{RESET} {}", exit_usage_text(command)),
             }
             continue;
@@ -1446,7 +1446,9 @@ async fn repl_loop(
         if let Some((command, rest)) = clear_command_arg(trimmed) {
             match parse_clear_command(rest) {
                 ClearCommand::Status => print_clear_status(command, &provider, &model, mode.get()),
-                ClearCommand::Json => print_clear_json(command, &provider, &model, mode.get()),
+                ClearCommand::Json => {
+                    print_clear_json(command, &provider, &model, mode.get(), rest)
+                }
                 ClearCommand::Usage => {
                     println!("{DIM}  usage:{RESET} {}", clear_usage_text(command));
                 }
@@ -3294,11 +3296,18 @@ fn parse_clear_command(input: &str) -> ClearCommand {
     }
 }
 
-fn clear_json_payload(command: &str, provider: &str, model: &str, mode: Mode) -> serde_json::Value {
+fn clear_json_payload(
+    command: &str,
+    provider: &str,
+    model: &str,
+    mode: Mode,
+    query: &str,
+) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": command.trim_start_matches('/'),
         "aliases": ["clear", "new"],
+        "query": query.trim(),
         "available": true,
         "active_turn": false,
         "will_clear_screen": true,
@@ -3318,8 +3327,10 @@ fn print_clear_status(command: &str, provider: &str, model: &str, mode: Mode) {
     );
 }
 
-fn print_clear_json(command: &str, provider: &str, model: &str, mode: Mode) {
-    match serde_json::to_string_pretty(&clear_json_payload(command, provider, model, mode)) {
+fn print_clear_json(command: &str, provider: &str, model: &str, mode: Mode, query: &str) {
+    match serde_json::to_string_pretty(&clear_json_payload(
+        command, provider, model, mode, query,
+    )) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  {command} json failed: {e}{RESET}"),
     }
@@ -3352,7 +3363,7 @@ fn parse_forget_command(input: &str) -> ForgetCommand {
     }
 }
 
-fn forget_json_payload(approvals: &ApprovalState) -> serde_json::Value {
+fn forget_json_payload(approvals: &ApprovalState, query: &str) -> serde_json::Value {
     let allow_rules_path = crate::config::allow_rules_path()
         .ok()
         .map(|path| path.display().to_string());
@@ -3360,6 +3371,7 @@ fn forget_json_payload(approvals: &ApprovalState) -> serde_json::Value {
         "surface": "terminal",
         "command": "forget",
         "aliases": ["forget"],
+        "query": query.trim(),
         "available": true,
         "remembered_approvals": approvals.always_rules().len(),
         "will_clear_saved_allow_rules": true,
@@ -3377,8 +3389,8 @@ fn print_forget_status(approvals: &ApprovalState) {
     );
 }
 
-fn print_forget_json(approvals: &ApprovalState) {
-    match serde_json::to_string_pretty(&forget_json_payload(approvals)) {
+fn print_forget_json(approvals: &ApprovalState, query: &str) {
+    match serde_json::to_string_pretty(&forget_json_payload(approvals, query)) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  /forget json failed: {e}{RESET}"),
     }
@@ -3420,11 +3432,12 @@ fn parse_exit_command(input: &str) -> ExitCommand {
     }
 }
 
-fn exit_json_payload(command: &str) -> serde_json::Value {
+fn exit_json_payload(command: &str, query: &str) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": command.trim_start_matches('/'),
         "aliases": ["exit", "quit"],
+        "query": query.trim(),
         "available": true,
         "active_turn": false,
         "will_exit_repl": true,
@@ -3441,8 +3454,8 @@ fn print_exit_status(command: &str) {
     );
 }
 
-fn print_exit_json(command: &str) {
-    match serde_json::to_string_pretty(&exit_json_payload(command)) {
+fn print_exit_json(command: &str, query: &str) {
+    match serde_json::to_string_pretty(&exit_json_payload(command, query)) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  {command} json failed: {e}{RESET}"),
     }
@@ -17168,9 +17181,10 @@ mod tests {
         assert_eq!(parse_clear_command("run"), ClearCommand::Usage);
         assert!(clear_usage_text("/clear").contains("json|--json|status --json"));
         assert!(clear_usage_text("/clear").contains("show --json|info --json|preview --json"));
-        let payload = clear_json_payload("/new", "libertai", "qwen", Mode::Plan);
+        let payload = clear_json_payload("/new", "libertai", "qwen", Mode::Plan, "preview --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "new");
+        assert_eq!(payload["query"], "preview --json");
         assert_eq!(payload["available"], true);
         assert_eq!(payload["active_turn"], false);
         assert_eq!(payload["current_mode"], "plan");
@@ -17207,9 +17221,10 @@ mod tests {
         assert!(forget_usage_text().contains("preview|json|--json|status --json"));
         assert!(forget_usage_text().contains("show --json|info --json|preview --json"));
         let approvals = ApprovalState::new();
-        let payload = forget_json_payload(&approvals);
+        let payload = forget_json_payload(&approvals, "status --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "forget");
+        assert_eq!(payload["query"], "status --json");
         assert_eq!(payload["available"], true);
         assert_eq!(payload["remembered_approvals"], 0);
         assert_eq!(payload["will_clear_saved_allow_rules"], true);
@@ -17242,9 +17257,10 @@ mod tests {
         assert_eq!(parse_exit_command("run"), ExitCommand::Usage);
         assert!(exit_usage_text("/exit").contains("json|--json|status --json"));
         assert!(exit_usage_text("/exit").contains("show --json|info --json|preview --json"));
-        let payload = exit_json_payload("/quit");
+        let payload = exit_json_payload("/quit", "show --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "quit");
+        assert_eq!(payload["query"], "show --json");
         assert_eq!(payload["available"], true);
         assert_eq!(payload["active_turn"], false);
         assert_eq!(payload["will_exit_repl"], true);
