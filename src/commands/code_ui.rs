@@ -1063,9 +1063,7 @@ async fn repl_loop(
                     );
                 }
                 StatusCommand::Usage => {
-                    println!(
-                        "{DIM}  usage:{RESET} /status, /status json, /status show, /status info, or /status session"
-                    );
+                    println!("{DIM}  usage:{RESET} {}", status_usage_text());
                 }
             }
             continue;
@@ -2961,7 +2959,7 @@ fn print_help() {
     println!("{DIM}  {} — alias for /permissions{RESET}", mode_usage_text());
     println!("{DIM}  {}{RESET}", model_usage_text());
     println!("{DIM}  /name <name> — set this session's display name (also /rename){RESET}");
-    println!("{DIM}  /status   — show current REPL session status{RESET}");
+    println!("{DIM}  {} — show current REPL session status{RESET}", status_usage_text());
     println!("{DIM}  {} — run a local session/config diagnostic report{RESET}", doctor_usage_text());
     println!("{DIM}  /abort [status|cancel|stop|interrupt] — show how to interrupt the active CLI turn{RESET}");
     println!("{DIM}  /review [scope] — ask the agent to review current code changes{RESET}");
@@ -5948,6 +5946,10 @@ fn parse_status_command(input: &str) -> StatusCommand {
         | "info --json" | "current --json" | "session --json" => StatusCommand::Json,
         _ => StatusCommand::Usage,
     }
+}
+
+fn status_usage_text() -> &'static str {
+    "/status [status|state|show|info|current|session|json|--json|status --json|state --json|show --json|info --json|current --json|session --json]"
 }
 
 fn parse_doctor_command(input: &str) -> DoctorCommand {
@@ -16652,6 +16654,11 @@ mod tests {
         assert_eq!(parse_status_command("current --json"), StatusCommand::Json);
         assert_eq!(parse_status_command("session --json"), StatusCommand::Json);
         assert_eq!(parse_status_command("open"), StatusCommand::Usage);
+        assert!(status_usage_text().contains("status|state|show|info"));
+        assert!(status_usage_text().contains("current|session|json|--json"));
+        assert!(status_usage_text().contains("status --json"));
+        assert!(status_usage_text().contains("state --json|show --json|info --json"));
+        assert!(status_usage_text().contains("current --json|session --json"));
     }
 
     #[test]
