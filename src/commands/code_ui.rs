@@ -1388,7 +1388,16 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/tree ") {
-            print_project_tree(Some(rest.trim()));
+            if let Some(path_input) = tree_json_request_arg(rest) {
+                let path = if path_input.is_empty() {
+                    None
+                } else {
+                    Some(path_input.as_str())
+                };
+                print_project_tree_json(path);
+            } else {
+                print_project_tree(Some(rest.trim()));
+            }
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/changelog ") {
@@ -2803,6 +2812,37 @@ fn print_project_tree(path: Option<&str>) {
     }
 }
 
+fn tree_json_request_arg(input: &str) -> Option<String> {
+    let raw = input.trim();
+    let lower = raw.to_ascii_lowercase();
+    match lower.as_str() {
+        "json" | "--json" | "status --json" | "state --json" | "show --json" => {
+            Some(String::new())
+        }
+        _ if lower.starts_with("json ") => Some(raw[5..].trim().to_string()),
+        _ if lower.starts_with("--json ") => Some(raw[7..].trim().to_string()),
+        _ if lower.ends_with(" --json") => Some(raw[..raw.len() - 7].trim().to_string()),
+        _ => None,
+    }
+}
+
+fn print_project_tree_json(path: Option<&str>) {
+    let root = match tree_root(path) {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("{DIM}  /tree json: {e:#}{RESET}");
+            return;
+        }
+    };
+    match project_tree_json_payload(&root, TREE_MAX_ENTRIES) {
+        Ok(payload) => match serde_json::to_string_pretty(&payload) {
+            Ok(raw) => println!("{raw}"),
+            Err(e) => eprintln!("{DIM}  /tree json: {e:#}{RESET}"),
+        },
+        Err(e) => eprintln!("{DIM}  /tree json: {e:#}{RESET}"),
+    }
+}
+
 fn tree_root(path: Option<&str>) -> Result<PathBuf> {
     let raw = path.unwrap_or("").trim();
     if raw.is_empty() {
@@ -2828,6 +2868,80 @@ fn render_project_tree(root: &Path, max_entries: usize) -> Result<String> {
         out.push_str(&format!("{DIM}... truncated after {max_entries} entries{RESET}\n"));
     }
     Ok(out)
+}
+
+fn project_tree_json_payload(root: &Path, max_entries: usize) -> Result<serde_json::Value> {
+    let meta = std::fs::metadata(root).with_context(|| format!("read {}", root.display()))?;
+    if !meta.is_dir() {
+        anyhow::bail!("{} is not a directory", root.display());
+    }
+    let mut rows = Vec::new();
+    let mut remaining = max_entries;
+    collect_tree_json_entries(root, root, 0, &mut remaining, &mut rows)?;
+    Ok(json!({
+        "surface": "terminal",
+        "command": "tree",
+        "root": root.display().to_string(),
+        "limit": max_entries,
+        "count": rows.len(),
+        "truncated": remaining == 0,
+        "entries": rows,
+    }))
+}
+
+fn collect_tree_json_entries(
+    root: &Path,
+    path: &Path,
+    depth: usize,
+    remaining: &mut usize,
+    rows: &mut Vec<serde_json::Value>,
+) -> Result<()> {
+    if *remaining == 0 {
+        return Ok(());
+    }
+    let meta = std::fs::symlink_metadata(path).with_context(|| format!("read {}", path.display()))?;
+    let file_type = meta.file_type();
+    let name = if depth == 0 {
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(".")
+            .to_string()
+    } else {
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let relative = path
+        .strip_prefix(root)
+        .ok()
+        .and_then(|p| if p.as_os_str().is_empty() { Some(".") } else { p.to_str() })
+        .unwrap_or(".");
+    rows.push(json!({
+        "name": name,
+        "path": relative,
+        "depth": depth,
+        "kind": if file_type.is_dir() { "dir" } else { "file" },
+        "symlink": file_type.is_symlink(),
+    }));
+    *remaining -= 1;
+    if file_type.is_dir() && !file_type.is_symlink() {
+        let mut entries = tree_entries(path)?;
+        entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        for entry in entries {
+            if *remaining == 0 {
+                break;
+            }
+            collect_tree_json_entries(root, &entry.path, depth + 1, remaining, rows)?;
+        }
+    }
+    Ok(())
 }
 
 fn render_tree_children(
@@ -12522,6 +12636,23 @@ mod tests {
         assert!(
             rendered.find("src/").unwrap() < rendered.find("README.md").unwrap(),
             "directories should be printed before files"
+        );
+        assert_eq!(tree_json_request_arg("json"), Some(String::new()));
+        assert_eq!(tree_json_request_arg("--json"), Some(String::new()));
+        assert_eq!(tree_json_request_arg("json src"), Some("src".to_string()));
+        assert_eq!(tree_json_request_arg("src --json"), Some("src".to_string()));
+        assert_eq!(tree_json_request_arg("MyDir --json"), Some("MyDir".to_string()));
+        assert_eq!(tree_json_request_arg("src"), None);
+        let payload = project_tree_json_payload(temp.path(), 20).unwrap();
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "tree");
+        assert_eq!(payload["entries"][0]["kind"], "dir");
+        assert!(
+            payload["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["name"] == "main.rs")
         );
     }
 
