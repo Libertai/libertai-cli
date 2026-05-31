@@ -11418,6 +11418,10 @@ fn usage_export_json(
     serde_json::to_string_pretty(&json!({
         "kind": "libertai_code_usage_export",
         "version": 1,
+        "surface": "terminal",
+        "command": "usage",
+        "aliases": ["usage", "cost"],
+        "supported_actions": ["status", "show", "summary", "tools", "json", "status --json", "show --json", "summary --json", "tools --json", "csv", "export", "export json", "export csv"],
         "usage": usage,
         "tools": tools,
         "provenance": {
@@ -14380,6 +14384,11 @@ mod tests {
             }],
         );
         assert!(report.contains("\"kind\": \"libertai_code_usage_export\""));
+        assert!(report.contains("\"surface\": \"terminal\""));
+        assert!(report.contains("\"command\": \"usage\""));
+        assert!(report.contains("\"aliases\": ["));
+        assert!(report.contains("\"status --json\""));
+        assert!(report.contains("\"export csv\""));
         assert!(report.contains("\"toolName\": \"bash\""));
         assert!(report.contains("provider-measured per-tool billing is not available"));
     }
