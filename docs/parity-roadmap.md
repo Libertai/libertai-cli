@@ -458,7 +458,7 @@ the saved rules.
 The libertai-cli REPL handles `/help`, `/plan`, `/clear`, `/exit`,
 `/forget`, `/permissions`, `/remember`, `/memory`, `/init`, `/agents`, `/agent`,
 `/skills`, `/template`, custom `/<name>` templates, `/status`, `/usage`/`/cost`,
-`/config`, `/settings`, `/model`, `/mode`, `/name`, `/rename`, `/new`, `/export`, `/share`, `/history`, `/copy`, `/hotkeys`, `/tree`, `/changelog`, `/reload`, `/resume`, `/fork`, `/compact`, `/doctor`, `/abort`, `/review`, `/security-review`, `/pr_comments`, `/sandbox`, `/thinking`, `/theme`, `/scoped-models`, `/login`, `/logout`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
+`/config`, `/settings`, `/model`, `/mode`, `/name`, `/rename`, `/new`, `/export`, `/share`, `/onboarding`, `/history`, `/copy`, `/hotkeys`, `/tree`, `/changelog`, `/reload`, `/resume`, `/fork`, `/compact`, `/doctor`, `/abort`, `/review`, `/security-review`, `/pr_comments`, `/send`, `/send-message`, `/sandbox`, `/statusline`, `/notify`, `/loop`, `/auto`, `/schedule`, `/thinking`, `/theme`, `/scoped-models`, `/login`, `/logout`, `/output-style`, `/vim`, `/ide`, and `/bug`. Pi defines ~24
 (`/compact`, `/resume`, `/fork`, `/export`, `/thinking`, `/template`,
 `/share`, `/login`, `/logout`,
 `/history`, `/copy`, `/name`, `/hotkeys`, `/changelog`, `/tree`,
@@ -477,6 +477,18 @@ approvals, appearance, sandbox, and advanced. The remaining work here is
 deeper Claude-specific semantics and any future decision to delegate
 unknown typed `/foo` lines into pi's slash dispatcher instead of handling
 them locally.
+
+Machine-readable status/preview forms are now also part of the shipped
+contract for the local command set: CLI and desktop accept `json`,
+`--json`, or `status --json` style aliases for command surfaces where
+that is meaningful, including `/help`, `/clear`/`/new`, `/forget`,
+`/exit`/`/quit`, `/compact`, `/resume`, `/statusline`, `/sandbox`,
+`/hooks`, `/mcp`, `/skills`, `/thinking`, `/template`, `/onboarding`,
+`/export`, `/share`, `/remember`, `/reload`, `/theme`,
+`/scoped-models`, `/notify`, `/usage`/`/cost`, `/history`, `/copy`,
+`/hotkeys`, `/tree`, `/changelog`, `/login`, and `/logout`. These JSON
+forms are deliberately read-only unless the command name explicitly says
+`save`, `run`, `clear`, or another mutating action.
 
 ### 2F. Native `/init`
 
