@@ -283,6 +283,7 @@ enum HotkeysCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReloadCommand {
     Session,
+    Json,
     Usage,
 }
 
@@ -989,9 +990,19 @@ async fn repl_loop(
                         Err(e) => eprintln!("{DIM}  /reload: {e:#}{RESET}"),
                     }
                 }
+                ReloadCommand::Json => {
+                    print_reload_preview_json(
+                        rest,
+                        &provider,
+                        &model,
+                        mode.get(),
+                        output_style.as_deref(),
+                        &cfg,
+                    );
+                }
                 ReloadCommand::Usage => {
                     println!(
-                        "{DIM}  usage:{RESET} /reload, /reload config, /reload session, or /reload now"
+                        "{DIM}  usage:{RESET} /reload, /reload json, /reload config, /reload session, or /reload now"
                     );
                 }
             }
@@ -4524,6 +4535,8 @@ fn hotkeys_usage_text() -> &'static str {
 fn parse_reload_command(input: &str) -> ReloadCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "config" | "session" | "now" | "fresh" => ReloadCommand::Session,
+        "json" | "--json" | "config --json" | "session --json" | "now --json"
+        | "fresh --json" => ReloadCommand::Json,
         _ => ReloadCommand::Usage,
     }
 }
@@ -8905,6 +8918,49 @@ fn print_session_status_json(
     }
 }
 
+fn print_reload_preview_json(
+    input: &str,
+    provider: &str,
+    model: &str,
+    mode: Mode,
+    output_style: Option<&str>,
+    cfg: &LibertaiConfig,
+) {
+    let action = input
+        .trim()
+        .to_ascii_lowercase()
+        .replace(" --json", "")
+        .trim()
+        .to_string();
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|e| format!("unavailable: {e}"));
+    let payload = json!({
+        "surface": "terminal",
+        "command": "reload",
+        "action": if action.is_empty() || action == "json" || action == "--json" { "session" } else { action.as_str() },
+        "will_reload_config": true,
+        "will_start_fresh_agent_session": true,
+        "will_clear_usage_history": true,
+        "current": {
+            "provider": provider,
+            "model": model,
+            "mode": mode_label(mode),
+            "output_style": output_style.unwrap_or("default"),
+            "cwd": cwd,
+        },
+        "defaults": {
+            "provider": cfg.default_code_provider,
+            "code_model": cfg.default_code_model,
+        },
+        "aliases": ["config", "session", "now", "fresh"],
+    });
+    match serde_json::to_string_pretty(&payload) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("{DIM}  /reload json: {e:#}{RESET}"),
+    }
+}
+
 async fn print_doctor(
     handle: &AgentSessionHandle,
     provider: &str,
@@ -13254,6 +13310,12 @@ mod tests {
         assert_eq!(parse_reload_command("config"), ReloadCommand::Session);
         assert_eq!(parse_reload_command("now"), ReloadCommand::Session);
         assert_eq!(parse_reload_command("fresh"), ReloadCommand::Session);
+        assert_eq!(parse_reload_command("json"), ReloadCommand::Json);
+        assert_eq!(parse_reload_command("--json"), ReloadCommand::Json);
+        assert_eq!(parse_reload_command("config --json"), ReloadCommand::Json);
+        assert_eq!(parse_reload_command("session --json"), ReloadCommand::Json);
+        assert_eq!(parse_reload_command("now --json"), ReloadCommand::Json);
+        assert_eq!(parse_reload_command("fresh --json"), ReloadCommand::Json);
         assert_eq!(parse_reload_command("auth"), ReloadCommand::Usage);
     }
 
