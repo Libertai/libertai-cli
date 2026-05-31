@@ -5912,23 +5912,7 @@ fn print_notify_json(cfg: &LibertaiConfig) {
 fn print_send_status(rest: &str) {
     let requested = rest.trim();
     if is_send_json_request(requested) {
-        let payload = json!({
-            "surface": "terminal",
-            "active_session_only": true,
-            "desktop_registry_available": false,
-            "total_targets": 0,
-            "queued_total": 0,
-            "targets": [],
-            "queued": [],
-            "desktop_commands": [
-                "/send status",
-                "/send targets",
-                "/send queued",
-                "/send json",
-                "/send queued --json"
-            ],
-            "remaining_gap": "pi-level streaming child-agent bus or detached inter-agent scheduler"
-        });
+        let payload = send_json_payload(requested);
         match serde_json::to_string_pretty(&payload) {
             Ok(raw) => println!("{raw}"),
             Err(err) => eprintln!("{DIM}  /send: could not render JSON: {err}.{RESET}"),
@@ -5956,11 +5940,54 @@ fn print_send_status(rest: &str) {
         );
     }
     println!(
-        "{DIM}  usage:{RESET} /send status, /send targets, /send queued, /send json, /send <session> <message>"
+        "{DIM}  usage:{RESET} /send status|targets|list|json|queued|queued --json|clear <id|target|all>|<session> <message> (also /send-message)"
     );
     println!(
         "{DIM}  remaining gap:{RESET} pi-level streaming child-agent bus or detached inter-agent scheduler."
     );
+}
+
+fn send_json_payload(query: &str) -> serde_json::Value {
+    json!({
+        "command": "send",
+        "surface": "terminal",
+        "query": query,
+        "aliases": ["send", "send-message"],
+        "active_session_only": true,
+        "desktop_registry_available": false,
+        "total_targets": 0,
+        "queued_total": 0,
+        "targets": [],
+        "queued": [],
+        "supported_actions": [
+            "status",
+            "targets",
+            "list",
+            "json",
+            "status --json",
+            "targets --json",
+            "queued",
+            "queued --json",
+            "clear <id|target|all>",
+            "<session> <message>"
+        ],
+        "desktop_commands": [
+            "/send status",
+            "/send targets",
+            "/send list",
+            "/send json",
+            "/send queued",
+            "/send queued --json",
+            "/send clear all",
+            "/send-message status",
+            "/send-message targets",
+            "/send-message list",
+            "/send-message json",
+            "/send-message queued",
+            "/send-message queued --json"
+        ],
+        "remaining_gap": "pi-level streaming child-agent bus or detached inter-agent scheduler"
+    })
 }
 
 fn is_send_json_request(rest: &str) -> bool {
@@ -16300,9 +16327,26 @@ mod tests {
         );
         assert_eq!(send_command_arg("/sender worker finish tests"), None);
         assert!(is_send_json_request("json"));
+        assert!(is_send_json_request("status --json"));
         assert!(is_send_json_request("targets --json"));
         assert!(is_send_json_request("queued --json"));
         assert!(!is_send_json_request("worker finish tests"));
+
+        let payload = send_json_payload("queued --json");
+        assert_eq!(payload["command"], "send");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "queued --json");
+        assert_eq!(payload["aliases"], json!(["send", "send-message"]));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "queued --json"));
+        assert!(payload["desktop_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "/send-message queued --json"));
     }
 
     #[test]
