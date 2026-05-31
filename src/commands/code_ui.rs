@@ -2612,7 +2612,7 @@ enum ResumePreviewCommand {
 }
 
 fn resume_usage_text() -> &'static str {
-    "/resume [status|show|info|json|status --json|path]"
+    "/resume [status|state|show|info|preview|json|status --json|state --json|show --json|info --json|preview --json|path]"
 }
 
 fn resume_preview_arg(trimmed: &str) -> Option<&str> {
@@ -2666,7 +2666,8 @@ fn resume_json_payload_from_rows(cwd: &Path, sessions: Vec<serde_json::Value>) -
         "will_replace_current_repl_session": true,
         "accepts_path": true,
         "path_argument": "/resume PATH",
-        "supported_actions": ["status", "state", "show", "info", "json", "status --json", "path"],
+        "aliases": ["resume"],
+        "supported_actions": ["status", "state", "show", "info", "preview", "json", "--json", "status --json", "state --json", "show --json", "info --json", "preview --json", "path"],
     })
 }
 
@@ -3362,7 +3363,7 @@ fn model_usage_text() -> &'static str {
 }
 
 fn scoped_models_usage_text() -> &'static str {
-    "/scoped-models <status|show|json|status --json|patterns|clear|reset|off> — filter /model list and /model next|prev"
+    "/scoped-models <status|show|json|status --json|show --json|patterns|clear|reset|off> — filter /model list and /model next|prev"
 }
 
 fn hotkey_lines() -> &'static [&'static str] {
@@ -4949,7 +4950,7 @@ fn handle_scoped_models_command(raw: &str, scoped_model_patterns: &mut Vec<Strin
         }
         ScopedModelsCommand::Usage => {
             eprintln!(
-                "{DIM}  usage: /scoped-models <status|show|pattern[,pattern...]|clear|reset|off>{RESET}"
+                "{DIM}  usage: /scoped-models <status|show|json|status --json|show --json|pattern[,pattern...]|clear|reset|off>{RESET}"
             );
         }
     }
@@ -4966,7 +4967,7 @@ fn print_scoped_model_status(scoped_model_patterns: &[String]) {
         }
     }
     println!(
-        "{DIM}  usage:{RESET} /scoped-models status, /scoped-models qwen* gemma*, /scoped-models clear|reset|off, /model list, /model next|prev"
+        "{DIM}  usage:{RESET} /scoped-models status, /scoped-models status --json, /scoped-models qwen* gemma*, /scoped-models clear|reset|off, /model list, /model next|prev"
     );
     println!();
 }
@@ -4978,7 +4979,7 @@ fn scoped_model_json_payload(scoped_model_patterns: &[String]) -> serde_json::Va
         "patterns": scoped_model_patterns,
         "is_scoped": !scoped_model_patterns.is_empty(),
         "aliases": ["scoped-models", "scoped"],
-        "supported_actions": ["status", "show", "json", "status --json", "clear", "reset", "off"],
+        "supported_actions": ["status", "show", "json", "--json", "status --json", "show --json", "clear", "reset", "off"],
     })
 }
 
@@ -13177,7 +13178,7 @@ fn print_status_line_status(cfg: &LibertaiConfig) {
 }
 
 fn status_line_usage_text() -> &'static str {
-    "/statusline|/status-line <status|show|json|status --json|template|command <shell>|command-clear|command reset|command clear|reset|clear>"
+    "/statusline|/status-line <status|show|json|status --json|show --json|template --json|info --json|template|command <shell>|command-clear|command reset|command clear|reset|clear>"
 }
 
 fn is_status_line_json_action(action: &str) -> bool {
@@ -13198,7 +13199,7 @@ fn status_line_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "statusline",
-        "aliases": ["status-line"],
+        "aliases": ["statusline", "status-line"],
         "template": if template.is_empty() { serde_json::Value::Null } else { json!(template) },
         "effective_template": if template.is_empty() { "default" } else { template },
         "status_command": if command.is_empty() { serde_json::Value::Null } else { json!(command) },
@@ -13207,7 +13208,7 @@ fn status_line_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
         "command_max_chars": STATUS_LINE_COMMAND_MAX_CHARS,
         "will_write": false,
         "will_run_command": false,
-        "supported_actions": ["status", "show", "json", "status --json", "template", "command <shell>", "command-clear", "command reset", "command clear", "reset", "clear"],
+        "supported_actions": ["status", "show", "json", "--json", "status --json", "show --json", "template --json", "info --json", "template", "command <shell>", "command-clear", "command reset", "command clear", "reset", "clear"],
     })
 }
 
@@ -13315,7 +13316,7 @@ fn is_output_style_json_request(value: &str) -> bool {
 }
 
 fn output_style_usage_text() -> &'static str {
-    "/output-style [default|concise|explanatory|review|status|show|current|info|list|json|status --json|list --json]"
+    "/output-style [default|concise|explanatory|review|status|show|current|info|list|json|status --json|show --json|current --json|info --json|list --json]"
 }
 
 fn print_output_style_status(output_style: Option<&str>, unknown: Option<&str>) {
@@ -13339,6 +13340,7 @@ fn output_style_status_json_payload(output_style: Option<&str>) -> serde_json::V
     json!({
         "surface": "terminal",
         "command": "output-style",
+        "aliases": ["output-style"],
         "current": output_style.unwrap_or("default"),
         "available": styles.into_iter().map(|style| {
             json!({
@@ -13347,7 +13349,7 @@ fn output_style_status_json_payload(output_style: Option<&str>) -> serde_json::V
                 "instruction": style.instruction,
             })
         }).collect::<Vec<_>>(),
-        "supported_actions": ["default", "concise", "explanatory", "review", "status", "show", "current", "info", "list", "json", "status --json", "list --json"],
+        "supported_actions": ["default", "concise", "explanatory", "review", "status", "show", "current", "info", "list", "json", "--json", "status --json", "show --json", "current --json", "info --json", "list --json"],
     })
 }
 
@@ -13949,15 +13951,31 @@ mod tests {
         assert!(is_output_style_json_request("json"));
         assert!(is_output_style_json_request("--json"));
         assert!(is_output_style_json_request("status --json"));
+        assert!(is_output_style_json_request("show --json"));
+        assert!(is_output_style_json_request("current --json"));
+        assert!(is_output_style_json_request("info --json"));
         assert!(is_output_style_json_request("list --json"));
         assert!(!is_output_style_json_request("review --json"));
         assert!(output_style_usage_text().contains("status|show|current|info|list"));
-        assert!(output_style_usage_text().contains("json|status --json|list --json"));
+        assert!(output_style_usage_text().contains("json|status --json|show --json"));
+        assert!(output_style_usage_text().contains("info --json|list --json"));
         assert!(output_style_usage_text().contains("default|concise|explanatory|review"));
         let payload = output_style_status_json_payload(Some("review"));
         assert_eq!(payload["command"], "output-style");
+        assert_eq!(payload["aliases"][0], "output-style");
         assert_eq!(payload["current"], "review");
-        assert_eq!(payload["supported_actions"][10], "status --json");
+        assert!(
+            payload["supported_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("show --json"))
+        );
+        assert!(
+            payload["supported_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("info --json"))
+        );
     }
 
     #[test]
@@ -14682,7 +14700,8 @@ mod tests {
         );
         assert!(status_line_command_arg("/status").is_none());
         assert!(status_line_usage_text().contains("/statusline|/status-line"));
-        assert!(status_line_usage_text().contains("json|status --json"));
+        assert!(status_line_usage_text().contains("json|status --json|show --json"));
+        assert!(status_line_usage_text().contains("template --json|info --json"));
         assert!(status_line_usage_text().contains("command reset|command clear"));
         assert!(status_line_usage_text().contains("reset|clear"));
         assert!(is_status_line_json_action("json"));
@@ -14701,13 +14720,25 @@ mod tests {
         let payload = status_line_json_payload(&cfg);
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "statusline");
-        assert_eq!(payload["aliases"][0], "status-line");
+        assert_eq!(payload["aliases"][0], "statusline");
+        assert_eq!(payload["aliases"][1], "status-line");
         assert_eq!(payload["template"], "{project} {model}");
         assert_eq!(payload["status_command"], "git branch --show-current");
         assert_eq!(payload["will_write"], false);
         assert_eq!(payload["will_run_command"], false);
         assert_eq!(payload["tokens"][0], "project");
-        assert_eq!(payload["supported_actions"][3], "status --json");
+        assert!(
+            payload["supported_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("template --json"))
+        );
+        assert!(
+            payload["supported_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("info --json"))
+        );
     }
 
     #[test]
@@ -15276,7 +15307,8 @@ mod tests {
             parse_resume_preview_command("path"),
             ResumePreviewCommand::Usage
         );
-        assert!(resume_usage_text().contains("json|status --json|path"));
+        assert!(resume_usage_text().contains("json|status --json|state --json"));
+        assert!(resume_usage_text().contains("preview --json|path"));
 
         let cwd = PathBuf::from("/tmp/project");
         let payload = resume_json_payload_from_rows(
@@ -15294,12 +15326,24 @@ mod tests {
         );
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "resume");
+        assert_eq!(payload["aliases"][0], "resume");
         assert_eq!(payload["available"], true);
         assert_eq!(payload["candidate_count"], 1);
         assert_eq!(payload["default_target"]["id"], "s1");
         assert_eq!(payload["will_replace_current_repl_session"], true);
         assert_eq!(payload["accepts_path"], true);
-        assert_eq!(payload["supported_actions"][5], "status --json");
+        assert!(
+            payload["supported_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("state --json"))
+        );
+        assert!(
+            payload["supported_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("preview --json"))
+        );
     }
 
     fn fork_messages_for_tests() -> Vec<RpcForkMessage> {
@@ -17260,7 +17304,7 @@ mod tests {
     fn scoped_models_parse_patterns_and_filter_matches() {
         assert_eq!(
             scoped_models_usage_text(),
-            "/scoped-models <status|show|json|status --json|patterns|clear|reset|off> — filter /model list and /model next|prev"
+            "/scoped-models <status|show|json|status --json|show --json|patterns|clear|reset|off> — filter /model list and /model next|prev"
         );
         assert_eq!(scoped_models_command_arg("/scoped-models"), Some(""));
         assert_eq!(
@@ -17290,6 +17334,10 @@ mod tests {
         );
         assert_eq!(
             parse_scoped_models_command("status --json"),
+            ScopedModelsCommand::Json
+        );
+        assert_eq!(
+            parse_scoped_models_command("show --json"),
             ScopedModelsCommand::Json
         );
         assert_eq!(
@@ -17325,7 +17373,12 @@ mod tests {
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["is_scoped"], true);
         assert_eq!(payload["patterns"][0], "qwen*");
-        assert_eq!(payload["supported_actions"][3], "status --json");
+        assert!(
+            payload["supported_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("show --json"))
+        );
     }
 
     #[test]
