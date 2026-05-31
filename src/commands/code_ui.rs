@@ -1101,16 +1101,20 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some(rest) = help_command_arg(trimmed) {
+            match parse_help_command(rest) {
+                HelpCommand::Show => print_help(),
+                HelpCommand::Json => print_help_json(),
+                HelpCommand::Usage => println!("{DIM}  usage:{RESET} {}", help_usage_text()),
+            }
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
             "/exit" | "/quit" => {
                 println!("{DIM}goodbye.{RESET}");
                 return Ok(());
-            }
-            "/help" => {
-                print_help();
-                continue;
             }
             "/plan" => {
                 let new_mode = flip(mode.get());
@@ -2812,6 +2816,130 @@ fn print_help() {
     println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
     println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");
     println!();
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelpCommand {
+    Show,
+    Json,
+    Usage,
+}
+
+fn help_usage_text() -> &'static str {
+    "/help [status|show|list|json|status --json]"
+}
+
+fn help_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/help" => Some(""),
+        _ => trimmed.strip_prefix("/help ").map(str::trim),
+    }
+}
+
+fn parse_help_command(input: &str) -> HelpCommand {
+    match normalize_help_command_arg(input).as_str() {
+        "" | "status" | "show" | "list" | "commands" => HelpCommand::Show,
+        "json" | "--json" | "status --json" | "show --json" | "list --json" | "commands --json" => {
+            HelpCommand::Json
+        }
+        _ => HelpCommand::Usage,
+    }
+}
+
+fn normalize_help_command_arg(input: &str) -> String {
+    input
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn help_command_rows() -> &'static [(&'static str, &'static [&'static str], &'static str)] {
+    &[
+        ("abort", &[], "show or interrupt active-turn controls"),
+        ("agent", &[], "run a named sub-agent task"),
+        ("agents", &[], "manage named and background sub-agents"),
+        ("attach", &[], "attach a local file to the next prompt"),
+        ("auto", &["autorun", "continuous"], "run bounded continuous execution"),
+        ("bug", &[], "print a bug report diagnostic template"),
+        ("changelog", &[], "show recent git commits"),
+        ("clear", &["new"], "wipe the screen and start a fresh session"),
+        ("compact", &[], "compact older conversation history"),
+        ("config", &[], "show or update active config"),
+        ("copy", &[], "copy the last assistant response"),
+        ("doctor", &[], "run local session/config diagnostics"),
+        ("exit", &["quit"], "quit the REPL"),
+        ("export", &[], "write the transcript as Markdown"),
+        ("forget", &[], "clear saved allow rules"),
+        ("fork", &[], "fork from a previous user message"),
+        ("help", &[], "show slash commands"),
+        ("history", &[], "show recent submitted prompts"),
+        ("hooks", &["hook"], "show configured command hooks"),
+        ("hotkeys", &[], "show input bar keyboard controls"),
+        ("ide", &[], "show IDE integration status"),
+        ("image", &[], "attach a local image to the next prompt"),
+        ("init", &[], "create or merge AGENTS.md guidance"),
+        ("login", &[], "inspect auth or run libertai login"),
+        ("logout", &[], "run libertai logout or explain provider logout"),
+        ("loop", &["autoloop"], "run bounded autonomous follow-up turns"),
+        ("mcp", &[], "show terminal MCP support status"),
+        ("memory", &[], "show or update project memory"),
+        ("mention", &[], "attach a local text file to the next prompt"),
+        ("mode", &[], "show or change permission mode"),
+        ("model", &[], "show or change the active model"),
+        ("name", &["rename"], "show or set this session's display name"),
+        ("notify", &["notifications"], "configure turn-complete notifications"),
+        ("onboarding", &["onboard"], "write or publish a project onboarding guide"),
+        ("output-style", &[], "show or change output style"),
+        ("permissions", &[], "show or change permission mode"),
+        ("plan", &[], "toggle plan mode"),
+        ("pr_comments", &[], "inspect or update GitHub PR review comments"),
+        ("reload", &[], "reload config and start a fresh agent session"),
+        ("remember", &[], "append typed project memory"),
+        ("resume", &[], "resume a saved session"),
+        ("review", &[], "ask the agent to review current code changes"),
+        ("sandbox", &[], "inspect the bash sandbox profile"),
+        ("schedule", &["cron"], "queue a due follow-up prompt"),
+        ("scoped-models", &["scoped"], "filter model list and cycling"),
+        ("security-review", &[], "ask for a focused security review"),
+        ("send", &["send-message"], "show terminal inter-session send status"),
+        ("share", &[], "write or publish shareable HTML transcript"),
+        ("skills", &[], "manage code-agent skills"),
+        ("status", &[], "show current REPL session status"),
+        ("statusline", &["status-line"], "customize the input-bar status line"),
+        ("template", &[], "expand a prompt template"),
+        ("theme", &[], "show terminal theme status"),
+        ("thinking", &["think", "t"], "show or set thinking budget"),
+        ("tree", &[], "show a bounded project tree"),
+        ("usage", &["cost"], "show token usage for this REPL session"),
+        ("vim", &[], "show Vim-input status"),
+    ]
+}
+
+fn help_json_payload() -> serde_json::Value {
+    let commands: Vec<serde_json::Value> = help_command_rows()
+        .iter()
+        .map(|(name, aliases, description)| {
+            json!({
+                "name": name,
+                "aliases": aliases,
+                "description": description,
+            })
+        })
+        .collect();
+    json!({
+        "surface": "terminal",
+        "command": "help",
+        "commands": commands,
+        "supported_actions": ["status", "show", "list", "json", "status --json"],
+    })
+}
+
+fn print_help_json() {
+    match serde_json::to_string_pretty(&help_json_payload()) {
+        Ok(raw) => println!("{raw}"),
+        Err(err) => eprintln!("{DIM}  failed to render help JSON: {err}{RESET}"),
+    }
 }
 
 fn model_usage_text() -> &'static str {
@@ -14216,6 +14344,32 @@ mod tests {
         assert_eq!(payload["active_turn"], false);
         assert_eq!(payload["interrupt_mechanism"], "ctrl-c");
         assert_eq!(payload["supported_actions"][5], "status --json");
+    }
+
+    #[test]
+    fn help_command_arg_and_parser_capture_json_aliases() {
+        assert_eq!(help_command_arg("/help"), Some(""));
+        assert_eq!(help_command_arg("/help status"), Some("status"));
+        assert_eq!(help_command_arg("/help json"), Some("json"));
+        assert_eq!(help_command_arg("/help status --json"), Some("status --json"));
+        assert_eq!(help_command_arg("/helper"), None);
+        assert_eq!(parse_help_command(""), HelpCommand::Show);
+        assert_eq!(parse_help_command("list"), HelpCommand::Show);
+        assert_eq!(parse_help_command("json"), HelpCommand::Json);
+        assert_eq!(parse_help_command("status --json"), HelpCommand::Json);
+        assert!(help_usage_text().contains("json|status --json"));
+        let payload = help_json_payload();
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "help");
+        assert_eq!(payload["supported_actions"][4], "status --json");
+        assert!(
+            payload["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["name"] == "model"
+                    && row["description"] == "show or change the active model")
+        );
     }
 
     #[test]
