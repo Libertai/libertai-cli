@@ -4103,7 +4103,7 @@ fn parse_history_limit(input: &str) -> Result<usize> {
 }
 
 fn history_usage_text() -> &'static str {
-    "/history [count|list|recent|latest|status|state|show|json|status --json|list --json|recent --json|latest --json]"
+    "/history [count|list|recent|latest|status|state|show|json|--json|status --json|state --json|show --json|list --json|recent --json|latest --json]"
 }
 
 fn is_default_list_alias(value: &str) -> bool {
@@ -15046,9 +15046,15 @@ mod tests {
         assert!(parse_history_limit("open").is_err());
         assert!(history_usage_text().contains("list|recent|latest"));
         assert!(history_usage_text().contains("status|state|show"));
-        assert!(history_usage_text().contains("json|status --json|list --json"));
+        assert!(history_usage_text().contains("json|--json|status --json"));
+        assert!(history_usage_text().contains("state --json|show --json"));
         assert_eq!(history_json_request_arg("json"), Some(String::new()));
         assert_eq!(history_json_request_arg("--json"), Some(String::new()));
+        assert_eq!(
+            history_json_request_arg("state --json"),
+            Some(String::new())
+        );
+        assert_eq!(history_json_request_arg("show --json"), Some(String::new()));
         assert_eq!(history_json_request_arg("list --json"), Some(String::new()));
         assert_eq!(history_json_request_arg("json 3"), Some("3".to_string()));
         assert_eq!(history_json_request_arg("status"), None);
