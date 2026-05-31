@@ -948,7 +948,7 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = theme_command_arg(trimmed) {
-            print_theme_status(parse_theme_command(rest));
+            print_theme_status(parse_theme_command(rest), rest);
             continue;
         }
         if let Some(rest) = vim_command_arg(trimmed) {
@@ -6275,9 +6275,9 @@ fn is_send_json_request(rest: &str) -> bool {
     )
 }
 
-fn print_theme_status(command: ThemeCommand) {
+fn print_theme_status(command: ThemeCommand, query: &str) {
     if command == ThemeCommand::Json {
-        print_theme_status_json();
+        print_theme_status_json(query);
         return;
     }
     println!("{BOLD}theme{RESET}");
@@ -6302,17 +6302,18 @@ fn print_theme_status(command: ThemeCommand) {
     }
 }
 
-fn print_theme_status_json() {
-    match serde_json::to_string_pretty(&theme_json_payload()) {
+fn print_theme_status_json(query: &str) {
+    match serde_json::to_string_pretty(&theme_json_payload(query)) {
         Ok(raw) => println!("{raw}"),
         Err(err) => eprintln!("{DIM}  /theme json: {err:#}{RESET}"),
     }
 }
 
-fn theme_json_payload() -> serde_json::Value {
+fn theme_json_payload(query: &str) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "theme",
+        "query": query.trim(),
         "aliases": ["theme"],
         "current": null,
         "resolved": null,
@@ -17505,9 +17506,10 @@ mod tests {
             parse_theme_command("high-contrast"),
             ThemeCommand::Requested("high-contrast".to_string())
         );
-        let payload = theme_json_payload();
+        let payload = theme_json_payload("current --json");
         assert_eq!(payload["command"], "theme");
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "current --json");
         assert_eq!(payload["aliases"][0], "theme");
         assert_eq!(payload["terminal_mutates_theme"], false);
         assert!(payload["supported_actions"]
