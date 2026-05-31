@@ -3365,7 +3365,7 @@ fn print_exit_json(command: &str) {
 }
 
 fn model_usage_text() -> &'static str {
-    "/model [status|show|current|json|status --json|list|ls|list --json|next|cycle|prev|previous|back|model|provider/model]"
+    "/model [status|show|current|json|--json|status --json|show --json|current --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model]"
 }
 
 fn scoped_models_usage_text() -> &'static str {
@@ -17689,13 +17689,14 @@ mod tests {
     fn parse_model_slash_command_accepts_status_and_cycle_aliases() {
         assert_eq!(
             model_usage_text(),
-            "/model [status|show|current|json|status --json|list|ls|list --json|next|cycle|prev|previous|back|model|provider/model]"
+            "/model [status|show|current|json|--json|status --json|show --json|current --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model]"
         );
         assert!(matches!(parse_model_slash_command(""), ModelSlashCommand::Status));
         assert!(matches!(parse_model_slash_command("status"), ModelSlashCommand::Status));
         assert!(matches!(parse_model_slash_command("show"), ModelSlashCommand::Status));
         assert!(matches!(parse_model_slash_command("current"), ModelSlashCommand::Status));
         assert!(matches!(parse_model_slash_command("json"), ModelSlashCommand::Json));
+        assert!(matches!(parse_model_slash_command("--json"), ModelSlashCommand::Json));
         assert!(matches!(parse_model_slash_command("status --json"), ModelSlashCommand::Json));
         assert!(matches!(parse_model_slash_command("show --json"), ModelSlashCommand::Json));
         assert!(matches!(parse_model_slash_command("current --json"), ModelSlashCommand::Json));
@@ -17812,7 +17813,7 @@ mod tests {
     fn model_slash_command_cycles_scoped_models() {
         assert_eq!(
             model_usage_text(),
-            "/model [status|show|current|json|status --json|list|ls|list --json|next|cycle|prev|previous|back|model|provider/model]"
+            "/model [status|show|current|json|--json|status --json|show --json|current --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model]"
         );
         assert_eq!(parse_model_slash_command(""), ModelSlashCommand::Status);
         assert_eq!(parse_model_slash_command("list"), ModelSlashCommand::List);
