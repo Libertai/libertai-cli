@@ -3493,11 +3493,12 @@ fn project_tree_json_payload(root: &Path, max_entries: usize) -> Result<serde_js
     Ok(json!({
         "surface": "terminal",
         "command": "tree",
+        "aliases": ["tree"],
         "root": root.display().to_string(),
         "limit": max_entries,
         "count": rows.len(),
         "truncated": remaining == 0,
-        "supported_actions": ["json", "status --json", "state --json", "show --json", "path --json"],
+        "supported_actions": ["json", "--json", "status --json", "state --json", "show --json", "path --json"],
         "entries": rows,
     }))
 }
@@ -3765,6 +3766,7 @@ fn sandbox_json_payload(profile: &StrictProfile) -> serde_json::Value {
     json!({
         "command": "sandbox",
         "surface": "terminal",
+        "aliases": ["sandbox"],
         "cwd": profile.cwd,
         "network_allowed": profile.network_allowed,
         "bwrap_path": binary_on_path("bwrap"),
@@ -3780,7 +3782,7 @@ fn sandbox_json_payload(profile: &StrictProfile) -> serde_json::Value {
         "env": profile.env,
         "will_write": false,
         "will_reload": false,
-        "supported_actions": ["info", "status", "state", "show", "diagnostics", "diag", "json", "status --json", "reload"],
+        "supported_actions": ["info", "status", "state", "show", "diagnostics", "diag", "json", "--json", "status --json", "diagnostics --json", "reload"],
     })
 }
 
@@ -14797,8 +14799,10 @@ mod tests {
         let payload = project_tree_json_payload(temp.path(), 20).unwrap();
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "tree");
-        assert_eq!(payload["supported_actions"][1], "status --json");
-        assert_eq!(payload["supported_actions"][4], "path --json");
+        assert_eq!(payload["aliases"][0], "tree");
+        assert_eq!(payload["supported_actions"][1], "--json");
+        assert_eq!(payload["supported_actions"][2], "status --json");
+        assert_eq!(payload["supported_actions"][5], "path --json");
         assert_eq!(payload["entries"][0]["kind"], "dir");
         assert!(
             payload["entries"]
@@ -14901,7 +14905,10 @@ mod tests {
         assert_eq!(payload["will_reload"], false);
         assert!(payload["binds"]["count"].as_u64().unwrap() > 0);
         assert!(payload["binds"]["bin_count"].as_u64().unwrap() > 0);
-        assert_eq!(payload["supported_actions"][7], "status --json");
+        assert_eq!(payload["aliases"][0], "sandbox");
+        assert_eq!(payload["supported_actions"][7], "--json");
+        assert_eq!(payload["supported_actions"][8], "status --json");
+        assert_eq!(payload["supported_actions"][9], "diagnostics --json");
     }
 
     #[test]
