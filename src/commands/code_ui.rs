@@ -1809,11 +1809,21 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/export ") {
-            export_transcript(&handle, Some(rest.trim())).await;
+            let rest = rest.trim();
+            if is_export_json_arg(rest) {
+                print_export_json(&handle, rest).await;
+            } else {
+                export_transcript(&handle, Some(rest)).await;
+            }
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/share ") {
-            share_transcript(&handle, Some(rest.trim())).await;
+            let rest = rest.trim();
+            if is_share_json_arg(rest) {
+                print_share_json(&handle, rest).await;
+            } else {
+                share_transcript(&handle, Some(rest)).await;
+            }
             continue;
         }
         if let Some(rest) = onboarding_command_arg(trimmed) {
@@ -5028,6 +5038,43 @@ async fn export_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
     }
 }
 
+fn is_export_json_arg(input: &str) -> bool {
+    matches!(
+        normalize_help_command_arg(input).as_str(),
+        "json" | "--json" | "status --json" | "show --json" | "preview --json"
+    )
+}
+
+async fn print_export_json(handle: &AgentSessionHandle, query: &str) {
+    match handle.messages().await {
+        Ok(messages) => match serde_json::to_string_pretty(&export_json_payload(query, &messages)) {
+            Ok(body) => println!("{body}"),
+            Err(e) => eprintln!("{DIM}  /export json failed: {e}{RESET}"),
+        },
+        Err(e) => eprintln!("{DIM}  /export json: could not read transcript: {e:#}{RESET}"),
+    }
+}
+
+fn export_json_payload(query: &str, messages: &[Message]) -> serde_json::Value {
+    let markdown = render_markdown_transcript(messages);
+    json!({
+        "surface": "terminal",
+        "command": "export",
+        "query": normalize_help_command_arg(query),
+        "available": !messages.is_empty(),
+        "message_count": messages.len(),
+        "default_path": "libertai-transcript.md",
+        "artifact": {
+            "format": "markdown",
+            "bytes": markdown.len(),
+            "lines": markdown.lines().count(),
+        },
+        "will_write": false,
+        "will_copy": false,
+        "supported_actions": ["copy", "save", "path", "json", "status --json"],
+    })
+}
+
 async fn share_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
     let target = match parse_share_target(path) {
         Ok(target) => target,
@@ -5072,6 +5119,45 @@ async fn share_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
             }
         }
     }
+}
+
+fn is_share_json_arg(input: &str) -> bool {
+    matches!(
+        normalize_help_command_arg(input).as_str(),
+        "json" | "--json" | "status --json" | "show --json" | "preview --json"
+    )
+}
+
+async fn print_share_json(handle: &AgentSessionHandle, query: &str) {
+    match handle.messages().await {
+        Ok(messages) => match serde_json::to_string_pretty(&share_json_payload(query, &messages)) {
+            Ok(body) => println!("{body}"),
+            Err(e) => eprintln!("{DIM}  /share json failed: {e}{RESET}"),
+        },
+        Err(e) => eprintln!("{DIM}  /share json: could not read transcript: {e:#}{RESET}"),
+    }
+}
+
+fn share_json_payload(query: &str, messages: &[Message]) -> serde_json::Value {
+    let html = render_html_transcript(messages);
+    json!({
+        "surface": "terminal",
+        "command": "share",
+        "query": normalize_help_command_arg(query),
+        "available": !messages.is_empty(),
+        "message_count": messages.len(),
+        "default_path": "libertai-share.html",
+        "default_gist_filename": "libertai-share.html",
+        "artifact": {
+            "format": "html",
+            "bytes": html.len(),
+            "lines": html.lines().count(),
+        },
+        "will_write": false,
+        "will_publish": false,
+        "will_copy": false,
+        "supported_actions": ["copy", "save", "path", "gist", "json", "status --json"],
+    })
 }
 
 async fn compact_transcript(handle: &mut AgentSessionHandle, notes: Option<&str>) -> bool {
@@ -16211,6 +16297,35 @@ mod tests {
     }
 
     #[test]
+    fn export_json_arg_accepts_preview_aliases() {
+        assert!(is_export_json_arg("json"));
+        assert!(is_export_json_arg("--json"));
+        assert!(is_export_json_arg("status --json"));
+        assert!(is_export_json_arg("show --json"));
+        assert!(is_export_json_arg("preview --json"));
+        assert!(!is_export_json_arg("save report.md"));
+    }
+
+    #[test]
+    fn export_json_payload_reports_non_writing_preview() {
+        let messages = vec![Message::User(pi::model::UserMessage {
+            content: UserContent::Text("hello".to_string()),
+            timestamp: 1,
+        })];
+        let payload = export_json_payload("status --json", &messages);
+
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "export");
+        assert_eq!(payload["query"], "status --json");
+        assert_eq!(payload["message_count"], 1);
+        assert_eq!(payload["default_path"], "libertai-transcript.md");
+        assert_eq!(payload["will_write"], false);
+        assert_eq!(payload["will_copy"], false);
+        assert!(payload["artifact"]["bytes"].as_u64().unwrap() > 0);
+        assert_eq!(payload["supported_actions"][4], "status --json");
+    }
+
+    #[test]
     fn share_target_uses_default_or_custom_path() {
         assert_eq!(
             parse_share_target(None).unwrap(),
@@ -16243,6 +16358,37 @@ mod tests {
             }
         );
         assert!(parse_share_target(Some("gist --wat")).is_err());
+    }
+
+    #[test]
+    fn share_json_arg_accepts_preview_aliases() {
+        assert!(is_share_json_arg("json"));
+        assert!(is_share_json_arg("--json"));
+        assert!(is_share_json_arg("status --json"));
+        assert!(is_share_json_arg("show --json"));
+        assert!(is_share_json_arg("preview --json"));
+        assert!(!is_share_json_arg("gist public report.html"));
+    }
+
+    #[test]
+    fn share_json_payload_reports_non_writing_preview() {
+        let messages = vec![Message::User(pi::model::UserMessage {
+            content: UserContent::Text("hello".to_string()),
+            timestamp: 1,
+        })];
+        let payload = share_json_payload("status --json", &messages);
+
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "share");
+        assert_eq!(payload["query"], "status --json");
+        assert_eq!(payload["message_count"], 1);
+        assert_eq!(payload["default_path"], "libertai-share.html");
+        assert_eq!(payload["default_gist_filename"], "libertai-share.html");
+        assert_eq!(payload["will_write"], false);
+        assert_eq!(payload["will_publish"], false);
+        assert_eq!(payload["will_copy"], false);
+        assert!(payload["artifact"]["bytes"].as_u64().unwrap() > 0);
+        assert_eq!(payload["supported_actions"][5], "status --json");
     }
 
     #[test]
