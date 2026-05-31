@@ -3397,7 +3397,8 @@ fn hotkeys_json_payload() -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "hotkeys",
-        "supported_actions": ["status", "show", "list", "help", "json", "status --json"],
+        "aliases": ["hotkeys"],
+        "supported_actions": ["status", "show", "list", "help", "json", "--json", "status --json", "show --json", "list --json"],
         "shortcuts": shortcuts,
     })
 }
@@ -3973,13 +3974,14 @@ fn copy_json_payload(messages: &[Message]) -> serde_json::Value {
     json!({
         "command": "copy",
         "surface": "terminal",
+        "aliases": ["copy"],
         "target": "latest_assistant_response",
         "available": response.is_some(),
         "bytes": bytes,
         "max_terminal_clipboard_bytes": OSC52_MAX_TEXT_BYTES,
         "copy_available": response.is_some() && bytes <= OSC52_MAX_TEXT_BYTES,
         "copy_mechanism": "osc52",
-        "supported_actions": ["status", "show", "info", "json", "status --json", "last", "latest", "response", "assistant", "assistant-response"],
+        "supported_actions": ["status", "show", "info", "json", "--json", "status --json", "show --json", "info --json", "last", "latest", "response", "assistant", "assistant-response"],
     })
 }
 
@@ -16108,9 +16110,15 @@ mod tests {
         let empty_payload = copy_json_payload(&[]);
         assert_eq!(empty_payload["command"], "copy");
         assert_eq!(empty_payload["surface"], "terminal");
+        assert_eq!(empty_payload["aliases"][0], "copy");
         assert_eq!(empty_payload["available"], false);
         assert_eq!(empty_payload["copy_mechanism"], "osc52");
-        assert_eq!(empty_payload["supported_actions"][4], "status --json");
+        assert_eq!(empty_payload["supported_actions"][5], "status --json");
+        assert_eq!(empty_payload["supported_actions"][7], "info --json");
+        assert_eq!(
+            empty_payload["supported_actions"][12],
+            "assistant-response"
+        );
 
         assert_eq!(hotkeys_command_arg("/hotkeys"), Some(""));
         assert_eq!(hotkeys_command_arg("/hotkeys status"), Some("status"));
@@ -16126,7 +16134,9 @@ mod tests {
         let payload = hotkeys_json_payload();
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "hotkeys");
-        assert_eq!(payload["supported_actions"][5], "status --json");
+        assert_eq!(payload["aliases"][0], "hotkeys");
+        assert_eq!(payload["supported_actions"][6], "status --json");
+        assert_eq!(payload["supported_actions"][8], "list --json");
         assert!(
             payload["shortcuts"]
                 .as_array()
