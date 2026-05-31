@@ -1117,6 +1117,14 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some((command, rest)) = exit_command_arg(trimmed) {
+            match parse_exit_command(rest) {
+                ExitCommand::Status => print_exit_status(command),
+                ExitCommand::Json => print_exit_json(command),
+                ExitCommand::Usage => println!("{DIM}  usage:{RESET} {}", exit_usage_text(command)),
+            }
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
@@ -3080,6 +3088,68 @@ fn print_forget_json(approvals: &ApprovalState) {
     match serde_json::to_string_pretty(&forget_json_payload(approvals)) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  /forget json failed: {e}{RESET}"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitCommand {
+    Status,
+    Json,
+    Usage,
+}
+
+fn exit_usage_text(command: &str) -> String {
+    format!("{command} [status|show|info|json|status --json]")
+}
+
+fn exit_command_arg(trimmed: &str) -> Option<(&'static str, &str)> {
+    for command in ["/exit", "/quit"] {
+        if trimmed == command {
+            return None;
+        }
+        if let Some(rest) = trimmed.strip_prefix(command) {
+            if rest.starts_with(' ') {
+                return Some((command, rest.trim()));
+            }
+        }
+    }
+    None
+}
+
+fn parse_exit_command(input: &str) -> ExitCommand {
+    match normalize_help_command_arg(input).as_str() {
+        "" | "status" | "state" | "show" | "info" | "preview" => ExitCommand::Status,
+        "json" | "--json" | "status --json" | "state --json" | "show --json"
+        | "info --json" | "preview --json" => ExitCommand::Json,
+        _ => ExitCommand::Usage,
+    }
+}
+
+fn exit_json_payload(command: &str) -> serde_json::Value {
+    json!({
+        "surface": "terminal",
+        "command": command.trim_start_matches('/'),
+        "aliases": ["exit", "quit"],
+        "available": true,
+        "active_turn": false,
+        "will_exit_repl": true,
+        "will_close_session_tab": false,
+        "will_stop_current_process": true,
+        "interrupt_alternative": "Ctrl+D",
+        "supported_actions": ["status", "state", "show", "info", "json", "status --json"],
+    })
+}
+
+fn print_exit_status(command: &str) {
+    println!(
+        "{DIM}  {command}: ready. Running `{command}` with no arguments quits this terminal REPL; Ctrl+D is equivalent.{RESET}",
+    );
+}
+
+fn print_exit_json(command: &str) {
+    match serde_json::to_string_pretty(&exit_json_payload(command)) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  {command} json failed: {e}{RESET}"),
     }
 }
 
@@ -14563,6 +14633,34 @@ mod tests {
         assert_eq!(payload["remembered_approvals"], 0);
         assert_eq!(payload["will_clear_saved_allow_rules"], true);
         assert_eq!(payload["will_change_permission_mode"], false);
+        assert_eq!(payload["supported_actions"][5], "status --json");
+    }
+
+    #[test]
+    fn exit_command_arg_and_parser_capture_preview_aliases() {
+        assert_eq!(exit_command_arg("/exit"), None);
+        assert_eq!(exit_command_arg("/quit"), None);
+        assert_eq!(exit_command_arg("/exit status"), Some(("/exit", "status")));
+        assert_eq!(exit_command_arg("/quit json"), Some(("/quit", "json")));
+        assert_eq!(
+            exit_command_arg("/exit status --json"),
+            Some(("/exit", "status --json"))
+        );
+        assert_eq!(exit_command_arg("/exitcode status"), None);
+        assert_eq!(parse_exit_command("status"), ExitCommand::Status);
+        assert_eq!(parse_exit_command("preview"), ExitCommand::Status);
+        assert_eq!(parse_exit_command("json"), ExitCommand::Json);
+        assert_eq!(parse_exit_command("status --json"), ExitCommand::Json);
+        assert_eq!(parse_exit_command("run"), ExitCommand::Usage);
+        assert!(exit_usage_text("/exit").contains("json|status --json"));
+        let payload = exit_json_payload("/quit");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "quit");
+        assert_eq!(payload["available"], true);
+        assert_eq!(payload["active_turn"], false);
+        assert_eq!(payload["will_exit_repl"], true);
+        assert_eq!(payload["will_close_session_tab"], false);
+        assert_eq!(payload["interrupt_alternative"], "Ctrl+D");
         assert_eq!(payload["supported_actions"][5], "status --json");
     }
 
