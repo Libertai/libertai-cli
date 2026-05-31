@@ -3352,7 +3352,7 @@ fn model_usage_text() -> &'static str {
 }
 
 fn scoped_models_usage_text() -> &'static str {
-    "/scoped-models <status|show|json|patterns|clear|reset|off> — filter /model list and /model next|prev"
+    "/scoped-models <status|show|json|status --json|patterns|clear|reset|off> — filter /model list and /model next|prev"
 }
 
 fn hotkey_lines() -> &'static [&'static str] {
@@ -16802,7 +16802,7 @@ mod tests {
     fn scoped_models_parse_patterns_and_filter_matches() {
         assert_eq!(
             scoped_models_usage_text(),
-            "/scoped-models <status|show|json|patterns|clear|reset|off> — filter /model list and /model next|prev"
+            "/scoped-models <status|show|json|status --json|patterns|clear|reset|off> — filter /model list and /model next|prev"
         );
         assert_eq!(scoped_models_command_arg("/scoped-models"), Some(""));
         assert_eq!(
