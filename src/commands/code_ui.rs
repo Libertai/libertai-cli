@@ -338,6 +338,8 @@ enum ThemeCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelSlashCommand<'a> {
     Status,
+    Json,
+    JsonList,
     List,
     Next,
     Previous,
@@ -1726,6 +1728,12 @@ async fn repl_loop(
             match model_command {
                 ModelSlashCommand::Status => {
                     print_model_status(&handle, &cfg, &scoped_model_patterns)
+                }
+                ModelSlashCommand::Json => {
+                    print_model_json(&handle, &cfg, &scoped_model_patterns, false)
+                }
+                ModelSlashCommand::JsonList => {
+                    print_model_json(&handle, &cfg, &scoped_model_patterns, true)
                 }
                 ModelSlashCommand::List => {
                     print_model_list(&cfg, &provider, &scoped_model_patterns)
@@ -3348,7 +3356,7 @@ fn print_exit_json(command: &str) {
 }
 
 fn model_usage_text() -> &'static str {
-    "/model [status|show|current|list|ls|next|cycle|prev|previous|back|model|provider/model]"
+    "/model [status|show|current|json|status --json|list|ls|list --json|next|cycle|prev|previous|back|model|provider/model]"
 }
 
 fn scoped_models_usage_text() -> &'static str {
@@ -4838,6 +4846,10 @@ fn parse_model_slash_command(input: &str) -> ModelSlashCommand<'_> {
     let raw = input.trim();
     match raw.to_ascii_lowercase().as_str() {
         "" | "status" | "show" | "current" => ModelSlashCommand::Status,
+        "json" | "--json" | "status --json" | "show --json" | "current --json" => {
+            ModelSlashCommand::Json
+        }
+        "list --json" | "ls --json" => ModelSlashCommand::JsonList,
         "list" | "ls" => ModelSlashCommand::List,
         "next" | "cycle" => ModelSlashCommand::Next,
         "prev" | "previous" | "back" => ModelSlashCommand::Previous,
@@ -4958,6 +4970,69 @@ fn print_model_status(
         println!("{DIM}  scoped models:{RESET} {}", scoped_model_patterns.join(", "));
     }
     println!("{DIM}  usage:{RESET} {}", model_usage_text());
+}
+
+fn model_json_payload(
+    provider: &str,
+    model: &str,
+    cfg: &LibertaiConfig,
+    scoped_model_patterns: &[String],
+    available_models: Option<Vec<String>>,
+) -> serde_json::Value {
+    json!({
+        "surface": "terminal",
+        "command": "model",
+        "current": {
+            "provider": provider,
+            "model": model,
+            "id": format!("{provider}/{model}"),
+        },
+        "default": {
+            "provider": cfg.default_code_provider,
+            "model": cfg.default_code_model,
+            "id": format!("{}/{}", cfg.default_code_provider, cfg.default_code_model),
+        },
+        "scope": {
+            "patterns": scoped_model_patterns,
+            "is_scoped": !scoped_model_patterns.is_empty(),
+        },
+        "available_models": available_models,
+        "aliases": ["model"],
+        "supported_actions": ["status", "show", "current", "json", "status --json", "show --json", "current --json", "list", "ls", "list --json", "ls --json", "next", "cycle", "prev", "previous", "back", "set <model>", "set <provider/model>"],
+    })
+}
+
+fn print_model_json(
+    handle: &AgentSessionHandle,
+    cfg: &LibertaiConfig,
+    scoped_model_patterns: &[String],
+    include_list: bool,
+) {
+    let (provider, model) = handle.model();
+    let available_models = if include_list {
+        match crate::client::list_models(cfg) {
+            Ok(list) => {
+                let ids: Vec<String> = list.data.into_iter().map(|entry| entry.id).collect();
+                Some(scoped_model_ids(&provider, &ids, scoped_model_patterns))
+            }
+            Err(e) => {
+                eprintln!("{DIM}  /model list --json: {e:#}{RESET}");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    match serde_json::to_string_pretty(&model_json_payload(
+        &provider,
+        &model,
+        cfg,
+        scoped_model_patterns,
+        available_models,
+    )) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("{DIM}  /model json failed: {e}{RESET}"),
+    }
 }
 
 fn print_model_list(cfg: &LibertaiConfig, provider: &str, scoped_model_patterns: &[String]) {
@@ -16920,20 +16995,42 @@ mod tests {
     fn parse_model_slash_command_accepts_status_and_cycle_aliases() {
         assert_eq!(
             model_usage_text(),
-            "/model [status|show|current|list|ls|next|cycle|prev|previous|back|model|provider/model]"
+            "/model [status|show|current|json|status --json|list|ls|list --json|next|cycle|prev|previous|back|model|provider/model]"
         );
         assert!(matches!(parse_model_slash_command(""), ModelSlashCommand::Status));
         assert!(matches!(parse_model_slash_command("status"), ModelSlashCommand::Status));
         assert!(matches!(parse_model_slash_command("show"), ModelSlashCommand::Status));
         assert!(matches!(parse_model_slash_command("current"), ModelSlashCommand::Status));
+        assert!(matches!(parse_model_slash_command("json"), ModelSlashCommand::Json));
+        assert!(matches!(parse_model_slash_command("status --json"), ModelSlashCommand::Json));
+        assert!(matches!(parse_model_slash_command("show --json"), ModelSlashCommand::Json));
+        assert!(matches!(parse_model_slash_command("current --json"), ModelSlashCommand::Json));
         assert!(matches!(parse_model_slash_command("list"), ModelSlashCommand::List));
         assert!(matches!(parse_model_slash_command("ls"), ModelSlashCommand::List));
+        assert!(matches!(parse_model_slash_command("list --json"), ModelSlashCommand::JsonList));
+        assert!(matches!(parse_model_slash_command("ls --json"), ModelSlashCommand::JsonList));
         assert!(matches!(parse_model_slash_command("next"), ModelSlashCommand::Next));
         assert!(matches!(parse_model_slash_command("cycle"), ModelSlashCommand::Next));
         assert!(matches!(parse_model_slash_command("prev"), ModelSlashCommand::Previous));
         assert!(matches!(parse_model_slash_command("previous"), ModelSlashCommand::Previous));
         assert!(matches!(parse_model_slash_command("back"), ModelSlashCommand::Previous));
         assert!(matches!(parse_model_slash_command("openai/gpt-5"), ModelSlashCommand::Set("openai/gpt-5")));
+
+        let cfg = LibertaiConfig::default();
+        let payload = model_json_payload(
+            "libertai",
+            "qwen3",
+            &cfg,
+            &["qwen*".to_string()],
+            Some(vec!["qwen3".to_string()]),
+        );
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "model");
+        assert_eq!(payload["current"]["id"], "libertai/qwen3");
+        assert_eq!(payload["scope"]["is_scoped"], true);
+        assert_eq!(payload["available_models"][0], "qwen3");
+        assert_eq!(payload["supported_actions"][4], "status --json");
+        assert_eq!(payload["supported_actions"][9], "list --json");
     }
 
     #[test]
@@ -17012,7 +17109,7 @@ mod tests {
     fn model_slash_command_cycles_scoped_models() {
         assert_eq!(
             model_usage_text(),
-            "/model [status|show|current|list|ls|next|cycle|prev|previous|back|model|provider/model]"
+            "/model [status|show|current|json|status --json|list|ls|list --json|next|cycle|prev|previous|back|model|provider/model]"
         );
         assert_eq!(parse_model_slash_command(""), ModelSlashCommand::Status);
         assert_eq!(parse_model_slash_command("list"), ModelSlashCommand::List);
