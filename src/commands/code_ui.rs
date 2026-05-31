@@ -2881,7 +2881,7 @@ fn thinking_json_payload(level: ThinkingLevel) -> serde_json::Value {
         "current": level.to_string(),
         "supported_levels": ["off", "minimal", "low", "medium", "high", "xhigh"],
         "will_change": false,
-        "supported_actions": ["status", "show", "current", "info", "json", "status --json", "set"],
+        "supported_actions": ["status", "show", "current", "info", "json", "--json", "status --json", "show --json", "current --json", "info --json", "off", "minimal", "low", "medium", "high", "xhigh", "set"],
     })
 }
 
@@ -3158,8 +3158,9 @@ fn help_json_payload() -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "help",
+        "aliases": ["help"],
         "commands": commands,
-        "supported_actions": ["status", "show", "list", "json", "status --json"],
+        "supported_actions": ["status", "show", "list", "commands", "json", "--json", "status --json", "show --json", "list --json", "commands --json"],
     })
 }
 
@@ -3217,7 +3218,7 @@ fn clear_json_payload(command: &str, provider: &str, model: &str, mode: Mode) ->
         "current_provider": provider,
         "current_model": model,
         "current_mode": mode_label(mode),
-        "supported_actions": ["status", "state", "show", "info", "json", "status --json"],
+        "supported_actions": ["status", "state", "show", "info", "preview", "json", "--json", "status --json", "state --json", "show --json", "info --json", "preview --json"],
     })
 }
 
@@ -3339,7 +3340,7 @@ fn exit_json_payload(command: &str) -> serde_json::Value {
         "will_close_session_tab": false,
         "will_stop_current_process": true,
         "interrupt_alternative": "Ctrl+D",
-        "supported_actions": ["status", "state", "show", "info", "json", "status --json"],
+        "supported_actions": ["status", "state", "show", "info", "preview", "json", "--json", "status --json", "state --json", "show --json", "info --json", "preview --json"],
     })
 }
 
@@ -15381,7 +15382,14 @@ mod tests {
         assert_eq!(payload["command"], "thinking");
         assert_eq!(payload["current"], "high");
         assert_eq!(payload["will_change"], false);
-        assert_eq!(payload["supported_actions"][5], "status --json");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("info --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("xhigh")));
     }
 
     #[test]
@@ -16339,7 +16347,15 @@ mod tests {
         let payload = help_json_payload();
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "help");
-        assert_eq!(payload["supported_actions"][4], "status --json");
+        assert_eq!(payload["aliases"][0], "help");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("commands --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("list --json")));
         assert!(
             payload["commands"]
                 .as_array()
@@ -16373,7 +16389,14 @@ mod tests {
         assert_eq!(payload["available"], true);
         assert_eq!(payload["active_turn"], false);
         assert_eq!(payload["current_mode"], "plan");
-        assert_eq!(payload["supported_actions"][5], "status --json");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("preview --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("info --json")));
     }
 
     #[test]
@@ -16430,7 +16453,14 @@ mod tests {
         assert_eq!(payload["will_exit_repl"], true);
         assert_eq!(payload["will_close_session_tab"], false);
         assert_eq!(payload["interrupt_alternative"], "Ctrl+D");
-        assert_eq!(payload["supported_actions"][5], "status --json");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("preview --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("info --json")));
     }
 
     #[test]
