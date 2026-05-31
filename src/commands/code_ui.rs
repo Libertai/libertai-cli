@@ -2236,6 +2236,7 @@ fn parse_init_agent_notes(input: &str) -> Option<Option<&str>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InitFromAgentAction {
     Preview,
+    Json,
     PreviewApply(&'static str),
     Append,
     Merge,
@@ -2276,6 +2277,9 @@ fn parse_init_from_agent_action(input: &str) -> Option<InitFromAgentAction> {
     }
     match rest {
         "" | "preview" | "show" => Some(InitFromAgentAction::Preview),
+        "json" | "--json" | "status --json" | "preview --json" | "show --json" => {
+            Some(InitFromAgentAction::Json)
+        }
         "preview append" | "show append" => Some(InitFromAgentAction::PreviewApply("append")),
         "preview merge" | "show merge" => Some(InitFromAgentAction::PreviewApply("merge")),
         "preview merge-lines" | "preview line-merge" | "preview lines" => {
@@ -2932,7 +2936,7 @@ fn print_help() {
     println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
     println!("{DIM}  /skills [list|status|show <name>|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions{RESET}");
     println!(
-        "{DIM}  /init [--agent|from-agent preview append|preview merge|preview merge-lines|preview replace|preview [append|merge|merge-lines] sections N[,M]|append sections N[,M]|merge sections N[,M]|merge-lines sections N[,M]|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}"
+        "{DIM}  /init [--agent|from-agent json|from-agent preview append|preview merge|preview merge-lines|preview replace|preview [append|merge|merge-lines] sections N[,M]|append sections N[,M]|merge sections N[,M]|merge-lines sections N[,M]|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}"
     );
     println!("{DIM}  /onboarding|/onboard [save|path] — write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
@@ -6698,33 +6702,58 @@ fn print_init_project(notes: Option<&str>) {
 }
 
 async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgentAction) {
+    let json_output = matches!(action, InitFromAgentAction::Json);
     let messages = match handle.messages().await {
         Ok(messages) => messages,
         Err(e) => {
-            eprintln!("{DIM}  /init from-agent: could not read transcript: {e:#}{RESET}");
+            if json_output {
+                print_init_from_agent_json(None, None, None, Some(&format!("could not read transcript: {e:#}")));
+            } else {
+                eprintln!("{DIM}  /init from-agent: could not read transcript: {e:#}{RESET}");
+            }
             return;
         }
     };
     let Some(text) = last_assistant_text(&messages) else {
-        println!("{DIM}  /init from-agent: no assistant response yet.{RESET}");
+        if json_output {
+            print_init_from_agent_json(None, None, None, Some("no assistant response yet"));
+        } else {
+            println!("{DIM}  /init from-agent: no assistant response yet.{RESET}");
+        }
         return;
     };
     let Some(candidate) = crate::commands::code_init::extract_agents_md_candidate(&text) else {
-        println!(
-            "{DIM}  /init from-agent: no fenced AGENTS.md candidate found in the latest assistant response.{RESET}"
-        );
+        if json_output {
+            print_init_from_agent_json(
+                None,
+                None,
+                None,
+                Some("no fenced AGENTS.md candidate found in the latest assistant response"),
+            );
+        } else {
+            println!(
+                "{DIM}  /init from-agent: no fenced AGENTS.md candidate found in the latest assistant response.{RESET}"
+            );
+        }
         return;
     };
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(e) => {
-            eprintln!("{DIM}  /init from-agent: could not resolve cwd: {e}{RESET}");
+            if json_output {
+                print_init_from_agent_json(None, None, Some(&candidate), Some(&format!("could not resolve cwd: {e}")));
+            } else {
+                eprintln!("{DIM}  /init from-agent: could not resolve cwd: {e}{RESET}");
+            }
             return;
         }
     };
     let path = cwd.join("AGENTS.md");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     match &action {
+        InitFromAgentAction::Json => {
+            print_init_from_agent_json(Some(&path), Some(&existing), Some(&candidate), None);
+        }
         InitFromAgentAction::Preview => {
             println!("{BOLD}init from-agent{RESET}");
             print!(
@@ -6801,6 +6830,7 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
                 InitFromAgentAction::MergeSections(_) => "merge",
                 InitFromAgentAction::MergeLineSections(_) => "merge-lines",
                 InitFromAgentAction::Preview
+                | InitFromAgentAction::Json
                 | InitFromAgentAction::PreviewApply(_)
                 | InitFromAgentAction::PreviewSections(_)
                 | InitFromAgentAction::PreviewApplySections(_, _) => unreachable!(),
@@ -6865,6 +6895,7 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
                         "line-merged selected sections into"
                     }
                     InitFromAgentAction::Preview
+                    | InitFromAgentAction::Json
                     | InitFromAgentAction::PreviewApply(_)
                     | InitFromAgentAction::PreviewSections(_)
                     | InitFromAgentAction::PreviewApplySections(_, _) => unreachable!(),
@@ -7189,6 +7220,67 @@ fn init_candidate_preview(path: &str, existing: &str, candidate: &str) -> String
     }
     out.push_str("\n  Review the candidate against the existing AGENTS.md and merge only verified repo facts.\n");
     out
+}
+
+fn print_init_from_agent_json(
+    path: Option<&Path>,
+    existing: Option<&str>,
+    candidate: Option<&str>,
+    error: Option<&str>,
+) {
+    let sections = existing
+        .zip(candidate)
+        .map(|(existing, candidate)| {
+            init_candidate_section_summaries(existing, candidate)
+                .into_iter()
+                .enumerate()
+                .map(|(idx, section)| {
+                    json!({
+                        "index": idx + 1,
+                        "title": section.title,
+                        "impact": section.status,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let candidate_content = candidate.map(str::to_string);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "surface": "cli",
+            "command": "init",
+            "subcommand": "from-agent",
+            "available": candidate.is_some() && error.is_none(),
+            "error": error,
+            "path": path.map(|path| path.display().to_string()),
+            "candidate": candidate_content.as_ref().map(|content| json!({
+                "content": content,
+                "bytes": content.len(),
+                "lines": content.lines().count(),
+            })),
+            "sections": sections,
+            "will_write": false,
+            "supported_actions": [
+                "preview",
+                "json",
+                "status --json",
+                "preview append",
+                "preview merge",
+                "preview merge-lines",
+                "preview replace",
+                "append",
+                "merge",
+                "merge-lines",
+                "replace",
+                "preview sections N[,M]",
+                "append sections N[,M]",
+                "merge sections N[,M]",
+                "merge-lines sections N[,M]"
+            ],
+        }))
+        .unwrap_or_else(|_| "{}".to_string())
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12896,6 +12988,14 @@ mod tests {
         assert_eq!(
             parse_init_from_agent_action("from-agent"),
             Some(InitFromAgentAction::Preview)
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent json"),
+            Some(InitFromAgentAction::Json)
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent status --json"),
+            Some(InitFromAgentAction::Json)
         );
         assert_eq!(
             parse_init_from_agent_action("from-agent append"),
