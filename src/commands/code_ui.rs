@@ -1678,7 +1678,7 @@ async fn repl_loop(
         }
         if let Some(rest) = thinking_command_arg(trimmed) {
             if is_thinking_json_arg(rest) {
-                print_thinking_json(&handle);
+                print_thinking_json(&handle, rest);
                 continue;
             }
             if is_thinking_status_arg(rest) {
@@ -2902,10 +2902,11 @@ fn print_thinking_status(handle: &AgentSessionHandle) {
     println!("{DIM}  usage:{RESET} /thinking [status|show|current|info|json|--json|status --json|show --json|current --json|info --json|level] (also /think or /t)");
 }
 
-fn thinking_json_payload(level: ThinkingLevel) -> serde_json::Value {
+fn thinking_json_payload(level: ThinkingLevel, query: &str) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "thinking",
+        "query": query.trim(),
         "aliases": ["think", "t"],
         "current": level.to_string(),
         "supported_levels": ["off", "minimal", "low", "medium", "high", "xhigh"],
@@ -2914,9 +2915,9 @@ fn thinking_json_payload(level: ThinkingLevel) -> serde_json::Value {
     })
 }
 
-fn print_thinking_json(handle: &AgentSessionHandle) {
+fn print_thinking_json(handle: &AgentSessionHandle, query: &str) {
     let current = handle.thinking_level().unwrap_or_default();
-    match serde_json::to_string_pretty(&thinking_json_payload(current)) {
+    match serde_json::to_string_pretty(&thinking_json_payload(current, query)) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  /thinking json failed: {e}{RESET}"),
     }
@@ -15960,9 +15961,10 @@ mod tests {
         assert!(is_thinking_json_arg("info --json"));
         assert!(!is_thinking_json_arg("high"));
         assert!(parse_thinking_level("").unwrap_err().to_string().contains("--json"));
-        let payload = thinking_json_payload(ThinkingLevel::High);
+        let payload = thinking_json_payload(ThinkingLevel::High, "current --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "thinking");
+        assert_eq!(payload["query"], "current --json");
         assert_eq!(payload["current"], "high");
         assert_eq!(payload["will_change"], false);
         assert!(payload["supported_actions"]
