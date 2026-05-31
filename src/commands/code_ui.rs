@@ -6256,7 +6256,7 @@ fn theme_json_payload() -> serde_json::Value {
 }
 
 const VIM_USAGE: &str =
-    "/vim [status|state|show|current|info|json|status --json|state --json|show --json|current --json|info --json|on|enable|enabled|true|off|disable|disabled|false]";
+    "/vim [status|state|show|current|info|json|--json|status --json|state --json|show --json|current --json|info --json|on|enable|enabled|true|off|disable|disabled|false]";
 const IDE_USAGE: &str =
     "/ide [status|state|show|json|--json|status --json|state --json|show --json|open|settings|edit]";
 const BUG_USAGE: &str =
@@ -13611,7 +13611,7 @@ fn is_output_style_json_request(value: &str) -> bool {
 }
 
 fn output_style_usage_text() -> &'static str {
-    "/output-style [default|concise|explanatory|review|status|show|current|info|list|json|status --json|show --json|current --json|info --json|list --json]"
+    "/output-style [default|concise|explanatory|review|status|show|current|info|list|json|--json|status --json|show --json|current --json|info --json|list --json]"
 }
 
 fn print_output_style_status(output_style: Option<&str>, unknown: Option<&str>) {
@@ -14252,7 +14252,7 @@ mod tests {
         assert!(is_output_style_json_request("list --json"));
         assert!(!is_output_style_json_request("review --json"));
         assert!(output_style_usage_text().contains("status|show|current|info|list"));
-        assert!(output_style_usage_text().contains("json|status --json|show --json"));
+        assert!(output_style_usage_text().contains("json|--json|status --json|show --json"));
         assert!(output_style_usage_text().contains("info --json|list --json"));
         assert!(output_style_usage_text().contains("default|concise|explanatory|review"));
         let payload = output_style_status_json_payload(Some("review"));
@@ -16473,6 +16473,7 @@ mod tests {
         assert_eq!(parse_vim_command("current"), VimCommand::Status);
         assert_eq!(parse_vim_command("info"), VimCommand::Status);
         assert_eq!(parse_vim_command("json"), VimCommand::Json);
+        assert_eq!(parse_vim_command("--json"), VimCommand::Json);
         assert_eq!(parse_vim_command("status --json"), VimCommand::Json);
         assert_eq!(parse_vim_command("info --json"), VimCommand::Json);
         assert_eq!(parse_vim_command("on"), VimCommand::Enable);
@@ -16485,7 +16486,7 @@ mod tests {
         assert_eq!(parse_vim_command("false"), VimCommand::Disable);
         assert_eq!(parse_vim_command("toggle"), VimCommand::Usage);
         assert!(VIM_USAGE.contains("current|info"));
-        assert!(VIM_USAGE.contains("json|status --json|state --json|show --json"));
+        assert!(VIM_USAGE.contains("json|--json|status --json|state --json|show --json"));
         assert!(VIM_USAGE.contains("current --json|info --json"));
         assert!(VIM_USAGE.contains("enable|enabled|true"));
         assert!(VIM_USAGE.contains("disable|disabled|false"));
