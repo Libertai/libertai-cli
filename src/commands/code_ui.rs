@@ -260,6 +260,7 @@ enum VimNormalAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IdeCommand {
     Status,
+    Json,
     Open,
     Usage,
 }
@@ -4843,6 +4844,9 @@ fn parse_vim_command(input: &str) -> VimCommand {
 fn parse_ide_command(input: &str) -> IdeCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "state" | "show" => IdeCommand::Status,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" => {
+            IdeCommand::Json
+        }
         "open" | "settings" | "edit" => IdeCommand::Open,
         _ => IdeCommand::Usage,
     }
@@ -5133,7 +5137,7 @@ fn print_theme_status_json() {
 
 const VIM_USAGE: &str =
     "/vim [status|state|show|current|info|json|status --json|on|enable|enabled|true|off|disable|disabled|false]";
-const IDE_USAGE: &str = "/ide [status|state|show|open|settings|edit]";
+const IDE_USAGE: &str = "/ide [status|state|show|json|status --json|open|settings|edit]";
 const BUG_USAGE: &str = "/bug [report|template|status|show]";
 
 fn print_vim_status(command: VimCommand) {
@@ -5222,6 +5226,7 @@ fn print_ide_status(command: IdeCommand) {
                 "{DIM}  terminal:{RESET} run libertai code inside your project, or use the desktop workspace for project navigation."
             );
         }
+        IdeCommand::Json => print_ide_json(),
         IdeCommand::Open => {
             println!(
                 "{DIM}  /ide open:{RESET} no IDE bridge is available to open from the terminal CLI yet."
@@ -5233,6 +5238,25 @@ fn print_ide_status(command: IdeCommand) {
         IdeCommand::Usage => {
             println!("{DIM}  usage:{RESET} {IDE_USAGE}");
         }
+    }
+}
+
+fn ide_json_payload() -> serde_json::Value {
+    json!({
+        "command": "ide",
+        "surface": "terminal",
+        "dedicated_ide_bridge": false,
+        "supported_editors": [],
+        "desktop_workspace_available": true,
+        "terminal_guidance": "Run libertai code inside your project, or use the desktop workspace for project navigation.",
+        "supported_actions": ["status", "state", "show", "json", "status --json", "open", "settings", "edit"],
+    })
+}
+
+fn print_ide_json() {
+    match serde_json::to_string_pretty(&ide_json_payload()) {
+        Ok(s) => println!("{s}"),
+        Err(e) => eprintln!("{DIM}  /ide json failed: {e}{RESET}"),
     }
 }
 
@@ -13832,12 +13856,21 @@ mod tests {
         assert_eq!(parse_ide_command("status"), IdeCommand::Status);
         assert_eq!(parse_ide_command("state"), IdeCommand::Status);
         assert_eq!(parse_ide_command("show"), IdeCommand::Status);
+        assert_eq!(parse_ide_command("json"), IdeCommand::Json);
+        assert_eq!(parse_ide_command("status --json"), IdeCommand::Json);
         assert_eq!(parse_ide_command("open"), IdeCommand::Open);
         assert_eq!(parse_ide_command("settings"), IdeCommand::Open);
         assert_eq!(parse_ide_command("edit"), IdeCommand::Open);
         assert_eq!(parse_ide_command("install"), IdeCommand::Usage);
         assert!(IDE_USAGE.contains("state|show"));
+        assert!(IDE_USAGE.contains("json|status --json"));
         assert!(IDE_USAGE.contains("settings|edit"));
+        let payload = ide_json_payload();
+        assert_eq!(payload["command"], "ide");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["dedicated_ide_bridge"], false);
+        assert_eq!(payload["desktop_workspace_available"], true);
+        assert_eq!(payload["supported_actions"][4], "status --json");
     }
 
     #[test]
