@@ -9330,7 +9330,7 @@ fn parse_skills_command(query: &str) -> Result<SkillsCommand> {
             Ok(SkillsCommand::Disable(name.to_string()))
         }
         _ => anyhow::bail!(
-            "usage: /skills [list|status|json|status --json|show <name>|open|settings|edit|enable|on <name>|disable|off <name>]"
+            "usage: /skills [list|status|show|json|--json|status --json|list --json|show --json|show <name>|open|settings|edit|enable|on <name>|disable|off <name>]"
         ),
     }
 }
@@ -14642,6 +14642,7 @@ mod tests {
     #[test]
     fn memory_json_action_and_entry_counts_are_stable() {
         assert!(is_memory_json_action("json"));
+        assert!(is_memory_json_action("--json"));
         assert!(is_memory_json_action("status --json"));
         assert!(is_memory_json_action("show --json"));
         assert!(!is_memory_json_action("status"));
@@ -19101,8 +19102,13 @@ mod tests {
             parse_skills_command("status --json").unwrap(),
             SkillsCommand::Json
         );
+        assert_eq!(parse_skills_command("--json").unwrap(), SkillsCommand::Json);
         assert_eq!(
             parse_skills_command("list --json").unwrap(),
+            SkillsCommand::Json
+        );
+        assert_eq!(
+            parse_skills_command("show --json").unwrap(),
             SkillsCommand::Json
         );
         assert_eq!(
@@ -19127,6 +19133,8 @@ mod tests {
         let usage = parse_skills_command("remove foo").unwrap_err().to_string();
         assert!(usage.contains("settings"));
         assert!(usage.contains("json"));
+        assert!(usage.contains("--json"));
+        assert!(usage.contains("show --json"));
         assert!(usage.contains("on <name>"));
         assert!(usage.contains("off <name>"));
     }
