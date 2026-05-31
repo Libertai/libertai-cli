@@ -952,11 +952,11 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = vim_command_arg(trimmed) {
-            print_vim_status(parse_vim_command(rest));
+            print_vim_status(parse_vim_command(rest), rest);
             continue;
         }
         if let Some(rest) = ide_command_arg(trimmed) {
-            print_ide_status(parse_ide_command(rest));
+            print_ide_status(parse_ide_command(rest), rest);
             continue;
         }
         if let Some(rest) = bug_command_arg(trimmed) {
@@ -6371,7 +6371,7 @@ const IDE_USAGE: &str =
 const BUG_USAGE: &str =
     "/bug [report|template|status|show|json|--json|status --json|show --json|template --json|report --json]";
 
-fn print_vim_status(command: VimCommand) {
+fn print_vim_status(command: VimCommand, query: &str) {
     println!("{BOLD}vim{RESET}");
     match command {
         VimCommand::Status => {
@@ -6384,7 +6384,7 @@ fn print_vim_status(command: VimCommand) {
                 "{DIM}  terminal:{RESET} Vim input supports insert/normal mode: Esc, i/a/I/A, h/l/0/$, x, and Enter."
             );
         }
-        VimCommand::Json => print_vim_json(),
+        VimCommand::Json => print_vim_json(query),
         VimCommand::Enable => {
             VIM_INPUT_ENABLED.store(true, Ordering::SeqCst);
             println!(
@@ -6404,11 +6404,12 @@ fn print_vim_status(command: VimCommand) {
     }
 }
 
-fn vim_json_payload() -> serde_json::Value {
+fn vim_json_payload(query: &str) -> serde_json::Value {
     json!({
         "command": "vim",
         "surface": "terminal",
         "aliases": ["vim"],
+        "query": query.trim(),
         "enabled": VIM_INPUT_ENABLED.load(Ordering::SeqCst),
         "mode": "insert",
         "supported_modes": ["insert", "normal"],
@@ -6417,8 +6418,8 @@ fn vim_json_payload() -> serde_json::Value {
     })
 }
 
-fn print_vim_json() {
-    match serde_json::to_string_pretty(&vim_json_payload()) {
+fn print_vim_json(query: &str) {
+    match serde_json::to_string_pretty(&vim_json_payload(query)) {
         Ok(s) => println!("{s}"),
         Err(e) => eprintln!("{DIM}  /vim json failed: {e}{RESET}"),
     }
@@ -6447,7 +6448,7 @@ fn vim_normal_key_action(code: KeyCode, modifiers: KeyModifiers) -> VimNormalAct
     }
 }
 
-fn print_ide_status(command: IdeCommand) {
+fn print_ide_status(command: IdeCommand, query: &str) {
     println!("{BOLD}ide{RESET}");
     match command {
         IdeCommand::Status => {
@@ -6458,7 +6459,7 @@ fn print_ide_status(command: IdeCommand) {
                 "{DIM}  terminal:{RESET} run libertai code inside your project, or use the desktop workspace for project navigation."
             );
         }
-        IdeCommand::Json => print_ide_json(),
+        IdeCommand::Json => print_ide_json(query),
         IdeCommand::Open => {
             println!(
                 "{DIM}  /ide open:{RESET} no IDE bridge is available to open from the terminal CLI yet."
@@ -6473,11 +6474,12 @@ fn print_ide_status(command: IdeCommand) {
     }
 }
 
-fn ide_json_payload() -> serde_json::Value {
+fn ide_json_payload(query: &str) -> serde_json::Value {
     json!({
         "command": "ide",
         "surface": "terminal",
         "aliases": ["ide"],
+        "query": query.trim(),
         "dedicated_ide_bridge": false,
         "supported_editors": [],
         "desktop_workspace_available": true,
@@ -6486,8 +6488,8 @@ fn ide_json_payload() -> serde_json::Value {
     })
 }
 
-fn print_ide_json() {
-    match serde_json::to_string_pretty(&ide_json_payload()) {
+fn print_ide_json(query: &str) {
+    match serde_json::to_string_pretty(&ide_json_payload(query)) {
         Ok(s) => println!("{s}"),
         Err(e) => eprintln!("{DIM}  /ide json failed: {e}{RESET}"),
     }
@@ -16739,10 +16741,11 @@ mod tests {
         assert!(VIM_USAGE.contains("enable|enabled|true"));
         assert!(VIM_USAGE.contains("disable|disabled|false"));
         VIM_INPUT_ENABLED.store(true, Ordering::SeqCst);
-        let payload = vim_json_payload();
+        let payload = vim_json_payload("current --json");
         assert_eq!(payload["command"], "vim");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["aliases"][0], "vim");
+        assert_eq!(payload["query"], "current --json");
         assert_eq!(payload["enabled"], true);
         assert!(payload["supported_actions"]
             .as_array()
@@ -16819,9 +16822,10 @@ mod tests {
         assert!(IDE_USAGE.contains("state|show"));
         assert!(IDE_USAGE.contains("json|--json|status --json|state --json|show --json"));
         assert!(IDE_USAGE.contains("settings|edit"));
-        let payload = ide_json_payload();
+        let payload = ide_json_payload("status --json");
         assert_eq!(payload["command"], "ide");
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "status --json");
         assert_eq!(payload["dedicated_ide_bridge"], false);
         assert_eq!(payload["desktop_workspace_available"], true);
         assert_eq!(payload["aliases"][0], "ide");
