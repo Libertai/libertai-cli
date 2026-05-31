@@ -4518,6 +4518,7 @@ fn permissions_json_payload(mode: Mode, approvals: &ApprovalState) -> serde_json
         "bypass_permissions_note": "native bypassPermissions is intentionally unavailable",
         "allow_rules_path": allow_rules_path,
         "settings_target": "Settings > Approvals",
+        "supported_actions": ["status", "show", "current", "info", "json", "--json", "status --json", "show --json", "current --json", "info --json", "default", "normal", "acceptEdits", "accept-edits", "accept_edits", "plan", "readonly", "read-only", "open", "settings", "edit", "approvals", "forget", "clear", "reset", "bypassPermissions", "bypass", "danger"],
         "supported_modes": ["normal", "acceptEdits", "plan"],
         "aliases": {
             "normal": ["default", "normal"],
@@ -4546,6 +4547,7 @@ fn mode_json_payload(mode: Mode) -> serde_json::Value {
             Mode::AcceptEdits => "write/edit tools auto-allow; bash still asks",
             Mode::Plan => "mutating tools are denied automatically",
         },
+        "supported_actions": ["status", "show", "current", "info", "json", "--json", "status --json", "show --json", "current --json", "info --json", "default", "normal", "acceptEdits", "accept-edits", "accept_edits", "plan", "readonly", "read-only"],
         "supported_modes": ["normal", "acceptEdits", "plan"],
         "aliases": {
             "normal": ["default", "normal"],
@@ -4563,11 +4565,11 @@ fn print_mode_json(mode: Mode) {
 }
 
 fn permissions_usage_text() -> &'static str {
-    "/permissions [status|show|current|info|json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only|open|settings|edit|approvals|forget|clear|reset|bypassPermissions|bypass|danger]"
+    "/permissions [status|show|current|info|json|--json|status --json|show --json|current --json|info --json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only|open|settings|edit|approvals|forget|clear|reset|bypassPermissions|bypass|danger]"
 }
 
 fn mode_usage_text() -> &'static str {
-    "/mode [status|show|current|info|json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only]"
+    "/mode [status|show|current|info|json|--json|status --json|show --json|current --json|info --json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only]"
 }
 
 fn print_permissions_open_hint() {
@@ -17590,8 +17592,21 @@ mod tests {
         assert_eq!(parse_permissions_command("current"), PermissionsCommand::Show);
         assert_eq!(parse_permissions_command("info"), PermissionsCommand::Show);
         assert_eq!(parse_permissions_command("json"), PermissionsCommand::Json);
+        assert_eq!(parse_permissions_command("--json"), PermissionsCommand::Json);
         assert_eq!(
             parse_permissions_command("status --json"),
+            PermissionsCommand::Json
+        );
+        assert_eq!(
+            parse_permissions_command("show --json"),
+            PermissionsCommand::Json
+        );
+        assert_eq!(
+            parse_permissions_command("current --json"),
+            PermissionsCommand::Json
+        );
+        assert_eq!(
+            parse_permissions_command("info --json"),
             PermissionsCommand::Json
         );
         assert_eq!(parse_permissions_command("open"), PermissionsCommand::Open);
@@ -17614,13 +17629,15 @@ mod tests {
         );
         assert_eq!(parse_permissions_command("wat"), PermissionsCommand::Show);
         assert!(permissions_usage_text().contains("default|normal"));
-        assert!(permissions_usage_text().contains("info|json"));
+        assert!(permissions_usage_text().contains("info|json|--json|status --json"));
+        assert!(permissions_usage_text().contains("show --json|current --json|info --json"));
         assert!(permissions_usage_text().contains("accept-edits|accept_edits"));
         assert!(permissions_usage_text().contains("readonly|read-only"));
         assert!(permissions_usage_text().contains("settings|edit|approvals"));
         assert!(permissions_usage_text().contains("forget|clear|reset"));
         assert!(permissions_usage_text().contains("bypassPermissions|bypass|danger"));
-        assert!(mode_usage_text().contains("info|json"));
+        assert!(mode_usage_text().contains("info|json|--json|status --json"));
+        assert!(mode_usage_text().contains("show --json|current --json|info --json"));
         assert!(mode_usage_text().contains("normal|acceptEdits"));
         assert!(mode_usage_text().contains("readonly|read-only"));
         let approvals = ApprovalState::new();
@@ -17630,10 +17647,12 @@ mod tests {
         assert_eq!(payload["mode"], "plan");
         assert_eq!(payload["remembered_approvals"], 0);
         assert_eq!(payload["native_bypass_permissions"], false);
+        assert_eq!(payload["supported_actions"][5], "--json");
         let mode_payload = mode_json_payload(Mode::AcceptEdits);
         assert_eq!(mode_payload["surface"], "terminal");
         assert_eq!(mode_payload["command"], "mode");
         assert_eq!(mode_payload["mode"], "accept-edits");
+        assert_eq!(mode_payload["supported_actions"][5], "--json");
     }
 
     #[test]
