@@ -522,9 +522,11 @@ latest assistant candidate, section impacts, and supported follow-up
 actions without writing,
 CLI and desktop `/init from-agent preview append|merge|merge-lines|replace` show
 the resulting file before applying, and CLI plus desktop `/init from-agent preview
-[append|merge|merge-lines] sections N[,M]` plus `/init from-agent
-append|merge|merge-lines sections N[,M]` support numbered-section
-review/apply flows alongside the desktop merge modal.
+[append|merge|merge-lines] sections N[,M]`, `sections N-M`, and
+`sections all` plus `/init from-agent append|merge|merge-lines sections
+N[,M]`, `sections N-M`, and `sections all` support numbered-section,
+range, and all-section review/apply flows alongside the desktop merge
+modal.
 The desktop merge modal and typed slash previews show the same
 per-section impact labels beside the selectable generated sections.
 Remaining work is richer interactive

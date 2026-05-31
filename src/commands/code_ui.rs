@@ -2395,17 +2395,38 @@ fn parse_init_from_agent_sections(input: &str) -> Option<(&'static str, Vec<usiz
 }
 
 fn parse_init_section_indexes(input: &str) -> Option<Vec<usize>> {
+    let normalized = input.trim().to_ascii_lowercase();
+    if normalized == "all" {
+        return Some(vec![0]);
+    }
     let mut indexes = Vec::new();
-    for part in input
+    for part in normalized
         .split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
         .map(str::trim)
         .filter(|part| !part.is_empty())
     {
-        let index = part.parse::<usize>().ok()?;
-        if index == 0 || indexes.contains(&index) {
+        if part == "all" {
             return None;
         }
-        indexes.push(index);
+        if let Some((start, end)) = part.split_once('-') {
+            let start = start.parse::<usize>().ok()?;
+            let end = end.parse::<usize>().ok()?;
+            if start == 0 || end == 0 || start > end {
+                return None;
+            }
+            for index in start..=end {
+                if indexes.contains(&index) {
+                    return None;
+                }
+                indexes.push(index);
+            }
+        } else {
+            let index = part.parse::<usize>().ok()?;
+            if index == 0 || indexes.contains(&index) {
+                return None;
+            }
+            indexes.push(index);
+        }
     }
     (!indexes.is_empty()).then_some(indexes)
 }
@@ -3022,7 +3043,7 @@ fn print_help() {
     println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
     println!("{DIM}  /skills [list|status|show|json|--json|status --json|list --json|show --json|show <name>|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions{RESET}");
     println!(
-        "{DIM}  /init [--agent|from-agent json|from-agent preview append|preview merge|preview merge-lines|preview replace|preview [append|merge|merge-lines] sections N[,M]|append sections N[,M]|merge sections N[,M]|merge-lines sections N[,M]|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}"
+        "{DIM}  /init [--agent|from-agent json|from-agent preview append|preview merge|preview merge-lines|preview replace|preview [append|merge|merge-lines] sections N[,M]|N-M|all|append sections N[,M]|N-M|all|merge sections N[,M]|N-M|all|merge-lines sections N[,M]|N-M|all|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}"
     );
     println!("{DIM}  /onboarding|/onboard [show|preview|save|path|gist|json|--json|status --json|show --json|preview --json] — preview or write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
@@ -3192,7 +3213,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "hooks" | "mcp" => "status|state|show|list|diagnostics|diag|json|--json|status --json|state --json|show --json|list --json|diagnostics --json|diag --json",
         "hotkeys" => "status|show|list|help|json|--json|status --json|show --json|list --json",
         "ide" => "status|state|show|json|--json|status --json|state --json|show --json|open|settings|edit",
-        "init" => "--agent|json|--json|status --json|from-agent json|from-agent preview|from-agent append|from-agent merge|from-agent merge-lines|from-agent replace|[notes]",
+        "init" => "--agent|json|--json|status --json|from-agent json|from-agent preview|from-agent append|from-agent merge|from-agent merge-lines|from-agent replace|from-agent sections N[,M]|N-M|all|[notes]",
         "login" | "logout" => "status|show|info|json|--json|status --json|show --json|info --json|libertai|account|key|api-key|api|provider|show <provider>|show <provider> --json|info <provider>|info <provider> --json|inspect <provider>|inspect <provider> --json|provider <provider>|provider <provider> --json|<provider> --json",
         "loop" => "[turns] [goal]|json [turns] [goal]|--json [turns] [goal]|status --json",
         "memory" => "show|status|edit|open|list|files|file <number|path>|references|refs|verify|import <path>|import-claude|import-claude-all|clear|path|json|--json|status --json|show --json|list --json",
@@ -7643,6 +7664,9 @@ fn selected_init_candidate_sections(candidate: &str, indexes: &[usize]) -> Resul
     if sections.is_empty() {
         return Err("assistant candidate has no selectable markdown sections".to_string());
     }
+    if indexes.len() == 1 && indexes[0] == 0 {
+        return Ok(ensure_trailing_newline(&join_init_markdown_sections(&sections)));
+    }
     let mut selected = Vec::new();
     for index in indexes {
         let Some(section) = sections.get(index.saturating_sub(1)) else {
@@ -8041,9 +8065,17 @@ fn print_init_from_agent_json(
                 "merge-lines",
                 "replace",
                 "preview sections N[,M]",
+                "preview sections N-M",
+                "preview sections all",
                 "append sections N[,M]",
+                "append sections N-M",
+                "append sections all",
                 "merge sections N[,M]",
-                "merge-lines sections N[,M]"
+                "merge sections N-M",
+                "merge sections all",
+                "merge-lines sections N[,M]",
+                "merge-lines sections N-M",
+                "merge-lines sections all"
             ],
         }))
         .unwrap_or_else(|_| "{}".to_string())
@@ -14411,6 +14443,14 @@ mod tests {
             Some(InitFromAgentAction::PreviewSections(vec![1, 3]))
         );
         assert_eq!(
+            parse_init_from_agent_action("from-agent preview sections 1-3"),
+            Some(InitFromAgentAction::PreviewSections(vec![1, 2, 3]))
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent preview sections all"),
+            Some(InitFromAgentAction::PreviewSections(vec![0]))
+        );
+        assert_eq!(
             parse_init_from_agent_action("from-agent preview append sections 1,3"),
             Some(InitFromAgentAction::PreviewApplySections("append", vec![1, 3]))
         );
@@ -14443,6 +14483,8 @@ mod tests {
             Some(InitFromAgentAction::Replace)
         );
         assert_eq!(parse_init_from_agent_action("from-agent sections 0"), None);
+        assert_eq!(parse_init_from_agent_action("from-agent sections 3-1"), None);
+        assert_eq!(parse_init_from_agent_action("from-agent sections all,1"), None);
         assert_eq!(parse_init_from_agent_action("from-agent sections 1 1"), None);
         assert_eq!(parse_init_from_agent_action("from-agent nope"), None);
     }
@@ -14520,6 +14562,10 @@ mod tests {
         assert!(!selected.contains("## Build & test"));
         assert!(selected.starts_with("## Structure\n- src/ - code\n"));
         assert!(selected.ends_with('\n'));
+        let all = selected_init_candidate_sections(candidate, &[0]).unwrap();
+        assert!(all.contains("# Candidate"));
+        assert!(all.contains("## Build & test"));
+        assert!(all.contains("## Structure"));
         assert!(selected_init_candidate_sections(candidate, &[4])
             .unwrap_err()
             .contains("out of range"));
