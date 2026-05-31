@@ -13646,12 +13646,13 @@ fn is_status_line_json_action(action: &str) -> bool {
     )
 }
 
-fn status_line_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
+fn status_line_json_payload(cfg: &LibertaiConfig, query: &str) -> serde_json::Value {
     let template = cfg.status_line_template.trim();
     let command = cfg.status_line_command.trim();
     json!({
         "surface": "terminal",
         "command": "statusline",
+        "query": query.trim(),
         "aliases": ["statusline", "status-line"],
         "template": if template.is_empty() { serde_json::Value::Null } else { json!(template) },
         "effective_template": if template.is_empty() { "default" } else { template },
@@ -13665,8 +13666,8 @@ fn status_line_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
     })
 }
 
-fn print_status_line_json(cfg: &LibertaiConfig) {
-    match serde_json::to_string_pretty(&status_line_json_payload(cfg)) {
+fn print_status_line_json(cfg: &LibertaiConfig, query: &str) {
+    match serde_json::to_string_pretty(&status_line_json_payload(cfg, query)) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("{DIM}  /statusline json failed: {e}{RESET}"),
     }
@@ -13675,7 +13676,7 @@ fn print_status_line_json(cfg: &LibertaiConfig) {
 fn handle_status_line_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Result<()> {
     let action = raw.trim();
     if is_status_line_json_action(action) {
-        print_status_line_json(cfg);
+        print_status_line_json(cfg, action);
         return Ok(());
     }
     if action.is_empty()
@@ -15222,9 +15223,10 @@ mod tests {
             status_line_command: "git branch --show-current".to_string(),
             ..Default::default()
         };
-        let payload = status_line_json_payload(&cfg);
+        let payload = status_line_json_payload(&cfg, "template --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "statusline");
+        assert_eq!(payload["query"], "template --json");
         assert_eq!(payload["aliases"][0], "statusline");
         assert_eq!(payload["aliases"][1], "status-line");
         assert_eq!(payload["template"], "{project} {model}");
