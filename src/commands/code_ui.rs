@@ -4486,6 +4486,30 @@ fn print_notify_status(cfg: &LibertaiConfig) {
 
 fn print_send_status(rest: &str) {
     let requested = rest.trim();
+    if is_send_json_request(requested) {
+        let payload = json!({
+            "surface": "terminal",
+            "active_session_only": true,
+            "desktop_registry_available": false,
+            "total_targets": 0,
+            "queued_total": 0,
+            "targets": [],
+            "queued": [],
+            "desktop_commands": [
+                "/send status",
+                "/send targets",
+                "/send queued",
+                "/send json",
+                "/send queued --json"
+            ],
+            "remaining_gap": "pi-level streaming child-agent bus or detached inter-agent scheduler"
+        });
+        match serde_json::to_string_pretty(&payload) {
+            Ok(raw) => println!("{raw}"),
+            Err(err) => eprintln!("{DIM}  /send: could not render JSON: {err}.{RESET}"),
+        }
+        return;
+    }
     println!("{BOLD}send message{RESET}");
     println!(
         "{DIM}  desktop:{RESET} /send <session> <message> can relay prompts into another open idle desktop session."
@@ -4507,11 +4531,35 @@ fn print_send_status(rest: &str) {
         );
     }
     println!(
-        "{DIM}  usage:{RESET} /send status, /send targets, /send list, /send <session> <message>"
+        "{DIM}  usage:{RESET} /send status, /send targets, /send queued, /send json, /send <session> <message>"
     );
     println!(
         "{DIM}  remaining gap:{RESET} pi-level streaming child-agent bus or detached inter-agent scheduler."
     );
+}
+
+fn is_send_json_request(rest: &str) -> bool {
+    matches!(
+        rest.trim().to_ascii_lowercase().as_str(),
+        "json"
+            | "--json"
+            | "status json"
+            | "status --json"
+            | "state json"
+            | "state --json"
+            | "show json"
+            | "show --json"
+            | "list json"
+            | "list --json"
+            | "targets json"
+            | "targets --json"
+            | "queue json"
+            | "queue --json"
+            | "queued json"
+            | "queued --json"
+            | "pending json"
+            | "pending --json"
+    )
 }
 
 fn print_theme_status(command: ThemeCommand) {
@@ -13025,6 +13073,8 @@ mod tests {
         assert_eq!(send_command_arg("/send status"), Some("status"));
         assert_eq!(send_command_arg("/send targets"), Some("targets"));
         assert_eq!(send_command_arg("/send list"), Some("list"));
+        assert_eq!(send_command_arg("/send json"), Some("json"));
+        assert_eq!(send_command_arg("/send queued --json"), Some("queued --json"));
         assert_eq!(send_command_arg("/send worker finish tests"), Some("worker finish tests"));
         assert_eq!(send_command_arg("/send-message"), Some(""));
         assert_eq!(
@@ -13032,6 +13082,10 @@ mod tests {
             Some("worker finish tests")
         );
         assert_eq!(send_command_arg("/sender worker finish tests"), None);
+        assert!(is_send_json_request("json"));
+        assert!(is_send_json_request("targets --json"));
+        assert!(is_send_json_request("queued --json"));
+        assert!(!is_send_json_request("worker finish tests"));
     }
 
     #[test]
