@@ -1817,7 +1817,13 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = onboarding_command_arg(trimmed) {
-            write_onboarding_guide(Some(rest));
+            if is_onboarding_json_arg(rest) {
+                print_onboarding_json(rest);
+            } else if is_onboarding_preview_arg(rest) {
+                print_onboarding_preview();
+            } else {
+                write_onboarding_guide(Some(rest));
+            }
             continue;
         }
         if let Some(rest) = pr_comments_draft_arg(trimmed) {
@@ -2946,7 +2952,7 @@ fn print_help() {
     println!(
         "{DIM}  /init [--agent|from-agent json|from-agent preview append|preview merge|preview merge-lines|preview replace|preview [append|merge|merge-lines] sections N[,M]|append sections N[,M]|merge sections N[,M]|merge-lines sections N[,M]|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}"
     );
-    println!("{DIM}  /onboarding|/onboard [save|path] — write a local project onboarding guide{RESET}");
+    println!("{DIM}  /onboarding|/onboard [show|preview|save|path|json|status --json] — preview or write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
     println!("{DIM}  /agents   — list named sub-agents (/agents show <name> inspects one){RESET}");
     println!("{DIM}  /agents create [--worktree|--same-cwd] <name> [description] — create a project sub-agent{RESET}");
@@ -5349,6 +5355,28 @@ fn onboarding_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
+fn is_onboarding_json_arg(input: &str) -> bool {
+    matches!(
+        normalize_onboarding_arg(input).as_str(),
+        "json" | "--json" | "status --json" | "show --json" | "preview --json"
+    )
+}
+
+fn is_onboarding_preview_arg(input: &str) -> bool {
+    matches!(
+        normalize_onboarding_arg(input).as_str(),
+        "show" | "status" | "preview"
+    )
+}
+
+fn normalize_onboarding_arg(input: &str) -> String {
+    input
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
 fn send_command_arg(trimmed: &str) -> Option<&str> {
     match trimmed {
         "/send" | "/send-message" => Some(""),
@@ -7272,6 +7300,63 @@ fn write_onboarding_guide(path: Option<&str>) {
             }
         }
     }
+}
+
+fn print_onboarding_preview() {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /onboarding: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    match crate::commands::code_init::onboarding_guide(&cwd) {
+        Ok(guide) => println!("{guide}"),
+        Err(e) => eprintln!("{DIM}  /onboarding: failed: {e:#}{RESET}"),
+    }
+}
+
+fn print_onboarding_json(query: &str) {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /onboarding: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    match onboarding_json_payload(&cwd, query) {
+        Ok(payload) => match serde_json::to_string_pretty(&payload) {
+            Ok(body) => println!("{body}"),
+            Err(e) => eprintln!("{DIM}  /onboarding json: {e:#}{RESET}"),
+        },
+        Err(e) => eprintln!("{DIM}  /onboarding json: {e:#}{RESET}"),
+    }
+}
+
+fn onboarding_json_payload(cwd: &Path, query: &str) -> Result<serde_json::Value> {
+    let guide = crate::commands::code_init::onboarding_guide(cwd)?;
+    let suggested_path = PathBuf::from("libertai-onboarding.md");
+    let first_heading = guide
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("# ").map(str::trim))
+        .unwrap_or("onboarding");
+    Ok(json!({
+        "surface": "terminal",
+        "command": "onboarding",
+        "aliases": ["onboard"],
+        "query": normalize_onboarding_arg(query),
+        "cwd": cwd.display().to_string(),
+        "suggested_path": suggested_path.display().to_string(),
+        "suggested_gist_filename": "libertai-onboarding.md",
+        "guide": {
+            "bytes": guide.len(),
+            "lines": guide.lines().count(),
+            "first_heading": first_heading,
+        },
+        "will_write": false,
+        "will_publish": false,
+        "supported_actions": ["show", "preview", "save", "path", "gist", "json", "status --json"],
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15444,6 +15529,24 @@ mod tests {
     }
 
     #[test]
+    fn onboarding_json_arg_accepts_preview_aliases() {
+        assert!(is_onboarding_json_arg("json"));
+        assert!(is_onboarding_json_arg("--json"));
+        assert!(is_onboarding_json_arg("status --json"));
+        assert!(is_onboarding_json_arg("show --json"));
+        assert!(is_onboarding_json_arg("preview --json"));
+        assert!(!is_onboarding_json_arg("save docs/onboarding.md"));
+    }
+
+    #[test]
+    fn onboarding_preview_arg_accepts_read_only_aliases() {
+        assert!(is_onboarding_preview_arg("show"));
+        assert!(is_onboarding_preview_arg("status"));
+        assert!(is_onboarding_preview_arg("preview"));
+        assert!(!is_onboarding_preview_arg("save docs/onboarding.md"));
+    }
+
+    #[test]
     fn send_command_arg_accepts_desktop_alias() {
         assert_eq!(send_command_arg("/send"), Some(""));
         assert_eq!(send_command_arg("/send status"), Some("status"));
@@ -16175,6 +16278,23 @@ mod tests {
             }
         );
         assert!(parse_onboarding_target(Some("gist --wat")).is_err());
+    }
+
+    #[test]
+    fn onboarding_json_payload_reports_non_writing_preview() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("README.md"), "# Demo\n\nProject notes.").unwrap();
+
+        let payload = onboarding_json_payload(temp.path(), "status --json").unwrap();
+
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "onboarding");
+        assert_eq!(payload["query"], "status --json");
+        assert_eq!(payload["suggested_path"], "libertai-onboarding.md");
+        assert_eq!(payload["will_write"], false);
+        assert_eq!(payload["will_publish"], false);
+        assert!(payload["guide"]["bytes"].as_u64().unwrap() > 0);
+        assert_eq!(payload["supported_actions"][6], "status --json");
     }
 
     #[test]
