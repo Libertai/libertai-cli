@@ -1399,6 +1399,10 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = loop_command_arg(trimmed) {
+            if let Some(json_input) = loop_json_request_arg(rest) {
+                print_loop_json(json_input);
+                continue;
+            }
             let request = parse_loop_request(rest);
             auto_run = None;
             autonomous_queue = autonomous_loop_prompts(&request);
@@ -5165,6 +5169,38 @@ fn parse_loop_request(input: &str) -> LoopRequest {
             turns: LOOP_DEFAULT_TURNS,
             goal: raw.to_string(),
         },
+    }
+}
+
+fn loop_json_request_arg(input: &str) -> Option<&str> {
+    let raw = input.trim();
+    if matches!(raw, "json" | "--json" | "status --json" | "state --json") {
+        return Some("");
+    }
+    raw.strip_prefix("json ")
+        .or_else(|| raw.strip_prefix("--json "))
+        .or_else(|| raw.strip_prefix("status --json "))
+        .or_else(|| raw.strip_prefix("state --json "))
+        .map(str::trim)
+}
+
+fn print_loop_json(input: &str) {
+    let request = parse_loop_request(input);
+    let first_prompt = autonomous_loop_prompt(1, request.turns, &request.goal);
+    let payload = json!({
+        "mode": "foreground",
+        "detached": false,
+        "default_turns": LOOP_DEFAULT_TURNS,
+        "max_turns": LOOP_MAX_TURNS,
+        "requested_turns": request.turns,
+        "goal": if request.goal.is_empty() { None } else { Some(request.goal.as_str()) },
+        "queued_on_run": request.turns,
+        "first_prompt": first_prompt,
+        "aliases": ["/loop", "/autoloop"]
+    });
+    match serde_json::to_string_pretty(&payload) {
+        Ok(raw) => println!("{raw}"),
+        Err(err) => eprintln!("{DIM}  /loop: could not render JSON: {err}.{RESET}"),
     }
 }
 
@@ -12401,6 +12437,22 @@ mod tests {
                 goal: "keep going".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn loop_json_request_arg_accepts_preview_forms() {
+        assert_eq!(loop_json_request_arg("json"), Some(""));
+        assert_eq!(loop_json_request_arg("--json"), Some(""));
+        assert_eq!(loop_json_request_arg("status --json"), Some(""));
+        assert_eq!(
+            loop_json_request_arg("json 2 close gaps"),
+            Some("2 close gaps")
+        );
+        assert_eq!(
+            loop_json_request_arg("--json close gaps"),
+            Some("close gaps")
+        );
+        assert_eq!(loop_json_request_arg("2 close gaps"), None);
     }
 
     #[test]
