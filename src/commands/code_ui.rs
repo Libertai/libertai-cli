@@ -289,6 +289,7 @@ enum ReloadCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatusCommand {
     Session,
+    Json,
     Usage,
 }
 
@@ -1008,9 +1009,19 @@ async fn repl_loop(
                         usage_summary(&usage_history),
                     );
                 }
+                StatusCommand::Json => {
+                    print_session_status_json(
+                        &provider,
+                        &model,
+                        mode.get(),
+                        output_style.as_deref(),
+                        &cfg,
+                        usage_summary(&usage_history),
+                    );
+                }
                 StatusCommand::Usage => {
                     println!(
-                        "{DIM}  usage:{RESET} /status, /status show, /status info, or /status session"
+                        "{DIM}  usage:{RESET} /status, /status json, /status show, /status info, or /status session"
                     );
                 }
             }
@@ -4419,6 +4430,8 @@ fn parse_status_command(input: &str) -> StatusCommand {
         "" | "status" | "state" | "show" | "info" | "current" | "session" => {
             StatusCommand::Session
         }
+        "json" | "--json" | "status --json" | "state --json" | "show --json"
+        | "info --json" | "current --json" | "session --json" => StatusCommand::Json,
         _ => StatusCommand::Usage,
     }
 }
@@ -8750,6 +8763,45 @@ fn print_session_status(
     println!();
 }
 
+fn print_session_status_json(
+    provider: &str,
+    model: &str,
+    mode: Mode,
+    output_style: Option<&str>,
+    cfg: &LibertaiConfig,
+    usage: Option<UsageSummary>,
+) {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|e| format!("unavailable: {e}"));
+    let usage = usage.map(|summary| {
+        json!({
+            "turns": summary.turns,
+            "context_high_water": summary.context_high_water,
+            "context_high_water_human": human_tokens(summary.context_high_water),
+            "output_total": summary.output_total,
+            "output_total_human": human_tokens(summary.output_total),
+        })
+    });
+    let payload = json!({
+        "surface": "terminal",
+        "provider": provider,
+        "model": model,
+        "mode": mode_label(mode),
+        "output_style": output_style.unwrap_or("default"),
+        "cwd": cwd,
+        "defaults": {
+            "provider": cfg.default_code_provider,
+            "code_model": cfg.default_code_model,
+        },
+        "usage": usage,
+    });
+    match serde_json::to_string_pretty(&payload) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("{DIM}  /status json: {e:#}{RESET}"),
+    }
+}
+
 async fn print_doctor(
     handle: &AgentSessionHandle,
     provider: &str,
@@ -13041,6 +13093,14 @@ mod tests {
         assert_eq!(parse_status_command("info"), StatusCommand::Session);
         assert_eq!(parse_status_command("current"), StatusCommand::Session);
         assert_eq!(parse_status_command("session"), StatusCommand::Session);
+        assert_eq!(parse_status_command("json"), StatusCommand::Json);
+        assert_eq!(parse_status_command("--json"), StatusCommand::Json);
+        assert_eq!(parse_status_command("status --json"), StatusCommand::Json);
+        assert_eq!(parse_status_command("state --json"), StatusCommand::Json);
+        assert_eq!(parse_status_command("show --json"), StatusCommand::Json);
+        assert_eq!(parse_status_command("info --json"), StatusCommand::Json);
+        assert_eq!(parse_status_command("current --json"), StatusCommand::Json);
+        assert_eq!(parse_status_command("session --json"), StatusCommand::Json);
         assert_eq!(parse_status_command("open"), StatusCommand::Usage);
     }
 
