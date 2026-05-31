@@ -5279,6 +5279,7 @@ fn export_json_payload(query: &str, messages: &[Message]) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "export",
+        "aliases": ["export"],
         "query": normalize_help_command_arg(query),
         "available": !messages.is_empty(),
         "message_count": messages.len(),
@@ -5290,7 +5291,7 @@ fn export_json_payload(query: &str, messages: &[Message]) -> serde_json::Value {
         },
         "will_write": false,
         "will_copy": false,
-        "supported_actions": ["copy", "save", "path", "json", "status --json"],
+        "supported_actions": ["copy", "save", "path", "json", "--json", "status --json", "show --json", "preview --json"],
     })
 }
 
@@ -5362,6 +5363,7 @@ fn share_json_payload(query: &str, messages: &[Message]) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "share",
+        "aliases": ["share"],
         "query": normalize_help_command_arg(query),
         "available": !messages.is_empty(),
         "message_count": messages.len(),
@@ -5375,7 +5377,7 @@ fn share_json_payload(query: &str, messages: &[Message]) -> serde_json::Value {
         "will_write": false,
         "will_publish": false,
         "will_copy": false,
-        "supported_actions": ["copy", "save", "path", "gist", "json", "status --json"],
+        "supported_actions": ["copy", "save", "path", "gist", "json", "--json", "status --json", "show --json", "preview --json"],
     })
 }
 
@@ -8959,11 +8961,12 @@ fn template_json_payload(cwd: &Path) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "template",
+        "aliases": ["template"],
         "cwd": cwd.display().to_string(),
         "count": rows.len(),
         "templates": rows,
         "will_write": false,
-        "supported_actions": ["list", "show", "json", "status --json", "<name> [args]"],
+        "supported_actions": ["list", "show", "json", "--json", "status --json", "list --json", "show --json", "<name> [args]"],
     })
 }
 
@@ -9061,13 +9064,14 @@ fn code_skills_json_payload(
     json!({
         "surface": "terminal",
         "command": "skills",
+        "aliases": ["skills"],
         "cwd": cwd.display().to_string(),
         "count": rows.len(),
         "enabled_count": enabled,
         "disabled_count": rows.len().saturating_sub(enabled),
         "skills": rows,
         "will_write": false,
-        "supported_actions": ["list", "status", "json", "status --json", "show <name>", "open", "settings", "edit", "enable <name>", "disable <name>"],
+        "supported_actions": ["list", "status", "show", "json", "--json", "status --json", "list --json", "show --json", "show <name>", "open", "settings", "edit", "enable <name>", "on <name>", "disable <name>", "off <name>"],
     })
 }
 
@@ -17419,7 +17423,15 @@ mod tests {
         assert_eq!(payload["will_write"], false);
         assert_eq!(payload["will_copy"], false);
         assert!(payload["artifact"]["bytes"].as_u64().unwrap() > 0);
-        assert_eq!(payload["supported_actions"][4], "status --json");
+        assert_eq!(payload["aliases"][0], "export");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("preview --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
     }
 
     #[test]
@@ -17485,7 +17497,15 @@ mod tests {
         assert_eq!(payload["will_publish"], false);
         assert_eq!(payload["will_copy"], false);
         assert!(payload["artifact"]["bytes"].as_u64().unwrap() > 0);
-        assert_eq!(payload["supported_actions"][5], "status --json");
+        assert_eq!(payload["aliases"][0], "share");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("preview --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
     }
 
     #[test]
@@ -18421,6 +18441,15 @@ mod tests {
         assert_eq!(row["arg_hint"], "target");
         assert_eq!(row["argument_names"][0], "target");
         assert_eq!(payload["will_write"], false);
+        assert_eq!(payload["aliases"][0], "template");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("list --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
     }
 
     #[test]
@@ -18525,7 +18554,15 @@ mod tests {
         assert_eq!(payload["skills"][1]["allowed_tools"], "read, grep");
         assert_eq!(payload["skills"][1]["agent_created"], true);
         assert_eq!(payload["will_write"], false);
-        assert_eq!(payload["supported_actions"][3], "status --json");
+        assert_eq!(payload["aliases"][0], "skills");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("list --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("off <name>")));
     }
 
     #[test]
