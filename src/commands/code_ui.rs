@@ -1022,7 +1022,7 @@ async fn repl_loop(
                 }
                 ReloadCommand::Usage => {
                     println!(
-                        "{DIM}  usage:{RESET} /reload, /reload json, /reload config, /reload session, or /reload now"
+                        "{DIM}  usage:{RESET} /reload [config|session|now|fresh|json|config --json|session --json|now --json|fresh --json]"
                     );
                 }
             }
@@ -10757,6 +10757,21 @@ fn print_reload_preview_json(
     output_style: Option<&str>,
     cfg: &LibertaiConfig,
 ) {
+    let payload = reload_preview_json_payload(input, provider, model, mode, output_style, cfg);
+    match serde_json::to_string_pretty(&payload) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("{DIM}  /reload json: {e:#}{RESET}"),
+    }
+}
+
+fn reload_preview_json_payload(
+    input: &str,
+    provider: &str,
+    model: &str,
+    mode: Mode,
+    output_style: Option<&str>,
+    cfg: &LibertaiConfig,
+) -> serde_json::Value {
     let action = input
         .trim()
         .to_ascii_lowercase()
@@ -10766,7 +10781,7 @@ fn print_reload_preview_json(
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|e| format!("unavailable: {e}"));
-    let payload = json!({
+    json!({
         "surface": "terminal",
         "command": "reload",
         "action": if action.is_empty() || action == "json" || action == "--json" { "session" } else { action.as_str() },
@@ -10785,11 +10800,8 @@ fn print_reload_preview_json(
             "code_model": cfg.default_code_model,
         },
         "aliases": ["config", "session", "now", "fresh"],
-    });
-    match serde_json::to_string_pretty(&payload) {
-        Ok(text) => println!("{text}"),
-        Err(e) => eprintln!("{DIM}  /reload json: {e:#}{RESET}"),
-    }
+        "supported_actions": ["config", "session", "now", "fresh", "json", "config --json", "session --json", "now --json", "fresh --json"],
+    })
 }
 
 async fn print_doctor(
@@ -15949,6 +15961,18 @@ mod tests {
         assert_eq!(parse_reload_command("now --json"), ReloadCommand::Json);
         assert_eq!(parse_reload_command("fresh --json"), ReloadCommand::Json);
         assert_eq!(parse_reload_command("auth"), ReloadCommand::Usage);
+        let payload = reload_preview_json_payload(
+            "fresh --json",
+            "libertai",
+            "qwen",
+            Mode::Plan,
+            Some("review"),
+            &LibertaiConfig::default(),
+        );
+        assert_eq!(payload["command"], "reload");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["action"], "fresh");
+        assert_eq!(payload["supported_actions"][8], "fresh --json");
     }
 
     #[test]
