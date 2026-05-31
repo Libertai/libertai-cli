@@ -230,6 +230,7 @@ enum McpCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VimCommand {
     Status,
+    Json,
     Enable,
     Disable,
     Usage,
@@ -4831,6 +4832,8 @@ fn parse_mcp_command(input: &str) -> McpCommand {
 fn parse_vim_command(input: &str) -> VimCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "state" | "show" | "current" | "info" => VimCommand::Status,
+        "json" | "--json" | "status --json" | "state --json" | "show --json"
+        | "current --json" | "info --json" => VimCommand::Json,
         "on" | "enable" | "enabled" | "true" => VimCommand::Enable,
         "off" | "disable" | "disabled" | "false" => VimCommand::Disable,
         _ => VimCommand::Usage,
@@ -5129,7 +5132,7 @@ fn print_theme_status_json() {
 }
 
 const VIM_USAGE: &str =
-    "/vim [status|state|show|current|info|on|enable|enabled|true|off|disable|disabled|false]";
+    "/vim [status|state|show|current|info|json|status --json|on|enable|enabled|true|off|disable|disabled|false]";
 const IDE_USAGE: &str = "/ide [status|state|show|open|settings|edit]";
 const BUG_USAGE: &str = "/bug [report|template|status|show]";
 
@@ -5146,6 +5149,7 @@ fn print_vim_status(command: VimCommand) {
                 "{DIM}  terminal:{RESET} Vim input supports insert/normal mode: Esc, i/a/I/A, h/l/0/$, x, and Enter."
             );
         }
+        VimCommand::Json => print_vim_json(),
         VimCommand::Enable => {
             VIM_INPUT_ENABLED.store(true, Ordering::SeqCst);
             println!(
@@ -5162,6 +5166,25 @@ fn print_vim_status(command: VimCommand) {
         VimCommand::Usage => {
             println!("{DIM}  usage:{RESET} {VIM_USAGE}");
         }
+    }
+}
+
+fn vim_json_payload() -> serde_json::Value {
+    json!({
+        "command": "vim",
+        "surface": "terminal",
+        "enabled": VIM_INPUT_ENABLED.load(Ordering::SeqCst),
+        "mode": "insert",
+        "supported_modes": ["insert", "normal"],
+        "controls": ["Esc", "i", "a", "I", "A", "h", "l", "0", "$", "x", "Enter"],
+        "supported_actions": ["status", "state", "show", "current", "info", "json", "status --json", "on", "off"],
+    })
+}
+
+fn print_vim_json() {
+    match serde_json::to_string_pretty(&vim_json_payload()) {
+        Ok(s) => println!("{s}"),
+        Err(e) => eprintln!("{DIM}  /vim json failed: {e}{RESET}"),
     }
 }
 
@@ -13730,6 +13753,9 @@ mod tests {
         assert_eq!(parse_vim_command("status"), VimCommand::Status);
         assert_eq!(parse_vim_command("current"), VimCommand::Status);
         assert_eq!(parse_vim_command("info"), VimCommand::Status);
+        assert_eq!(parse_vim_command("json"), VimCommand::Json);
+        assert_eq!(parse_vim_command("status --json"), VimCommand::Json);
+        assert_eq!(parse_vim_command("info --json"), VimCommand::Json);
         assert_eq!(parse_vim_command("on"), VimCommand::Enable);
         assert_eq!(parse_vim_command("enable"), VimCommand::Enable);
         assert_eq!(parse_vim_command("enabled"), VimCommand::Enable);
@@ -13740,8 +13766,16 @@ mod tests {
         assert_eq!(parse_vim_command("false"), VimCommand::Disable);
         assert_eq!(parse_vim_command("toggle"), VimCommand::Usage);
         assert!(VIM_USAGE.contains("current|info"));
+        assert!(VIM_USAGE.contains("json|status --json"));
         assert!(VIM_USAGE.contains("enable|enabled|true"));
         assert!(VIM_USAGE.contains("disable|disabled|false"));
+        VIM_INPUT_ENABLED.store(true, Ordering::SeqCst);
+        let payload = vim_json_payload();
+        assert_eq!(payload["command"], "vim");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["enabled"], true);
+        assert_eq!(payload["supported_actions"][6], "status --json");
+        VIM_INPUT_ENABLED.store(false, Ordering::SeqCst);
     }
 
     #[test]
