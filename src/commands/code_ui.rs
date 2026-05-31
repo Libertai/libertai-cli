@@ -1101,9 +1101,7 @@ async fn repl_loop(
                     .await;
                 }
                 DoctorCommand::Usage => {
-                    println!(
-                        "{DIM}  usage:{RESET} /doctor, /doctor status, /doctor health, /doctor diagnostics, or /doctor json"
-                    );
+                    println!("{DIM}  usage:{RESET} {}", doctor_usage_text());
                 }
             }
             continue;
