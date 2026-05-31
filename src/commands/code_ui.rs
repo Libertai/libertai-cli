@@ -6013,7 +6013,7 @@ fn handle_notify_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Result<()>
             crate::commands::code_term::notify_terminal("LibertAI Code", "Notification test");
         }
         NotifyCommand::Usage => {
-            eprintln!("{DIM}  usage: /notify [on|enable|enabled|off|disable|disabled|clear|status|state|show|json|status --json|test|ping]{RESET}");
+            eprintln!("{DIM}  usage: {}{RESET}", notify_usage_text());
         }
     }
     Ok(())
@@ -6039,7 +6039,11 @@ fn print_notify_status(cfg: &LibertaiConfig) {
     println!(
         "{DIM}  agent push notifications:{RESET} terminal bell + visible notification block"
     );
-    println!("{DIM}  usage:{RESET} /notify on, /notify off, /notify status, /notify test");
+    println!("{DIM}  usage:{RESET} {}", notify_usage_text());
+}
+
+fn notify_usage_text() -> &'static str {
+    "/notify [on|enable|enabled|off|disable|disabled|clear|status|state|show|json|--json|status --json|state --json|show --json|test|ping]"
 }
 
 fn notify_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
@@ -15932,8 +15936,10 @@ mod tests {
         assert_eq!(parse_notify_command("state"), NotifyCommand::Status);
         assert_eq!(parse_notify_command("show"), NotifyCommand::Status);
         assert_eq!(parse_notify_command("json"), NotifyCommand::Json);
+        assert_eq!(parse_notify_command("--json"), NotifyCommand::Json);
         assert_eq!(parse_notify_command("status --json"), NotifyCommand::Json);
         assert_eq!(parse_notify_command("state --json"), NotifyCommand::Json);
+        assert_eq!(parse_notify_command("show --json"), NotifyCommand::Json);
         assert_eq!(parse_notify_command("on"), NotifyCommand::On);
         assert_eq!(parse_notify_command("enable"), NotifyCommand::On);
         assert_eq!(parse_notify_command("enabled"), NotifyCommand::On);
@@ -15944,6 +15950,8 @@ mod tests {
         assert_eq!(parse_notify_command("test"), NotifyCommand::Test);
         assert_eq!(parse_notify_command("ping"), NotifyCommand::Test);
         assert_eq!(parse_notify_command("wat"), NotifyCommand::Usage);
+        assert!(notify_usage_text().contains("json|--json|status --json"));
+        assert!(notify_usage_text().contains("state --json|show --json"));
         let cfg = LibertaiConfig {
             code_turn_notifications: true,
             ..LibertaiConfig::default()
