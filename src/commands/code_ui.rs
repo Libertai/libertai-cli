@@ -3703,9 +3703,10 @@ fn changelog_json_payload(limit: usize, lines: Vec<String>) -> serde_json::Value
     json!({
         "surface": "terminal",
         "command": "changelog",
+        "aliases": ["changelog"],
         "limit": limit,
         "count": commits.len(),
-        "supported_actions": ["count", "list", "recent", "latest", "status", "state", "show", "json", "status --json", "list --json", "recent --json", "latest --json"],
+        "supported_actions": ["count", "list", "recent", "latest", "status", "state", "show", "json", "--json", "status --json", "state --json", "show --json", "list --json", "recent --json", "latest --json"],
         "commits": commits,
     })
 }
@@ -4140,10 +4141,11 @@ fn history_json_payload(history: &VecDeque<String>, limit: usize) -> serde_json:
     json!({
         "surface": "terminal",
         "command": "history",
+        "aliases": ["history"],
         "total": history.len(),
         "limit": limit,
         "shown": shown,
-        "supported_actions": ["count", "list", "recent", "latest", "status", "state", "show", "json", "status --json", "list --json", "recent --json", "latest --json"],
+        "supported_actions": ["count", "list", "recent", "latest", "status", "state", "show", "json", "--json", "status --json", "state --json", "show --json", "list --json", "recent --json", "latest --json"],
         "prompts": prompts,
     })
 }
@@ -14719,10 +14721,12 @@ mod tests {
         history.push_back("second prompt".to_string());
         let payload = history_json_payload(&history, 1);
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["aliases"][0], "history");
         assert_eq!(payload["total"], 2);
         assert_eq!(payload["shown"], 1);
-        assert_eq!(payload["supported_actions"][8], "status --json");
-        assert_eq!(payload["supported_actions"][11], "latest --json");
+        assert_eq!(payload["supported_actions"][9], "status --json");
+        assert_eq!(payload["supported_actions"][11], "show --json");
+        assert_eq!(payload["supported_actions"][14], "latest --json");
         assert_eq!(payload["prompts"][0]["index"], 2);
     }
 
@@ -14849,10 +14853,12 @@ mod tests {
             ],
         );
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["aliases"][0], "changelog");
         assert_eq!(payload["limit"], 2);
         assert_eq!(payload["count"], 2);
-        assert_eq!(payload["supported_actions"][8], "status --json");
-        assert_eq!(payload["supported_actions"][11], "latest --json");
+        assert_eq!(payload["supported_actions"][9], "status --json");
+        assert_eq!(payload["supported_actions"][11], "show --json");
+        assert_eq!(payload["supported_actions"][14], "latest --json");
         assert_eq!(payload["commits"][0]["hash"], "abc1234");
         assert_eq!(payload["commits"][1]["summary"], "(HEAD -> main) second commit");
     }
