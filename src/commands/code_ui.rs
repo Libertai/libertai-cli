@@ -2618,7 +2618,7 @@ enum ResumePreviewCommand {
 }
 
 fn resume_usage_text() -> &'static str {
-    "/resume [status|state|show|info|preview|json|status --json|state --json|show --json|info --json|preview --json|path]"
+    "/resume [status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json|path]"
 }
 
 fn resume_preview_arg(trimmed: &str) -> Option<&str> {
@@ -15616,6 +15616,10 @@ mod tests {
             ResumePreviewCommand::Json
         );
         assert_eq!(
+            parse_resume_preview_command("--json"),
+            ResumePreviewCommand::Json
+        );
+        assert_eq!(
             parse_resume_preview_command("status --json"),
             ResumePreviewCommand::Json
         );
@@ -15623,7 +15627,7 @@ mod tests {
             parse_resume_preview_command("path"),
             ResumePreviewCommand::Usage
         );
-        assert!(resume_usage_text().contains("json|status --json|state --json"));
+        assert!(resume_usage_text().contains("json|--json|status --json|state --json"));
         assert!(resume_usage_text().contains("preview --json|path"));
 
         let cwd = PathBuf::from("/tmp/project");
