@@ -6641,6 +6641,10 @@ fn print_memory(action: &str) {
             return;
         }
     };
+    if is_memory_json_action(action) {
+        print_memory_json(&doc);
+        return;
+    }
     if action.eq_ignore_ascii_case("path") {
         println!("{DIM}  memory path: {}{RESET}", doc.path.display());
         return;
@@ -6686,6 +6690,13 @@ fn memory_file_selector(action: &str) -> Option<&str> {
         return None;
     }
     parts.next().map(str::trim).filter(|source| !source.is_empty())
+}
+
+fn is_memory_json_action(action: &str) -> bool {
+    matches!(
+        action.trim().to_ascii_lowercase().as_str(),
+        "json" | "--json" | "status --json" | "show --json"
+    )
 }
 
 fn read_memory_sidecar_selection(
@@ -6780,7 +6791,7 @@ fn print_memory_file(file: &crate::commands::code_memory::MemoryFileEntry, conte
     println!();
 }
 
-fn print_memory_summary(content: &str) {
+fn memory_entry_counts(content: &str) -> (usize, usize, usize, usize) {
     let mut user = 0usize;
     let mut feedback = 0usize;
     let mut project = 0usize;
@@ -6796,6 +6807,35 @@ fn print_memory_summary(content: &str) {
             project += 1;
         }
     }
+    (user, feedback, project, reference)
+}
+
+fn print_memory_json(doc: &crate::commands::code_memory::MemoryDocument) {
+    let (user, feedback, project, reference) = memory_entry_counts(&doc.content);
+    let entry_count = user + feedback + project + reference;
+    let payload = json!({
+        "command": "memory",
+        "surface": "terminal",
+        "path": doc.path,
+        "exists": doc.exists,
+        "entry_count": entry_count,
+        "entries": {
+            "user": user,
+            "feedback": feedback,
+            "project": project,
+            "reference": reference,
+        },
+        "content_bytes": doc.content.len(),
+        "supported_actions": ["show", "status", "json", "status --json", "path", "files", "references", "clear", "import"],
+    });
+    match serde_json::to_string_pretty(&payload) {
+        Ok(s) => println!("{s}"),
+        Err(e) => eprintln!("{DIM}  /memory json failed: {e}{RESET}"),
+    }
+}
+
+fn print_memory_summary(content: &str) {
+    let (user, feedback, project, reference) = memory_entry_counts(content);
     println!(
         "{DIM}  entries: user {user} · feedback {feedback} · project {project} · reference {reference}{RESET}"
     );
@@ -12379,6 +12419,20 @@ mod tests {
         assert_eq!(memory_file_selector("show-file entry.md"), Some("entry.md"));
         assert_eq!(memory_file_selector("files"), None);
         assert_eq!(memory_file_selector("file"), None);
+    }
+
+    #[test]
+    fn memory_json_action_and_entry_counts_are_stable() {
+        assert!(is_memory_json_action("json"));
+        assert!(is_memory_json_action("status --json"));
+        assert!(is_memory_json_action("show --json"));
+        assert!(!is_memory_json_action("status"));
+        assert_eq!(
+            memory_entry_counts(
+                "- [user] remember me\n- [feedback] too long\n- [reference] ./README.md\n- project note\n"
+            ),
+            (1, 1, 1, 1)
+        );
     }
 
     #[test]
