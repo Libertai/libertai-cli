@@ -3670,7 +3670,7 @@ fn parse_changelog_limit(input: &str) -> Result<usize> {
 }
 
 fn changelog_usage_text() -> &'static str {
-    "/changelog [count|list|recent|latest|status|state|show|json|status --json|list --json|recent --json|latest --json]"
+    "/changelog [count|list|recent|latest|status|state|show|json|--json|status --json|state --json|show --json|list --json|recent --json|latest --json]"
 }
 
 fn print_changelog(limit: usize) {
@@ -15182,9 +15182,13 @@ mod tests {
         assert!(parse_changelog_limit("open").is_err());
         assert!(changelog_usage_text().contains("list|recent|latest"));
         assert!(changelog_usage_text().contains("status|state|show"));
-        assert!(changelog_usage_text().contains("json|status --json|list --json"));
+        assert!(changelog_usage_text().contains("json|--json|status --json"));
+        assert!(changelog_usage_text().contains("state --json|show --json"));
+        assert!(changelog_usage_text().contains("list --json|recent --json|latest --json"));
         assert_eq!(changelog_json_request_arg("json"), Some(String::new()));
         assert_eq!(changelog_json_request_arg("--json"), Some(String::new()));
+        assert_eq!(changelog_json_request_arg("state --json"), Some(String::new()));
+        assert_eq!(changelog_json_request_arg("show --json"), Some(String::new()));
         assert_eq!(changelog_json_request_arg("list --json"), Some(String::new()));
         assert_eq!(changelog_json_request_arg("json 3"), Some("3".to_string()));
         assert_eq!(changelog_json_request_arg("status"), None);
