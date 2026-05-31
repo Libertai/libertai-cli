@@ -7737,7 +7737,7 @@ fn onboarding_json_payload(cwd: &Path, query: &str) -> Result<serde_json::Value>
         },
         "will_write": false,
         "will_publish": false,
-        "supported_actions": ["show", "preview", "save", "path", "gist", "json", "status --json"],
+        "supported_actions": ["show", "preview", "save", "path", "gist", "json", "--json", "status --json", "show --json", "preview --json"],
     }))
 }
 
@@ -17669,7 +17669,18 @@ mod tests {
         assert_eq!(payload["will_write"], false);
         assert_eq!(payload["will_publish"], false);
         assert!(payload["guide"]["bytes"].as_u64().unwrap() > 0);
-        assert_eq!(payload["supported_actions"][6], "status --json");
+        assert!(
+            payload["supported_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("show --json"))
+        );
+        assert!(
+            payload["supported_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("preview --json"))
+        );
     }
 
     #[test]
