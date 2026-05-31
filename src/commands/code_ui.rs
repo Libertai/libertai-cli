@@ -5993,7 +5993,7 @@ fn parse_abort_command(input: &str) -> AbortCommand {
 }
 
 fn abort_usage_text() -> &'static str {
-    "/abort [status|state|show|info|json|status --json|cancel|stop|interrupt]"
+    "/abort [status|state|show|info|json|--json|status --json|state --json|show --json|info --json|cancel|stop|interrupt]"
 }
 
 fn parse_notify_command(input: &str) -> NotifyCommand {
@@ -16785,9 +16785,14 @@ mod tests {
         assert_eq!(parse_abort_command("stop"), AbortCommand::Status);
         assert_eq!(parse_abort_command("interrupt"), AbortCommand::Status);
         assert_eq!(parse_abort_command("json"), AbortCommand::Json);
+        assert_eq!(parse_abort_command("--json"), AbortCommand::Json);
         assert_eq!(parse_abort_command("status --json"), AbortCommand::Json);
+        assert_eq!(parse_abort_command("state --json"), AbortCommand::Json);
+        assert_eq!(parse_abort_command("show --json"), AbortCommand::Json);
+        assert_eq!(parse_abort_command("info --json"), AbortCommand::Json);
         assert_eq!(parse_abort_command("open"), AbortCommand::Usage);
-        assert!(abort_usage_text().contains("json|status --json"));
+        assert!(abort_usage_text().contains("json|--json|status --json|state --json"));
+        assert!(abort_usage_text().contains("show --json|info --json"));
         let payload = abort_json_payload();
         assert_eq!(payload["command"], "abort");
         assert_eq!(payload["surface"], "terminal");
