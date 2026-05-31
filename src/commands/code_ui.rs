@@ -295,6 +295,7 @@ enum StatusCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DoctorCommand {
     Run,
+    Json,
     Usage,
 }
 
@@ -1031,9 +1032,23 @@ async fn repl_loop(
                     )
                     .await;
                 }
+                DoctorCommand::Json => {
+                    print_doctor_json(
+                        &handle,
+                        &provider,
+                        &model,
+                        mode.get(),
+                        output_style.as_deref(),
+                        &cfg,
+                        &approvals,
+                        &scheduled_runs,
+                        usage_summary(&usage_history),
+                    )
+                    .await;
+                }
                 DoctorCommand::Usage => {
                     println!(
-                        "{DIM}  usage:{RESET} /doctor, /doctor status, /doctor health, or /doctor diagnostics"
+                        "{DIM}  usage:{RESET} /doctor, /doctor status, /doctor health, /doctor diagnostics, or /doctor json"
                     );
                 }
             }
@@ -4413,12 +4428,16 @@ fn parse_doctor_command(input: &str) -> DoctorCommand {
         "" | "status" | "state" | "show" | "info" | "health" | "diagnostics" | "diag" => {
             DoctorCommand::Run
         }
+        "json" | "--json" | "status --json" | "state --json" | "show --json"
+        | "info --json" | "health --json" | "diagnostics --json" | "diag --json" => {
+            DoctorCommand::Json
+        }
         _ => DoctorCommand::Usage,
     }
 }
 
 fn doctor_usage_text() -> &'static str {
-    "/doctor [status|state|show|info|health|diagnostics|diag]"
+    "/doctor [status|state|show|info|health|diagnostics|diag|json]"
 }
 
 fn parse_abort_command(input: &str) -> AbortCommand {
@@ -8945,6 +8964,129 @@ async fn print_doctor(
     println!();
 }
 
+async fn print_doctor_json(
+    handle: &AgentSessionHandle,
+    provider: &str,
+    model: &str,
+    mode: Mode,
+    output_style: Option<&str>,
+    cfg: &LibertaiConfig,
+    approvals: &ApprovalState,
+    scheduled_runs: &[ScheduledRun],
+    usage: Option<UsageSummary>,
+) {
+    let cwd = std::env::current_dir();
+    let cwd_label = cwd
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|e| format!("unavailable: {e}"));
+    let mut checks = Vec::new();
+
+    match handle.state().await {
+        Ok(state) => {
+            checks.push(json!({
+                "status": "ok",
+                "ok": true,
+                "label": "pi session",
+                "detail": state.session_id.unwrap_or_else(|| "not persisted".to_string())
+            }));
+            checks.push(json!({
+                "status": if state.save_enabled { "ok" } else { "warn" },
+                "ok": state.save_enabled,
+                "label": "session persistence",
+                "detail": if state.save_enabled { "enabled" } else { "disabled" }
+            }));
+            checks.push(json!({
+                "status": "ok",
+                "ok": true,
+                "label": "transcript",
+                "detail": format!("{} message(s)", state.message_count)
+            }));
+        }
+        Err(e) => checks.push(json!({
+            "status": "warn",
+            "ok": false,
+            "label": "pi session",
+            "detail": e.to_string()
+        })),
+    }
+
+    checks.push(json!({
+        "status": if cfg.auth.api_key.is_some() { "ok" } else { "warn" },
+        "ok": cfg.auth.api_key.is_some(),
+        "label": "LibertAI auth",
+        "detail": cfg.auth.api_key.as_deref().map(mask_key).unwrap_or_else(|| "not logged in".to_string())
+    }));
+    checks.push(json!({
+        "status": "ok",
+        "ok": true,
+        "label": "defaults",
+        "detail": format!("{}/{}", cfg.default_code_provider, cfg.default_code_model)
+    }));
+    checks.push(json!({
+        "status": "ok",
+        "ok": true,
+        "label": "smart approvals",
+        "detail": if cfg.smart_approval_enabled {
+            format!("enabled ({})", cfg.smart_approval_model)
+        } else {
+            "disabled".to_string()
+        }
+    }));
+    checks.push(json!({
+        "status": "ok",
+        "ok": true,
+        "label": "remembered approvals",
+        "detail": format!("{} saved rule(s)", approvals.always_rules().len())
+    }));
+    checks.push(json!({
+        "status": "ok",
+        "ok": true,
+        "label": "hooks",
+        "detail": format_hook_event_breakdown(cfg)
+    }));
+    checks.push(json!({
+        "status": if cfg.mcp_servers.is_empty() { "info" } else { "ok" },
+        "ok": if cfg.mcp_servers.is_empty() { serde_json::Value::Null } else { serde_json::Value::Bool(true) },
+        "label": "mcp registry",
+        "detail": format_mcp_doctor_summary(cfg)
+    }));
+    checks.push(json!({
+        "status": "ok",
+        "ok": true,
+        "label": "scheduled prompts",
+        "detail": format_schedule_doctor_summary(scheduled_runs)
+    }));
+    checks.push(json!({
+        "status": "ok",
+        "ok": true,
+        "label": "usage",
+        "detail": usage
+            .map(|summary| format!("{} turn(s), {} ctx high-water", summary.turns, human_tokens(summary.context_high_water)))
+            .unwrap_or_else(|| "no completed turns yet".to_string())
+    }));
+
+    let payload = json!({
+        "surface": "terminal",
+        "cwd": cwd_label,
+        "provider": provider,
+        "model": model,
+        "mode": mode_label(mode),
+        "output_style": output_style.unwrap_or("default"),
+        "summary": {
+            "total": checks.len(),
+            "ok": checks.iter().filter(|check| check.get("status").and_then(|value| value.as_str()) == Some("ok")).count(),
+            "warn": checks.iter().filter(|check| check.get("status").and_then(|value| value.as_str()) == Some("warn")).count(),
+            "info": checks.iter().filter(|check| check.get("status").and_then(|value| value.as_str()) == Some("info")).count(),
+        },
+        "checks": checks,
+    });
+    match serde_json::to_string_pretty(&payload) {
+        Ok(raw) => println!("{raw}"),
+        Err(err) => eprintln!("{DIM}  /doctor: could not render JSON: {err}.{RESET}"),
+    }
+}
+
 fn doctor_line(ok: bool, label: &str, detail: impl AsRef<str>) -> String {
     let status = if ok { "ok" } else { "warn" };
     let detail = detail.as_ref();
@@ -12916,9 +13058,11 @@ mod tests {
         assert_eq!(parse_doctor_command("health"), DoctorCommand::Run);
         assert_eq!(parse_doctor_command("diagnostics"), DoctorCommand::Run);
         assert_eq!(parse_doctor_command("diag"), DoctorCommand::Run);
+        assert_eq!(parse_doctor_command("json"), DoctorCommand::Json);
+        assert_eq!(parse_doctor_command("diagnostics --json"), DoctorCommand::Json);
         assert_eq!(parse_doctor_command("open"), DoctorCommand::Usage);
         assert!(doctor_usage_text().contains("status|state|show|info"));
-        assert!(doctor_usage_text().contains("health|diagnostics|diag"));
+        assert!(doctor_usage_text().contains("health|diagnostics|diag|json"));
     }
 
     #[test]
