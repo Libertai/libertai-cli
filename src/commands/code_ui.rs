@@ -11995,11 +11995,22 @@ fn usage_export_csv(
     tool_activity: &[ToolActivitySummary],
 ) -> String {
     let mut out = String::from(
-        "category,name,count,input_tokens,output_tokens,estimated_tokens,estimated_cost_usd,duration_ms,provenance\n",
+        "category,name,count,input_tokens,output_tokens,estimated_tokens,estimated_cost_usd,duration_ms,pricing_match,input_usd_per_million,output_usd_per_million,pricing_source,provenance\n",
     );
     if let Some(summary) = summary {
+        let pricing = model_token_rate_match(&summary.model);
+        let (pricing_match, input_rate, output_rate, pricing_source) = pricing
+            .map(|(matched, input, output)| {
+                (
+                    matched.to_string(),
+                    format!("{input:.8}"),
+                    format!("{output:.8}"),
+                    "libertai-cli pricing table".to_string(),
+                )
+            })
+            .unwrap_or_default();
         out.push_str(&format!(
-            "usage,{},{},{},{},{},{},{},{}\n",
+            "usage,{},{},{},{},{},{},{},{},{},{},{},{}\n",
             csv_cell(&format!("{}/{}", summary.provider, summary.model)),
             summary.turns,
             summary.context_high_water,
@@ -12010,11 +12021,15 @@ fn usage_export_csv(
                 .map(|cost| format!("{cost:.8}"))
                 .unwrap_or_default(),
             "",
+            csv_cell(&pricing_match),
+            input_rate,
+            output_rate,
+            csv_cell(&pricing_source),
             csv_cell("input=context high-water; output=sum of completed turns")
         ));
         for row in estimate_tool_attribution(summary, tool_activity) {
             out.push_str(&format!(
-                "tool,{},{},{},{},{},{},{},{}\n",
+                "tool,{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 csv_cell(&row.tool_name),
                 row.count,
                 "",
@@ -12024,13 +12039,17 @@ fn usage_export_csv(
                     .map(|cost| format!("{cost:.8}"))
                     .unwrap_or_default(),
                 row.total_duration.as_millis(),
+                "",
+                "",
+                "",
+                "",
                 csv_cell("estimated duration-weighted attribution")
             ));
         }
     } else {
         for tool in tool_activity {
             out.push_str(&format!(
-                "tool,{},{},{},{},{},{},{},{}\n",
+                "tool,{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 csv_cell(&tool.tool_name),
                 tool.count,
                 "",
@@ -12038,6 +12057,10 @@ fn usage_export_csv(
                 "",
                 "",
                 tool.total_duration.as_millis(),
+                "",
+                "",
+                "",
+                "",
                 csv_cell("observed tool activity only; no usage recorded")
             ));
         }
@@ -15058,8 +15081,23 @@ mod tests {
             }],
         );
         assert!(report.starts_with("category,name,count"));
+        assert!(report.contains("pricing_match,input_usd_per_million,output_usd_per_million,pricing_source"));
         assert!(report.contains("\"local,dev/unknown\""));
         assert!(report.contains("estimated duration-weighted attribution"));
+        let priced = usage_export_csv(
+            Some(&UsageSummary {
+                turns: 1,
+                last_input: 20,
+                last_output: 10,
+                output_total: 10,
+                context_high_water: 20,
+                context_window: 100,
+                provider: "libertai".to_string(),
+                model: "qwen3-coder-480b".to_string(),
+            }),
+            &[],
+        );
+        assert!(priced.contains("qwen3-coder-480b,1.00000000,3.00000000"));
     }
 
     #[test]
