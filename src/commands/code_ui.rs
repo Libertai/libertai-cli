@@ -194,6 +194,11 @@ struct ScheduleJsonRow {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ScheduleJsonPayload {
+    surface: &'static str,
+    command: &'static str,
+    query: String,
+    aliases: &'static [&'static str],
+    supported_actions: &'static [&'static str],
     total: usize,
     due: usize,
     pending: usize,
@@ -1583,9 +1588,9 @@ async fn repl_loop(
         if let Some(rest) = schedule_command_arg(trimmed) {
             match parse_schedule_command(rest) {
                 ScheduleCommand::Status => print_schedule_status(&scheduled_runs),
-                ScheduleCommand::Json => print_schedule_json(&scheduled_runs, None),
+                ScheduleCommand::Json => print_schedule_json(&scheduled_runs, rest, None),
                 ScheduleCommand::Show(id) => print_schedule_details(&scheduled_runs, &id),
-                ScheduleCommand::ShowJson(id) => print_schedule_json(&scheduled_runs, Some(&id)),
+                ScheduleCommand::ShowJson(id) => print_schedule_json(&scheduled_runs, rest, Some(&id)),
                 ScheduleCommand::Run(id) => {
                     let now = Instant::now();
                     if let Some(run) = scheduled_runs.iter_mut().find(|run| run.id == id) {
@@ -1663,7 +1668,7 @@ async fn repl_loop(
                 }
                 ScheduleCommand::Usage => {
                     eprintln!(
-                        "{DIM}  usage: /schedule in 10m follow up, /schedule list|status|state|json, /schedule show <id> [--json], /schedule run <id>, /schedule cancel <id>, or /schedule clear|stop (also /cron){RESET}"
+                        "{DIM}  usage: /schedule in 10m follow up, /schedule list|status|state|json|--json|list --json, /schedule show|inspect <id> [--json], /schedule show-json <id>, /schedule run|now|trigger <id>, /schedule cancel|delete|rm <id>, or /schedule clear|stop (also /cron){RESET}"
                     );
                 }
             }
@@ -3005,7 +3010,7 @@ fn print_help() {
     println!("{DIM}  /compact — compact older conversation history now{RESET}");
     println!("{DIM}  /loop [turns] [goal] — run bounded autonomous follow-up turns{RESET}");
     println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|stop|status|state; also /autorun, /continuous){RESET}");
-    println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|status|state|json|cancel|clear|stop; also /cron){RESET}");
+    println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|status|state|json|--json|list --json|show|inspect|show-json|run|now|trigger|cancel|delete|rm|clear|stop; also /cron){RESET}");
     println!("{DIM}  /send [target message] — show terminal inter-session send status{RESET}");
     println!("{DIM}  /notify on|enable|enabled|off|disable|disabled|clear|status|state|show|test|ping — turn-complete terminal notifications{RESET}");
     println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
@@ -6633,7 +6638,39 @@ fn print_schedule_details(scheduled_runs: &[ScheduledRun], id: &str) {
     println!("{DIM}  prompt:{RESET} {}", run.prompt.replace('\n', " "));
 }
 
-fn schedule_json_payload(scheduled_runs: &[ScheduledRun], now: Instant) -> ScheduleJsonPayload {
+fn schedule_supported_actions() -> &'static [&'static str] {
+    &[
+        "list",
+        "status",
+        "state",
+        "json",
+        "--json",
+        "list --json",
+        "status --json",
+        "state --json",
+        "show <id>",
+        "show <id> --json",
+        "show-json <id>",
+        "inspect <id>",
+        "inspect <id> --json",
+        "inspect-json <id>",
+        "run <id>",
+        "now <id>",
+        "trigger <id>",
+        "cancel <id>",
+        "delete <id>",
+        "rm <id>",
+        "clear",
+        "stop",
+        "in <delay> <prompt>",
+    ]
+}
+
+fn schedule_json_payload(
+    scheduled_runs: &[ScheduledRun],
+    now: Instant,
+    query: &str,
+) -> ScheduleJsonPayload {
     let counts = schedule_status_counts(scheduled_runs, now);
     let runs = scheduled_runs
         .iter()
@@ -6653,6 +6690,11 @@ fn schedule_json_payload(scheduled_runs: &[ScheduledRun], now: Instant) -> Sched
         })
         .collect();
     ScheduleJsonPayload {
+        surface: "terminal",
+        command: "schedule",
+        query: query.to_string(),
+        aliases: &["schedule", "cron"],
+        supported_actions: schedule_supported_actions(),
         total: counts.total,
         due: counts.due,
         pending: counts.pending,
@@ -6660,9 +6702,9 @@ fn schedule_json_payload(scheduled_runs: &[ScheduledRun], now: Instant) -> Sched
     }
 }
 
-fn print_schedule_json(scheduled_runs: &[ScheduledRun], id: Option<&str>) {
+fn print_schedule_json(scheduled_runs: &[ScheduledRun], query: &str, id: Option<&str>) {
     let now = Instant::now();
-    let mut payload = schedule_json_payload(scheduled_runs, now);
+    let mut payload = schedule_json_payload(scheduled_runs, now, query);
     if let Some(id) = id {
         payload.runs.retain(|run| run.id == id);
         payload.total = payload.runs.len();
@@ -16884,7 +16926,19 @@ mod tests {
             ScheduleCommand::Run("sch_2".to_string())
         );
         assert_eq!(
+            parse_schedule_command("trigger sch_2"),
+            ScheduleCommand::Run("sch_2".to_string())
+        );
+        assert_eq!(
             parse_schedule_command("cancel sch_2"),
+            ScheduleCommand::Cancel("sch_2".to_string())
+        );
+        assert_eq!(
+            parse_schedule_command("delete sch_2"),
+            ScheduleCommand::Cancel("sch_2".to_string())
+        );
+        assert_eq!(
+            parse_schedule_command("rm sch_2"),
             ScheduleCommand::Cancel("sch_2".to_string())
         );
         assert_eq!(parse_schedule_command("clear"), ScheduleCommand::Clear);
@@ -16973,7 +17027,14 @@ mod tests {
             scheduled_run_for_test("sch_1", "due", now - Duration::from_millis(1)),
             scheduled_run_for_test("sch_2", "later", now + Duration::from_secs(5)),
         ];
-        let payload = schedule_json_payload(&runs, now);
+        let payload = schedule_json_payload(&runs, now, "list --json");
+        assert_eq!(payload.surface, "terminal");
+        assert_eq!(payload.command, "schedule");
+        assert_eq!(payload.query, "list --json");
+        assert_eq!(payload.aliases, &["schedule", "cron"]);
+        assert!(payload.supported_actions.contains(&"trigger <id>"));
+        assert!(payload.supported_actions.contains(&"delete <id>"));
+        assert!(payload.supported_actions.contains(&"rm <id>"));
         assert_eq!(payload.total, 2);
         assert_eq!(payload.due, 1);
         assert_eq!(payload.pending, 1);
