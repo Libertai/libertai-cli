@@ -3488,6 +3488,7 @@ fn project_tree_json_payload(root: &Path, max_entries: usize) -> Result<serde_js
         "limit": max_entries,
         "count": rows.len(),
         "truncated": remaining == 0,
+        "supported_actions": ["json", "status --json", "state --json", "show --json", "path --json"],
         "entries": rows,
     }))
 }
@@ -3646,7 +3647,7 @@ fn parse_changelog_limit(input: &str) -> Result<usize> {
 }
 
 fn changelog_usage_text() -> &'static str {
-    "/changelog [count|list|recent|latest|status|state|show|json|list --json]"
+    "/changelog [count|list|recent|latest|status|state|show|json|status --json|list --json|recent --json|latest --json]"
 }
 
 fn print_changelog(limit: usize) {
@@ -3695,6 +3696,7 @@ fn changelog_json_payload(limit: usize, lines: Vec<String>) -> serde_json::Value
         "command": "changelog",
         "limit": limit,
         "count": commits.len(),
+        "supported_actions": ["count", "list", "recent", "latest", "status", "state", "show", "json", "status --json", "list --json", "recent --json", "latest --json"],
         "commits": commits,
     })
 }
@@ -4074,7 +4076,7 @@ fn parse_history_limit(input: &str) -> Result<usize> {
 }
 
 fn history_usage_text() -> &'static str {
-    "/history [count|list|recent|latest|status|state|show|json|list --json]"
+    "/history [count|list|recent|latest|status|state|show|json|status --json|list --json|recent --json|latest --json]"
 }
 
 fn is_default_list_alias(value: &str) -> bool {
@@ -4131,6 +4133,7 @@ fn history_json_payload(history: &VecDeque<String>, limit: usize) -> serde_json:
         "total": history.len(),
         "limit": limit,
         "shown": shown,
+        "supported_actions": ["count", "list", "recent", "latest", "status", "state", "show", "json", "status --json", "list --json", "recent --json", "latest --json"],
         "prompts": prompts,
     })
 }
@@ -14530,7 +14533,7 @@ mod tests {
         assert!(parse_history_limit("open").is_err());
         assert!(history_usage_text().contains("list|recent|latest"));
         assert!(history_usage_text().contains("status|state|show"));
-        assert!(history_usage_text().contains("json|list --json"));
+        assert!(history_usage_text().contains("json|status --json|list --json"));
         assert_eq!(history_json_request_arg("json"), Some(String::new()));
         assert_eq!(history_json_request_arg("--json"), Some(String::new()));
         assert_eq!(history_json_request_arg("list --json"), Some(String::new()));
@@ -14543,6 +14546,8 @@ mod tests {
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["total"], 2);
         assert_eq!(payload["shown"], 1);
+        assert_eq!(payload["supported_actions"][8], "status --json");
+        assert_eq!(payload["supported_actions"][11], "latest --json");
         assert_eq!(payload["prompts"][0]["index"], 2);
     }
 
@@ -14613,6 +14618,8 @@ mod tests {
         let payload = project_tree_json_payload(temp.path(), 20).unwrap();
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "tree");
+        assert_eq!(payload["supported_actions"][1], "status --json");
+        assert_eq!(payload["supported_actions"][4], "path --json");
         assert_eq!(payload["entries"][0]["kind"], "dir");
         assert!(
             payload["entries"]
@@ -14653,7 +14660,7 @@ mod tests {
         assert!(parse_changelog_limit("open").is_err());
         assert!(changelog_usage_text().contains("list|recent|latest"));
         assert!(changelog_usage_text().contains("status|state|show"));
-        assert!(changelog_usage_text().contains("json|list --json"));
+        assert!(changelog_usage_text().contains("json|status --json|list --json"));
         assert_eq!(changelog_json_request_arg("json"), Some(String::new()));
         assert_eq!(changelog_json_request_arg("--json"), Some(String::new()));
         assert_eq!(changelog_json_request_arg("list --json"), Some(String::new()));
@@ -14669,6 +14676,8 @@ mod tests {
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["limit"], 2);
         assert_eq!(payload["count"], 2);
+        assert_eq!(payload["supported_actions"][8], "status --json");
+        assert_eq!(payload["supported_actions"][11], "latest --json");
         assert_eq!(payload["commits"][0]["hash"], "abc1234");
         assert_eq!(payload["commits"][1]["summary"], "(HEAD -> main) second commit");
     }
