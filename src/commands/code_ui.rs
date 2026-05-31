@@ -44,7 +44,9 @@ use serde_json::json;
 
 use crate::commands::code_approvals::ApprovalState;
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
-use crate::commands::code_sandbox::{detect_strict_profile, format_profile_text};
+use crate::commands::code_sandbox::{
+    binary_on_path, detect_strict_profile, format_profile_text, BindKind, StrictProfile,
+};
 use crate::commands::code_session::{
     build_session_options, list_past_sessions, most_recent_session, CodeSessionConfig,
     SessionPersistence,
@@ -3708,6 +3710,17 @@ fn print_sandbox_status(action: &str) {
             let profile = detect_strict_profile(&cwd);
             print!("{}", format_profile_text(&profile));
         }
+        SandboxAction::Json => {
+            let cwd = match std::env::current_dir() {
+                Ok(cwd) => cwd,
+                Err(e) => {
+                    eprintln!("{DIM}  /sandbox json: could not resolve cwd: {e}{RESET}");
+                    return;
+                }
+            };
+            let profile = detect_strict_profile(&cwd);
+            print_sandbox_json(&profile);
+        }
         SandboxAction::Reload => {
             println!(
                 "{DIM}  /sandbox reload: CLI sandbox policy is fixed when `libertai code` starts. Exit and restart with the desired --sandbox mode or policy settings.{RESET}"
@@ -3720,7 +3733,38 @@ fn print_sandbox_status(action: &str) {
 }
 
 fn sandbox_usage_text() -> &'static str {
-    "/sandbox [info|status|state|show|diagnostics|diag|reload]"
+    "/sandbox [info|status|state|show|diagnostics|diag|json|status --json|reload]"
+}
+
+fn sandbox_json_payload(profile: &StrictProfile) -> serde_json::Value {
+    let count_kind = |kind| profile.binds.iter().filter(|bind| bind.kind == kind).count();
+    json!({
+        "command": "sandbox",
+        "surface": "terminal",
+        "cwd": profile.cwd,
+        "network_allowed": profile.network_allowed,
+        "bwrap_path": binary_on_path("bwrap"),
+        "binds": {
+            "count": profile.binds.len(),
+            "enabled_count": profile.binds.iter().filter(|bind| bind.enabled).count(),
+            "present_count": profile.binds.iter().filter(|bind| bind.present).count(),
+            "bin_count": count_kind(BindKind::Bin),
+            "lib_count": count_kind(BindKind::Lib),
+            "config_count": count_kind(BindKind::Config),
+            "items": profile.binds,
+        },
+        "env": profile.env,
+        "will_write": false,
+        "will_reload": false,
+        "supported_actions": ["info", "status", "state", "show", "diagnostics", "diag", "json", "status --json", "reload"],
+    })
+}
+
+fn print_sandbox_json(profile: &StrictProfile) {
+    match serde_json::to_string_pretty(&sandbox_json_payload(profile)) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("{DIM}  /sandbox json failed: {e}{RESET}"),
+    }
 }
 
 fn abort_status_message() -> String {
@@ -3751,6 +3795,7 @@ fn print_abort_json() {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SandboxAction<'a> {
     Info,
+    Json,
     Reload,
     Unknown(&'a str),
 }
@@ -3766,6 +3811,18 @@ fn parse_sandbox_action(raw: &str) -> SandboxAction<'_> {
         || value.eq_ignore_ascii_case("diag")
     {
         SandboxAction::Info
+    } else if matches!(
+        value.to_ascii_lowercase().as_str(),
+        "json"
+            | "--json"
+            | "status --json"
+            | "state --json"
+            | "show --json"
+            | "info --json"
+            | "diagnostics --json"
+            | "diag --json"
+    ) {
+        SandboxAction::Json
     } else if value.eq_ignore_ascii_case("reload") {
         SandboxAction::Reload
     } else {
@@ -14420,11 +14477,36 @@ mod tests {
         assert_eq!(parse_sandbox_action("show"), SandboxAction::Info);
         assert_eq!(parse_sandbox_action("diagnostics"), SandboxAction::Info);
         assert_eq!(parse_sandbox_action("diag"), SandboxAction::Info);
+        assert_eq!(parse_sandbox_action("json"), SandboxAction::Json);
+        assert_eq!(parse_sandbox_action("--json"), SandboxAction::Json);
+        assert_eq!(parse_sandbox_action("status --json"), SandboxAction::Json);
+        assert_eq!(
+            parse_sandbox_action("diagnostics --json"),
+            SandboxAction::Json
+        );
         assert_eq!(parse_sandbox_action("reload"), SandboxAction::Reload);
         assert_eq!(parse_sandbox_action("reset"), SandboxAction::Unknown("reset"));
         assert!(sandbox_usage_text().contains("status|state|show"));
         assert!(sandbox_usage_text().contains("diagnostics|diag"));
+        assert!(sandbox_usage_text().contains("json|status --json"));
         assert!(sandbox_usage_text().contains("reload"));
+    }
+
+    #[test]
+    fn sandbox_json_payload_reports_profile_counts() {
+        let profile = crate::commands::code_sandbox::detect_strict_profile(Path::new(
+            env!("CARGO_MANIFEST_DIR"),
+        ));
+        let payload = sandbox_json_payload(&profile);
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "sandbox");
+        assert_eq!(payload["cwd"], env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(payload["network_allowed"], false);
+        assert_eq!(payload["will_write"], false);
+        assert_eq!(payload["will_reload"], false);
+        assert!(payload["binds"]["count"].as_u64().unwrap() > 0);
+        assert!(payload["binds"]["bin_count"].as_u64().unwrap() > 0);
+        assert_eq!(payload["supported_actions"][7], "status --json");
     }
 
     #[test]
