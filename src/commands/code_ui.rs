@@ -4718,6 +4718,8 @@ fn login_status_payload(command: &str, cfg: &LibertaiConfig) -> serde_json::Valu
     json!({
         "surface": "terminal",
         "command": command,
+        "aliases": [command],
+        "supported_actions": login_supported_actions(),
         "libertai": {
             "api_key": login_key_state(cfg),
             "logged_in": cfg.auth.api_key.is_some(),
@@ -4729,6 +4731,30 @@ fn login_status_payload(command: &str, cfg: &LibertaiConfig) -> serde_json::Valu
             "desktop_settings_target": "Settings > Backends",
         },
     })
+}
+
+fn login_supported_actions() -> &'static [&'static str] {
+    &[
+        "status",
+        "show",
+        "info",
+        "json",
+        "status --json",
+        "show --json",
+        "info --json",
+        "libertai",
+        "account",
+        "key",
+        "api-key",
+        "api",
+        "provider",
+        "show provider",
+        "show provider --json",
+        "info provider",
+        "inspect provider",
+        "provider provider",
+        "provider --json",
+    ]
 }
 
 fn print_login_status_json(command: &str, cfg: &LibertaiConfig) {
@@ -4762,6 +4788,8 @@ fn provider_login_payload(command: &str, provider: &str, cfg: &LibertaiConfig) -
     json!({
         "surface": "terminal",
         "command": command,
+        "aliases": [command],
+        "supported_actions": login_supported_actions(),
         "provider": provider,
         "terminal_provider_key": if is_libertai { login_key_state(cfg) } else { "not stored".to_string() },
         "managed_by_desktop_settings": !is_libertai,
@@ -16966,6 +16994,18 @@ mod tests {
         assert!(logout_usage_text().contains("show <provider>"));
         assert!(logout_usage_text().contains("inspect <provider>"));
         assert!(logout_usage_text().contains("provider <provider>"));
+        let cfg = LibertaiConfig::default();
+        let payload = login_status_payload("login", &cfg);
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "login");
+        assert_eq!(payload["aliases"][0], "login");
+        assert_eq!(payload["supported_actions"][4], "status --json");
+        assert_eq!(payload["supported_actions"][14], "show provider --json");
+        let provider_payload = provider_login_payload("logout", "anthropic", &cfg);
+        assert_eq!(provider_payload["command"], "logout");
+        assert_eq!(provider_payload["provider"], "anthropic");
+        assert_eq!(provider_payload["managed_by_desktop_settings"], true);
+        assert_eq!(provider_payload["supported_actions"][18], "provider --json");
     }
 
     #[test]
