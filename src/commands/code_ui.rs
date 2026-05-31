@@ -388,6 +388,7 @@ impl ToolActivityTracker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PermissionsCommand {
     Show,
+    Json,
     Open,
     Set(Mode),
     Forget,
@@ -1112,7 +1113,7 @@ async fn repl_loop(
                 continue;
             }
             "/permissions" | "/mode" => {
-                print_permissions_status(mode.get());
+                print_permissions_status(mode.get(), &approvals);
                 continue;
             }
             "/model" => {
@@ -1622,7 +1623,8 @@ async fn repl_loop(
         }
         if let Some((_command, rest)) = mode_command_arg(trimmed) {
             match parse_permissions_command(rest) {
-                PermissionsCommand::Show => print_permissions_status(mode.get()),
+                PermissionsCommand::Show => print_permissions_status(mode.get(), &approvals),
+                PermissionsCommand::Json => print_permissions_json(mode.get(), &approvals),
                 PermissionsCommand::Open => print_permissions_open_hint(),
                 PermissionsCommand::Set(new_mode) => {
                     mode.set(new_mode);
@@ -3587,6 +3589,8 @@ fn detect_supported_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
 fn parse_permissions_command(input: &str) -> PermissionsCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "show" | "status" | "current" | "info" => PermissionsCommand::Show,
+        "json" | "--json" | "status --json" | "show --json" | "current --json"
+        | "info --json" => PermissionsCommand::Json,
         "open" | "settings" | "edit" | "approvals" => PermissionsCommand::Open,
         "default" | "normal" => PermissionsCommand::Set(Mode::Normal),
         "acceptedits" | "accept-edits" | "accept_edits" => {
@@ -3745,8 +3749,12 @@ fn is_status_line_token_name(name: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
 }
 
-fn print_permissions_status(mode: Mode) {
+fn print_permissions_status(mode: Mode, approvals: &ApprovalState) {
     println!("{DIM}  permission mode: {}{RESET}", mode_label(mode));
+    println!(
+        "{DIM}  remembered approvals:{RESET} {} saved rule(s)",
+        approvals.always_rules().len()
+    );
     println!(
         "{DIM}  supported:{RESET} default/normal, acceptEdits/accept-edits/accept_edits, plan/readonly/read-only"
     );
@@ -3756,8 +3764,39 @@ fn print_permissions_status(mode: Mode) {
     println!("{DIM}  use /permissions bypassPermissions to explain the native safety stance.{RESET}");
 }
 
+fn permissions_json_payload(mode: Mode, approvals: &ApprovalState) -> serde_json::Value {
+    let allow_rules_path = crate::config::allow_rules_path()
+        .ok()
+        .map(|path| path.display().to_string());
+    json!({
+        "surface": "terminal",
+        "command": "permissions",
+        "mode": mode_label(mode),
+        "remembered_approvals": approvals.always_rules().len(),
+        "native_bypass_permissions": false,
+        "bypass_permissions_note": "native bypassPermissions is intentionally unavailable",
+        "allow_rules_path": allow_rules_path,
+        "settings_target": "Settings > Approvals",
+        "supported_modes": ["normal", "acceptEdits", "plan"],
+        "aliases": {
+            "normal": ["default", "normal"],
+            "acceptEdits": ["acceptEdits", "accept-edits", "accept_edits"],
+            "plan": ["plan", "readonly", "read-only"],
+            "forget": ["forget", "clear", "reset"],
+            "bypass_stance": ["bypassPermissions", "bypass", "danger"]
+        }
+    })
+}
+
+fn print_permissions_json(mode: Mode, approvals: &ApprovalState) {
+    match serde_json::to_string_pretty(&permissions_json_payload(mode, approvals)) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  /permissions json: {e:#}{RESET}"),
+    }
+}
+
 fn permissions_usage_text() -> &'static str {
-    "/permissions [status|show|current|info|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only|open|settings|edit|approvals|forget|clear|reset|bypassPermissions|bypass|danger]"
+    "/permissions [status|show|current|info|json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only|open|settings|edit|approvals|forget|clear|reset|bypassPermissions|bypass|danger]"
 }
 
 fn mode_usage_text() -> &'static str {
@@ -14301,6 +14340,11 @@ mod tests {
         assert_eq!(parse_permissions_command("show"), PermissionsCommand::Show);
         assert_eq!(parse_permissions_command("current"), PermissionsCommand::Show);
         assert_eq!(parse_permissions_command("info"), PermissionsCommand::Show);
+        assert_eq!(parse_permissions_command("json"), PermissionsCommand::Json);
+        assert_eq!(
+            parse_permissions_command("status --json"),
+            PermissionsCommand::Json
+        );
         assert_eq!(parse_permissions_command("open"), PermissionsCommand::Open);
         assert_eq!(parse_permissions_command("settings"), PermissionsCommand::Open);
         assert_eq!(parse_permissions_command("edit"), PermissionsCommand::Open);
@@ -14321,6 +14365,7 @@ mod tests {
         );
         assert_eq!(parse_permissions_command("wat"), PermissionsCommand::Show);
         assert!(permissions_usage_text().contains("default|normal"));
+        assert!(permissions_usage_text().contains("info|json"));
         assert!(permissions_usage_text().contains("accept-edits|accept_edits"));
         assert!(permissions_usage_text().contains("readonly|read-only"));
         assert!(permissions_usage_text().contains("settings|edit|approvals"));
@@ -14328,6 +14373,13 @@ mod tests {
         assert!(permissions_usage_text().contains("bypassPermissions|bypass|danger"));
         assert!(mode_usage_text().contains("normal|acceptEdits"));
         assert!(mode_usage_text().contains("readonly|read-only"));
+        let approvals = ApprovalState::new();
+        let payload = permissions_json_payload(Mode::Plan, &approvals);
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "permissions");
+        assert_eq!(payload["mode"], "plan");
+        assert_eq!(payload["remembered_approvals"], 0);
+        assert_eq!(payload["native_bypass_permissions"], false);
     }
 
     #[test]
