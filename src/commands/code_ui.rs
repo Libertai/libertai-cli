@@ -1392,9 +1392,16 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/changelog ") {
-            match parse_changelog_limit(rest) {
-                Ok(limit) => print_changelog(limit),
-                Err(e) => eprintln!("{DIM}  /changelog: {e:#}{RESET}"),
+            if let Some(limit_input) = changelog_json_request_arg(rest) {
+                match parse_changelog_limit(&limit_input) {
+                    Ok(limit) => print_changelog_json(limit),
+                    Err(e) => eprintln!("{DIM}  /changelog: {e:#}{RESET}"),
+                }
+            } else {
+                match parse_changelog_limit(rest) {
+                    Ok(limit) => print_changelog(limit),
+                    Err(e) => eprintln!("{DIM}  /changelog: {e:#}{RESET}"),
+                }
             }
             continue;
         }
@@ -2922,7 +2929,7 @@ fn parse_changelog_limit(input: &str) -> Result<usize> {
 }
 
 fn changelog_usage_text() -> &'static str {
-    "/changelog [count|list|recent|latest|status|state|show]"
+    "/changelog [count|list|recent|latest|status|state|show|json|list --json]"
 }
 
 fn print_changelog(limit: usize) {
@@ -2934,6 +2941,53 @@ fn print_changelog(limit: usize) {
                 println!("  {line}");
             }
         }
+        Err(e) => eprintln!("{DIM}  /changelog: {e:#}{RESET}"),
+    }
+}
+
+fn changelog_json_request_arg(input: &str) -> Option<String> {
+    let raw = input.trim();
+    let lower = raw.to_ascii_lowercase();
+    match lower.as_str() {
+        "json" | "--json" | "status --json" | "state --json" | "show --json"
+        | "list --json" | "recent --json" | "latest --json" => Some(String::new()),
+        _ => lower
+            .strip_prefix("json ")
+            .or_else(|| lower.strip_prefix("--json "))
+            .map(str::trim)
+            .map(str::to_string),
+    }
+}
+
+fn changelog_json_payload(limit: usize, lines: Vec<String>) -> serde_json::Value {
+    let commits = lines
+        .into_iter()
+        .map(|line| {
+            let mut parts = line.splitn(2, char::is_whitespace);
+            let hash = parts.next().unwrap_or("").trim();
+            let summary = parts.next().unwrap_or("").trim();
+            json!({
+                "hash": hash,
+                "summary": summary,
+                "line": line,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "surface": "terminal",
+        "command": "changelog",
+        "limit": limit,
+        "count": commits.len(),
+        "commits": commits,
+    })
+}
+
+fn print_changelog_json(limit: usize) {
+    match recent_git_commits(limit) {
+        Ok(lines) => match serde_json::to_string_pretty(&changelog_json_payload(limit, lines)) {
+            Ok(raw) => println!("{raw}"),
+            Err(e) => eprintln!("{DIM}  /changelog json: {e:#}{RESET}"),
+        },
         Err(e) => eprintln!("{DIM}  /changelog: {e:#}{RESET}"),
     }
 }
@@ -12501,6 +12555,24 @@ mod tests {
         assert!(parse_changelog_limit("open").is_err());
         assert!(changelog_usage_text().contains("list|recent|latest"));
         assert!(changelog_usage_text().contains("status|state|show"));
+        assert!(changelog_usage_text().contains("json|list --json"));
+        assert_eq!(changelog_json_request_arg("json"), Some(String::new()));
+        assert_eq!(changelog_json_request_arg("--json"), Some(String::new()));
+        assert_eq!(changelog_json_request_arg("list --json"), Some(String::new()));
+        assert_eq!(changelog_json_request_arg("json 3"), Some("3".to_string()));
+        assert_eq!(changelog_json_request_arg("status"), None);
+        let payload = changelog_json_payload(
+            2,
+            vec![
+                "abc1234 first commit".to_string(),
+                "def5678 (HEAD -> main) second commit".to_string(),
+            ],
+        );
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["limit"], 2);
+        assert_eq!(payload["count"], 2);
+        assert_eq!(payload["commits"][0]["hash"], "abc1234");
+        assert_eq!(payload["commits"][1]["summary"], "(HEAD -> main) second commit");
     }
 
     #[test]
