@@ -275,6 +275,8 @@ enum BugCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CopyCommand {
     LastAssistant,
+    Status,
+    Json,
     Usage,
 }
 
@@ -953,6 +955,8 @@ async fn repl_loop(
         if let Some(rest) = copy_command_arg(trimmed) {
             match parse_copy_command(rest) {
                 CopyCommand::LastAssistant => copy_last_assistant(&handle).await,
+                CopyCommand::Status => print_copy_status(&handle).await,
+                CopyCommand::Json => print_copy_json(&handle).await,
                 CopyCommand::Usage => {
                     println!("{DIM}  usage:{RESET} {}", copy_usage_text());
                 }
@@ -3306,7 +3310,7 @@ fn git_status_short_in(cwd: &Path) -> Result<Vec<String>> {
 }
 
 async fn copy_last_assistant(handle: &AgentSessionHandle) {
-    let messages = match handle.messages().await {
+    let messages = match copy_messages(handle).await {
         Ok(messages) => messages,
         Err(e) => {
             eprintln!("{DIM}  /copy: could not read transcript: {e:#}{RESET}");
@@ -3329,6 +3333,65 @@ async fn copy_last_assistant(handle: &AgentSessionHandle) {
     print!("{sequence}");
     let _ = io::stdout().flush();
     println!("{DIM}  copied last assistant response to terminal clipboard.{RESET}");
+}
+
+async fn copy_messages(handle: &AgentSessionHandle) -> Result<Vec<Message>> {
+    handle.messages().await.context("reading transcript")
+}
+
+async fn print_copy_status(handle: &AgentSessionHandle) {
+    let messages = match copy_messages(handle).await {
+        Ok(messages) => messages,
+        Err(e) => {
+            eprintln!("{DIM}  /copy status: could not read transcript: {e:#}{RESET}");
+            return;
+        }
+    };
+    let response = last_assistant_text(&messages);
+    println!("{BOLD}copy{RESET}");
+    match response {
+        Some(text) => {
+            let too_large = text.len() > OSC52_MAX_TEXT_BYTES;
+            println!("{DIM}  latest assistant response:{RESET} available");
+            println!("{DIM}  bytes:{RESET} {}", text.len());
+            if too_large {
+                println!(
+                    "{DIM}  terminal clipboard:{RESET} unavailable, response exceeds {} bytes",
+                    OSC52_MAX_TEXT_BYTES
+                );
+            } else {
+                println!("{DIM}  terminal clipboard:{RESET} available via OSC52");
+            }
+        }
+        None => println!("{DIM}  latest assistant response:{RESET} unavailable"),
+    }
+    println!("{DIM}  usage:{RESET} {}", copy_usage_text());
+}
+
+fn copy_json_payload(messages: &[Message]) -> serde_json::Value {
+    let response = last_assistant_text(messages);
+    let bytes = response.as_ref().map(|text| text.len()).unwrap_or(0);
+    json!({
+        "command": "copy",
+        "surface": "terminal",
+        "target": "latest_assistant_response",
+        "available": response.is_some(),
+        "bytes": bytes,
+        "max_terminal_clipboard_bytes": OSC52_MAX_TEXT_BYTES,
+        "copy_available": response.is_some() && bytes <= OSC52_MAX_TEXT_BYTES,
+        "copy_mechanism": "osc52",
+        "supported_actions": ["status", "show", "info", "json", "status --json", "last", "latest", "response", "assistant", "assistant-response"],
+    })
+}
+
+async fn print_copy_json(handle: &AgentSessionHandle) {
+    match copy_messages(handle).await {
+        Ok(messages) => match serde_json::to_string_pretty(&copy_json_payload(&messages)) {
+            Ok(text) => println!("{text}"),
+            Err(e) => eprintln!("{DIM}  /copy json failed: {e}{RESET}"),
+        },
+        Err(e) => eprintln!("{DIM}  /copy json: could not read transcript: {e:#}{RESET}"),
+    }
 }
 
 fn last_assistant_text(messages: &[Message]) -> Option<String> {
@@ -4932,12 +4995,16 @@ fn parse_copy_command(input: &str) -> CopyCommand {
         "" | "last" | "latest" | "response" | "assistant" | "assistant-response" => {
             CopyCommand::LastAssistant
         }
+        "status" | "show" | "info" => CopyCommand::Status,
+        "json" | "--json" | "status --json" | "show --json" | "info --json" => {
+            CopyCommand::Json
+        }
         _ => CopyCommand::Usage,
     }
 }
 
 fn copy_usage_text() -> &'static str {
-    "/copy [last|latest|response|assistant|assistant-response]"
+    "/copy [status|show|info|json|status --json|last|latest|response|assistant|assistant-response]"
 }
 
 fn parse_hotkeys_command(input: &str) -> HotkeysCommand {
@@ -14030,8 +14097,18 @@ mod tests {
             parse_copy_command("assistant-response"),
             CopyCommand::LastAssistant
         );
+        assert_eq!(parse_copy_command("status"), CopyCommand::Status);
+        assert_eq!(parse_copy_command("show"), CopyCommand::Status);
+        assert_eq!(parse_copy_command("json"), CopyCommand::Json);
+        assert_eq!(parse_copy_command("status --json"), CopyCommand::Json);
         assert_eq!(parse_copy_command("transcript"), CopyCommand::Usage);
-        assert!(copy_usage_text().contains("assistant|assistant-response"));
+        assert!(copy_usage_text().contains("json|status --json"));
+        let empty_payload = copy_json_payload(&[]);
+        assert_eq!(empty_payload["command"], "copy");
+        assert_eq!(empty_payload["surface"], "terminal");
+        assert_eq!(empty_payload["available"], false);
+        assert_eq!(empty_payload["copy_mechanism"], "osc52");
+        assert_eq!(empty_payload["supported_actions"][4], "status --json");
 
         assert_eq!(hotkeys_command_arg("/hotkeys"), Some(""));
         assert_eq!(hotkeys_command_arg("/hotkeys status"), Some("status"));
