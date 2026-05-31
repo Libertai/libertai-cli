@@ -3369,7 +3369,7 @@ fn model_usage_text() -> &'static str {
 }
 
 fn scoped_models_usage_text() -> &'static str {
-    "/scoped-models <status|show|json|status --json|show --json|patterns|clear|reset|off> — filter /model list and /model next|prev"
+    "/scoped-models <status|show|json|--json|status --json|show --json|patterns|clear|reset|off> — filter /model list and /model next|prev"
 }
 
 fn hotkey_lines() -> &'static [&'static str] {
@@ -4960,7 +4960,7 @@ fn handle_scoped_models_command(raw: &str, scoped_model_patterns: &mut Vec<Strin
         }
         ScopedModelsCommand::Usage => {
             eprintln!(
-                "{DIM}  usage: /scoped-models <status|show|json|status --json|show --json|pattern[,pattern...]|clear|reset|off>{RESET}"
+                "{DIM}  usage: /scoped-models <status|show|json|--json|status --json|show --json|pattern[,pattern...]|clear|reset|off>{RESET}"
             );
         }
     }
@@ -17732,7 +17732,7 @@ mod tests {
     fn scoped_models_parse_patterns_and_filter_matches() {
         assert_eq!(
             scoped_models_usage_text(),
-            "/scoped-models <status|show|json|status --json|show --json|patterns|clear|reset|off> — filter /model list and /model next|prev"
+            "/scoped-models <status|show|json|--json|status --json|show --json|patterns|clear|reset|off> — filter /model list and /model next|prev"
         );
         assert_eq!(scoped_models_command_arg("/scoped-models"), Some(""));
         assert_eq!(
@@ -17758,6 +17758,10 @@ mod tests {
         );
         assert_eq!(
             parse_scoped_models_command("json"),
+            ScopedModelsCommand::Json
+        );
+        assert_eq!(
+            parse_scoped_models_command("--json"),
             ScopedModelsCommand::Json
         );
         assert_eq!(
