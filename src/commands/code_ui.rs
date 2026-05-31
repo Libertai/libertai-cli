@@ -5214,9 +5214,10 @@ fn name_json_payload(name: Option<&str>) -> serde_json::Value {
     json!({
         "command": "name",
         "surface": "terminal",
+        "aliases": ["name", "rename"],
         "current": name,
         "is_named": name.is_some(),
-        "supported_actions": ["status", "state", "show", "current", "info", "json", "status --json", "set"],
+        "supported_actions": ["status", "state", "show", "current", "info", "json", "--json", "status --json", "state --json", "show --json", "current --json", "info --json", "set"],
     })
 }
 
@@ -5430,6 +5431,7 @@ fn compact_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "compact",
+        "aliases": ["compact"],
         "available": true,
         "active_turn": false,
         "will_compact_history": true,
@@ -5440,7 +5442,7 @@ fn compact_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
             "reserve_tokens": cfg.code_compaction_reserve_tokens,
             "keep_recent_tokens": cfg.code_compaction_keep_recent_tokens,
         },
-        "supported_actions": ["status", "state", "show", "info", "json", "status --json", "notes"],
+        "supported_actions": ["status", "state", "show", "info", "preview", "json", "--json", "status --json", "state --json", "show --json", "info --json", "preview --json", "notes"],
     })
 }
 
@@ -15406,9 +15408,17 @@ mod tests {
         let payload = name_json_payload(Some("release work"));
         assert_eq!(payload["command"], "name");
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["aliases"][1], "rename");
         assert_eq!(payload["current"], "release work");
         assert_eq!(payload["is_named"], true);
-        assert_eq!(payload["supported_actions"][6], "status --json");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("current --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("info --json")));
     }
 
     #[test]
@@ -15455,7 +15465,15 @@ mod tests {
         assert_eq!(payload["active_turn"], false);
         assert_eq!(payload["will_compact_history"], true);
         assert_eq!(payload["accepts_notes"], true);
-        assert_eq!(payload["supported_actions"][5], "status --json");
+        assert_eq!(payload["aliases"][0], "compact");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("preview --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("info --json")));
     }
 
     #[test]
