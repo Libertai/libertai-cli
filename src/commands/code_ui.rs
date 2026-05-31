@@ -2958,7 +2958,7 @@ fn print_help() {
     println!("{DIM}  {}{RESET}", permissions_usage_text());
     println!("{DIM}  {} — alias for /permissions{RESET}", mode_usage_text());
     println!("{DIM}  {}{RESET}", model_usage_text());
-    println!("{DIM}  /name <name> — set this session's display name (also /rename){RESET}");
+    println!("{DIM}  {} — set/show this session's display name (also /rename){RESET}", name_usage_text());
     println!("{DIM}  {} — show current REPL session status{RESET}", status_usage_text());
     println!("{DIM}  {} — run a local session/config diagnostic report{RESET}", doctor_usage_text());
     println!("{DIM}  /abort [status|cancel|stop|interrupt] — show how to interrupt the active CLI turn{RESET}");
@@ -5215,7 +5215,11 @@ fn print_name_status(name: Option<&str>) {
         Some(name) => println!("{DIM}  current:{RESET} {name}"),
         None => println!("{DIM}  current:{RESET} unnamed or not loaded in this REPL"),
     }
-    println!("{DIM}  usage:{RESET} /name <name> | /name [status|show|current|json|status --json]");
+    println!("{DIM}  usage:{RESET} {}", name_usage_text());
+}
+
+fn name_usage_text() -> &'static str {
+    "/name <name> | /name [status|state|show|current|info|json|--json|status --json|state --json|show --json|current --json|info --json]"
 }
 
 fn name_json_payload(name: Option<&str>) -> serde_json::Value {
@@ -15752,10 +15756,22 @@ mod tests {
         assert_eq!(name_command_arg("/rename"), None);
         assert_eq!(name_command_arg("/nameplate foo"), None);
         assert_eq!(parse_name_command("status"), NameCommand::Status);
+        assert_eq!(parse_name_command("state"), NameCommand::Status);
+        assert_eq!(parse_name_command("show"), NameCommand::Status);
         assert_eq!(parse_name_command("current"), NameCommand::Status);
+        assert_eq!(parse_name_command("info"), NameCommand::Status);
         assert_eq!(parse_name_command("json"), NameCommand::Json);
+        assert_eq!(parse_name_command("--json"), NameCommand::Json);
         assert_eq!(parse_name_command("status --json"), NameCommand::Json);
+        assert_eq!(parse_name_command("state --json"), NameCommand::Json);
+        assert_eq!(parse_name_command("show --json"), NameCommand::Json);
+        assert_eq!(parse_name_command("current --json"), NameCommand::Json);
+        assert_eq!(parse_name_command("info --json"), NameCommand::Json);
         assert_eq!(parse_name_command("release work"), NameCommand::Set);
+        assert!(name_usage_text().contains("status|state|show|current|info"));
+        assert!(name_usage_text().contains("json|--json|status --json"));
+        assert!(name_usage_text().contains("state --json|show --json"));
+        assert!(name_usage_text().contains("current --json|info --json"));
         let payload = name_json_payload(Some("release work"));
         assert_eq!(payload["command"], "name");
         assert_eq!(payload["surface"], "terminal");
