@@ -3521,22 +3521,28 @@ fn print_permissions_open_hint() {
 enum LoginSlashTarget<'a> {
     Account,
     Status,
+    StatusJson,
     ProviderStatus(&'a str),
+    ProviderStatusJson(&'a str),
     Provider(&'a str),
 }
 
 fn login_usage_text() -> &'static str {
-    "/login [status|show|info|libertai|account|key|api-key|api|provider|show <provider>|info <provider>|inspect <provider>|provider <provider>]"
+    "/login [status|json|status --json|show|info|libertai|account|key|api-key|api|provider|show <provider>|show <provider> --json|info <provider>|inspect <provider>|provider <provider>]"
 }
 
 fn logout_usage_text() -> &'static str {
-    "/logout [status|show|info|libertai|account|key|api-key|api|provider|show <provider>|info <provider>|inspect <provider>|provider <provider>]"
+    "/logout [status|json|status --json|show|info|libertai|account|key|api-key|api|provider|show <provider>|show <provider> --json|info <provider>|inspect <provider>|provider <provider>]"
 }
 
 fn parse_login_slash_target(query: &str) -> LoginSlashTarget<'_> {
-    let raw = query.trim();
+    let (raw, wants_json) = strip_login_json_suffix(query);
     if raw.is_empty() {
-        return LoginSlashTarget::Account;
+        return if wants_json {
+            LoginSlashTarget::StatusJson
+        } else {
+            LoginSlashTarget::Account
+        };
     }
     if let Some((head, tail)) = split_first_word(raw) {
         if matches!(
@@ -3545,22 +3551,64 @@ fn parse_login_slash_target(query: &str) -> LoginSlashTarget<'_> {
         ) {
             let provider = tail.trim();
             if !provider.is_empty() && provider.split_whitespace().count() == 1 {
-                return LoginSlashTarget::ProviderStatus(provider);
+                return if wants_json {
+                    LoginSlashTarget::ProviderStatusJson(provider)
+                } else {
+                    LoginSlashTarget::ProviderStatus(provider)
+                };
             }
-            return LoginSlashTarget::Status;
+            return if wants_json {
+                LoginSlashTarget::StatusJson
+            } else {
+                LoginSlashTarget::Status
+            };
         }
     }
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
-        "status" | "show" | "info" => LoginSlashTarget::Status,
-        "libertai" | "account" | "key" | "api-key" | "api" => LoginSlashTarget::Account,
-        _ => LoginSlashTarget::Provider(raw),
+        "status" | "show" | "info" => {
+            if wants_json {
+                LoginSlashTarget::StatusJson
+            } else {
+                LoginSlashTarget::Status
+            }
+        }
+        "libertai" | "account" | "key" | "api-key" | "api" => {
+            if wants_json {
+                LoginSlashTarget::ProviderStatusJson("libertai")
+            } else {
+                LoginSlashTarget::Account
+            }
+        }
+        _ => {
+            if wants_json {
+                LoginSlashTarget::ProviderStatusJson(raw)
+            } else {
+                LoginSlashTarget::Provider(raw)
+            }
+        }
     }
+}
+
+fn strip_login_json_suffix(query: &str) -> (&str, bool) {
+    let raw = query.trim();
+    let lower = raw.to_ascii_lowercase();
+    if lower == "json" || lower == "--json" {
+        return ("", true);
+    }
+    if let Some(prefix) = lower.strip_suffix(" --json") {
+        return (&raw[..prefix.len()], true);
+    }
+    if let Some(prefix) = lower.strip_suffix(" json") {
+        return (&raw[..prefix.len()], true);
+    }
+    (raw, false)
 }
 
 fn handle_login_slash(query: &str, cfg: &LibertaiConfig) {
     match parse_login_slash_target(query) {
         LoginSlashTarget::Status => print_login_status(cfg),
+        LoginSlashTarget::StatusJson => print_login_status_json("login", cfg),
         LoginSlashTarget::Account => {
             println!("{BOLD}login{RESET}");
             println!("{DIM}  LibertAI API key:{RESET} {}", login_key_state(cfg));
@@ -3569,6 +3617,9 @@ fn handle_login_slash(query: &str, cfg: &LibertaiConfig) {
             );
         }
         LoginSlashTarget::ProviderStatus(provider) => print_provider_login_details(provider, cfg),
+        LoginSlashTarget::ProviderStatusJson(provider) => {
+            print_provider_login_details_json("login", provider, cfg)
+        }
         LoginSlashTarget::Provider(provider) => print_provider_login_note(provider, cfg),
     }
 }
@@ -3576,6 +3627,7 @@ fn handle_login_slash(query: &str, cfg: &LibertaiConfig) {
 fn handle_logout_slash(query: &str, cfg: &LibertaiConfig) {
     match parse_login_slash_target(query) {
         LoginSlashTarget::Status => print_login_status(cfg),
+        LoginSlashTarget::StatusJson => print_login_status_json("logout", cfg),
         LoginSlashTarget::Account => {
             println!("{BOLD}logout{RESET}");
             println!(
@@ -3583,6 +3635,9 @@ fn handle_logout_slash(query: &str, cfg: &LibertaiConfig) {
             );
         }
         LoginSlashTarget::ProviderStatus(provider) => print_provider_logout_details(provider, cfg),
+        LoginSlashTarget::ProviderStatusJson(provider) => {
+            print_provider_login_details_json("logout", provider, cfg)
+        }
         LoginSlashTarget::Provider(provider) => {
             println!("{BOLD}logout{RESET}");
             println!(
@@ -3616,6 +3671,30 @@ fn print_login_status(cfg: &LibertaiConfig) {
     );
 }
 
+fn login_status_payload(command: &str, cfg: &LibertaiConfig) -> serde_json::Value {
+    json!({
+        "surface": "terminal",
+        "command": command,
+        "libertai": {
+            "api_key": login_key_state(cfg),
+            "logged_in": cfg.auth.api_key.is_some(),
+            "wallet": cfg.auth.wallet_address.as_deref().map(mask_key),
+            "chain": cfg.auth.chain,
+        },
+        "provider_credentials": {
+            "terminal_stores_provider_keys": false,
+            "desktop_settings_target": "Settings > Backends",
+        },
+    })
+}
+
+fn print_login_status_json(command: &str, cfg: &LibertaiConfig) {
+    match serde_json::to_string_pretty(&login_status_payload(command, cfg)) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("{DIM}  /{command} json: {e:#}{RESET}"),
+    }
+}
+
 fn login_key_state(cfg: &LibertaiConfig) -> String {
     cfg.auth
         .api_key
@@ -3633,6 +3712,30 @@ fn print_provider_login_note(provider: &str, cfg: &LibertaiConfig) {
         "{DIM}  use the desktop `/login {provider}` flow or Settings > Backends for provider-specific credentials.{RESET}"
     );
     println!("{DIM}  terminal LibertAI API key:{RESET} {}", login_key_state(cfg));
+}
+
+fn provider_login_payload(command: &str, provider: &str, cfg: &LibertaiConfig) -> serde_json::Value {
+    let is_libertai = provider.eq_ignore_ascii_case("libertai");
+    json!({
+        "surface": "terminal",
+        "command": command,
+        "provider": provider,
+        "terminal_provider_key": if is_libertai { login_key_state(cfg) } else { "not stored".to_string() },
+        "managed_by_desktop_settings": !is_libertai,
+        "libertai": {
+            "api_key": login_key_state(cfg),
+            "logged_in": cfg.auth.api_key.is_some(),
+            "wallet": cfg.auth.wallet_address.as_deref().map(mask_key),
+            "chain": cfg.auth.chain,
+        },
+    })
+}
+
+fn print_provider_login_details_json(command: &str, provider: &str, cfg: &LibertaiConfig) {
+    match serde_json::to_string_pretty(&provider_login_payload(command, provider, cfg)) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("{DIM}  /{command} show {provider} --json: {e:#}{RESET}"),
+    }
 }
 
 fn print_provider_login_details(provider: &str, cfg: &LibertaiConfig) {
@@ -13793,11 +13896,25 @@ mod tests {
         assert_eq!(parse_login_slash_target("status"), LoginSlashTarget::Status);
         assert_eq!(parse_login_slash_target("show"), LoginSlashTarget::Status);
         assert_eq!(parse_login_slash_target("info"), LoginSlashTarget::Status);
+        assert_eq!(parse_login_slash_target("json"), LoginSlashTarget::StatusJson);
+        assert_eq!(parse_login_slash_target("--json"), LoginSlashTarget::StatusJson);
+        assert_eq!(
+            parse_login_slash_target("status --json"),
+            LoginSlashTarget::StatusJson
+        );
+        assert_eq!(
+            parse_login_slash_target("show json"),
+            LoginSlashTarget::StatusJson
+        );
         assert_eq!(parse_login_slash_target("libertai"), LoginSlashTarget::Account);
         assert_eq!(parse_login_slash_target("account"), LoginSlashTarget::Account);
         assert_eq!(parse_login_slash_target("key"), LoginSlashTarget::Account);
         assert_eq!(parse_login_slash_target("api-key"), LoginSlashTarget::Account);
         assert_eq!(parse_login_slash_target("api"), LoginSlashTarget::Account);
+        assert_eq!(
+            parse_login_slash_target("libertai --json"),
+            LoginSlashTarget::ProviderStatusJson("libertai")
+        );
         assert_eq!(
             parse_login_slash_target("anthropic"),
             LoginSlashTarget::Provider("anthropic")
@@ -13807,14 +13924,26 @@ mod tests {
             LoginSlashTarget::ProviderStatus("anthropic")
         );
         assert_eq!(
+            parse_login_slash_target("show anthropic --json"),
+            LoginSlashTarget::ProviderStatusJson("anthropic")
+        );
+        assert_eq!(
+            parse_login_slash_target("anthropic --json"),
+            LoginSlashTarget::ProviderStatusJson("anthropic")
+        );
+        assert_eq!(
             parse_login_slash_target("inspect libertai"),
             LoginSlashTarget::ProviderStatus("libertai")
         );
         assert!(login_usage_text().contains("account|key|api-key|api"));
+        assert!(login_usage_text().contains("status --json"));
+        assert!(login_usage_text().contains("show <provider> --json"));
         assert!(login_usage_text().contains("show <provider>"));
         assert!(login_usage_text().contains("inspect <provider>"));
         assert!(login_usage_text().contains("provider <provider>"));
         assert!(logout_usage_text().contains("account|key|api-key|api"));
+        assert!(logout_usage_text().contains("status --json"));
+        assert!(logout_usage_text().contains("show <provider> --json"));
         assert!(logout_usage_text().contains("show <provider>"));
         assert!(logout_usage_text().contains("inspect <provider>"));
         assert!(logout_usage_text().contains("provider <provider>"));
