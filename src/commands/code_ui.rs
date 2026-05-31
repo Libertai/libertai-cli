@@ -1054,6 +1054,7 @@ async fn repl_loop(
                 }
                 StatusCommand::Json => {
                     print_session_status_json(
+                        rest,
                         &provider,
                         &model,
                         mode.get(),
@@ -11266,6 +11267,7 @@ fn print_session_status(
 }
 
 fn print_session_status_json(
+    input: &str,
     provider: &str,
     model: &str,
     mode: Mode,
@@ -11273,6 +11275,22 @@ fn print_session_status_json(
     cfg: &LibertaiConfig,
     usage: Option<UsageSummary>,
 ) {
+    let payload = session_status_json_payload(input, provider, model, mode, output_style, cfg, usage);
+    match serde_json::to_string_pretty(&payload) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("{DIM}  /status json: {e:#}{RESET}"),
+    }
+}
+
+fn session_status_json_payload(
+    input: &str,
+    provider: &str,
+    model: &str,
+    mode: Mode,
+    output_style: Option<&str>,
+    cfg: &LibertaiConfig,
+    usage: Option<UsageSummary>,
+) -> serde_json::Value {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|e| format!("unavailable: {e}"));
@@ -11285,8 +11303,10 @@ fn print_session_status_json(
             "output_total_human": human_tokens(summary.output_total),
         })
     });
-    let payload = json!({
+    json!({
         "surface": "terminal",
+        "command": "status",
+        "query": input.trim(),
         "provider": provider,
         "model": model,
         "mode": mode_label(mode),
@@ -11297,11 +11317,9 @@ fn print_session_status_json(
             "code_model": cfg.default_code_model,
         },
         "usage": usage,
-    });
-    match serde_json::to_string_pretty(&payload) {
-        Ok(text) => println!("{text}"),
-        Err(e) => eprintln!("{DIM}  /status json: {e:#}{RESET}"),
-    }
+        "aliases": ["status"],
+        "supported_actions": ["status", "state", "show", "info", "current", "session", "json", "--json", "status --json", "state --json", "show --json", "info --json", "current --json", "session --json"],
+    })
 }
 
 fn print_reload_preview_json(
@@ -16952,6 +16970,36 @@ mod tests {
         assert!(status_usage_text().contains("status --json"));
         assert!(status_usage_text().contains("state --json|show --json|info --json"));
         assert!(status_usage_text().contains("current --json|session --json"));
+    }
+
+    #[test]
+    fn status_json_payload_includes_command_metadata() {
+        let payload = session_status_json_payload(
+            "session --json",
+            "libertai",
+            "qwen3-coder-480b",
+            Mode::Normal,
+            Some("review"),
+            &LibertaiConfig::default(),
+            Some(UsageSummary {
+                turns: 2,
+                last_input: 100,
+                last_output: 25,
+                output_total: 40,
+                context_high_water: 120,
+                context_window: 1000,
+                provider: "libertai".to_string(),
+                model: "qwen3-coder-480b".to_string(),
+            }),
+        );
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "status");
+        assert_eq!(payload["query"], "session --json");
+        assert_eq!(payload["aliases"][0], "status");
+        assert_eq!(payload["supported_actions"][7], "--json");
+        assert_eq!(payload["supported_actions"][13], "session --json");
+        assert_eq!(payload["usage"]["turns"], 2);
+        assert_eq!(payload["output_style"], "review");
     }
 
     #[test]
