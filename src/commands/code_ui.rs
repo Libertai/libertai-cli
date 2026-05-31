@@ -1125,6 +1125,16 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some(rest) = compact_preview_arg(trimmed) {
+            match parse_compact_preview_command(rest) {
+                CompactPreviewCommand::Status => print_compact_status(&cfg),
+                CompactPreviewCommand::Json => print_compact_json(&cfg),
+                CompactPreviewCommand::Usage => {
+                    println!("{DIM}  usage:{RESET} {}", compact_usage_text())
+                }
+            }
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
@@ -4953,6 +4963,74 @@ async fn compact_transcript(handle: &mut AgentSessionHandle, notes: Option<&str>
             eprintln!("{DIM}  /compact: {e:#}{RESET}");
             false
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactPreviewCommand {
+    Status,
+    Json,
+    Usage,
+}
+
+fn compact_usage_text() -> &'static str {
+    "/compact [status|show|info|json|status --json|notes]"
+}
+
+fn compact_preview_arg(trimmed: &str) -> Option<&str> {
+    let rest = trimmed.strip_prefix("/compact ")?.trim();
+    match normalize_help_command_arg(rest).as_str() {
+        "" | "status" | "state" | "show" | "info" | "preview" | "json" | "--json"
+        | "status --json" | "state --json" | "show --json" | "info --json"
+        | "preview --json" | "help" | "usage" => Some(rest),
+        _ => None,
+    }
+}
+
+fn parse_compact_preview_command(input: &str) -> CompactPreviewCommand {
+    match normalize_help_command_arg(input).as_str() {
+        "" | "status" | "state" | "show" | "info" | "preview" => CompactPreviewCommand::Status,
+        "json" | "--json" | "status --json" | "state --json" | "show --json"
+        | "info --json" | "preview --json" => CompactPreviewCommand::Json,
+        _ => CompactPreviewCommand::Usage,
+    }
+}
+
+fn compact_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
+    json!({
+        "surface": "terminal",
+        "command": "compact",
+        "available": true,
+        "active_turn": false,
+        "will_compact_history": true,
+        "accepts_notes": true,
+        "notes_argument": "/compact NOTES",
+        "auto_compaction": {
+            "enabled": cfg.code_auto_compaction_enabled,
+            "reserve_tokens": cfg.code_compaction_reserve_tokens,
+            "keep_recent_tokens": cfg.code_compaction_keep_recent_tokens,
+        },
+        "supported_actions": ["status", "state", "show", "info", "json", "status --json", "notes"],
+    })
+}
+
+fn print_compact_status(cfg: &LibertaiConfig) {
+    println!(
+        "{DIM}  /compact: ready. Running `/compact` summarizes older conversation history now; add notes with `/compact <notes>`. Auto compaction is {} (reserve={}, keep_recent={}).{RESET}",
+        if cfg.code_auto_compaction_enabled {
+            "on"
+        } else {
+            "off"
+        },
+        cfg.code_compaction_reserve_tokens,
+        cfg.code_compaction_keep_recent_tokens
+    );
+}
+
+fn print_compact_json(cfg: &LibertaiConfig) {
+    match serde_json::to_string_pretty(&compact_json_payload(cfg)) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  /compact json failed: {e}{RESET}"),
     }
 }
 
@@ -13923,6 +14001,45 @@ mod tests {
         assert_eq!(compact_command_notes("/compact   "), Some(""));
         assert_eq!(compact_command_notes("/compact"), None);
         assert_eq!(compact_command_notes("/compactly keep"), None);
+    }
+
+    #[test]
+    fn compact_preview_arg_preserves_freeform_notes() {
+        assert_eq!(compact_preview_arg("/compact"), None);
+        assert_eq!(compact_preview_arg("/compact status"), Some("status"));
+        assert_eq!(compact_preview_arg("/compact json"), Some("json"));
+        assert_eq!(
+            compact_preview_arg("/compact status --json"),
+            Some("status --json")
+        );
+        assert_eq!(compact_preview_arg("/compact keep setup"), None);
+        assert_eq!(compact_preview_arg("/compactly status"), None);
+        assert_eq!(
+            parse_compact_preview_command("status"),
+            CompactPreviewCommand::Status
+        );
+        assert_eq!(
+            parse_compact_preview_command("json"),
+            CompactPreviewCommand::Json
+        );
+        assert_eq!(
+            parse_compact_preview_command("status --json"),
+            CompactPreviewCommand::Json
+        );
+        assert_eq!(
+            parse_compact_preview_command("notes please"),
+            CompactPreviewCommand::Usage
+        );
+        assert!(compact_usage_text().contains("json|status --json|notes"));
+        let cfg = LibertaiConfig::default();
+        let payload = compact_json_payload(&cfg);
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "compact");
+        assert_eq!(payload["available"], true);
+        assert_eq!(payload["active_turn"], false);
+        assert_eq!(payload["will_compact_history"], true);
+        assert_eq!(payload["accepts_notes"], true);
+        assert_eq!(payload["supported_actions"][5], "status --json");
     }
 
     #[test]
