@@ -6258,7 +6258,7 @@ fn theme_json_payload() -> serde_json::Value {
 const VIM_USAGE: &str =
     "/vim [status|state|show|current|info|json|status --json|state --json|show --json|current --json|info --json|on|enable|enabled|true|off|disable|disabled|false]";
 const IDE_USAGE: &str =
-    "/ide [status|state|show|json|status --json|state --json|show --json|open|settings|edit]";
+    "/ide [status|state|show|json|--json|status --json|state --json|show --json|open|settings|edit]";
 const BUG_USAGE: &str =
     "/bug [report|template|status|show|json|--json|status --json|show --json|template --json|report --json]";
 
@@ -16561,13 +16561,14 @@ mod tests {
         assert_eq!(parse_ide_command("state"), IdeCommand::Status);
         assert_eq!(parse_ide_command("show"), IdeCommand::Status);
         assert_eq!(parse_ide_command("json"), IdeCommand::Json);
+        assert_eq!(parse_ide_command("--json"), IdeCommand::Json);
         assert_eq!(parse_ide_command("status --json"), IdeCommand::Json);
         assert_eq!(parse_ide_command("open"), IdeCommand::Open);
         assert_eq!(parse_ide_command("settings"), IdeCommand::Open);
         assert_eq!(parse_ide_command("edit"), IdeCommand::Open);
         assert_eq!(parse_ide_command("install"), IdeCommand::Usage);
         assert!(IDE_USAGE.contains("state|show"));
-        assert!(IDE_USAGE.contains("json|status --json|state --json|show --json"));
+        assert!(IDE_USAGE.contains("json|--json|status --json|state --json|show --json"));
         assert!(IDE_USAGE.contains("settings|edit"));
         let payload = ide_json_payload();
         assert_eq!(payload["command"], "ide");
@@ -16575,6 +16576,10 @@ mod tests {
         assert_eq!(payload["dedicated_ide_bridge"], false);
         assert_eq!(payload["desktop_workspace_available"], true);
         assert_eq!(payload["aliases"][0], "ide");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("--json")));
         assert!(payload["supported_actions"]
             .as_array()
             .unwrap()
