@@ -11357,6 +11357,7 @@ fn reload_preview_json_payload(
     json!({
         "surface": "terminal",
         "command": "reload",
+        "query": input.trim(),
         "action": if action.is_empty() || action == "json" || action == "--json" { "session" } else { action.as_str() },
         "will_reload_config": true,
         "will_start_fresh_agent_session": true,
@@ -11373,6 +11374,7 @@ fn reload_preview_json_payload(
             "code_model": cfg.default_code_model,
         },
         "aliases": ["config", "session", "now", "fresh"],
+        "action_aliases": ["config", "session", "now", "fresh"],
         "supported_actions": ["config", "session", "now", "fresh", "json", "--json", "config --json", "session --json", "now --json", "fresh --json"],
     })
 }
@@ -16937,7 +16939,9 @@ mod tests {
         );
         assert_eq!(payload["command"], "reload");
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "fresh --json");
         assert_eq!(payload["action"], "fresh");
+        assert_eq!(payload["action_aliases"][0], "config");
         assert_eq!(payload["supported_actions"][5], "--json");
         assert_eq!(payload["supported_actions"][9], "fresh --json");
     }
