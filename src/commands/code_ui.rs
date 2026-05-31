@@ -6234,8 +6234,9 @@ fn theme_json_payload() -> serde_json::Value {
 }
 
 const VIM_USAGE: &str =
-    "/vim [status|state|show|current|info|json|status --json|on|enable|enabled|true|off|disable|disabled|false]";
-const IDE_USAGE: &str = "/ide [status|state|show|json|status --json|open|settings|edit]";
+    "/vim [status|state|show|current|info|json|status --json|state --json|show --json|current --json|info --json|on|enable|enabled|true|off|disable|disabled|false]";
+const IDE_USAGE: &str =
+    "/ide [status|state|show|json|status --json|state --json|show --json|open|settings|edit]";
 const BUG_USAGE: &str = "/bug [report|template|status|show|json|status --json]";
 
 fn print_vim_status(command: VimCommand) {
@@ -16394,7 +16395,8 @@ mod tests {
         assert_eq!(parse_vim_command("false"), VimCommand::Disable);
         assert_eq!(parse_vim_command("toggle"), VimCommand::Usage);
         assert!(VIM_USAGE.contains("current|info"));
-        assert!(VIM_USAGE.contains("json|status --json"));
+        assert!(VIM_USAGE.contains("json|status --json|state --json|show --json"));
+        assert!(VIM_USAGE.contains("current --json|info --json"));
         assert!(VIM_USAGE.contains("enable|enabled|true"));
         assert!(VIM_USAGE.contains("disable|disabled|false"));
         VIM_INPUT_ENABLED.store(true, Ordering::SeqCst);
@@ -16475,7 +16477,7 @@ mod tests {
         assert_eq!(parse_ide_command("edit"), IdeCommand::Open);
         assert_eq!(parse_ide_command("install"), IdeCommand::Usage);
         assert!(IDE_USAGE.contains("state|show"));
-        assert!(IDE_USAGE.contains("json|status --json"));
+        assert!(IDE_USAGE.contains("json|status --json|state --json|show --json"));
         assert!(IDE_USAGE.contains("settings|edit"));
         let payload = ide_json_payload();
         assert_eq!(payload["command"], "ide");
