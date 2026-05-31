@@ -309,6 +309,7 @@ enum DoctorCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AbortCommand {
     Status,
+    Json,
     Usage,
 }
 
@@ -1089,6 +1090,7 @@ async fn repl_loop(
         if let Some(rest) = abort_command_arg(trimmed) {
             match parse_abort_command(rest) {
                 AbortCommand::Status => println!("{}", abort_status_message()),
+                AbortCommand::Json => print_abort_json(),
                 AbortCommand::Usage => {
                     println!("{DIM}  usage:{RESET} {}", abort_usage_text());
                 }
@@ -3176,6 +3178,25 @@ fn abort_status_message() -> String {
     )
 }
 
+fn abort_json_payload() -> serde_json::Value {
+    json!({
+        "command": "abort",
+        "surface": "terminal",
+        "active_turn": false,
+        "abort_available": false,
+        "interrupt_mechanism": "ctrl-c",
+        "terminal_guidance": "Press Ctrl+C while the assistant is streaming to interrupt the running turn.",
+        "supported_actions": ["status", "state", "show", "info", "json", "status --json", "cancel", "stop", "interrupt"],
+    })
+}
+
+fn print_abort_json() {
+    match serde_json::to_string_pretty(&abort_json_payload()) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("{DIM}  /abort json failed: {e}{RESET}"),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SandboxAction<'a> {
     Info,
@@ -4929,12 +4950,14 @@ fn parse_abort_command(input: &str) -> AbortCommand {
         "" | "status" | "state" | "show" | "info" | "cancel" | "stop" | "interrupt" => {
             AbortCommand::Status
         }
+        "json" | "--json" | "status --json" | "state --json" | "show --json"
+        | "info --json" => AbortCommand::Json,
         _ => AbortCommand::Usage,
     }
 }
 
 fn abort_usage_text() -> &'static str {
-    "/abort, /abort status, /abort cancel, /abort stop, or /abort interrupt"
+    "/abort [status|state|show|info|json|status --json|cancel|stop|interrupt]"
 }
 
 fn parse_notify_command(input: &str) -> NotifyCommand {
@@ -14051,8 +14074,16 @@ mod tests {
         assert_eq!(parse_abort_command("cancel"), AbortCommand::Status);
         assert_eq!(parse_abort_command("stop"), AbortCommand::Status);
         assert_eq!(parse_abort_command("interrupt"), AbortCommand::Status);
+        assert_eq!(parse_abort_command("json"), AbortCommand::Json);
+        assert_eq!(parse_abort_command("status --json"), AbortCommand::Json);
         assert_eq!(parse_abort_command("open"), AbortCommand::Usage);
-        assert!(abort_usage_text().contains("/abort interrupt"));
+        assert!(abort_usage_text().contains("json|status --json"));
+        let payload = abort_json_payload();
+        assert_eq!(payload["command"], "abort");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["active_turn"], false);
+        assert_eq!(payload["interrupt_mechanism"], "ctrl-c");
+        assert_eq!(payload["supported_actions"][5], "status --json");
     }
 
     #[test]
