@@ -1385,6 +1385,16 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some((command, rest)) = clear_command_arg(trimmed) {
+            match parse_clear_command(rest) {
+                ClearCommand::Status => print_clear_status(command, &provider, &model, mode.get()),
+                ClearCommand::Json => print_clear_json(command, &provider, &model, mode.get()),
+                ClearCommand::Usage => {
+                    println!("{DIM}  usage:{RESET} {}", clear_usage_text(command));
+                }
+            }
+            continue;
+        }
         if let Some(rest) = status_line_command_arg(trimmed) {
             match handle_status_line_command(rest, &mut cfg) {
                 Ok(()) => {}
@@ -2939,6 +2949,71 @@ fn print_help_json() {
     match serde_json::to_string_pretty(&help_json_payload()) {
         Ok(raw) => println!("{raw}"),
         Err(err) => eprintln!("{DIM}  failed to render help JSON: {err}{RESET}"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClearCommand {
+    Status,
+    Json,
+    Usage,
+}
+
+fn clear_usage_text(command: &str) -> String {
+    format!("{command} [status|show|info|json|status --json]")
+}
+
+fn clear_command_arg(trimmed: &str) -> Option<(&'static str, &str)> {
+    for command in ["/clear", "/new"] {
+        if trimmed == command {
+            return None;
+        }
+        if let Some(rest) = trimmed.strip_prefix(command) {
+            if rest.starts_with(' ') {
+                return Some((command, rest.trim()));
+            }
+        }
+    }
+    None
+}
+
+fn parse_clear_command(input: &str) -> ClearCommand {
+    match normalize_help_command_arg(input).as_str() {
+        "" | "status" | "state" | "show" | "info" | "preview" => ClearCommand::Status,
+        "json" | "--json" | "status --json" | "state --json" | "show --json"
+        | "info --json" | "preview --json" => ClearCommand::Json,
+        _ => ClearCommand::Usage,
+    }
+}
+
+fn clear_json_payload(command: &str, provider: &str, model: &str, mode: Mode) -> serde_json::Value {
+    json!({
+        "surface": "terminal",
+        "command": command.trim_start_matches('/'),
+        "aliases": ["clear", "new"],
+        "available": true,
+        "active_turn": false,
+        "will_clear_screen": true,
+        "will_start_fresh_session": true,
+        "will_preserve_mode": true,
+        "current_provider": provider,
+        "current_model": model,
+        "current_mode": mode_label(mode),
+        "supported_actions": ["status", "state", "show", "info", "json", "status --json"],
+    })
+}
+
+fn print_clear_status(command: &str, provider: &str, model: &str, mode: Mode) {
+    println!(
+        "{DIM}  {command}: ready. Running `{command}` with no arguments clears the screen and starts a fresh {provider}/{model} session in {} mode.{RESET}",
+        mode_label(mode)
+    );
+}
+
+fn print_clear_json(command: &str, provider: &str, model: &str, mode: Mode) {
+    match serde_json::to_string_pretty(&clear_json_payload(command, provider, model, mode)) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  {command} json failed: {e}{RESET}"),
     }
 }
 
@@ -14370,6 +14445,32 @@ mod tests {
                 .any(|row| row["name"] == "model"
                     && row["description"] == "show or change the active model")
         );
+    }
+
+    #[test]
+    fn clear_command_arg_and_parser_capture_preview_aliases() {
+        assert_eq!(clear_command_arg("/clear"), None);
+        assert_eq!(clear_command_arg("/new"), None);
+        assert_eq!(clear_command_arg("/clear status"), Some(("/clear", "status")));
+        assert_eq!(clear_command_arg("/new json"), Some(("/new", "json")));
+        assert_eq!(
+            clear_command_arg("/clear status --json"),
+            Some(("/clear", "status --json"))
+        );
+        assert_eq!(clear_command_arg("/clearer status"), None);
+        assert_eq!(parse_clear_command("status"), ClearCommand::Status);
+        assert_eq!(parse_clear_command("preview"), ClearCommand::Status);
+        assert_eq!(parse_clear_command("json"), ClearCommand::Json);
+        assert_eq!(parse_clear_command("status --json"), ClearCommand::Json);
+        assert_eq!(parse_clear_command("run"), ClearCommand::Usage);
+        assert!(clear_usage_text("/clear").contains("json|status --json"));
+        let payload = clear_json_payload("/new", "libertai", "qwen", Mode::Plan);
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "new");
+        assert_eq!(payload["available"], true);
+        assert_eq!(payload["active_turn"], false);
+        assert_eq!(payload["current_mode"], "plan");
+        assert_eq!(payload["supported_actions"][5], "status --json");
     }
 
     #[test]
