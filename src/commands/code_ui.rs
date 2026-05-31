@@ -11049,6 +11049,10 @@ fn handle_output_style(raw: &str, output_style: &mut Option<String>) {
     } else {
         value
     };
+    if is_output_style_json_request(key) {
+        print_output_style_status_json(output_style.as_deref());
+        return;
+    }
     if is_output_style_status_alias(key) {
         print_output_style_status(output_style.as_deref(), None);
         return;
@@ -11073,8 +11077,16 @@ fn is_output_style_status_alias(value: &str) -> bool {
     )
 }
 
+fn is_output_style_json_request(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "json" | "--json" | "status --json" | "show --json" | "current --json"
+            | "info --json" | "list --json"
+    )
+}
+
 fn output_style_usage_text() -> &'static str {
-    "/output-style [default|concise|explanatory|review|status|show|current|info|list]"
+    "/output-style [default|concise|explanatory|review|status|show|current|info|list|json|list --json]"
 }
 
 fn print_output_style_status(output_style: Option<&str>, unknown: Option<&str>) {
@@ -11090,6 +11102,27 @@ fn print_output_style_status(output_style: Option<&str>, unknown: Option<&str>) 
         println!("{DIM}  unknown output style: {name}{RESET}");
     }
     println!();
+}
+
+fn print_output_style_status_json(output_style: Option<&str>) {
+    let cwd = std::env::current_dir().ok();
+    let styles = crate::commands::code_output_style::load_styles(cwd.as_deref());
+    let payload = json!({
+        "surface": "terminal",
+        "command": "output-style",
+        "current": output_style.unwrap_or("default"),
+        "available": styles.into_iter().map(|style| {
+            json!({
+                "name": style.name,
+                "description": style.description,
+                "instruction": style.instruction,
+            })
+        }).collect::<Vec<_>>(),
+    });
+    match serde_json::to_string_pretty(&payload) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("{DIM}  /output-style json: {e:#}{RESET}"),
+    }
 }
 
 fn apply_output_style(output_style: Option<&str>, prompt: &str) -> String {
@@ -11642,7 +11675,13 @@ mod tests {
         assert!(is_output_style_status_alias(" SHOW "));
         assert!(!is_output_style_status_alias("review"));
         assert!(!is_output_style_status_alias("missing"));
+        assert!(is_output_style_json_request("json"));
+        assert!(is_output_style_json_request("--json"));
+        assert!(is_output_style_json_request("status --json"));
+        assert!(is_output_style_json_request("list --json"));
+        assert!(!is_output_style_json_request("review --json"));
         assert!(output_style_usage_text().contains("status|show|current|info|list"));
+        assert!(output_style_usage_text().contains("json|list --json"));
         assert!(output_style_usage_text().contains("default|concise|explanatory|review"));
     }
 
