@@ -6009,13 +6009,14 @@ fn notify_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
     json!({
         "command": "notify",
         "surface": "terminal",
+        "aliases": ["notify", "notifications"],
         "turn_notifications": cfg.code_turn_notifications,
         "agent_push_notifications": {
             "terminal_bell": true,
             "visible_notification_block": true,
         },
         "permission": "terminal",
-        "supported_actions": ["status", "state", "show", "json", "status --json", "on", "off", "test"],
+        "supported_actions": ["status", "state", "show", "json", "--json", "status --json", "state --json", "show --json", "on", "enable", "enabled", "off", "disable", "disabled", "clear", "test", "ping"],
     })
 }
 
@@ -6232,11 +6233,12 @@ fn vim_json_payload() -> serde_json::Value {
     json!({
         "command": "vim",
         "surface": "terminal",
+        "aliases": ["vim"],
         "enabled": VIM_INPUT_ENABLED.load(Ordering::SeqCst),
         "mode": "insert",
         "supported_modes": ["insert", "normal"],
         "controls": ["Esc", "i", "a", "I", "A", "h", "l", "0", "$", "x", "Enter"],
-        "supported_actions": ["status", "state", "show", "current", "info", "json", "status --json", "on", "off"],
+        "supported_actions": ["status", "state", "show", "current", "info", "json", "--json", "status --json", "state --json", "show --json", "current --json", "info --json", "on", "enable", "enabled", "true", "off", "disable", "disabled", "false"],
     })
 }
 
@@ -6300,11 +6302,12 @@ fn ide_json_payload() -> serde_json::Value {
     json!({
         "command": "ide",
         "surface": "terminal",
+        "aliases": ["ide"],
         "dedicated_ide_bridge": false,
         "supported_editors": [],
         "desktop_workspace_available": true,
         "terminal_guidance": "Run libertai code inside your project, or use the desktop workspace for project navigation.",
-        "supported_actions": ["status", "state", "show", "json", "status --json", "open", "settings", "edit"],
+        "supported_actions": ["status", "state", "show", "json", "--json", "status --json", "state --json", "show --json", "open", "settings", "edit"],
     })
 }
 
@@ -13391,6 +13394,7 @@ fn bug_json_payload(
     json!({
         "command": "bug",
         "surface": "terminal",
+        "aliases": ["bug"],
         "app": "libertai-cli",
         "branch": "integrated-code",
         "provider": provider,
@@ -13404,7 +13408,7 @@ fn bug_json_payload(
             "last_command_or_prompt",
             "reproduces_in_fresh_libertai_code_session"
         ],
-        "supported_actions": ["report", "template", "status", "show", "json", "status --json"],
+        "supported_actions": ["report", "template", "status", "show", "json", "--json", "status --json", "show --json", "template --json", "report --json"],
     })
 }
 
@@ -15595,8 +15599,16 @@ mod tests {
         let payload = notify_json_payload(&cfg);
         assert_eq!(payload["command"], "notify");
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["aliases"][1], "notifications");
         assert_eq!(payload["turn_notifications"], true);
-        assert_eq!(payload["supported_actions"][4], "status --json");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("ping")));
     }
 
     #[test]
@@ -16019,8 +16031,16 @@ mod tests {
         let payload = vim_json_payload();
         assert_eq!(payload["command"], "vim");
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["aliases"][0], "vim");
         assert_eq!(payload["enabled"], true);
-        assert_eq!(payload["supported_actions"][6], "status --json");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("info --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("false")));
         VIM_INPUT_ENABLED.store(false, Ordering::SeqCst);
     }
 
@@ -16092,7 +16112,15 @@ mod tests {
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["dedicated_ide_bridge"], false);
         assert_eq!(payload["desktop_workspace_available"], true);
-        assert_eq!(payload["supported_actions"][4], "status --json");
+        assert_eq!(payload["aliases"][0], "ide");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("edit")));
     }
 
     #[test]
@@ -16116,7 +16144,15 @@ mod tests {
         assert_eq!(payload["app"], "libertai-cli");
         assert_eq!(payload["mode"], "plan");
         assert_eq!(payload["output_style"], "review");
-        assert_eq!(payload["supported_actions"][5], "status --json");
+        assert_eq!(payload["aliases"][0], "bug");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("template --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("report --json")));
     }
 
     #[test]
