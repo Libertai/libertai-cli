@@ -13450,7 +13450,7 @@ fn print_status_line_status(cfg: &LibertaiConfig) {
 }
 
 fn status_line_usage_text() -> &'static str {
-    "/statusline|/status-line <status|show|json|status --json|show --json|template --json|info --json|template|command <shell>|command-clear|command reset|command clear|reset|clear>"
+    "/statusline|/status-line <status|show|json|--json|status --json|show --json|template --json|info --json|template|command <shell>|command-clear|command reset|command clear|reset|clear>"
 }
 
 fn is_status_line_json_action(action: &str) -> bool {
@@ -14972,11 +14972,12 @@ mod tests {
         );
         assert!(status_line_command_arg("/status").is_none());
         assert!(status_line_usage_text().contains("/statusline|/status-line"));
-        assert!(status_line_usage_text().contains("json|status --json|show --json"));
+        assert!(status_line_usage_text().contains("json|--json|status --json|show --json"));
         assert!(status_line_usage_text().contains("template --json|info --json"));
         assert!(status_line_usage_text().contains("command reset|command clear"));
         assert!(status_line_usage_text().contains("reset|clear"));
         assert!(is_status_line_json_action("json"));
+        assert!(is_status_line_json_action("--json"));
         assert!(is_status_line_json_action("status --json"));
         assert!(is_status_line_json_action("show --json"));
         assert!(!is_status_line_json_action("status"));
