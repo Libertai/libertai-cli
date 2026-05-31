@@ -3009,8 +3009,8 @@ fn print_help() {
     println!("{DIM}  /thinking [off|minimal|low|medium|high|xhigh] — show or set thinking{RESET}");
     println!("{DIM}  {}{RESET}", scoped_models_usage_text());
     println!("{DIM}  /compact — compact older conversation history now{RESET}");
-    println!("{DIM}  /loop [turns] [goal]|json [turns] [goal]|status --json — run bounded autonomous follow-up turns{RESET}");
-    println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|stop|cancel|status|state|json|status --json; also /autorun, /continuous){RESET}");
+    println!("{DIM}  /loop [turns] [goal]|json [turns] [goal]|--json [turns] [goal]|status --json — run bounded autonomous follow-up turns{RESET}");
+    println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|stop|cancel|status|state|json|--json|status --json|state --json; also /autorun, /continuous){RESET}");
     println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|status|state|json|--json|list --json|show|inspect|show-json|run|now|trigger|cancel|delete|rm|clear|stop; also /cron){RESET}");
     println!("{DIM}  /send [target message] — show terminal inter-session send status{RESET}");
     println!("{DIM}  /notify on|enable|enabled|off|disable|disabled|clear|status|state|show|test|ping — turn-complete terminal notifications{RESET}");
@@ -3020,13 +3020,13 @@ fn print_help() {
     println!("{DIM}  {} — inspect auth or run libertai login{RESET}", login_usage_text());
     println!("{DIM}  {} — run libertai logout or explain provider logout{RESET}", logout_usage_text());
     println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
-    println!("{DIM}  /skills [list|status|json|status --json|show <name>|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions{RESET}");
+    println!("{DIM}  /skills [list|status|show|json|--json|status --json|list --json|show --json|show <name>|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions{RESET}");
     println!(
         "{DIM}  /init [--agent|from-agent json|from-agent preview append|preview merge|preview merge-lines|preview replace|preview [append|merge|merge-lines] sections N[,M]|append sections N[,M]|merge sections N[,M]|merge-lines sections N[,M]|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}"
     );
     println!("{DIM}  /onboarding|/onboard [show|preview|save|path|gist|json|--json|status --json|show --json|preview --json] — preview or write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
-    println!("{DIM}  /agents [list|status|json|status --json|show <name>|show <name> --json] — list or inspect named sub-agents{RESET}");
+    println!("{DIM}  /agents [list|status|show <name>|json|--json|list --json|status --json|show --json|show <name> --json] — list or inspect named sub-agents{RESET}");
     println!("{DIM}  /agents create [--worktree|--same-cwd] <name> [description] — create a project sub-agent{RESET}");
     println!("{DIM}  /agents delete <name> — delete the active named sub-agent definition{RESET}");
     println!(
@@ -8449,7 +8449,7 @@ fn remember_json_payload(cwd: &Path, input: &str) -> serde_json::Value {
         "entry_preview": if valid { json!(format!("[{}] {}", parsed.kind.label(), parsed.text)) } else { serde_json::Value::Null },
         "will_write": false,
         "supported_kinds": ["project", "user", "feedback", "reference"],
-        "supported_actions": ["project: <text>", "user: <text>", "feedback: <text>", "reference: <text>", "json <text>", "--json <text>", "<text> --json", "status --json"],
+        "supported_actions": ["project: <text>", "user: <text>", "feedback: <text>", "reference: <text>", "json <text>", "--json <text>", "<text> --json", "status --json", "show --json", "preview --json"],
     })
 }
 
@@ -12201,7 +12201,7 @@ fn config_status_payload(cfg: &LibertaiConfig) -> serde_json::Value {
         "surface": "terminal",
         "command": "config",
         "aliases": ["config", "settings"],
-        "supported_actions": ["status", "show", "current", "info", "json", "status --json", "show --json", "current --json", "info --json", "path", "open", "settings", "backends", "defaults", "agents", "skills", "hooks", "mcp", "approvals", "appearance", "sandbox", "advanced", "set <key> <value>", "unset <key>", "reset <key>"],
+        "supported_actions": ["status", "show", "current", "info", "json", "--json", "status --json", "show --json", "current --json", "info --json", "path", "open", "settings", "backends", "defaults", "agents", "skills", "hooks", "mcp", "approvals", "appearance", "sandbox", "advanced", "set <key> <value>", "unset <key>", "reset <key>"],
         "api_base": cfg.api_base,
         "account_base": cfg.account_base,
         "config_path": config_path,
@@ -14702,6 +14702,16 @@ mod tests {
         assert_eq!(payload["will_write"], false);
         assert_eq!(payload["supported_kinds"][3], "reference");
         assert_eq!(payload["supported_actions"][7], "status --json");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "show --json"));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "preview --json"));
     }
 
     #[test]
@@ -16069,9 +16079,26 @@ mod tests {
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["aliases"][1], "settings");
-        assert_eq!(payload["supported_actions"][5], "status --json");
-        assert_eq!(payload["supported_actions"][9], "path");
-        assert_eq!(payload["supported_actions"][22], "set <key> <value>");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "--json"));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "status --json"));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "path"));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "set <key> <value>"));
     }
 
     #[test]
