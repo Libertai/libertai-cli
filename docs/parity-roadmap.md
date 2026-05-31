@@ -500,6 +500,9 @@ plus common directory names. It now parses README title/summary,
 manifest names, exact package script bodies, Go modules, common config
 files such as Dockerfile / GitHub Actions / Makefile, and
 CONTRIBUTING/EditorConfig guidance. CLI and desktop
+`/init json` / `status --json` now preview the native candidate,
+existing-file state, section impacts, and follow-up actions without
+writing `AGENTS.md`. CLI and desktop
 `/init from-agent merge-lines` can now apply an assistant-proposed
 candidate by appending only new lines inside matching `##` sections,
 CLI and desktop `/init from-agent json` / `status --json` inspect the

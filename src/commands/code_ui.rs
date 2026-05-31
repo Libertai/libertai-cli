@@ -1976,6 +1976,9 @@ async fn repl_loop(
             if notes.is_empty() {
                 println!("{DIM}  usage: /init [--agent] [project notes]{RESET}");
                 continue;
+            } else if is_init_json_arg(notes) {
+                print_init_project_json(None);
+                continue;
             } else if let Some(action) = parse_init_from_agent_action(notes) {
                 apply_init_from_agent(&handle, action).await;
                 continue;
@@ -6699,6 +6702,112 @@ fn print_init_project(notes: Option<&str>) {
         }
         Err(e) => eprintln!("{DIM}  /init: failed: {e:#}{RESET}"),
     }
+}
+
+fn is_init_json_arg(input: &str) -> bool {
+    matches!(
+        input.trim().to_ascii_lowercase().as_str(),
+        "json" | "--json" | "status --json" | "preview --json" | "show --json"
+    )
+}
+
+fn print_init_project_json(notes: Option<&str>) {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "surface": "cli",
+                    "command": "init",
+                    "available": false,
+                    "error": format!("could not resolve cwd: {e}"),
+                    "will_write": false,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            );
+            return;
+        }
+    };
+    let path = cwd.join("AGENTS.md");
+    let existing = std::fs::read_to_string(&path).ok();
+    let candidate = match crate::commands::code_init::agents_md_candidate(&cwd, notes) {
+        Ok(candidate) => candidate,
+        Err(e) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "surface": "cli",
+                    "command": "init",
+                    "available": false,
+                    "error": format!("{e:#}"),
+                    "path": path.display().to_string(),
+                    "will_write": false,
+                }))
+                .unwrap_or_else(|_| "{}".to_string())
+            );
+            return;
+        }
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&init_project_json_payload(
+            "cli",
+            &path,
+            existing.as_deref(),
+            &candidate,
+            notes,
+        ))
+        .unwrap_or_else(|_| "{}".to_string())
+    );
+}
+
+fn init_project_json_payload(
+    surface: &str,
+    path: &Path,
+    existing: Option<&str>,
+    candidate: &str,
+    notes: Option<&str>,
+) -> serde_json::Value {
+    let sections = init_candidate_section_summaries(existing.unwrap_or_default(), candidate)
+        .into_iter()
+        .enumerate()
+        .map(|(idx, section)| {
+            json!({
+                "index": idx + 1,
+                "title": section.title,
+                "impact": section.status,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "surface": surface,
+        "command": "init",
+        "available": true,
+        "path": path.display().to_string(),
+        "exists": existing.is_some(),
+        "would_create": existing.is_none(),
+        "will_write": false,
+        "notes_supplied": notes.is_some_and(|notes| !notes.trim().is_empty()),
+        "existing": existing.map(|content| json!({
+            "bytes": content.len(),
+            "lines": content.lines().count(),
+        })),
+        "candidate": {
+            "content": candidate,
+            "bytes": candidate.len(),
+            "lines": candidate.lines().count(),
+        },
+        "sections": sections,
+        "supported_actions": [
+            "preview",
+            "json",
+            "status --json",
+            "project notes",
+            "--agent",
+            "from-agent",
+        ],
+    })
 }
 
 async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgentAction) {
@@ -13064,6 +13173,34 @@ mod tests {
         assert_eq!(parse_init_from_agent_action("from-agent sections 0"), None);
         assert_eq!(parse_init_from_agent_action("from-agent sections 1 1"), None);
         assert_eq!(parse_init_from_agent_action("from-agent nope"), None);
+    }
+
+    #[test]
+    fn init_json_arg_accepts_status_aliases() {
+        assert!(is_init_json_arg("json"));
+        assert!(is_init_json_arg("status --json"));
+        assert!(is_init_json_arg("preview --json"));
+        assert!(!is_init_json_arg("from-agent json"));
+        assert!(!is_init_json_arg("project notes"));
+    }
+
+    #[test]
+    fn init_project_json_payload_reports_candidate_without_writing() {
+        let payload = init_project_json_payload(
+            "cli",
+            Path::new("/tmp/AGENTS.md"),
+            Some("custom\n"),
+            "# Demo\n\n## Build & test\n- test: cargo test\n",
+            Some("prefer checks"),
+        );
+        assert_eq!(payload["command"], "init");
+        assert_eq!(payload["exists"], true);
+        assert_eq!(payload["would_create"], false);
+        assert_eq!(payload["will_write"], false);
+        assert_eq!(payload["notes_supplied"], true);
+        assert_eq!(payload["sections"][1]["title"], "Build & test");
+        assert_eq!(payload["sections"][1]["impact"], "new section");
+        assert_eq!(payload["supported_actions"][2], "status --json");
     }
 
     #[test]
