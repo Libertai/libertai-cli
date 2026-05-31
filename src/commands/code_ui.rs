@@ -2866,7 +2866,7 @@ fn name_command_arg(input: &str) -> Option<(&str, &str)> {
 fn parse_thinking_level(input: &str) -> Result<ThinkingLevel> {
     let raw = input.trim();
     if raw.is_empty() {
-        anyhow::bail!("usage: /thinking [status|show|current|info|json|status --json|show --json|current --json|info --json|off|minimal|low|medium|high|xhigh]");
+        anyhow::bail!("usage: /thinking [status|show|current|info|json|--json|status --json|show --json|current --json|info --json|off|minimal|low|medium|high|xhigh]");
     }
     raw.parse::<ThinkingLevel>()
         .map_err(|_| anyhow::anyhow!("unknown thinking level `{raw}`"))
@@ -2877,7 +2877,7 @@ fn print_thinking_status(handle: &AgentSessionHandle) {
     println!("{BOLD}thinking{RESET}");
     println!("{DIM}  current:{RESET} {current}");
     println!("{DIM}  supported:{RESET} off, minimal, low, medium, high, xhigh");
-    println!("{DIM}  usage:{RESET} /thinking [status|show|current|info|json|status --json|show --json|current --json|info --json|level] (also /think or /t)");
+    println!("{DIM}  usage:{RESET} /thinking [status|show|current|info|json|--json|status --json|show --json|current --json|info --json|level] (also /think or /t)");
 }
 
 fn thinking_json_payload(level: ThinkingLevel) -> serde_json::Value {
@@ -15753,12 +15753,16 @@ mod tests {
         assert!(is_thinking_json_arg("current --json"));
         assert!(is_thinking_json_arg("info --json"));
         assert!(!is_thinking_json_arg("high"));
-        assert!(parse_thinking_level("").unwrap_err().to_string().contains("info --json"));
+        assert!(parse_thinking_level("").unwrap_err().to_string().contains("--json"));
         let payload = thinking_json_payload(ThinkingLevel::High);
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "thinking");
         assert_eq!(payload["current"], "high");
         assert_eq!(payload["will_change"], false);
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("--json")));
         assert!(payload["supported_actions"]
             .as_array()
             .unwrap()
