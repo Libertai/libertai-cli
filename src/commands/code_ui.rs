@@ -209,6 +209,7 @@ struct AutoJsonPayload {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NotifyCommand {
     Status,
+    Json,
     On,
     Off,
     Test,
@@ -4929,6 +4930,9 @@ fn abort_usage_text() -> &'static str {
 fn parse_notify_command(input: &str) -> NotifyCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "state" | "show" => NotifyCommand::Status,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" => {
+            NotifyCommand::Json
+        }
         "on" | "enable" | "enabled" => NotifyCommand::On,
         "off" | "disable" | "disabled" | "clear" => NotifyCommand::Off,
         "test" | "ping" => NotifyCommand::Test,
@@ -4939,6 +4943,7 @@ fn parse_notify_command(input: &str) -> NotifyCommand {
 fn handle_notify_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Result<()> {
     match parse_notify_command(raw) {
         NotifyCommand::Status => print_notify_status(cfg),
+        NotifyCommand::Json => print_notify_json(cfg),
         NotifyCommand::On => {
             set_turn_notifications(cfg, true)?;
             println!("{DIM}  /notify: turn-complete terminal notifications enabled.{RESET}");
@@ -4951,7 +4956,7 @@ fn handle_notify_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Result<()>
             crate::commands::code_term::notify_terminal("LibertAI Code", "Notification test");
         }
         NotifyCommand::Usage => {
-            eprintln!("{DIM}  usage: /notify [on|enable|enabled|off|disable|disabled|clear|status|state|show|test|ping]{RESET}");
+            eprintln!("{DIM}  usage: /notify [on|enable|enabled|off|disable|disabled|clear|status|state|show|json|status --json|test|ping]{RESET}");
         }
     }
     Ok(())
@@ -4978,6 +4983,27 @@ fn print_notify_status(cfg: &LibertaiConfig) {
         "{DIM}  agent push notifications:{RESET} terminal bell + visible notification block"
     );
     println!("{DIM}  usage:{RESET} /notify on, /notify off, /notify status, /notify test");
+}
+
+fn notify_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
+    json!({
+        "command": "notify",
+        "surface": "terminal",
+        "turn_notifications": cfg.code_turn_notifications,
+        "agent_push_notifications": {
+            "terminal_bell": true,
+            "visible_notification_block": true,
+        },
+        "permission": "terminal",
+        "supported_actions": ["status", "state", "show", "json", "status --json", "on", "off", "test"],
+    })
+}
+
+fn print_notify_json(cfg: &LibertaiConfig) {
+    match serde_json::to_string_pretty(&notify_json_payload(cfg)) {
+        Ok(s) => println!("{s}"),
+        Err(e) => eprintln!("{DIM}  /notify json failed: {e}{RESET}"),
+    }
 }
 
 fn print_send_status(rest: &str) {
@@ -13420,12 +13446,16 @@ mod tests {
         assert_eq!(notify_command_arg("/notify"), Some(""));
         assert_eq!(notify_command_arg("/notify on"), Some("on"));
         assert_eq!(notify_command_arg("/notifications status"), Some("status"));
+        assert_eq!(notify_command_arg("/notifications status --json"), Some("status --json"));
         assert_eq!(notify_command_arg("/notifications clear"), Some("clear"));
         assert_eq!(notify_command_arg("/notifier"), None);
         assert_eq!(parse_notify_command(""), NotifyCommand::Status);
         assert_eq!(parse_notify_command("status"), NotifyCommand::Status);
         assert_eq!(parse_notify_command("state"), NotifyCommand::Status);
         assert_eq!(parse_notify_command("show"), NotifyCommand::Status);
+        assert_eq!(parse_notify_command("json"), NotifyCommand::Json);
+        assert_eq!(parse_notify_command("status --json"), NotifyCommand::Json);
+        assert_eq!(parse_notify_command("state --json"), NotifyCommand::Json);
         assert_eq!(parse_notify_command("on"), NotifyCommand::On);
         assert_eq!(parse_notify_command("enable"), NotifyCommand::On);
         assert_eq!(parse_notify_command("enabled"), NotifyCommand::On);
@@ -13436,6 +13466,15 @@ mod tests {
         assert_eq!(parse_notify_command("test"), NotifyCommand::Test);
         assert_eq!(parse_notify_command("ping"), NotifyCommand::Test);
         assert_eq!(parse_notify_command("wat"), NotifyCommand::Usage);
+        let cfg = LibertaiConfig {
+            code_turn_notifications: true,
+            ..LibertaiConfig::default()
+        };
+        let payload = notify_json_payload(&cfg);
+        assert_eq!(payload["command"], "notify");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["turn_notifications"], true);
+        assert_eq!(payload["supported_actions"][4], "status --json");
     }
 
     #[test]
