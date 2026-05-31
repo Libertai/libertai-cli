@@ -1374,9 +1374,16 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/history ") {
-            match parse_history_limit(rest) {
-                Ok(limit) => print_history(&history, limit),
-                Err(e) => eprintln!("{DIM}  /history: {e:#}{RESET}"),
+            if let Some(limit_input) = history_json_request_arg(rest) {
+                match parse_history_limit(&limit_input) {
+                    Ok(limit) => print_history_json(&history, limit),
+                    Err(e) => eprintln!("{DIM}  /history: {e:#}{RESET}"),
+                }
+            } else {
+                match parse_history_limit(rest) {
+                    Ok(limit) => print_history(&history, limit),
+                    Err(e) => eprintln!("{DIM}  /history: {e:#}{RESET}"),
+                }
             }
             continue;
         }
@@ -3163,7 +3170,7 @@ fn parse_history_limit(input: &str) -> Result<usize> {
 }
 
 fn history_usage_text() -> &'static str {
-    "/history [count|list|recent|latest|status|state|show]"
+    "/history [count|list|recent|latest|status|state|show|json|list --json]"
 }
 
 fn is_default_list_alias(value: &str) -> bool {
@@ -3183,6 +3190,52 @@ fn print_history(history: &VecDeque<String>, limit: usize) {
     let start = history.len() - shown;
     for (idx, item) in history.iter().enumerate().skip(start) {
         println!("{DIM}  {:>2}.{RESET} {}", idx + 1, item);
+    }
+}
+
+fn history_json_request_arg(input: &str) -> Option<String> {
+    let raw = input.trim();
+    let lower = raw.to_ascii_lowercase();
+    match lower.as_str() {
+        "json" | "--json" | "status --json" | "state --json" | "show --json"
+        | "list --json" | "recent --json" | "latest --json" => Some(String::new()),
+        _ => lower
+            .strip_prefix("json ")
+            .or_else(|| lower.strip_prefix("--json "))
+            .map(str::trim)
+            .map(str::to_string),
+    }
+}
+
+fn history_json_payload(history: &VecDeque<String>, limit: usize) -> serde_json::Value {
+    let shown = history.len().min(limit);
+    let start = history.len().saturating_sub(shown);
+    let prompts = history
+        .iter()
+        .enumerate()
+        .skip(start)
+        .map(|(idx, prompt)| {
+            json!({
+                "index": idx + 1,
+                "text": prompt,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "surface": "terminal",
+        "command": "history",
+        "total": history.len(),
+        "limit": limit,
+        "shown": shown,
+        "prompts": prompts,
+    })
+}
+
+fn print_history_json(history: &VecDeque<String>, limit: usize) {
+    let payload = history_json_payload(history, limit);
+    match serde_json::to_string_pretty(&payload) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  /history json: {e:#}{RESET}"),
     }
 }
 
@@ -12342,6 +12395,20 @@ mod tests {
         assert!(parse_history_limit("open").is_err());
         assert!(history_usage_text().contains("list|recent|latest"));
         assert!(history_usage_text().contains("status|state|show"));
+        assert!(history_usage_text().contains("json|list --json"));
+        assert_eq!(history_json_request_arg("json"), Some(String::new()));
+        assert_eq!(history_json_request_arg("--json"), Some(String::new()));
+        assert_eq!(history_json_request_arg("list --json"), Some(String::new()));
+        assert_eq!(history_json_request_arg("json 3"), Some("3".to_string()));
+        assert_eq!(history_json_request_arg("status"), None);
+        let mut history = VecDeque::new();
+        history.push_back("first prompt".to_string());
+        history.push_back("second prompt".to_string());
+        let payload = history_json_payload(&history, 1);
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["total"], 2);
+        assert_eq!(payload["shown"], 1);
+        assert_eq!(payload["prompts"][0]["index"], 2);
     }
 
     #[test]
