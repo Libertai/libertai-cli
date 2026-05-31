@@ -6141,10 +6141,16 @@ fn send_json_payload(query: &str) -> serde_json::Value {
             "targets",
             "list",
             "json",
+            "--json",
             "status --json",
+            "state --json",
+            "show --json",
+            "list --json",
             "targets --json",
             "queued",
+            "queue --json",
             "queued --json",
+            "pending --json",
             "clear <id|target|all>",
             "<session> <message>"
         ],
@@ -7338,7 +7344,10 @@ fn init_project_json_payload(
         "supported_actions": [
             "preview",
             "json",
+            "--json",
             "status --json",
+            "show --json",
+            "preview --json",
             "project notes",
             "--agent",
             "from-agent",
@@ -14407,7 +14416,8 @@ mod tests {
         assert_eq!(payload["notes_supplied"], true);
         assert_eq!(payload["sections"][1]["title"], "Build & test");
         assert_eq!(payload["sections"][1]["impact"], "new section");
-        assert_eq!(payload["supported_actions"][2], "status --json");
+        assert_eq!(payload["supported_actions"][2], "--json");
+        assert_eq!(payload["supported_actions"][5], "preview --json");
     }
 
     #[test]
