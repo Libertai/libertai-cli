@@ -6207,6 +6207,7 @@ fn theme_json_payload() -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "theme",
+        "aliases": ["theme"],
         "current": null,
         "resolved": null,
         "supported": ["system", "dark", "light", "high-contrast"],
@@ -6218,7 +6219,11 @@ fn theme_json_payload() -> serde_json::Value {
             "current",
             "info",
             "json",
+            "--json",
             "status --json",
+            "show --json",
+            "current --json",
+            "info --json",
             "system",
             "dark",
             "light",
@@ -17087,12 +17092,18 @@ mod tests {
         let payload = theme_json_payload();
         assert_eq!(payload["command"], "theme");
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["aliases"][0], "theme");
         assert_eq!(payload["terminal_mutates_theme"], false);
         assert!(payload["supported_actions"]
             .as_array()
             .unwrap()
             .iter()
             .any(|item| item == "status --json"));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "current --json"));
         assert!(payload["supported_actions"]
             .as_array()
             .unwrap()
