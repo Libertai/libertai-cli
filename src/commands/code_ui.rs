@@ -5787,6 +5787,20 @@ enum HooksCommand {
 
 fn parse_hooks_command(input: &str) -> HooksCommand {
     let raw = input.trim();
+    let normalized = raw.to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "json"
+            | "--json"
+            | "status --json"
+            | "list --json"
+            | "state --json"
+            | "diagnostics --json"
+            | "diag --json"
+            | "show --json"
+    ) {
+        return HooksCommand::Json;
+    }
     if let Some((head, tail)) = split_first_word(raw) {
         if matches!(
             head.to_ascii_lowercase().as_str(),
@@ -5799,10 +5813,8 @@ fn parse_hooks_command(input: &str) -> HooksCommand {
             return HooksCommand::Usage;
         }
     }
-    match raw.to_ascii_lowercase().as_str() {
+    match normalized.as_str() {
         "" | "status" | "list" | "state" | "diagnostics" | "diag" => HooksCommand::Status,
-        "json" | "--json" | "status --json" | "list --json" | "state --json"
-        | "diagnostics --json" | "diag --json" | "show --json" => HooksCommand::Json,
         "open" | "settings" | "edit" => HooksCommand::Open,
         _ => HooksCommand::Usage,
     }
@@ -5810,6 +5822,20 @@ fn parse_hooks_command(input: &str) -> HooksCommand {
 
 fn parse_mcp_command(input: &str) -> McpCommand {
     let raw = input.trim();
+    let normalized = raw.to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "json"
+            | "--json"
+            | "status --json"
+            | "list --json"
+            | "state --json"
+            | "diagnostics --json"
+            | "diag --json"
+            | "show --json"
+    ) {
+        return McpCommand::Json;
+    }
     if let Some((head, tail)) = split_first_word(raw) {
         if matches!(
             head.to_ascii_lowercase().as_str(),
@@ -5822,13 +5848,10 @@ fn parse_mcp_command(input: &str) -> McpCommand {
             return McpCommand::Usage;
         }
     }
-    let normalized = raw.to_ascii_lowercase();
     match normalized.as_str() {
         "" | "status" | "list" | "state" | "diagnostics" | "diag" | "show" => {
             McpCommand::Status
         }
-        "json" | "--json" | "status --json" | "list --json" | "state --json"
-        | "diagnostics --json" | "diag --json" | "show --json" => McpCommand::Json,
         "probe" | "probes" => McpCommand::Probe,
         "refresh" | "probe --save" | "probe save" | "probe --write" | "probe write" => {
             McpCommand::ProbeSave
@@ -12168,8 +12191,8 @@ fn unset_repl_config_value(cfg: &mut Arc<LibertaiConfig>, key: &str) -> Result<(
 }
 
 const HOOKS_USAGE: &str =
-    "/hooks [status|list|state|diagnostics|diag|json|status --json|show|event|inspect <event>|open|settings|edit]";
-const MCP_USAGE: &str = "/mcp [status|list|state|show|json|status --json|server|inspect <server>|probe|probes|probe --save|probe save|probe --write|probe write|refresh|diagnostics|diag|reset|reset-sessions|open|settings|edit]";
+    "/hooks [status|list|state|diagnostics|diag|json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|show|event|inspect <event>|open|settings|edit]";
+const MCP_USAGE: &str = "/mcp [status|list|state|show|json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|server|inspect <server>|probe|probes|probe --save|probe save|probe --write|probe write|refresh|diagnostics|diag|reset|reset-sessions|open|settings|edit]";
 
 fn print_hooks_command(cfg: &LibertaiConfig, command: HooksCommand) {
     match command {
@@ -12301,7 +12324,8 @@ fn hooks_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
         "configured_count": configured_total,
         "hooks": rows,
         "will_write": false,
-        "supported_actions": ["status", "list", "state", "diagnostics", "diag", "json", "status --json", "show <event>", "open", "settings", "edit"],
+        "aliases": ["hooks", "hook"],
+        "supported_actions": ["status", "list", "state", "diagnostics", "diag", "json", "--json", "status --json", "list --json", "state --json", "diagnostics --json", "diag --json", "show --json", "show <event>", "event <event>", "inspect <event>", "open", "settings", "edit"],
     })
 }
 
@@ -12495,7 +12519,8 @@ fn mcp_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
         },
         "servers": servers,
         "will_write": false,
-        "supported_actions": ["status", "list", "state", "show", "json", "status --json", "server <name>", "inspect <server>", "probe", "probe --save", "refresh", "reset", "open"],
+        "aliases": ["mcp"],
+        "supported_actions": ["status", "list", "state", "show", "diagnostics", "diag", "json", "--json", "status --json", "list --json", "state --json", "diagnostics --json", "diag --json", "show --json", "server <name>", "inspect <server>", "probe", "probes", "probe --save", "probe save", "probe --write", "probe write", "refresh", "reset", "reset-sessions", "open", "settings", "edit"],
     })
 }
 
@@ -15758,11 +15783,15 @@ mod tests {
         assert_eq!(parse_hooks_command("list"), HooksCommand::Status);
         assert_eq!(parse_hooks_command("diagnostics"), HooksCommand::Status);
         assert_eq!(parse_hooks_command("json"), HooksCommand::Json);
+        assert_eq!(parse_hooks_command("--json"), HooksCommand::Json);
         assert_eq!(parse_hooks_command("status --json"), HooksCommand::Json);
+        assert_eq!(parse_hooks_command("list --json"), HooksCommand::Json);
+        assert_eq!(parse_hooks_command("state --json"), HooksCommand::Json);
         assert_eq!(
             parse_hooks_command("diagnostics --json"),
             HooksCommand::Json
         );
+        assert_eq!(parse_hooks_command("show --json"), HooksCommand::Json);
         assert_eq!(parse_hooks_command("open"), HooksCommand::Open);
         assert_eq!(parse_hooks_command("settings"), HooksCommand::Open);
         assert_eq!(parse_hooks_command("edit"), HooksCommand::Open);
@@ -15777,7 +15806,8 @@ mod tests {
         assert_eq!(parse_hooks_command("show"), HooksCommand::Usage);
         assert_eq!(parse_hooks_command("show pre post"), HooksCommand::Usage);
         assert!(HOOKS_USAGE.contains("diagnostics|diag"));
-        assert!(HOOKS_USAGE.contains("json|status --json"));
+        assert!(HOOKS_USAGE.contains("json|status --json|list --json"));
+        assert!(HOOKS_USAGE.contains("diagnostics --json|diag --json|show --json"));
         assert!(HOOKS_USAGE.contains("show|event|inspect"));
         assert!(HOOKS_USAGE.contains("settings|edit"));
     }
@@ -15835,7 +15865,20 @@ mod tests {
         assert_eq!(payload["hooks"][1]["type"], "mcp_tool");
         assert_eq!(payload["hooks"][1]["has_input"], true);
         assert_eq!(payload["will_write"], false);
-        assert_eq!(payload["supported_actions"][6], "status --json");
+        assert_eq!(payload["aliases"][0], "hooks");
+        assert_eq!(payload["aliases"][1], "hook");
+        assert!(
+            payload["supported_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("show --json"))
+        );
+        assert!(
+            payload["supported_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("inspect <event>"))
+        );
         let raw = serde_json::to_string(&payload).unwrap();
         assert!(!raw.contains("secret-token"));
         assert!(!raw.contains("Authorization"));
@@ -15898,11 +15941,15 @@ mod tests {
         assert_eq!(parse_mcp_command(""), McpCommand::Status);
         assert_eq!(parse_mcp_command("list"), McpCommand::Status);
         assert_eq!(parse_mcp_command("json"), McpCommand::Json);
+        assert_eq!(parse_mcp_command("--json"), McpCommand::Json);
         assert_eq!(parse_mcp_command("status --json"), McpCommand::Json);
+        assert_eq!(parse_mcp_command("list --json"), McpCommand::Json);
+        assert_eq!(parse_mcp_command("state --json"), McpCommand::Json);
         assert_eq!(
             parse_mcp_command("diagnostics --json"),
             McpCommand::Json
         );
+        assert_eq!(parse_mcp_command("show --json"), McpCommand::Json);
         assert_eq!(
             parse_mcp_command("show docs"),
             McpCommand::Show("docs".to_string())
@@ -15922,8 +15969,8 @@ mod tests {
         assert_eq!(parse_mcp_command("settings"), McpCommand::Open);
         assert_eq!(parse_mcp_command("edit"), McpCommand::Open);
         assert_eq!(parse_mcp_command("remote"), McpCommand::Usage);
-        assert!(MCP_USAGE.contains("show|json|status --json|server|inspect"));
-        assert!(MCP_USAGE.contains("json|status --json"));
+        assert!(MCP_USAGE.contains("show|json|status --json|list --json"));
+        assert!(MCP_USAGE.contains("diagnostics --json|diag --json|show --json"));
         assert!(MCP_USAGE.contains("probe|probes"));
         assert!(MCP_USAGE.contains("reset|reset-sessions"));
         assert!(MCP_USAGE.contains("settings|edit"));
@@ -15993,7 +16040,19 @@ mod tests {
         assert_eq!(payload["servers"][0]["enabled_resources"], 1);
         assert_eq!(payload["servers"][0]["enabled_prompts"], 1);
         assert_eq!(payload["will_write"], false);
-        assert_eq!(payload["supported_actions"][5], "status --json");
+        assert_eq!(payload["aliases"][0], "mcp");
+        assert!(
+            payload["supported_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("probe write"))
+        );
+        assert!(
+            payload["supported_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("settings"))
+        );
     }
 
     #[test]
