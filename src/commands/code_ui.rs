@@ -3061,7 +3061,7 @@ enum HelpCommand {
 }
 
 fn help_usage_text() -> &'static str {
-    "/help [status|show|list|json|status --json]"
+    "/help [status|show|list|commands|json|--json|status --json|show --json|list --json|commands --json]"
 }
 
 fn help_command_arg(trimmed: &str) -> Option<&str> {
@@ -16788,8 +16788,13 @@ mod tests {
         assert_eq!(parse_help_command(""), HelpCommand::Show);
         assert_eq!(parse_help_command("list"), HelpCommand::Show);
         assert_eq!(parse_help_command("json"), HelpCommand::Json);
+        assert_eq!(parse_help_command("--json"), HelpCommand::Json);
         assert_eq!(parse_help_command("status --json"), HelpCommand::Json);
-        assert!(help_usage_text().contains("json|status --json"));
+        assert_eq!(parse_help_command("show --json"), HelpCommand::Json);
+        assert_eq!(parse_help_command("list --json"), HelpCommand::Json);
+        assert_eq!(parse_help_command("commands --json"), HelpCommand::Json);
+        assert!(help_usage_text().contains("list|commands|json|--json"));
+        assert!(help_usage_text().contains("show --json|list --json|commands --json"));
         let payload = help_json_payload();
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "help");
