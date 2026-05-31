@@ -6042,7 +6042,14 @@ fn print_theme_status(command: ThemeCommand) {
 }
 
 fn print_theme_status_json() {
-    let payload = json!({
+    match serde_json::to_string_pretty(&theme_json_payload()) {
+        Ok(raw) => println!("{raw}"),
+        Err(err) => eprintln!("{DIM}  /theme json: {err:#}{RESET}"),
+    }
+}
+
+fn theme_json_payload() -> serde_json::Value {
+    json!({
         "surface": "terminal",
         "command": "theme",
         "current": null,
@@ -6050,12 +6057,20 @@ fn print_theme_status_json() {
         "supported": ["system", "dark", "light", "high-contrast"],
         "terminal_mutates_theme": false,
         "desktop_settings_target": "Settings > Appearance",
+        "supported_actions": [
+            "status",
+            "show",
+            "current",
+            "info",
+            "json",
+            "status --json",
+            "system",
+            "dark",
+            "light",
+            "high-contrast"
+        ],
         "note": "Terminal colors are controlled by the terminal emulator; desktop /theme changes app appearance."
-    });
-    match serde_json::to_string_pretty(&payload) {
-        Ok(raw) => println!("{raw}"),
-        Err(err) => eprintln!("{DIM}  /theme json: {err:#}{RESET}"),
-    }
+    })
 }
 
 const VIM_USAGE: &str =
@@ -16374,6 +16389,20 @@ mod tests {
             parse_theme_command("high-contrast"),
             ThemeCommand::Requested("high-contrast".to_string())
         );
+        let payload = theme_json_payload();
+        assert_eq!(payload["command"], "theme");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["terminal_mutates_theme"], false);
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "status --json"));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "high-contrast"));
     }
 
     #[test]
