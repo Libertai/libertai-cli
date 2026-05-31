@@ -10616,20 +10616,21 @@ fn print_usage_summary(summary: Option<UsageSummary>, tool_activity: &[ToolActiv
 fn parse_usage_export_command(input: &str) -> Option<UsageExportFormat> {
     let raw = input.trim();
     let rest = raw
-        .strip_prefix("/usage export")
-        .or_else(|| raw.strip_prefix("/cost export"))?;
+        .strip_prefix("/usage")
+        .or_else(|| raw.strip_prefix("/cost"))?;
     if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
         return None;
     }
     match rest.trim().to_ascii_lowercase().as_str() {
-        "" | "json" => Some(UsageExportFormat::Json),
-        "csv" => Some(UsageExportFormat::Csv),
+        "json" | "--json" | "status --json" | "show --json" | "summary --json"
+        | "tools --json" | "export" | "export json" => Some(UsageExportFormat::Json),
+        "csv" | "export csv" => Some(UsageExportFormat::Csv),
         _ => None,
     }
 }
 
 fn usage_slash_usage_text() -> &'static str {
-    "/usage|/cost [status|show|summary|tools|export|export json|export csv]"
+    "/usage|/cost [status|show|summary|tools|json|status --json|csv|export|export json|export csv]"
 }
 
 fn parse_usage_summary_command(input: &str) -> Option<()> {
@@ -13341,11 +13342,24 @@ mod tests {
             Some(UsageExportFormat::Json)
         );
         assert_eq!(
+            parse_usage_export_command("/usage json"),
+            Some(UsageExportFormat::Json)
+        );
+        assert_eq!(
+            parse_usage_export_command("/cost status --json"),
+            Some(UsageExportFormat::Json)
+        );
+        assert_eq!(
+            parse_usage_export_command("/usage csv"),
+            Some(UsageExportFormat::Csv)
+        );
+        assert_eq!(
             parse_usage_export_command("/cost export csv"),
             Some(UsageExportFormat::Csv)
         );
         assert_eq!(parse_usage_export_command("/cost export xml"), None);
         assert!(usage_slash_usage_text().contains("/usage|/cost"));
+        assert!(usage_slash_usage_text().contains("json|status --json|csv"));
         assert!(usage_slash_usage_text().contains("export json|export csv"));
     }
 
