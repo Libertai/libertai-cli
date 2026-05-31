@@ -207,6 +207,11 @@ struct ScheduleJsonPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct AutoJsonPayload {
+    surface: &'static str,
+    command: &'static str,
+    query: String,
+    aliases: &'static [&'static str],
+    supported_actions: &'static [&'static str],
     active: bool,
     limit: usize,
     completed: usize,
@@ -1562,7 +1567,7 @@ async fn repl_loop(
         if let Some(rest) = auto_command_arg(trimmed) {
             match parse_auto_command(rest) {
                 AutoCommand::Status => print_auto_status(auto_run.as_ref()),
-                AutoCommand::Json => print_auto_json(auto_run.as_ref()),
+                AutoCommand::Json => print_auto_json(auto_run.as_ref(), rest),
                 AutoCommand::Off => {
                     auto_run = None;
                     autonomous_queue.clear();
@@ -3008,8 +3013,8 @@ fn print_help() {
     println!("{DIM}  /thinking [off|minimal|low|medium|high|xhigh] — show or set thinking{RESET}");
     println!("{DIM}  {}{RESET}", scoped_models_usage_text());
     println!("{DIM}  /compact — compact older conversation history now{RESET}");
-    println!("{DIM}  /loop [turns] [goal] — run bounded autonomous follow-up turns{RESET}");
-    println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|stop|status|state; also /autorun, /continuous){RESET}");
+    println!("{DIM}  /loop [turns] [goal]|json [turns] [goal]|status --json — run bounded autonomous follow-up turns{RESET}");
+    println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|stop|cancel|status|state|json|status --json; also /autorun, /continuous){RESET}");
     println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|status|state|json|--json|list --json|show|inspect|show-json|run|now|trigger|cancel|delete|rm|clear|stop; also /cron){RESET}");
     println!("{DIM}  /send [target message] — show terminal inter-session send status{RESET}");
     println!("{DIM}  /notify on|enable|enabled|off|disable|disabled|clear|status|state|show|test|ping — turn-complete terminal notifications{RESET}");
@@ -6816,9 +6821,33 @@ fn parse_auto_request(input: &str) -> LoopRequest {
     }
 }
 
-fn auto_json_payload(auto_run: Option<&AutoRun>) -> AutoJsonPayload {
+fn auto_supported_actions() -> &'static [&'static str] {
+    &[
+        "status",
+        "state",
+        "json",
+        "--json",
+        "status --json",
+        "state --json",
+        "status-json",
+        "state-json",
+        "on [turns] [goal]",
+        "start [turns] [goal]",
+        "run [turns] [goal]",
+        "off",
+        "stop",
+        "cancel",
+    ]
+}
+
+fn auto_json_payload(auto_run: Option<&AutoRun>, query: &str) -> AutoJsonPayload {
     match auto_run {
         Some(run) => AutoJsonPayload {
+            surface: "terminal",
+            command: "auto",
+            query: query.to_string(),
+            aliases: &["auto", "autorun", "continuous"],
+            supported_actions: auto_supported_actions(),
             active: true,
             limit: run.limit,
             completed: run.completed,
@@ -6830,6 +6859,11 @@ fn auto_json_payload(auto_run: Option<&AutoRun>) -> AutoJsonPayload {
             },
         },
         None => AutoJsonPayload {
+            surface: "terminal",
+            command: "auto",
+            query: query.to_string(),
+            aliases: &["auto", "autorun", "continuous"],
+            supported_actions: auto_supported_actions(),
             active: false,
             limit: 0,
             completed: 0,
@@ -6839,8 +6873,8 @@ fn auto_json_payload(auto_run: Option<&AutoRun>) -> AutoJsonPayload {
     }
 }
 
-fn print_auto_json(auto_run: Option<&AutoRun>) {
-    let payload = auto_json_payload(auto_run);
+fn print_auto_json(auto_run: Option<&AutoRun>, query: &str) {
+    let payload = auto_json_payload(auto_run, query);
     match serde_json::to_string_pretty(&payload) {
         Ok(raw) => println!("{raw}"),
         Err(err) => eprintln!("{DIM}  /auto: could not render JSON: {err}.{RESET}"),
@@ -6899,10 +6933,13 @@ fn loop_json_request_arg(input: &str) -> Option<&str> {
         .map(str::trim)
 }
 
-fn print_loop_json(input: &str) {
+fn loop_json_payload(input: &str) -> serde_json::Value {
     let request = parse_loop_request(input);
     let first_prompt = autonomous_loop_prompt(1, request.turns, &request.goal);
-    let payload = json!({
+    json!({
+        "surface": "terminal",
+        "command": "loop",
+        "query": input,
         "mode": "foreground",
         "detached": false,
         "default_turns": LOOP_DEFAULT_TURNS,
@@ -6911,8 +6948,21 @@ fn print_loop_json(input: &str) {
         "goal": if request.goal.is_empty() { None } else { Some(request.goal.as_str()) },
         "queued_on_run": request.turns,
         "first_prompt": first_prompt,
-        "aliases": ["/loop", "/autoloop"]
-    });
+        "aliases": ["loop", "autoloop"],
+        "supported_actions": [
+            "json",
+            "--json",
+            "status --json",
+            "state --json",
+            "json [turns] [goal]",
+            "--json [turns] [goal]",
+            "[turns] [goal]"
+        ],
+    })
+}
+
+fn print_loop_json(input: &str) {
+    let payload = loop_json_payload(input);
     match serde_json::to_string_pretty(&payload) {
         Ok(raw) => println!("{raw}"),
         Err(err) => eprintln!("{DIM}  /loop: could not render JSON: {err}.{RESET}"),
@@ -15814,6 +15864,15 @@ mod tests {
         assert!(prompt.contains("Autonomous loop turn 2/4."));
         assert!(prompt.contains("Goal: close gaps"));
         assert!(prompt.contains("do not invent extra work"));
+
+        let payload = loop_json_payload("2 close gaps");
+        assert_eq!(payload["command"], "loop");
+        assert_eq!(payload["query"], "2 close gaps");
+        assert_eq!(payload["requested_turns"], 2);
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("status --json")));
     }
 
     #[test]
@@ -17293,8 +17352,13 @@ mod tests {
     #[test]
     fn auto_json_payload_reports_active_and_inactive_state() {
         assert_eq!(
-            auto_json_payload(None),
+            auto_json_payload(None, "status --json"),
             AutoJsonPayload {
+                surface: "terminal",
+                command: "auto",
+                query: "status --json".to_string(),
+                aliases: &["auto", "autorun", "continuous"],
+                supported_actions: auto_supported_actions(),
                 active: false,
                 limit: 0,
                 completed: 0,
@@ -17309,8 +17373,13 @@ mod tests {
             goal: "finish parity".to_string(),
         };
         assert_eq!(
-            auto_json_payload(Some(&run)),
+            auto_json_payload(Some(&run), "json"),
             AutoJsonPayload {
+                surface: "terminal",
+                command: "auto",
+                query: "json".to_string(),
+                aliases: &["auto", "autorun", "continuous"],
+                supported_actions: auto_supported_actions(),
                 active: true,
                 limit: 5,
                 completed: 2,
