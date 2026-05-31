@@ -6249,7 +6249,8 @@ const VIM_USAGE: &str =
     "/vim [status|state|show|current|info|json|status --json|state --json|show --json|current --json|info --json|on|enable|enabled|true|off|disable|disabled|false]";
 const IDE_USAGE: &str =
     "/ide [status|state|show|json|status --json|state --json|show --json|open|settings|edit]";
-const BUG_USAGE: &str = "/bug [report|template|status|show|json|status --json]";
+const BUG_USAGE: &str =
+    "/bug [report|template|status|show|json|--json|status --json|show --json|template --json|report --json]";
 
 fn print_vim_status(command: VimCommand) {
     println!("{BOLD}vim{RESET}");
@@ -16565,9 +16566,14 @@ mod tests {
         assert_eq!(parse_bug_command("status"), BugCommand::Template);
         assert_eq!(parse_bug_command("show"), BugCommand::Template);
         assert_eq!(parse_bug_command("json"), BugCommand::Json);
+        assert_eq!(parse_bug_command("--json"), BugCommand::Json);
         assert_eq!(parse_bug_command("status --json"), BugCommand::Json);
+        assert_eq!(parse_bug_command("show --json"), BugCommand::Json);
+        assert_eq!(parse_bug_command("template --json"), BugCommand::Json);
+        assert_eq!(parse_bug_command("report --json"), BugCommand::Json);
         assert_eq!(parse_bug_command("open"), BugCommand::Usage);
-        assert!(BUG_USAGE.contains("report|template|status|show|json|status --json"));
+        assert!(BUG_USAGE.contains("report|template|status|show|json|--json"));
+        assert!(BUG_USAGE.contains("show --json|template --json|report --json"));
         let payload = bug_json_payload("libertai", "test-model", Mode::Plan, Some("review"));
         assert_eq!(payload["command"], "bug");
         assert_eq!(payload["surface"], "terminal");
