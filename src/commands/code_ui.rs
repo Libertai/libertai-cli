@@ -1722,6 +1722,17 @@ async fn repl_loop(
             continue;
         }
         if let Some((command, rest)) = name_command_arg(trimmed) {
+            match parse_name_command(rest) {
+                NameCommand::Status => {
+                    print_name_status(session_name.as_deref());
+                    continue;
+                }
+                NameCommand::Json => {
+                    print_name_json(session_name.as_deref());
+                    continue;
+                }
+                NameCommand::Set => {}
+            }
             match parse_session_name(rest) {
                 Ok(name) => match handle.set_session_name(name.clone()).await {
                     Ok(()) => {
@@ -2602,6 +2613,22 @@ fn mode_command_arg(input: &str) -> Option<(&str, &str)> {
         }
     }
     None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameCommand {
+    Status,
+    Json,
+    Set,
+}
+
+fn parse_name_command(input: &str) -> NameCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "status" | "state" | "show" | "current" | "info" => NameCommand::Status,
+        "json" | "--json" | "status --json" | "state --json" | "show --json"
+        | "current --json" | "info --json" => NameCommand::Json,
+        _ => NameCommand::Set,
+    }
 }
 
 fn name_command_arg(input: &str) -> Option<(&str, &str)> {
@@ -4414,7 +4441,24 @@ fn print_name_status(name: Option<&str>) {
         Some(name) => println!("{DIM}  current:{RESET} {name}"),
         None => println!("{DIM}  current:{RESET} unnamed or not loaded in this REPL"),
     }
-    println!("{DIM}  usage:{RESET} /name <name>");
+    println!("{DIM}  usage:{RESET} /name <name> | /name [status|show|current|json|status --json]");
+}
+
+fn name_json_payload(name: Option<&str>) -> serde_json::Value {
+    json!({
+        "command": "name",
+        "surface": "terminal",
+        "current": name,
+        "is_named": name.is_some(),
+        "supported_actions": ["status", "state", "show", "current", "info", "json", "status --json", "set"],
+    })
+}
+
+fn print_name_json(name: Option<&str>) {
+    match serde_json::to_string_pretty(&name_json_payload(name)) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("{DIM}  /name json failed: {e}{RESET}"),
+    }
 }
 
 async fn export_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
@@ -13454,6 +13498,17 @@ mod tests {
         );
         assert_eq!(name_command_arg("/rename"), None);
         assert_eq!(name_command_arg("/nameplate foo"), None);
+        assert_eq!(parse_name_command("status"), NameCommand::Status);
+        assert_eq!(parse_name_command("current"), NameCommand::Status);
+        assert_eq!(parse_name_command("json"), NameCommand::Json);
+        assert_eq!(parse_name_command("status --json"), NameCommand::Json);
+        assert_eq!(parse_name_command("release work"), NameCommand::Set);
+        let payload = name_json_payload(Some("release work"));
+        assert_eq!(payload["command"], "name");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["current"], "release work");
+        assert_eq!(payload["is_named"], true);
+        assert_eq!(payload["supported_actions"][6], "status --json");
     }
 
     #[test]
