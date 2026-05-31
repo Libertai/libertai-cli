@@ -11768,7 +11768,7 @@ fn parse_usage_export_command(input: &str) -> Option<UsageExportFormat> {
 }
 
 fn usage_slash_usage_text() -> &'static str {
-    "/usage|/cost [status|show|summary|tools|json|status --json|csv|export|export json|export csv]"
+    "/usage|/cost [status|show|summary|tools|json|--json|status --json|show --json|summary --json|tools --json|csv|export|export json|export csv]"
 }
 
 fn parse_usage_summary_command(input: &str) -> Option<()> {
@@ -11856,7 +11856,7 @@ fn usage_export_json(
         "surface": "terminal",
         "command": "usage",
         "aliases": ["usage", "cost"],
-        "supported_actions": ["status", "show", "summary", "tools", "json", "status --json", "show --json", "summary --json", "tools --json", "csv", "export", "export json", "export csv"],
+        "supported_actions": ["status", "show", "summary", "tools", "json", "--json", "status --json", "show --json", "summary --json", "tools --json", "csv", "export", "export json", "export csv"],
         "usage": usage,
         "tools": tools,
         "provenance": {
@@ -14807,6 +14807,10 @@ mod tests {
             Some(UsageExportFormat::Json)
         );
         assert_eq!(
+            parse_usage_export_command("/usage --json"),
+            Some(UsageExportFormat::Json)
+        );
+        assert_eq!(
             parse_usage_export_command("/cost status --json"),
             Some(UsageExportFormat::Json)
         );
@@ -14820,7 +14824,8 @@ mod tests {
         );
         assert_eq!(parse_usage_export_command("/cost export xml"), None);
         assert!(usage_slash_usage_text().contains("/usage|/cost"));
-        assert!(usage_slash_usage_text().contains("json|status --json|csv"));
+        assert!(usage_slash_usage_text().contains("json|--json|status --json"));
+        assert!(usage_slash_usage_text().contains("show --json|summary --json|tools --json"));
         assert!(usage_slash_usage_text().contains("export json|export csv"));
     }
 
