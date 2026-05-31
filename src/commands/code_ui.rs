@@ -1621,9 +1621,10 @@ async fn repl_loop(
             handle_scoped_models_command(rest, &mut scoped_model_patterns);
             continue;
         }
-        if let Some((_command, rest)) = mode_command_arg(trimmed) {
+        if let Some((command, rest)) = mode_command_arg(trimmed) {
             match parse_permissions_command(rest) {
                 PermissionsCommand::Show => print_permissions_status(mode.get(), &approvals),
+                PermissionsCommand::Json if command == "/mode" => print_mode_json(mode.get()),
                 PermissionsCommand::Json => print_permissions_json(mode.get(), &approvals),
                 PermissionsCommand::Open => print_permissions_open_hint(),
                 PermissionsCommand::Set(new_mode) => {
@@ -3795,12 +3796,38 @@ fn print_permissions_json(mode: Mode, approvals: &ApprovalState) {
     }
 }
 
+fn mode_json_payload(mode: Mode) -> serde_json::Value {
+    json!({
+        "surface": "terminal",
+        "command": "mode",
+        "mode": mode_label(mode),
+        "behavior": match mode {
+            Mode::Normal => "mutating tools ask before running",
+            Mode::AcceptEdits => "write/edit tools auto-allow; bash still asks",
+            Mode::Plan => "mutating tools are denied automatically",
+        },
+        "supported_modes": ["normal", "acceptEdits", "plan"],
+        "aliases": {
+            "normal": ["default", "normal"],
+            "acceptEdits": ["acceptEdits", "accept-edits", "accept_edits"],
+            "plan": ["plan", "readonly", "read-only"]
+        }
+    })
+}
+
+fn print_mode_json(mode: Mode) {
+    match serde_json::to_string_pretty(&mode_json_payload(mode)) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  /mode json: {e:#}{RESET}"),
+    }
+}
+
 fn permissions_usage_text() -> &'static str {
     "/permissions [status|show|current|info|json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only|open|settings|edit|approvals|forget|clear|reset|bypassPermissions|bypass|danger]"
 }
 
 fn mode_usage_text() -> &'static str {
-    "/mode [status|show|current|info|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only|open|settings|edit|approvals|forget|clear|reset|bypassPermissions|bypass|danger]"
+    "/mode [status|show|current|info|json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only]"
 }
 
 fn print_permissions_open_hint() {
@@ -14371,6 +14398,7 @@ mod tests {
         assert!(permissions_usage_text().contains("settings|edit|approvals"));
         assert!(permissions_usage_text().contains("forget|clear|reset"));
         assert!(permissions_usage_text().contains("bypassPermissions|bypass|danger"));
+        assert!(mode_usage_text().contains("info|json"));
         assert!(mode_usage_text().contains("normal|acceptEdits"));
         assert!(mode_usage_text().contains("readonly|read-only"));
         let approvals = ApprovalState::new();
@@ -14380,6 +14408,10 @@ mod tests {
         assert_eq!(payload["mode"], "plan");
         assert_eq!(payload["remembered_approvals"], 0);
         assert_eq!(payload["native_bypass_permissions"], false);
+        let mode_payload = mode_json_payload(Mode::AcceptEdits);
+        assert_eq!(mode_payload["surface"], "terminal");
+        assert_eq!(mode_payload["command"], "mode");
+        assert_eq!(mode_payload["mode"], "accept-edits");
     }
 
     #[test]
