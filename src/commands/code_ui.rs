@@ -1938,7 +1938,12 @@ async fn repl_loop(
                     }
                 }
                 if let Some(rest) = trimmed.strip_prefix("/template ") {
-                    match build_template_slash_prompt(rest.trim(), &handle).await {
+                    let rest = rest.trim();
+                    if is_template_json_arg(rest) {
+                        print_templates_json();
+                        continue;
+                    }
+                    match build_template_slash_prompt(rest, &handle).await {
                         Ok(prompt) => {
                             line = prompt;
                         }
@@ -8379,6 +8384,67 @@ fn print_templates() {
         println!("{DIM}  run /template <name> [args], or /<name> [args].{RESET}");
     }
     println!();
+}
+
+fn is_template_json_arg(input: &str) -> bool {
+    matches!(
+        normalize_template_arg(input).as_str(),
+        "json" | "--json" | "status --json" | "list --json" | "show --json"
+    )
+}
+
+fn normalize_template_arg(input: &str) -> String {
+    input
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn print_templates_json() {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /template: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    match serde_json::to_string_pretty(&template_json_payload(&cwd)) {
+        Ok(body) => println!("{body}"),
+        Err(e) => eprintln!("{DIM}  /template: could not render JSON: {e}{RESET}"),
+    }
+}
+
+fn template_json_payload(cwd: &Path) -> serde_json::Value {
+    let templates = crate::commands::code_slash_registry::discover(cwd);
+    let rows: Vec<serde_json::Value> = templates
+        .iter()
+        .map(|template| {
+            let source = match template.source {
+                crate::commands::code_slash_registry::CommandSource::Project => "project",
+                crate::commands::code_slash_registry::CommandSource::User => "user",
+            };
+            json!({
+                "name": template.name,
+                "invocation": custom_slash_invocation_name(template),
+                "description": template.description,
+                "source": source,
+                "namespace": template.namespace,
+                "path": template.path.display().to_string(),
+                "arg_hint": template.arg_hint,
+                "argument_names": template.argument_names,
+            })
+        })
+        .collect();
+    json!({
+        "surface": "terminal",
+        "command": "template",
+        "cwd": cwd.display().to_string(),
+        "count": rows.len(),
+        "templates": rows,
+        "will_write": false,
+        "supported_actions": ["list", "show", "json", "status --json", "<name> [args]"],
+    })
 }
 
 fn handle_skills_slash(query: &str) -> Result<()> {
@@ -16951,6 +17017,47 @@ mod tests {
         );
         assert_eq!(parse_template_query("review").unwrap(), ("review", ""));
         assert!(parse_template_query("").is_err());
+    }
+
+    #[test]
+    fn template_json_arg_accepts_status_aliases() {
+        assert!(is_template_json_arg("json"));
+        assert!(is_template_json_arg("--json"));
+        assert!(is_template_json_arg("status --json"));
+        assert!(is_template_json_arg("list --json"));
+        assert!(is_template_json_arg("show --json"));
+        assert!(!is_template_json_arg("review src/lib.rs"));
+    }
+
+    #[test]
+    fn template_json_payload_lists_discovered_templates() {
+        let temp = tempfile::tempdir().unwrap();
+        let commands_dir = temp.path().join(".claude").join("commands").join("team");
+        std::fs::create_dir_all(&commands_dir).unwrap();
+        std::fs::write(
+            commands_dir.join("audit.md"),
+            "---\ndescription: Team audit\nargument-hint: target\narguments: [target]\n---\nAudit $target",
+        )
+        .unwrap();
+
+        let payload = template_json_payload(temp.path());
+        let row = payload["templates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["invocation"] == "team/audit")
+            .unwrap();
+
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "template");
+        assert!(payload["count"].as_u64().unwrap() >= 1);
+        assert_eq!(row["name"], "audit");
+        assert_eq!(row["description"], "Team audit");
+        assert_eq!(row["source"], "project");
+        assert_eq!(row["namespace"], "team");
+        assert_eq!(row["arg_hint"], "target");
+        assert_eq!(row["argument_names"][0], "target");
+        assert_eq!(payload["will_write"], false);
     }
 
     #[test]
