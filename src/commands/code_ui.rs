@@ -268,6 +268,7 @@ enum IdeCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BugCommand {
     Template,
+    Json,
     Usage,
 }
 
@@ -4855,6 +4856,8 @@ fn parse_ide_command(input: &str) -> IdeCommand {
 fn parse_bug_command(input: &str) -> BugCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "report" | "template" | "status" | "show" => BugCommand::Template,
+        "json" | "--json" | "status --json" | "show --json" | "template --json"
+        | "report --json" => BugCommand::Json,
         _ => BugCommand::Usage,
     }
 }
@@ -5138,7 +5141,7 @@ fn print_theme_status_json() {
 const VIM_USAGE: &str =
     "/vim [status|state|show|current|info|json|status --json|on|enable|enabled|true|off|disable|disabled|false]";
 const IDE_USAGE: &str = "/ide [status|state|show|json|status --json|open|settings|edit]";
-const BUG_USAGE: &str = "/bug [report|template|status|show]";
+const BUG_USAGE: &str = "/bug [report|template|status|show|json|status --json]";
 
 fn print_vim_status(command: VimCommand) {
     println!("{BOLD}vim{RESET}");
@@ -5269,6 +5272,7 @@ fn print_bug_command(
 ) {
     match command {
         BugCommand::Template => print_bug_template(provider, model, mode, output_style),
+        BugCommand::Json => print_bug_json(provider, model, mode, output_style),
         BugCommand::Usage => {
             println!("{BOLD}bug report{RESET}");
             println!("{DIM}  usage:{RESET} {BUG_USAGE}");
@@ -11632,6 +11636,42 @@ fn print_bug_template(provider: &str, model: &str, mode: Mode, output_style: Opt
     println!();
 }
 
+fn bug_json_payload(
+    provider: &str,
+    model: &str,
+    mode: Mode,
+    output_style: Option<&str>,
+) -> serde_json::Value {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|e| format!("unavailable: {e}"));
+    json!({
+        "command": "bug",
+        "surface": "terminal",
+        "app": "libertai-cli",
+        "branch": "integrated-code",
+        "provider": provider,
+        "model": model,
+        "mode": mode_label(mode),
+        "output_style": output_style.unwrap_or("default"),
+        "cwd": cwd,
+        "template_fields": [
+            "what_you_expected",
+            "what_happened",
+            "last_command_or_prompt",
+            "reproduces_in_fresh_libertai_code_session"
+        ],
+        "supported_actions": ["report", "template", "status", "show", "json", "status --json"],
+    })
+}
+
+fn print_bug_json(provider: &str, model: &str, mode: Mode, output_style: Option<&str>) {
+    match serde_json::to_string_pretty(&bug_json_payload(provider, model, mode, output_style)) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("{DIM}  /bug json failed: {e}{RESET}"),
+    }
+}
+
 fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => "normal",
@@ -13884,8 +13924,17 @@ mod tests {
         assert_eq!(parse_bug_command("template"), BugCommand::Template);
         assert_eq!(parse_bug_command("status"), BugCommand::Template);
         assert_eq!(parse_bug_command("show"), BugCommand::Template);
+        assert_eq!(parse_bug_command("json"), BugCommand::Json);
+        assert_eq!(parse_bug_command("status --json"), BugCommand::Json);
         assert_eq!(parse_bug_command("open"), BugCommand::Usage);
-        assert!(BUG_USAGE.contains("report|template|status|show"));
+        assert!(BUG_USAGE.contains("report|template|status|show|json|status --json"));
+        let payload = bug_json_payload("libertai", "test-model", Mode::Plan, Some("review"));
+        assert_eq!(payload["command"], "bug");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["app"], "libertai-cli");
+        assert_eq!(payload["mode"], "plan");
+        assert_eq!(payload["output_style"], "review");
+        assert_eq!(payload["supported_actions"][5], "status --json");
     }
 
     #[test]
