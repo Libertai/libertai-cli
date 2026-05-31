@@ -5816,7 +5816,7 @@ fn parse_doctor_command(input: &str) -> DoctorCommand {
 }
 
 fn doctor_usage_text() -> &'static str {
-    "/doctor [status|state|show|info|health|diagnostics|diag|json]"
+    "/doctor [status|state|show|info|health|diagnostics|diag|json|status --json|diagnostics --json|diag --json]"
 }
 
 fn parse_abort_command(input: &str) -> AbortCommand {
@@ -11125,6 +11125,9 @@ async fn print_doctor_json(
 
     let payload = json!({
         "surface": "terminal",
+        "command": "doctor",
+        "aliases": ["doctor"],
+        "supported_actions": ["status", "state", "show", "info", "health", "diagnostics", "diag", "json", "status --json", "state --json", "show --json", "info --json", "health --json", "diagnostics --json", "diag --json"],
         "cwd": cwd_label,
         "provider": provider,
         "model": model,
@@ -16033,10 +16036,19 @@ mod tests {
         assert_eq!(parse_doctor_command("diagnostics"), DoctorCommand::Run);
         assert_eq!(parse_doctor_command("diag"), DoctorCommand::Run);
         assert_eq!(parse_doctor_command("json"), DoctorCommand::Json);
+        assert_eq!(parse_doctor_command("status --json"), DoctorCommand::Json);
+        assert_eq!(parse_doctor_command("state --json"), DoctorCommand::Json);
+        assert_eq!(parse_doctor_command("show --json"), DoctorCommand::Json);
+        assert_eq!(parse_doctor_command("info --json"), DoctorCommand::Json);
+        assert_eq!(parse_doctor_command("health --json"), DoctorCommand::Json);
         assert_eq!(parse_doctor_command("diagnostics --json"), DoctorCommand::Json);
+        assert_eq!(parse_doctor_command("diag --json"), DoctorCommand::Json);
         assert_eq!(parse_doctor_command("open"), DoctorCommand::Usage);
         assert!(doctor_usage_text().contains("status|state|show|info"));
         assert!(doctor_usage_text().contains("health|diagnostics|diag|json"));
+        assert!(doctor_usage_text().contains("status --json"));
+        assert!(doctor_usage_text().contains("diagnostics --json"));
+        assert!(doctor_usage_text().contains("diag --json"));
     }
 
     #[test]
