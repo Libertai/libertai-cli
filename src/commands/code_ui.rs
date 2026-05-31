@@ -11810,6 +11810,9 @@ fn config_status_payload(cfg: &LibertaiConfig) -> serde_json::Value {
         .map(|path| path.display().to_string());
     json!({
         "surface": "terminal",
+        "command": "config",
+        "aliases": ["config", "settings"],
+        "supported_actions": ["status", "show", "current", "info", "json", "status --json", "show --json", "current --json", "info --json", "path", "open", "settings", "backends", "defaults", "agents", "skills", "hooks", "mcp", "approvals", "appearance", "sandbox", "advanced", "set <key> <value>", "unset <key>", "reset <key>"],
         "api_base": cfg.api_base,
         "account_base": cfg.account_base,
         "config_path": config_path,
@@ -15494,6 +15497,13 @@ mod tests {
         assert!(is_config_json_alias("current --json"));
         assert!(is_config_json_alias("info --json"));
         assert!(!is_config_json_alias("path --json"));
+        let payload = config_status_payload(&LibertaiConfig::default());
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "config");
+        assert_eq!(payload["aliases"][1], "settings");
+        assert_eq!(payload["supported_actions"][5], "status --json");
+        assert_eq!(payload["supported_actions"][9], "path");
+        assert_eq!(payload["supported_actions"][22], "set <key> <value>");
     }
 
     #[test]
