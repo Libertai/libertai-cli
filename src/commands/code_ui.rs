@@ -197,6 +197,15 @@ struct ScheduleJsonPayload {
     runs: Vec<ScheduleJsonRow>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AutoJsonPayload {
+    active: bool,
+    limit: usize,
+    completed: usize,
+    remaining: usize,
+    goal: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NotifyCommand {
     Status,
@@ -396,6 +405,7 @@ struct AutoRun {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AutoCommand {
     Status,
+    Json,
     Off,
     On { turns: usize, goal: String },
 }
@@ -1402,6 +1412,7 @@ async fn repl_loop(
         if let Some(rest) = auto_command_arg(trimmed) {
             match parse_auto_command(rest) {
                 AutoCommand::Status => print_auto_status(auto_run.as_ref()),
+                AutoCommand::Json => print_auto_json(auto_run.as_ref()),
                 AutoCommand::Off => {
                     auto_run = None;
                     autonomous_queue.clear();
@@ -4989,7 +5000,10 @@ fn parse_auto_command(input: &str) -> AutoCommand {
     let head = parts.next().unwrap_or("").trim();
     let rest = parts.next().unwrap_or("").trim();
     match head {
+        "status" | "state" if rest == "json" || rest == "--json" => AutoCommand::Json,
         "status" | "state" => AutoCommand::Status,
+        "json" | "--json" => AutoCommand::Json,
+        "status-json" | "state-json" => AutoCommand::Json,
         "off" | "stop" | "cancel" => AutoCommand::Off,
         "on" | "start" | "run" => {
             let request = parse_auto_request(rest);
@@ -5032,6 +5046,37 @@ fn parse_auto_request(input: &str) -> LoopRequest {
             turns: AUTO_DEFAULT_TURNS,
             goal: raw.to_string(),
         },
+    }
+}
+
+fn auto_json_payload(auto_run: Option<&AutoRun>) -> AutoJsonPayload {
+    match auto_run {
+        Some(run) => AutoJsonPayload {
+            active: true,
+            limit: run.limit,
+            completed: run.completed,
+            remaining: run.limit.saturating_sub(run.completed),
+            goal: if run.goal.is_empty() {
+                None
+            } else {
+                Some(run.goal.clone())
+            },
+        },
+        None => AutoJsonPayload {
+            active: false,
+            limit: 0,
+            completed: 0,
+            remaining: 0,
+            goal: None,
+        },
+    }
+}
+
+fn print_auto_json(auto_run: Option<&AutoRun>) {
+    let payload = auto_json_payload(auto_run);
+    match serde_json::to_string_pretty(&payload) {
+        Ok(raw) => println!("{raw}"),
+        Err(err) => eprintln!("{DIM}  /auto: could not render JSON: {err}.{RESET}"),
     }
 }
 
@@ -13218,6 +13263,11 @@ mod tests {
         assert_eq!(parse_auto_command(""), AutoCommand::Status);
         assert_eq!(parse_auto_command("status"), AutoCommand::Status);
         assert_eq!(parse_auto_command("state"), AutoCommand::Status);
+        assert_eq!(parse_auto_command("json"), AutoCommand::Json);
+        assert_eq!(parse_auto_command("--json"), AutoCommand::Json);
+        assert_eq!(parse_auto_command("status --json"), AutoCommand::Json);
+        assert_eq!(parse_auto_command("state json"), AutoCommand::Json);
+        assert_eq!(parse_auto_command("status-json"), AutoCommand::Json);
         assert_eq!(parse_auto_command("off"), AutoCommand::Off);
         assert_eq!(parse_auto_command("stop"), AutoCommand::Off);
         assert_eq!(parse_auto_command("cancel"), AutoCommand::Off);
@@ -13233,6 +13283,36 @@ mod tests {
             AutoCommand::On {
                 turns: AUTO_DEFAULT_TURNS,
                 goal: "keep going".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn auto_json_payload_reports_active_and_inactive_state() {
+        assert_eq!(
+            auto_json_payload(None),
+            AutoJsonPayload {
+                active: false,
+                limit: 0,
+                completed: 0,
+                remaining: 0,
+                goal: None,
+            }
+        );
+
+        let run = AutoRun {
+            limit: 5,
+            completed: 2,
+            goal: "finish parity".to_string(),
+        };
+        assert_eq!(
+            auto_json_payload(Some(&run)),
+            AutoJsonPayload {
+                active: true,
+                limit: 5,
+                completed: 2,
+                remaining: 3,
+                goal: Some("finish parity".to_string()),
             }
         );
     }
