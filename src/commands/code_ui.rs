@@ -3771,7 +3771,7 @@ fn print_sandbox_status(action: &str) {
 }
 
 fn sandbox_usage_text() -> &'static str {
-    "/sandbox [info|status|state|show|diagnostics|diag|json|status --json|reload]"
+    "/sandbox [info|status|state|show|diagnostics|diag|json|--json|status --json|state --json|show --json|info --json|diagnostics --json|diag --json|reload]"
 }
 
 fn sandbox_json_payload(profile: &StrictProfile) -> serde_json::Value {
@@ -3795,7 +3795,7 @@ fn sandbox_json_payload(profile: &StrictProfile) -> serde_json::Value {
         "env": profile.env,
         "will_write": false,
         "will_reload": false,
-        "supported_actions": ["info", "status", "state", "show", "diagnostics", "diag", "json", "--json", "status --json", "diagnostics --json", "reload"],
+        "supported_actions": ["info", "status", "state", "show", "diagnostics", "diag", "json", "--json", "status --json", "state --json", "show --json", "info --json", "diagnostics --json", "diag --json", "reload"],
     })
 }
 
@@ -15196,15 +15196,20 @@ mod tests {
         assert_eq!(parse_sandbox_action("json"), SandboxAction::Json);
         assert_eq!(parse_sandbox_action("--json"), SandboxAction::Json);
         assert_eq!(parse_sandbox_action("status --json"), SandboxAction::Json);
+        assert_eq!(parse_sandbox_action("state --json"), SandboxAction::Json);
+        assert_eq!(parse_sandbox_action("show --json"), SandboxAction::Json);
+        assert_eq!(parse_sandbox_action("info --json"), SandboxAction::Json);
         assert_eq!(
             parse_sandbox_action("diagnostics --json"),
             SandboxAction::Json
         );
+        assert_eq!(parse_sandbox_action("diag --json"), SandboxAction::Json);
         assert_eq!(parse_sandbox_action("reload"), SandboxAction::Reload);
         assert_eq!(parse_sandbox_action("reset"), SandboxAction::Unknown("reset"));
         assert!(sandbox_usage_text().contains("status|state|show"));
         assert!(sandbox_usage_text().contains("diagnostics|diag"));
-        assert!(sandbox_usage_text().contains("json|status --json"));
+        assert!(sandbox_usage_text().contains("json|--json|status --json|state --json"));
+        assert!(sandbox_usage_text().contains("info --json|diagnostics --json|diag --json"));
         assert!(sandbox_usage_text().contains("reload"));
     }
 
@@ -15225,7 +15230,8 @@ mod tests {
         assert_eq!(payload["aliases"][0], "sandbox");
         assert_eq!(payload["supported_actions"][7], "--json");
         assert_eq!(payload["supported_actions"][8], "status --json");
-        assert_eq!(payload["supported_actions"][9], "diagnostics --json");
+        assert_eq!(payload["supported_actions"][9], "state --json");
+        assert_eq!(payload["supported_actions"][13], "diag --json");
     }
 
     #[test]
