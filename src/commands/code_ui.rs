@@ -428,6 +428,7 @@ enum AutoCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SkillsCommand {
     List,
+    Json,
     Show(String),
     Open,
     Enable(String),
@@ -2990,7 +2991,7 @@ fn print_help() {
     println!("{DIM}  {} — inspect auth or run libertai login{RESET}", login_usage_text());
     println!("{DIM}  {} — run libertai logout or explain provider logout{RESET}", logout_usage_text());
     println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
-    println!("{DIM}  /skills [list|status|show <name>|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions{RESET}");
+    println!("{DIM}  /skills [list|status|json|status --json|show <name>|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions{RESET}");
     println!(
         "{DIM}  /init [--agent|from-agent json|from-agent preview append|preview merge|preview merge-lines|preview replace|preview [append|merge|merge-lines] sections N[,M]|append sections N[,M]|merge sections N[,M]|merge-lines sections N[,M]|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}"
     );
@@ -8653,6 +8654,7 @@ fn template_json_payload(cwd: &Path) -> serde_json::Value {
 fn handle_skills_slash(query: &str) -> Result<()> {
     match parse_skills_command(query)? {
         SkillsCommand::List => print_code_skills(),
+        SkillsCommand::Json => print_code_skills_json(),
         SkillsCommand::Show(name) => print_code_skill_details(&name),
         SkillsCommand::Open => print_code_skills_open_hint(),
         SkillsCommand::Enable(name) => {
@@ -8677,6 +8679,12 @@ fn parse_skills_command(query: &str) -> Result<SkillsCommand> {
         || raw.eq_ignore_ascii_case("show")
     {
         return Ok(SkillsCommand::List);
+    }
+    if matches!(
+        normalize_help_command_arg(raw).as_str(),
+        "json" | "--json" | "status --json" | "list --json" | "show --json"
+    ) {
+        return Ok(SkillsCommand::Json);
     }
     if let Some(name) = raw.strip_prefix("show ") {
         let name = name.trim().trim_start_matches('@');
@@ -8709,8 +8717,62 @@ fn parse_skills_command(query: &str) -> Result<SkillsCommand> {
             Ok(SkillsCommand::Disable(name.to_string()))
         }
         _ => anyhow::bail!(
-            "usage: /skills [list|status|show <name>|open|settings|edit|enable|on <name>|disable|off <name>]"
+            "usage: /skills [list|status|json|status --json|show <name>|open|settings|edit|enable|on <name>|disable|off <name>]"
         ),
+    }
+}
+
+fn code_skills_json_payload(
+    cwd: &Path,
+    skills: Vec<code_skills::SkillInventoryEntry>,
+) -> serde_json::Value {
+    let enabled = skills.iter().filter(|skill| skill.enabled).count();
+    let rows: Vec<serde_json::Value> = skills
+        .into_iter()
+        .map(|skill| {
+            json!({
+                "name": skill.name,
+                "description": skill.description,
+                "enabled": skill.enabled,
+                "allowed_tools": skill.allowed_tools,
+                "source": skill.source,
+                "source_kind": skill.source_kind,
+                "path": skill.path.map(|path| path.display().to_string()),
+                "agent_created": skill.agent_created,
+            })
+        })
+        .collect();
+    json!({
+        "surface": "terminal",
+        "command": "skills",
+        "cwd": cwd.display().to_string(),
+        "count": rows.len(),
+        "enabled_count": enabled,
+        "disabled_count": rows.len().saturating_sub(enabled),
+        "skills": rows,
+        "will_write": false,
+        "supported_actions": ["list", "status", "json", "status --json", "show <name>", "open", "settings", "edit", "enable <name>", "disable <name>"],
+    })
+}
+
+fn print_code_skills_json() {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /skills json: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let skills = match code_skills::skill_inventory(SkillPillar::Code, Some(&cwd)) {
+        Ok(skills) => skills,
+        Err(e) => {
+            eprintln!("{DIM}  /skills json: failed: {e:#}{RESET}");
+            return;
+        }
+    };
+    match serde_json::to_string_pretty(&code_skills_json_payload(&cwd, skills)) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  /skills json failed: {e}{RESET}"),
     }
 }
 
@@ -17397,6 +17459,15 @@ mod tests {
         assert_eq!(parse_skills_command("").unwrap(), SkillsCommand::List);
         assert_eq!(parse_skills_command("status").unwrap(), SkillsCommand::List);
         assert_eq!(parse_skills_command("show").unwrap(), SkillsCommand::List);
+        assert_eq!(parse_skills_command("json").unwrap(), SkillsCommand::Json);
+        assert_eq!(
+            parse_skills_command("status --json").unwrap(),
+            SkillsCommand::Json
+        );
+        assert_eq!(
+            parse_skills_command("list --json").unwrap(),
+            SkillsCommand::Json
+        );
         assert_eq!(
             parse_skills_command("show libertai-harness").unwrap(),
             SkillsCommand::Show("libertai-harness".to_string())
@@ -17418,8 +17489,51 @@ mod tests {
         assert!(parse_skills_command("enable").is_err());
         let usage = parse_skills_command("remove foo").unwrap_err().to_string();
         assert!(usage.contains("settings"));
+        assert!(usage.contains("json"));
         assert!(usage.contains("on <name>"));
         assert!(usage.contains("off <name>"));
+    }
+
+    #[test]
+    fn code_skills_json_payload_reports_counts_and_rows() {
+        let payload = code_skills_json_payload(
+            Path::new("/tmp/project"),
+            vec![
+                code_skills::SkillInventoryEntry {
+                    name: "libertai-harness".to_string(),
+                    description: "Verification workflow".to_string(),
+                    allowed_tools: None,
+                    body: "Run checks.".to_string(),
+                    source: "builtin".to_string(),
+                    source_kind: "builtin".to_string(),
+                    path: None,
+                    agent_created: false,
+                    enabled: true,
+                },
+                code_skills::SkillInventoryEntry {
+                    name: "project-review".to_string(),
+                    description: "Project review flow".to_string(),
+                    allowed_tools: Some("read, grep".to_string()),
+                    body: "Review changes.".to_string(),
+                    source: "project:/tmp/project/.libertai/skills/project-review".to_string(),
+                    source_kind: "project".to_string(),
+                    path: Some(PathBuf::from("/tmp/project/.libertai/skills/project-review")),
+                    agent_created: true,
+                    enabled: false,
+                },
+            ],
+        );
+
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "skills");
+        assert_eq!(payload["count"], 2);
+        assert_eq!(payload["enabled_count"], 1);
+        assert_eq!(payload["disabled_count"], 1);
+        assert_eq!(payload["skills"][1]["name"], "project-review");
+        assert_eq!(payload["skills"][1]["allowed_tools"], "read, grep");
+        assert_eq!(payload["skills"][1]["agent_created"], true);
+        assert_eq!(payload["will_write"], false);
+        assert_eq!(payload["supported_actions"][3], "status --json");
     }
 
     #[test]
