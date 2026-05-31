@@ -1664,6 +1664,10 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = thinking_command_arg(trimmed) {
+            if is_thinking_json_arg(rest) {
+                print_thinking_json(&handle);
+                continue;
+            }
             if is_thinking_status_arg(rest) {
                 print_thinking_status(&handle);
                 continue;
@@ -2784,6 +2788,14 @@ fn is_thinking_status_arg(input: &str) -> bool {
     )
 }
 
+fn is_thinking_json_arg(input: &str) -> bool {
+    matches!(
+        normalize_help_command_arg(input).as_str(),
+        "json" | "--json" | "status --json" | "show --json" | "current --json"
+            | "info --json"
+    )
+}
+
 fn mode_command_arg(input: &str) -> Option<(&str, &str)> {
     for command in ["/permissions", "/mode"] {
         if input == command {
@@ -2836,6 +2848,26 @@ fn print_thinking_status(handle: &AgentSessionHandle) {
     println!("{DIM}  current:{RESET} {current}");
     println!("{DIM}  supported:{RESET} off, minimal, low, medium, high, xhigh");
     println!("{DIM}  usage:{RESET} /thinking [status|show|current|level] (also /think or /t)");
+}
+
+fn thinking_json_payload(level: ThinkingLevel) -> serde_json::Value {
+    json!({
+        "surface": "terminal",
+        "command": "thinking",
+        "aliases": ["think", "t"],
+        "current": level.to_string(),
+        "supported_levels": ["off", "minimal", "low", "medium", "high", "xhigh"],
+        "will_change": false,
+        "supported_actions": ["status", "show", "current", "info", "json", "status --json", "set"],
+    })
+}
+
+fn print_thinking_json(handle: &AgentSessionHandle) {
+    let current = handle.thinking_level().unwrap_or_default();
+    match serde_json::to_string_pretty(&thinking_json_payload(current)) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  /thinking json failed: {e}{RESET}"),
+    }
 }
 
 /// Render a previously-saved conversation in the same shape the live REPL
@@ -14610,6 +14642,17 @@ mod tests {
         assert!(is_thinking_status_arg("current"));
         assert!(is_thinking_status_arg("info"));
         assert!(!is_thinking_status_arg("high"));
+        assert!(is_thinking_json_arg("json"));
+        assert!(is_thinking_json_arg("--json"));
+        assert!(is_thinking_json_arg("status --json"));
+        assert!(is_thinking_json_arg("current --json"));
+        assert!(!is_thinking_json_arg("high"));
+        let payload = thinking_json_payload(ThinkingLevel::High);
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "thinking");
+        assert_eq!(payload["current"], "high");
+        assert_eq!(payload["will_change"], false);
+        assert_eq!(payload["supported_actions"][5], "status --json");
     }
 
     #[test]
