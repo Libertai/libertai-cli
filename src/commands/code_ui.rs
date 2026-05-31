@@ -11954,6 +11954,7 @@ fn usage_export_json(
             .collect::<Vec<_>>()
     };
     let usage = summary.map(|summary| {
+        let rates = model_token_rate_details(&summary.model);
         json!({
             "provider": summary.provider,
             "model": summary.model,
@@ -11968,6 +11969,7 @@ fn usage_export_json(
                 summary.context_high_water,
                 summary.output_total,
             ),
+            "pricing": rates,
         })
     });
     serde_json::to_string_pretty(&json!({
@@ -12144,6 +12146,21 @@ fn model_token_cost(model: &str, input_tokens: u64, output_tokens: u64) -> Optio
 }
 
 fn model_token_rates(model: &str) -> Option<(f64, f64)> {
+    model_token_rate_match(model).map(|(_, input, output)| (input, output))
+}
+
+fn model_token_rate_details(model: &str) -> Option<serde_json::Value> {
+    model_token_rate_match(model).map(|(matched, input, output)| {
+        json!({
+            "matched": matched,
+            "inputUsdPerMillion": input,
+            "outputUsdPerMillion": output,
+            "source": "libertai-cli pricing table",
+        })
+    })
+}
+
+fn model_token_rate_match(model: &str) -> Option<(&'static str, f64, f64)> {
     let m = model.to_ascii_lowercase();
     const TABLE: &[(&[&str], f64, f64)] = &[
         (&["opus-4.7", "opus 4.7"], 15.00, 75.00),
@@ -12188,7 +12205,7 @@ fn model_token_rates(model: &str) -> Option<(f64, f64)> {
     ];
     for (keys, input, output) in TABLE {
         if keys.iter().any(|key| m.contains(key)) {
-            return Some((*input, *output));
+            return Some((keys[0], *input, *output));
         }
     }
     None
@@ -15013,6 +15030,9 @@ mod tests {
         assert!(report.contains("\"aliases\": ["));
         assert!(report.contains("\"status --json\""));
         assert!(report.contains("\"export csv\""));
+        assert!(report.contains("\"pricing\""));
+        assert!(report.contains("\"inputUsdPerMillion\": 1.0"));
+        assert!(report.contains("\"outputUsdPerMillion\": 3.0"));
         assert!(report.contains("\"toolName\": \"bash\""));
         assert!(report.contains("provider-measured per-tool billing is not available"));
     }
