@@ -5917,7 +5917,7 @@ fn parse_copy_command(input: &str) -> CopyCommand {
 }
 
 fn copy_usage_text() -> &'static str {
-    "/copy [status|show|info|json|status --json|last|latest|response|assistant|assistant-response]"
+    "/copy [status|show|info|json|--json|status --json|show --json|info --json|last|latest|response|assistant|assistant-response]"
 }
 
 fn parse_hotkeys_command(input: &str) -> HotkeysCommand {
@@ -16583,10 +16583,15 @@ mod tests {
         );
         assert_eq!(parse_copy_command("status"), CopyCommand::Status);
         assert_eq!(parse_copy_command("show"), CopyCommand::Status);
+        assert_eq!(parse_copy_command("info"), CopyCommand::Status);
         assert_eq!(parse_copy_command("json"), CopyCommand::Json);
+        assert_eq!(parse_copy_command("--json"), CopyCommand::Json);
         assert_eq!(parse_copy_command("status --json"), CopyCommand::Json);
+        assert_eq!(parse_copy_command("show --json"), CopyCommand::Json);
+        assert_eq!(parse_copy_command("info --json"), CopyCommand::Json);
         assert_eq!(parse_copy_command("transcript"), CopyCommand::Usage);
-        assert!(copy_usage_text().contains("json|status --json"));
+        assert!(copy_usage_text().contains("json|--json|status --json"));
+        assert!(copy_usage_text().contains("show --json|info --json"));
         let empty_payload = copy_json_payload(&[]);
         assert_eq!(empty_payload["command"], "copy");
         assert_eq!(empty_payload["surface"], "terminal");
