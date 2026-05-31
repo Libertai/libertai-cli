@@ -46,7 +46,8 @@ use crate::commands::code_approvals::ApprovalState;
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
 use crate::commands::code_sandbox::{detect_strict_profile, format_profile_text};
 use crate::commands::code_session::{
-    build_session_options, most_recent_session, CodeSessionConfig, SessionPersistence,
+    build_session_options, list_past_sessions, most_recent_session, CodeSessionConfig,
+    SessionPersistence,
 };
 use crate::commands::code_skills::{self, SkillPillar};
 use crate::commands::code_term::TerminalApprovalUi;
@@ -1131,6 +1132,24 @@ async fn repl_loop(
                 CompactPreviewCommand::Json => print_compact_json(&cfg),
                 CompactPreviewCommand::Usage => {
                     println!("{DIM}  usage:{RESET} {}", compact_usage_text())
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = resume_preview_arg(trimmed) {
+            match parse_resume_preview_command(rest) {
+                ResumePreviewCommand::Status => {
+                    if let Err(e) = print_resume_status() {
+                        eprintln!("{DIM}  /resume status: {e:#}{RESET}");
+                    }
+                }
+                ResumePreviewCommand::Json => {
+                    if let Err(e) = print_resume_json() {
+                        eprintln!("{DIM}  /resume json: {e:#}{RESET}");
+                    }
+                }
+                ResumePreviewCommand::Usage => {
+                    println!("{DIM}  usage:{RESET} {}", resume_usage_text())
                 }
             }
             continue;
@@ -2528,6 +2547,96 @@ fn resolve_repl_resume_path(input: &str) -> Result<PathBuf> {
         anyhow::bail!("session file not found: {}", path.display());
     }
     Ok(path)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumePreviewCommand {
+    Status,
+    Json,
+    Usage,
+}
+
+fn resume_usage_text() -> &'static str {
+    "/resume [status|show|info|json|status --json|path]"
+}
+
+fn resume_preview_arg(trimmed: &str) -> Option<&str> {
+    let rest = trimmed.strip_prefix("/resume ")?.trim();
+    match normalize_help_command_arg(rest).as_str() {
+        "" | "status" | "state" | "show" | "info" | "preview" | "json" | "--json"
+        | "status --json" | "state --json" | "show --json" | "info --json"
+        | "preview --json" | "help" | "usage" => Some(rest),
+        _ => None,
+    }
+}
+
+fn parse_resume_preview_command(input: &str) -> ResumePreviewCommand {
+    match normalize_help_command_arg(input).as_str() {
+        "" | "status" | "state" | "show" | "info" | "preview" => ResumePreviewCommand::Status,
+        "json" | "--json" | "status --json" | "state --json" | "show --json"
+        | "info --json" | "preview --json" => ResumePreviewCommand::Json,
+        _ => ResumePreviewCommand::Usage,
+    }
+}
+
+fn resume_session_rows(cwd: &Path) -> Result<Vec<serde_json::Value>> {
+    let sessions = list_past_sessions(Some(cwd))?;
+    Ok(sessions
+        .into_iter()
+        .map(|session| {
+            json!({
+                "id": session.id,
+                "name": session.name,
+                "path": session.path,
+                "cwd": session.cwd,
+                "timestamp": session.timestamp,
+                "message_count": session.message_count,
+                "last_modified_ms": session.last_modified_ms,
+                "size_bytes": session.size_bytes,
+            })
+        })
+        .collect())
+}
+
+fn resume_json_payload_from_rows(cwd: &Path, sessions: Vec<serde_json::Value>) -> serde_json::Value {
+    let default_target = sessions.first().cloned();
+    json!({
+        "surface": "terminal",
+        "command": "resume",
+        "cwd": cwd.display().to_string(),
+        "available": !sessions.is_empty(),
+        "candidate_count": sessions.len(),
+        "default_target": default_target,
+        "candidates": sessions,
+        "will_replace_current_repl_session": true,
+        "accepts_path": true,
+        "path_argument": "/resume PATH",
+        "supported_actions": ["status", "state", "show", "info", "json", "status --json", "path"],
+    })
+}
+
+fn resume_json_payload() -> Result<serde_json::Value> {
+    let cwd = std::env::current_dir().context("resolve current directory")?;
+    let rows = resume_session_rows(&cwd)?;
+    Ok(resume_json_payload_from_rows(&cwd, rows))
+}
+
+fn print_resume_status() -> Result<()> {
+    let payload = resume_json_payload()?;
+    let count = payload["candidate_count"].as_u64().unwrap_or(0);
+    let default_path = payload["default_target"]["path"].as_str().unwrap_or("(none)");
+    println!(
+        "{DIM}  /resume: {count} saved session(s) for this cwd. Running `/resume` resumes the most recent target: {default_path}.{RESET}"
+    );
+    Ok(())
+}
+
+fn print_resume_json() -> Result<()> {
+    match serde_json::to_string_pretty(&resume_json_payload()?) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  /resume json failed: {e}{RESET}"),
+    }
+    Ok(())
 }
 
 async fn handle_fork(handle: &mut AgentSessionHandle, query: &str) -> Result<bool> {
@@ -13884,6 +13993,59 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("missing.jsonl");
         assert!(resolve_repl_resume_path(path.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn resume_preview_arg_preserves_explicit_paths() {
+        assert_eq!(resume_preview_arg("/resume"), None);
+        assert_eq!(resume_preview_arg("/resume status"), Some("status"));
+        assert_eq!(resume_preview_arg("/resume json"), Some("json"));
+        assert_eq!(
+            resume_preview_arg("/resume status --json"),
+            Some("status --json")
+        );
+        assert_eq!(resume_preview_arg("/resume /tmp/session.jsonl"), None);
+        assert_eq!(resume_preview_arg("/resumable status"), None);
+        assert_eq!(
+            parse_resume_preview_command("status"),
+            ResumePreviewCommand::Status
+        );
+        assert_eq!(
+            parse_resume_preview_command("json"),
+            ResumePreviewCommand::Json
+        );
+        assert_eq!(
+            parse_resume_preview_command("status --json"),
+            ResumePreviewCommand::Json
+        );
+        assert_eq!(
+            parse_resume_preview_command("path"),
+            ResumePreviewCommand::Usage
+        );
+        assert!(resume_usage_text().contains("json|status --json|path"));
+
+        let cwd = PathBuf::from("/tmp/project");
+        let payload = resume_json_payload_from_rows(
+            &cwd,
+            vec![json!({
+                "id": "s1",
+                "name": "release",
+                "path": "/tmp/project/session.jsonl",
+                "cwd": "/tmp/project",
+                "timestamp": "2026-05-31T00:00:00Z",
+                "message_count": 3,
+                "last_modified_ms": 1,
+                "size_bytes": 128,
+            })],
+        );
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "resume");
+        assert_eq!(payload["available"], true);
+        assert_eq!(payload["candidate_count"], 1);
+        assert_eq!(payload["default_target"]["id"], "s1");
+        assert_eq!(payload["will_replace_current_repl_session"], true);
+        assert_eq!(payload["accepts_path"], true);
+        assert_eq!(payload["supported_actions"][5], "status --json");
     }
 
     fn fork_messages_for_tests() -> Vec<RpcForkMessage> {
