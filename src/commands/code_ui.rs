@@ -3159,6 +3159,7 @@ fn help_json_payload() -> serde_json::Value {
                 "name": name,
                 "aliases": aliases,
                 "description": description,
+                "arg_hint": help_command_arg_hint(name),
             })
         })
         .collect();
@@ -3169,6 +3170,61 @@ fn help_json_payload() -> serde_json::Value {
         "commands": commands,
         "supported_actions": ["status", "show", "list", "commands", "json", "--json", "status --json", "show --json", "list --json", "commands --json"],
     })
+}
+
+fn help_command_arg_hint(command: &str) -> &'static str {
+    match command {
+        "abort" => "status|state|show|info|json|--json|status --json|state --json|show --json|info --json|cancel|stop|interrupt",
+        "agent" => "[--worktree|--same-cwd|--background|--detached] <name> <task>",
+        "agents" => "list|status|show <name>|json|--json|list --json|status --json|show --json|show <name> --json|create|delete|background",
+        "attach" | "image" => "<path> [prompt]",
+        "auto" => "on [turns] [goal]|off|stop|cancel|status|state|json|--json|status --json|state --json",
+        "bug" => "report|template|status|show|json|--json|status --json|show --json|template --json|report --json",
+        "changelog" | "history" => "count|list|recent|latest|status|state|show|json|--json|status --json|state --json|show --json|list --json|recent --json|latest --json",
+        "clear" | "exit" | "forget" => "status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json",
+        "compact" => "status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json|[notes]",
+        "config" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|path|open|settings|set <key> <value>|unset <key>|reset <key>",
+        "copy" => "status|show|info|json|--json|status --json|show --json|info --json|last|latest|response|assistant|assistant-response",
+        "doctor" => "status|state|show|info|health|diagnostics|diag|json|--json|status --json|state --json|show --json|info --json|health --json|diagnostics --json|diag --json",
+        "export" => "copy|save|path|json|--json|status --json|show --json|preview --json|[path]",
+        "fork" => "list|index|id",
+        "help" => "status|show|list|commands|json|--json|status --json|show --json|list --json|commands --json",
+        "hooks" | "mcp" => "status|state|show|list|diagnostics|diag|json|--json|status --json|state --json|show --json|list --json|diagnostics --json|diag --json",
+        "hotkeys" => "status|show|list|help|json|--json|status --json|show --json|list --json",
+        "ide" => "status|state|show|json|--json|status --json|state --json|show --json|open|settings|edit",
+        "init" => "--agent|json|--json|status --json|from-agent json|from-agent preview|from-agent append|from-agent merge|from-agent merge-lines|from-agent replace|[notes]",
+        "login" | "logout" => "status|show|info|json|--json|status --json|show --json|info --json|libertai|account|key|api-key|api|provider|show <provider>|show <provider> --json|info <provider>|info <provider> --json|inspect <provider>|inspect <provider> --json|provider <provider>|provider <provider> --json|<provider> --json",
+        "loop" => "[turns] [goal]|json [turns] [goal]|--json [turns] [goal]|status --json",
+        "memory" => "show|status|edit|open|list|files|file <number|path>|references|refs|verify|import <path>|import-claude|import-claude-all|clear|path|json|--json|status --json|show --json|list --json",
+        "mention" => "<path> [prompt]",
+        "mode" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only",
+        "model" => "status|show|current|json|--json|status --json|show --json|current --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model",
+        "name" => "<name>|status|state|show|current|info|json|--json|status --json|state --json|show --json|current --json|info --json",
+        "notify" => "on|enable|enabled|off|disable|disabled|clear|status|state|show|test|ping|json|--json|status --json|state --json|show --json",
+        "onboarding" => "show|preview|save|path|gist|json|--json|status --json|show --json|preview --json",
+        "output-style" => "style|status|show|current|info|list|json|--json|status --json|show --json|current --json|info --json|list --json",
+        "permissions" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only|open|settings|edit|approvals|forget|clear|reset|bypassPermissions|bypass|danger",
+        "plan" => "on|off|status",
+        "pr_comments" | "review" | "security-review" => "[instructions]",
+        "reload" => "config|session|now|fresh|json|--json|config --json|session --json|now --json|fresh --json",
+        "remember" => "project: <text>|user: <text>|feedback: <text>|reference: <text>|json <text>|--json <text>|<text> --json|status --json|show --json|preview --json",
+        "resume" => "status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json|path",
+        "sandbox" => "info|status|state|show|diagnostics|diag|json|--json|status --json|state --json|show --json|info --json|diagnostics --json|diag --json|reload",
+        "schedule" => "in <delay> <prompt>|list|status|state|json|--json|list --json|show <id>|show <id> --json|run <id>|cancel <id>|clear|stop",
+        "scoped-models" => "status|show|json|--json|status --json|show --json|patterns|clear|reset|off",
+        "send" => "status|targets|list|queued|queued --json|clear <id|target|all>|json|--json|status --json|targets --json|list --json",
+        "share" => "copy|save|path|gist|json|--json|status --json|show --json|preview --json|[path]",
+        "skills" => "list|status|show|json|--json|status --json|list --json|show --json|show <name>|open|settings|edit|enable|on <name>|disable|off <name>",
+        "status" => "show|info|current|session|json|--json|show --json|info --json|current --json|session --json",
+        "statusline" => "status|show|json|--json|status --json|show --json|template --json|info --json|template|command <shell>|command-clear|command reset|command clear|reset|clear",
+        "template" => "list|show|json|--json|status --json|list --json|show --json|<name> [args]",
+        "theme" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|system|dark|light|high-contrast",
+        "thinking" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|off|minimal|low|medium|high|xhigh",
+        "tree" => "path|json|--json|status --json|state --json|show --json|path --json",
+        "usage" => "status|show|summary|tools|json|--json|status --json|show --json|summary --json|tools --json|csv|export|export json|export csv",
+        "vim" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|on|off|enable|disable|toggle",
+        _ => "",
+    }
 }
 
 fn print_help_json() {
@@ -16893,7 +16949,22 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|row| row["name"] == "model"
-                    && row["description"] == "show or change the active model")
+                    && row["description"] == "show or change the active model"
+                    && row["arg_hint"]
+                        .as_str()
+                        .unwrap()
+                        .contains("list --json"))
+        );
+        assert!(
+            payload["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["name"] == "remember"
+                    && row["arg_hint"]
+                        .as_str()
+                        .unwrap()
+                        .contains("preview --json"))
         );
     }
 
