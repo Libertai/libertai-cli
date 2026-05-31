@@ -9708,8 +9708,69 @@ fn print_config_status(cfg: &LibertaiConfig) {
     println!();
 }
 
+fn config_status_payload(cfg: &LibertaiConfig) -> serde_json::Value {
+    let user_prompt_hooks = count_runnable_hooks(&cfg.hooks.user_prompt_submit);
+    let pre_tool_hooks = count_runnable_hooks(&cfg.hooks.pre_tool_use);
+    let post_tool_hooks = count_runnable_hooks(&cfg.hooks.post_tool_use);
+    let subagent_stop_hooks = count_runnable_hooks(&cfg.hooks.subagent_stop);
+    let session_start_hooks = count_runnable_hooks(&cfg.hooks.session_start);
+    let stop_hooks = count_runnable_hooks(&cfg.hooks.stop);
+    let session_end_hooks = count_runnable_hooks(&cfg.hooks.session_end);
+    let notification_hooks = count_runnable_hooks(&cfg.hooks.notification);
+    let config_path = crate::config::config_path()
+        .ok()
+        .map(|path| path.display().to_string());
+    json!({
+        "surface": "terminal",
+        "api_base": cfg.api_base,
+        "account_base": cfg.account_base,
+        "config_path": config_path,
+        "defaults": {
+            "chat_model": cfg.default_chat_model,
+            "code_provider": cfg.default_code_provider,
+            "code_model": cfg.default_code_model,
+            "image_model": cfg.default_image_model,
+        },
+        "smart_approvals": {
+            "enabled": cfg.smart_approval_enabled,
+            "model": cfg.smart_approval_model,
+        },
+        "auto_compaction": {
+            "enabled": cfg.code_auto_compaction_enabled,
+            "reserve_tokens": cfg.code_compaction_reserve_tokens,
+            "keep_recent_tokens": cfg.code_compaction_keep_recent_tokens,
+        },
+        "turn_notifications": cfg.code_turn_notifications,
+        "hooks": {
+            "user_prompt_submit": user_prompt_hooks,
+            "pre_tool_use": pre_tool_hooks,
+            "post_tool_use": post_tool_hooks,
+            "subagent_stop": subagent_stop_hooks,
+            "session_start": session_start_hooks,
+            "stop": stop_hooks,
+            "session_end": session_end_hooks,
+            "notification": notification_hooks,
+        },
+        "auth": {
+            "logged_in": cfg.auth.api_key.is_some(),
+            "api_key": cfg.auth.api_key.as_deref().map(mask_key),
+        },
+    })
+}
+
+fn print_config_status_json(cfg: &LibertaiConfig) {
+    match serde_json::to_string_pretty(&config_status_payload(cfg)) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("{DIM}  /config json: {e:#}{RESET}"),
+    }
+}
+
 fn handle_repl_config_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Result<()> {
     let action = raw.trim();
+    if is_config_json_alias(action) {
+        print_config_status_json(cfg);
+        return Ok(());
+    }
     if is_config_status_alias(action) {
         print_config_status(cfg);
         return Ok(());
@@ -9753,6 +9814,13 @@ fn is_config_status_alias(action: &str) -> bool {
     matches!(
         action.trim().to_ascii_lowercase().as_str(),
         "" | "status" | "show" | "current" | "info"
+    )
+}
+
+fn is_config_json_alias(action: &str) -> bool {
+    matches!(
+        action.trim().to_ascii_lowercase().as_str(),
+        "json" | "--json" | "status --json" | "show --json" | "current --json" | "info --json"
     )
 }
 
@@ -12712,6 +12780,13 @@ mod tests {
         assert!(is_config_status_alias("info"));
         assert!(!is_config_status_alias("path"));
         assert!(!is_config_status_alias("set code_turn_notifications true"));
+        assert!(is_config_json_alias("json"));
+        assert!(is_config_json_alias("--json"));
+        assert!(is_config_json_alias("status --json"));
+        assert!(is_config_json_alias("show --json"));
+        assert!(is_config_json_alias("current --json"));
+        assert!(is_config_json_alias("info --json"));
+        assert!(!is_config_json_alias("path --json"));
     }
 
     #[test]
