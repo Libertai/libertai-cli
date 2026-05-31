@@ -1711,8 +1711,8 @@ async fn repl_loop(
         if let Some((command, rest)) = mode_command_arg(trimmed) {
             match parse_permissions_command(rest) {
                 PermissionsCommand::Show => print_permissions_status(mode.get(), &approvals),
-                PermissionsCommand::Json if command == "/mode" => print_mode_json(mode.get()),
-                PermissionsCommand::Json => print_permissions_json(mode.get(), &approvals),
+                PermissionsCommand::Json if command == "/mode" => print_mode_json(mode.get(), rest),
+                PermissionsCommand::Json => print_permissions_json(mode.get(), &approvals, rest),
                 PermissionsCommand::Open => print_permissions_open_hint(),
                 PermissionsCommand::Set(new_mode) => {
                     mode.set(new_mode);
@@ -4588,13 +4588,18 @@ fn print_permissions_status(mode: Mode, approvals: &ApprovalState) {
     println!("{DIM}  use /permissions bypassPermissions to explain the native safety stance.{RESET}");
 }
 
-fn permissions_json_payload(mode: Mode, approvals: &ApprovalState) -> serde_json::Value {
+fn permissions_json_payload(
+    mode: Mode,
+    approvals: &ApprovalState,
+    query: &str,
+) -> serde_json::Value {
     let allow_rules_path = crate::config::allow_rules_path()
         .ok()
         .map(|path| path.display().to_string());
     json!({
         "surface": "terminal",
         "command": "permissions",
+        "query": query.trim(),
         "mode": mode_label(mode),
         "remembered_approvals": approvals.always_rules().len(),
         "native_bypass_permissions": false,
@@ -4613,17 +4618,18 @@ fn permissions_json_payload(mode: Mode, approvals: &ApprovalState) -> serde_json
     })
 }
 
-fn print_permissions_json(mode: Mode, approvals: &ApprovalState) {
-    match serde_json::to_string_pretty(&permissions_json_payload(mode, approvals)) {
+fn print_permissions_json(mode: Mode, approvals: &ApprovalState, query: &str) {
+    match serde_json::to_string_pretty(&permissions_json_payload(mode, approvals, query)) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  /permissions json: {e:#}{RESET}"),
     }
 }
 
-fn mode_json_payload(mode: Mode) -> serde_json::Value {
+fn mode_json_payload(mode: Mode, query: &str) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "mode",
+        "query": query.trim(),
         "mode": mode_label(mode),
         "behavior": match mode {
             Mode::Normal => "mutating tools ask before running",
@@ -4640,8 +4646,8 @@ fn mode_json_payload(mode: Mode) -> serde_json::Value {
     })
 }
 
-fn print_mode_json(mode: Mode) {
-    match serde_json::to_string_pretty(&mode_json_payload(mode)) {
+fn print_mode_json(mode: Mode, query: &str) {
+    match serde_json::to_string_pretty(&mode_json_payload(mode, query)) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  /mode json: {e:#}{RESET}"),
     }
@@ -17936,16 +17942,18 @@ mod tests {
         assert!(mode_usage_text().contains("normal|acceptEdits"));
         assert!(mode_usage_text().contains("readonly|read-only"));
         let approvals = ApprovalState::new();
-        let payload = permissions_json_payload(Mode::Plan, &approvals);
+        let payload = permissions_json_payload(Mode::Plan, &approvals, "status --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "permissions");
+        assert_eq!(payload["query"], "status --json");
         assert_eq!(payload["mode"], "plan");
         assert_eq!(payload["remembered_approvals"], 0);
         assert_eq!(payload["native_bypass_permissions"], false);
         assert_eq!(payload["supported_actions"][5], "--json");
-        let mode_payload = mode_json_payload(Mode::AcceptEdits);
+        let mode_payload = mode_json_payload(Mode::AcceptEdits, "current --json");
         assert_eq!(mode_payload["surface"], "terminal");
         assert_eq!(mode_payload["command"], "mode");
+        assert_eq!(mode_payload["query"], "current --json");
         assert_eq!(mode_payload["mode"], "accept-edits");
         assert_eq!(mode_payload["supported_actions"][5], "--json");
     }
