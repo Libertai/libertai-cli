@@ -5427,7 +5427,7 @@ enum CompactPreviewCommand {
 }
 
 fn compact_usage_text() -> &'static str {
-    "/compact [status|show|info|json|status --json|notes]"
+    "/compact [status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json|notes]"
 }
 
 fn compact_preview_arg(trimmed: &str) -> Option<&str> {
@@ -15840,14 +15840,27 @@ mod tests {
             CompactPreviewCommand::Json
         );
         assert_eq!(
+            parse_compact_preview_command("--json"),
+            CompactPreviewCommand::Json
+        );
+        assert_eq!(
             parse_compact_preview_command("status --json"),
+            CompactPreviewCommand::Json
+        );
+        assert_eq!(
+            parse_compact_preview_command("show --json"),
+            CompactPreviewCommand::Json
+        );
+        assert_eq!(
+            parse_compact_preview_command("preview --json"),
             CompactPreviewCommand::Json
         );
         assert_eq!(
             parse_compact_preview_command("notes please"),
             CompactPreviewCommand::Usage
         );
-        assert!(compact_usage_text().contains("json|status --json|notes"));
+        assert!(compact_usage_text().contains("json|--json|status --json"));
+        assert!(compact_usage_text().contains("show --json|info --json|preview --json|notes"));
         let cfg = LibertaiConfig::default();
         let payload = compact_json_payload(&cfg);
         assert_eq!(payload["surface"], "terminal");
