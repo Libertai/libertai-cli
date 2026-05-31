@@ -1034,7 +1034,7 @@ async fn repl_loop(
                 }
                 ReloadCommand::Usage => {
                     println!(
-                        "{DIM}  usage:{RESET} /reload [config|session|now|fresh|json|config --json|session --json|now --json|fresh --json]"
+                        "{DIM}  usage:{RESET} /reload [config|session|now|fresh|json|--json|config --json|session --json|now --json|fresh --json]"
                     );
                 }
             }
@@ -5966,7 +5966,7 @@ fn parse_doctor_command(input: &str) -> DoctorCommand {
 }
 
 fn doctor_usage_text() -> &'static str {
-    "/doctor [status|state|show|info|health|diagnostics|diag|json|status --json|diagnostics --json|diag --json]"
+    "/doctor [status|state|show|info|health|diagnostics|diag|json|--json|status --json|state --json|show --json|info --json|health --json|diagnostics --json|diag --json]"
 }
 
 fn parse_abort_command(input: &str) -> AbortCommand {
@@ -11235,7 +11235,7 @@ fn reload_preview_json_payload(
             "code_model": cfg.default_code_model,
         },
         "aliases": ["config", "session", "now", "fresh"],
-        "supported_actions": ["config", "session", "now", "fresh", "json", "config --json", "session --json", "now --json", "fresh --json"],
+        "supported_actions": ["config", "session", "now", "fresh", "json", "--json", "config --json", "session --json", "now --json", "fresh --json"],
     })
 }
 
@@ -11559,7 +11559,7 @@ async fn print_doctor_json(
         "surface": "terminal",
         "command": "doctor",
         "aliases": ["doctor"],
-        "supported_actions": ["status", "state", "show", "info", "health", "diagnostics", "diag", "json", "status --json", "state --json", "show --json", "info --json", "health --json", "diagnostics --json", "diag --json"],
+        "supported_actions": ["status", "state", "show", "info", "health", "diagnostics", "diag", "json", "--json", "status --json", "state --json", "show --json", "info --json", "health --json", "diagnostics --json", "diag --json"],
         "cwd": cwd_label,
         "provider": provider,
         "model": model,
@@ -16622,7 +16622,8 @@ mod tests {
         assert_eq!(payload["command"], "reload");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["action"], "fresh");
-        assert_eq!(payload["supported_actions"][8], "fresh --json");
+        assert_eq!(payload["supported_actions"][5], "--json");
+        assert_eq!(payload["supported_actions"][9], "fresh --json");
     }
 
     #[test]
@@ -16675,7 +16676,10 @@ mod tests {
         assert_eq!(parse_doctor_command("open"), DoctorCommand::Usage);
         assert!(doctor_usage_text().contains("status|state|show|info"));
         assert!(doctor_usage_text().contains("health|diagnostics|diag|json"));
+        assert!(doctor_usage_text().contains("json|--json|status --json"));
         assert!(doctor_usage_text().contains("status --json"));
+        assert!(doctor_usage_text().contains("state --json|show --json|info --json"));
+        assert!(doctor_usage_text().contains("health --json"));
         assert!(doctor_usage_text().contains("diagnostics --json"));
         assert!(doctor_usage_text().contains("diag --json"));
     }
