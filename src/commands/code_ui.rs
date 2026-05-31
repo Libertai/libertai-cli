@@ -5929,7 +5929,7 @@ fn parse_hotkeys_command(input: &str) -> HotkeysCommand {
 }
 
 fn hotkeys_usage_text() -> &'static str {
-    "/hotkeys [status|show|list|help|json|status --json]"
+    "/hotkeys [status|show|list|help|json|--json|status --json|show --json|list --json]"
 }
 
 fn parse_reload_command(input: &str) -> ReloadCommand {
@@ -16613,9 +16613,13 @@ mod tests {
         assert_eq!(parse_hotkeys_command("list"), HotkeysCommand::Show);
         assert_eq!(parse_hotkeys_command("help"), HotkeysCommand::Show);
         assert_eq!(parse_hotkeys_command("json"), HotkeysCommand::Json);
+        assert_eq!(parse_hotkeys_command("--json"), HotkeysCommand::Json);
         assert_eq!(parse_hotkeys_command("status --json"), HotkeysCommand::Json);
+        assert_eq!(parse_hotkeys_command("show --json"), HotkeysCommand::Json);
+        assert_eq!(parse_hotkeys_command("list --json"), HotkeysCommand::Json);
         assert_eq!(parse_hotkeys_command("edit"), HotkeysCommand::Usage);
-        assert!(hotkeys_usage_text().contains("json|status --json"));
+        assert!(hotkeys_usage_text().contains("json|--json|status --json"));
+        assert!(hotkeys_usage_text().contains("show --json|list --json"));
         let payload = hotkeys_json_payload();
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "hotkeys");
