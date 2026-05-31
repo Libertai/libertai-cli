@@ -973,7 +973,7 @@ async fn repl_loop(
             match parse_copy_command(rest) {
                 CopyCommand::LastAssistant => copy_last_assistant(&handle).await,
                 CopyCommand::Status => print_copy_status(&handle).await,
-                CopyCommand::Json => print_copy_json(&handle).await,
+                CopyCommand::Json => print_copy_json(&handle, rest).await,
                 CopyCommand::Usage => {
                     println!("{DIM}  usage:{RESET} {}", copy_usage_text());
                 }
@@ -4070,12 +4070,13 @@ async fn print_copy_status(handle: &AgentSessionHandle) {
     println!("{DIM}  usage:{RESET} {}", copy_usage_text());
 }
 
-fn copy_json_payload(messages: &[Message]) -> serde_json::Value {
+fn copy_json_payload(messages: &[Message], query: &str) -> serde_json::Value {
     let response = last_assistant_text(messages);
     let bytes = response.as_ref().map(|text| text.len()).unwrap_or(0);
     json!({
         "command": "copy",
         "surface": "terminal",
+        "query": query.trim(),
         "aliases": ["copy"],
         "target": "latest_assistant_response",
         "available": response.is_some(),
@@ -4087,9 +4088,9 @@ fn copy_json_payload(messages: &[Message]) -> serde_json::Value {
     })
 }
 
-async fn print_copy_json(handle: &AgentSessionHandle) {
+async fn print_copy_json(handle: &AgentSessionHandle, query: &str) {
     match copy_messages(handle).await {
-        Ok(messages) => match serde_json::to_string_pretty(&copy_json_payload(&messages)) {
+        Ok(messages) => match serde_json::to_string_pretty(&copy_json_payload(&messages, query)) {
             Ok(text) => println!("{text}"),
             Err(e) => eprintln!("{DIM}  /copy json failed: {e}{RESET}"),
         },
@@ -16881,9 +16882,10 @@ mod tests {
         assert_eq!(parse_copy_command("transcript"), CopyCommand::Usage);
         assert!(copy_usage_text().contains("json|--json|status --json"));
         assert!(copy_usage_text().contains("show --json|info --json"));
-        let empty_payload = copy_json_payload(&[]);
+        let empty_payload = copy_json_payload(&[], "info --json");
         assert_eq!(empty_payload["command"], "copy");
         assert_eq!(empty_payload["surface"], "terminal");
+        assert_eq!(empty_payload["query"], "info --json");
         assert_eq!(empty_payload["aliases"][0], "copy");
         assert_eq!(empty_payload["available"], false);
         assert_eq!(empty_payload["copy_mechanism"], "osc52");
