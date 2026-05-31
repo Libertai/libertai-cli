@@ -12898,11 +12898,53 @@ fn print_status_line_status(cfg: &LibertaiConfig) {
 }
 
 fn status_line_usage_text() -> &'static str {
-    "/statusline|/status-line <status|show|template|command <shell>|command-clear|command reset|command clear|reset|clear>"
+    "/statusline|/status-line <status|show|json|status --json|template|command <shell>|command-clear|command reset|command clear|reset|clear>"
+}
+
+fn is_status_line_json_action(action: &str) -> bool {
+    matches!(
+        action.trim().to_ascii_lowercase().as_str(),
+        "json"
+            | "--json"
+            | "status --json"
+            | "show --json"
+            | "template --json"
+            | "info --json"
+    )
+}
+
+fn status_line_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
+    let template = cfg.status_line_template.trim();
+    let command = cfg.status_line_command.trim();
+    json!({
+        "surface": "terminal",
+        "command": "statusline",
+        "aliases": ["status-line"],
+        "template": if template.is_empty() { serde_json::Value::Null } else { json!(template) },
+        "effective_template": if template.is_empty() { "default" } else { template },
+        "status_command": if command.is_empty() { serde_json::Value::Null } else { json!(command) },
+        "tokens": STATUS_LINE_TOKENS,
+        "template_max_chars": STATUS_LINE_TEMPLATE_MAX_CHARS,
+        "command_max_chars": STATUS_LINE_COMMAND_MAX_CHARS,
+        "will_write": false,
+        "will_run_command": false,
+        "supported_actions": ["status", "show", "json", "status --json", "template", "command <shell>", "command-clear", "command reset", "command clear", "reset", "clear"],
+    })
+}
+
+fn print_status_line_json(cfg: &LibertaiConfig) {
+    match serde_json::to_string_pretty(&status_line_json_payload(cfg)) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("{DIM}  /statusline json failed: {e}{RESET}"),
+    }
 }
 
 fn handle_status_line_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Result<()> {
     let action = raw.trim();
+    if is_status_line_json_action(action) {
+        print_status_line_json(cfg);
+        return Ok(());
+    }
     if action.is_empty()
         || action.eq_ignore_ascii_case("status")
         || action.eq_ignore_ascii_case("show")
@@ -14306,8 +14348,32 @@ mod tests {
         );
         assert!(status_line_command_arg("/status").is_none());
         assert!(status_line_usage_text().contains("/statusline|/status-line"));
+        assert!(status_line_usage_text().contains("json|status --json"));
         assert!(status_line_usage_text().contains("command reset|command clear"));
         assert!(status_line_usage_text().contains("reset|clear"));
+        assert!(is_status_line_json_action("json"));
+        assert!(is_status_line_json_action("status --json"));
+        assert!(is_status_line_json_action("show --json"));
+        assert!(!is_status_line_json_action("status"));
+    }
+
+    #[test]
+    fn status_line_json_payload_reports_read_only_preview() {
+        let cfg = LibertaiConfig {
+            status_line_template: "{project} {model}".to_string(),
+            status_line_command: "git branch --show-current".to_string(),
+            ..Default::default()
+        };
+        let payload = status_line_json_payload(&cfg);
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "statusline");
+        assert_eq!(payload["aliases"][0], "status-line");
+        assert_eq!(payload["template"], "{project} {model}");
+        assert_eq!(payload["status_command"], "git branch --show-current");
+        assert_eq!(payload["will_write"], false);
+        assert_eq!(payload["will_run_command"], false);
+        assert_eq!(payload["tokens"][0], "project");
+        assert_eq!(payload["supported_actions"][3], "status --json");
     }
 
     #[test]
