@@ -5052,7 +5052,7 @@ fn model_json_payload(
         },
         "available_models": available_models,
         "aliases": ["model"],
-        "supported_actions": ["status", "show", "current", "json", "status --json", "show --json", "current --json", "list", "ls", "list --json", "ls --json", "next", "cycle", "prev", "previous", "back", "set <model>", "set <provider/model>"],
+        "supported_actions": ["status", "show", "current", "json", "--json", "status --json", "show --json", "current --json", "list", "ls", "list --json", "ls --json", "next", "cycle", "prev", "previous", "back", "set <model>", "set <provider/model>"],
     })
 }
 
@@ -17798,8 +17798,9 @@ mod tests {
         assert_eq!(payload["current"]["id"], "libertai/qwen3");
         assert_eq!(payload["scope"]["is_scoped"], true);
         assert_eq!(payload["available_models"][0], "qwen3");
-        assert_eq!(payload["supported_actions"][4], "status --json");
-        assert_eq!(payload["supported_actions"][9], "list --json");
+        assert_eq!(payload["supported_actions"][4], "--json");
+        assert_eq!(payload["supported_actions"][5], "status --json");
+        assert_eq!(payload["supported_actions"][10], "list --json");
     }
 
     #[test]
