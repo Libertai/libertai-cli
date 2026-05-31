@@ -4597,11 +4597,11 @@ enum LoginSlashTarget<'a> {
 }
 
 fn login_usage_text() -> &'static str {
-    "/login [status|json|status --json|show|info|libertai|account|key|api-key|api|provider|show <provider>|show <provider> --json|info <provider>|inspect <provider>|provider <provider>]"
+    "/login [status|show|info|json|--json|status --json|show --json|info --json|libertai|account|key|api-key|api|provider|show <provider>|show <provider> --json|info <provider>|info <provider> --json|inspect <provider>|inspect <provider> --json|provider <provider>|provider <provider> --json|<provider> --json]"
 }
 
 fn logout_usage_text() -> &'static str {
-    "/logout [status|json|status --json|show|info|libertai|account|key|api-key|api|provider|show <provider>|show <provider> --json|info <provider>|inspect <provider>|provider <provider>]"
+    "/logout [status|show|info|json|--json|status --json|show --json|info --json|libertai|account|key|api-key|api|provider|show <provider>|show <provider> --json|info <provider>|info <provider> --json|inspect <provider>|inspect <provider> --json|provider <provider>|provider <provider> --json|<provider> --json]"
 }
 
 fn parse_login_slash_target(query: &str) -> LoginSlashTarget<'_> {
@@ -4765,6 +4765,7 @@ fn login_supported_actions() -> &'static [&'static str] {
         "show",
         "info",
         "json",
+        "--json",
         "status --json",
         "show --json",
         "info --json",
@@ -4777,8 +4778,11 @@ fn login_supported_actions() -> &'static [&'static str] {
         "show provider",
         "show provider --json",
         "info provider",
+        "info provider --json",
         "inspect provider",
+        "inspect provider --json",
         "provider provider",
+        "provider provider --json",
         "provider --json",
     ]
 }
@@ -17701,14 +17705,22 @@ mod tests {
             LoginSlashTarget::ProviderStatus("libertai")
         );
         assert!(login_usage_text().contains("account|key|api-key|api"));
+        assert!(login_usage_text().contains("json|--json|status --json"));
+        assert!(login_usage_text().contains("show --json|info --json"));
         assert!(login_usage_text().contains("status --json"));
         assert!(login_usage_text().contains("show <provider> --json"));
+        assert!(login_usage_text().contains("inspect <provider> --json"));
+        assert!(login_usage_text().contains("provider <provider> --json"));
         assert!(login_usage_text().contains("show <provider>"));
         assert!(login_usage_text().contains("inspect <provider>"));
         assert!(login_usage_text().contains("provider <provider>"));
         assert!(logout_usage_text().contains("account|key|api-key|api"));
+        assert!(logout_usage_text().contains("json|--json|status --json"));
+        assert!(logout_usage_text().contains("show --json|info --json"));
         assert!(logout_usage_text().contains("status --json"));
         assert!(logout_usage_text().contains("show <provider> --json"));
+        assert!(logout_usage_text().contains("inspect <provider> --json"));
+        assert!(logout_usage_text().contains("provider <provider> --json"));
         assert!(logout_usage_text().contains("show <provider>"));
         assert!(logout_usage_text().contains("inspect <provider>"));
         assert!(logout_usage_text().contains("provider <provider>"));
@@ -17717,13 +17729,14 @@ mod tests {
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "login");
         assert_eq!(payload["aliases"][0], "login");
-        assert_eq!(payload["supported_actions"][4], "status --json");
-        assert_eq!(payload["supported_actions"][14], "show provider --json");
+        assert_eq!(payload["supported_actions"][4], "--json");
+        assert_eq!(payload["supported_actions"][5], "status --json");
+        assert_eq!(payload["supported_actions"][15], "show provider --json");
         let provider_payload = provider_login_payload("logout", "anthropic", &cfg);
         assert_eq!(provider_payload["command"], "logout");
         assert_eq!(provider_payload["provider"], "anthropic");
         assert_eq!(provider_payload["managed_by_desktop_settings"], true);
-        assert_eq!(provider_payload["supported_actions"][18], "provider --json");
+        assert_eq!(provider_payload["supported_actions"][22], "provider --json");
     }
 
     #[test]
