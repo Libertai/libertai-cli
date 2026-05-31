@@ -2020,6 +2020,17 @@ async fn repl_loop(
         }
         if let Some(rest) = trimmed.strip_prefix("/remember") {
             let text = rest.trim();
+            if let Some(note) = remember_json_note_arg(text) {
+                let cwd = match std::env::current_dir() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("{DIM}  /remember json: could not resolve cwd: {e}{RESET}");
+                        continue;
+                    }
+                };
+                print_remember_json(&cwd, note);
+                continue;
+            }
             if text.is_empty() {
                 println!(
                     "{DIM}  usage: /remember [user:|feedback:|project:|reference:] <text>{RESET}"
@@ -8051,6 +8062,45 @@ fn print_memory_summary(content: &str) {
     );
 }
 
+fn remember_json_note_arg(input: &str) -> Option<&str> {
+    let raw = input.trim();
+    let lower = raw.to_ascii_lowercase();
+    match lower.as_str() {
+        "json" | "--json" | "status --json" | "preview --json" | "show --json" => Some(""),
+        _ if lower.starts_with("json ") => Some(raw[5..].trim()),
+        _ if lower.starts_with("--json ") => Some(raw[7..].trim()),
+        _ if lower.ends_with(" --json") => Some(raw[..raw.len() - 7].trim()),
+        _ => None,
+    }
+}
+
+fn remember_json_payload(cwd: &Path, input: &str) -> serde_json::Value {
+    let parsed = crate::commands::code_memory::parse_memory_note(input);
+    let memory = crate::commands::code_memory::read_memory(cwd).ok();
+    let path = memory.as_ref().map(|doc| doc.path.clone());
+    let valid = !parsed.text.trim().is_empty();
+    json!({
+        "command": "remember",
+        "surface": "terminal",
+        "input": input,
+        "kind": parsed.kind.label(),
+        "text": parsed.text,
+        "valid": valid,
+        "path": path,
+        "entry_preview": if valid { json!(format!("[{}] {}", parsed.kind.label(), parsed.text)) } else { serde_json::Value::Null },
+        "will_write": false,
+        "supported_kinds": ["project", "user", "feedback", "reference"],
+        "supported_actions": ["project: <text>", "user: <text>", "feedback: <text>", "reference: <text>", "json <text>", "--json <text>", "<text> --json", "status --json"],
+    })
+}
+
+fn print_remember_json(cwd: &Path, input: &str) {
+    match serde_json::to_string_pretty(&remember_json_payload(cwd, input)) {
+        Ok(s) => println!("{s}"),
+        Err(e) => eprintln!("{DIM}  /remember json failed: {e}{RESET}"),
+    }
+}
+
 fn print_agents() {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
@@ -14049,6 +14099,31 @@ mod tests {
             ),
             (1, 1, 1, 1)
         );
+    }
+
+    #[test]
+    fn remember_json_arg_and_payload_preview_without_writing() {
+        assert_eq!(remember_json_note_arg("json"), Some(""));
+        assert_eq!(
+            remember_json_note_arg("json feedback: too verbose"),
+            Some("feedback: too verbose")
+        );
+        assert_eq!(
+            remember_json_note_arg("reference: docs --json"),
+            Some("reference: docs")
+        );
+        assert_eq!(remember_json_note_arg("project: keep tests"), None);
+
+        let temp = tempfile::tempdir().unwrap();
+        let payload = remember_json_payload(temp.path(), "feedback: too verbose");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "remember");
+        assert_eq!(payload["kind"], "feedback");
+        assert_eq!(payload["text"], "too verbose");
+        assert_eq!(payload["valid"], true);
+        assert_eq!(payload["will_write"], false);
+        assert_eq!(payload["supported_kinds"][3], "reference");
+        assert_eq!(payload["supported_actions"][7], "status --json");
     }
 
     #[test]
