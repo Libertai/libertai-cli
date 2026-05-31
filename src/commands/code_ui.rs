@@ -277,6 +277,7 @@ enum CopyCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HotkeysCommand {
     Show,
+    Json,
     Usage,
 }
 
@@ -954,9 +955,11 @@ async fn repl_loop(
         if let Some(rest) = hotkeys_command_arg(trimmed) {
             match parse_hotkeys_command(rest) {
                 HotkeysCommand::Show => print_hotkeys(),
+                HotkeysCommand::Json => print_hotkeys_json(),
                 HotkeysCommand::Usage => {
                     println!(
-                        "{DIM}  usage:{RESET} /hotkeys, /hotkeys status, /hotkeys show, or /hotkeys list"
+                        "{DIM}  usage:{RESET} {}",
+                        hotkeys_usage_text()
                     );
                 }
             }
@@ -2795,6 +2798,31 @@ fn print_hotkeys() {
     println!("{BOLD}hotkeys{RESET}");
     for line in hotkey_lines() {
         println!("{DIM}  {line}{RESET}");
+    }
+}
+
+fn hotkeys_json_payload() -> serde_json::Value {
+    let shortcuts: Vec<serde_json::Value> = hotkey_lines()
+        .into_iter()
+        .map(|line| {
+            let (key, action) = line.split_once(" — ").unwrap_or((line, ""));
+            json!({
+                "key": key,
+                "action": action,
+            })
+        })
+        .collect();
+    json!({
+        "surface": "terminal",
+        "command": "hotkeys",
+        "shortcuts": shortcuts,
+    })
+}
+
+fn print_hotkeys_json() {
+    match serde_json::to_string_pretty(&hotkeys_json_payload()) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  /hotkeys json: {e:#}{RESET}"),
     }
 }
 
@@ -4747,12 +4775,13 @@ fn copy_usage_text() -> &'static str {
 fn parse_hotkeys_command(input: &str) -> HotkeysCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "show" | "list" | "help" => HotkeysCommand::Show,
+        "json" | "--json" | "status --json" | "show --json" | "list --json" => HotkeysCommand::Json,
         _ => HotkeysCommand::Usage,
     }
 }
 
 fn hotkeys_usage_text() -> &'static str {
-    "/hotkeys [status|show|list|help]"
+    "/hotkeys [status|show|list|help|json]"
 }
 
 fn parse_reload_command(input: &str) -> ReloadCommand {
@@ -13632,8 +13661,20 @@ mod tests {
         assert_eq!(parse_hotkeys_command(""), HotkeysCommand::Show);
         assert_eq!(parse_hotkeys_command("list"), HotkeysCommand::Show);
         assert_eq!(parse_hotkeys_command("help"), HotkeysCommand::Show);
+        assert_eq!(parse_hotkeys_command("json"), HotkeysCommand::Json);
+        assert_eq!(parse_hotkeys_command("status --json"), HotkeysCommand::Json);
         assert_eq!(parse_hotkeys_command("edit"), HotkeysCommand::Usage);
-        assert!(hotkeys_usage_text().contains("status|show|list|help"));
+        assert!(hotkeys_usage_text().contains("status|show|list|help|json"));
+        let payload = hotkeys_json_payload();
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "hotkeys");
+        assert!(
+            payload["shortcuts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["key"] == "Shift+Tab")
+        );
 
         assert_eq!(reload_command_arg("/reload"), Some(""));
         assert_eq!(reload_command_arg("/reload config"), Some("config"));
