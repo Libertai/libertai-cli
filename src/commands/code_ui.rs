@@ -8012,7 +8012,7 @@ fn print_memory(action: &str) {
         }
     };
     if is_memory_json_action(action) {
-        print_memory_json(&doc);
+        print_memory_json(&doc, action);
         return;
     }
     if action.eq_ignore_ascii_case("path") {
@@ -8067,6 +8067,37 @@ fn is_memory_json_action(action: &str) -> bool {
         action.trim().to_ascii_lowercase().as_str(),
         "json" | "--json" | "status --json" | "show --json"
     )
+}
+
+fn memory_supported_actions() -> &'static [&'static str] {
+    &[
+        "show",
+        "status",
+        "json",
+        "status --json",
+        "show --json",
+        "--json",
+        "path",
+        "open",
+        "edit",
+        "editor",
+        "files",
+        "list",
+        "file selector",
+        "read selector",
+        "show-file selector",
+        "references",
+        "refs",
+        "verify",
+        "clear",
+        "import path",
+        "import-claude",
+        "migrate-claude",
+        "claude",
+        "import-claude-all",
+        "migrate-claude-all",
+        "claude-all",
+    ]
 }
 
 fn read_memory_sidecar_selection(
@@ -8180,12 +8211,17 @@ fn memory_entry_counts(content: &str) -> (usize, usize, usize, usize) {
     (user, feedback, project, reference)
 }
 
-fn print_memory_json(doc: &crate::commands::code_memory::MemoryDocument) {
+fn memory_json_payload(
+    doc: &crate::commands::code_memory::MemoryDocument,
+    action: &str,
+) -> serde_json::Value {
     let (user, feedback, project, reference) = memory_entry_counts(&doc.content);
     let entry_count = user + feedback + project + reference;
-    let payload = json!({
+    json!({
         "command": "memory",
         "surface": "terminal",
+        "aliases": ["memory"],
+        "query": action.trim(),
         "path": doc.path,
         "exists": doc.exists,
         "entry_count": entry_count,
@@ -8196,8 +8232,12 @@ fn print_memory_json(doc: &crate::commands::code_memory::MemoryDocument) {
             "reference": reference,
         },
         "content_bytes": doc.content.len(),
-        "supported_actions": ["show", "status", "json", "status --json", "path", "files", "references", "clear", "import"],
-    });
+        "supported_actions": memory_supported_actions(),
+    })
+}
+
+fn print_memory_json(doc: &crate::commands::code_memory::MemoryDocument, action: &str) {
+    let payload = memory_json_payload(doc, action);
     match serde_json::to_string_pretty(&payload) {
         Ok(s) => println!("{s}"),
         Err(e) => eprintln!("{DIM}  /memory json failed: {e}{RESET}"),
@@ -14279,6 +14319,21 @@ mod tests {
             ),
             (1, 1, 1, 1)
         );
+        let doc = crate::commands::code_memory::MemoryDocument {
+            path: PathBuf::from("/tmp/MEMORY.md"),
+            content: "- [user] remember me\n- [reference] ./README.md\n".to_string(),
+            exists: true,
+        };
+        let payload = memory_json_payload(&doc, "status --json");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "memory");
+        assert_eq!(payload["aliases"][0], "memory");
+        assert_eq!(payload["query"], "status --json");
+        assert_eq!(payload["entries"]["user"], 1);
+        assert_eq!(payload["entries"]["reference"], 1);
+        assert_eq!(payload["supported_actions"][4], "show --json");
+        assert_eq!(payload["supported_actions"][19], "import path");
+        assert_eq!(payload["supported_actions"][23], "import-claude-all");
     }
 
     #[test]
