@@ -3389,6 +3389,7 @@ fn hotkeys_json_payload() -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "hotkeys",
+        "supported_actions": ["status", "show", "list", "help", "json", "status --json"],
         "shortcuts": shortcuts,
     })
 }
@@ -5775,7 +5776,7 @@ fn parse_hotkeys_command(input: &str) -> HotkeysCommand {
 }
 
 fn hotkeys_usage_text() -> &'static str {
-    "/hotkeys [status|show|list|help|json]"
+    "/hotkeys [status|show|list|help|json|status --json]"
 }
 
 fn parse_reload_command(input: &str) -> ReloadCommand {
@@ -15920,10 +15921,11 @@ mod tests {
         assert_eq!(parse_hotkeys_command("json"), HotkeysCommand::Json);
         assert_eq!(parse_hotkeys_command("status --json"), HotkeysCommand::Json);
         assert_eq!(parse_hotkeys_command("edit"), HotkeysCommand::Usage);
-        assert!(hotkeys_usage_text().contains("status|show|list|help|json"));
+        assert!(hotkeys_usage_text().contains("json|status --json"));
         let payload = hotkeys_json_payload();
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "hotkeys");
+        assert_eq!(payload["supported_actions"][5], "status --json");
         assert!(
             payload["shortcuts"]
                 .as_array()
