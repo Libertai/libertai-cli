@@ -311,6 +311,7 @@ enum AbortCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScopedModelsCommand {
     Status,
+    Json,
     Clear,
     Set(Vec<String>),
     Usage,
@@ -2781,7 +2782,7 @@ fn model_usage_text() -> &'static str {
 }
 
 fn scoped_models_usage_text() -> &'static str {
-    "/scoped-models <status|show|patterns|clear|reset|off> — filter /model list and /model next|prev"
+    "/scoped-models <status|show|json|patterns|clear|reset|off> — filter /model list and /model next|prev"
 }
 
 fn hotkey_lines() -> &'static [&'static str] {
@@ -4152,6 +4153,12 @@ fn parse_scoped_models_command(input: &str) -> ScopedModelsCommand {
     if raw.is_empty() || matches!(raw.to_ascii_lowercase().as_str(), "status" | "show") {
         return ScopedModelsCommand::Status;
     }
+    if matches!(
+        raw.to_ascii_lowercase().as_str(),
+        "json" | "--json" | "status --json" | "show --json"
+    ) {
+        return ScopedModelsCommand::Json;
+    }
     if matches!(raw.to_ascii_lowercase().as_str(), "clear" | "reset" | "off") {
         return ScopedModelsCommand::Clear;
     }
@@ -4175,6 +4182,7 @@ fn parse_scoped_model_patterns(input: &str) -> Vec<String> {
 fn handle_scoped_models_command(raw: &str, scoped_model_patterns: &mut Vec<String>) {
     match parse_scoped_models_command(raw) {
         ScopedModelsCommand::Status => print_scoped_model_status(scoped_model_patterns),
+        ScopedModelsCommand::Json => print_scoped_model_json(scoped_model_patterns),
         ScopedModelsCommand::Clear => {
             scoped_model_patterns.clear();
             println!("{DIM}  scoped models cleared; /model list shows all discovered models.{RESET}");
@@ -4205,6 +4213,24 @@ fn print_scoped_model_status(scoped_model_patterns: &[String]) {
         "{DIM}  usage:{RESET} /scoped-models status, /scoped-models qwen* gemma*, /scoped-models clear|reset|off, /model list, /model next|prev"
     );
     println!();
+}
+
+fn scoped_model_json_payload(scoped_model_patterns: &[String]) -> serde_json::Value {
+    json!({
+        "command": "scoped-models",
+        "surface": "terminal",
+        "patterns": scoped_model_patterns,
+        "is_scoped": !scoped_model_patterns.is_empty(),
+        "aliases": ["scoped-models", "scoped"],
+        "supported_actions": ["status", "show", "json", "status --json", "clear", "reset", "off"],
+    })
+}
+
+fn print_scoped_model_json(scoped_model_patterns: &[String]) {
+    match serde_json::to_string_pretty(&scoped_model_json_payload(scoped_model_patterns)) {
+        Ok(s) => println!("{s}"),
+        Err(e) => eprintln!("{DIM}  /scoped-models json failed: {e}{RESET}"),
+    }
 }
 
 fn print_model_status(
@@ -14530,7 +14556,7 @@ mod tests {
     fn scoped_models_parse_patterns_and_filter_matches() {
         assert_eq!(
             scoped_models_usage_text(),
-            "/scoped-models <status|show|patterns|clear|reset|off> — filter /model list and /model next|prev"
+            "/scoped-models <status|show|json|patterns|clear|reset|off> — filter /model list and /model next|prev"
         );
         assert_eq!(scoped_models_command_arg("/scoped-models"), Some(""));
         assert_eq!(
@@ -14553,6 +14579,14 @@ mod tests {
         assert_eq!(
             parse_scoped_models_command("show"),
             ScopedModelsCommand::Status
+        );
+        assert_eq!(
+            parse_scoped_models_command("json"),
+            ScopedModelsCommand::Json
+        );
+        assert_eq!(
+            parse_scoped_models_command("status --json"),
+            ScopedModelsCommand::Json
         );
         assert_eq!(
             parse_scoped_models_command("reset"),
@@ -14581,6 +14615,13 @@ mod tests {
             scoped_model_ids("libertai", &ids, &["no-match*".to_string()]),
             ids
         );
+
+        let payload = scoped_model_json_payload(&["qwen*".to_string(), "openai/gpt-*".to_string()]);
+        assert_eq!(payload["command"], "scoped-models");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["is_scoped"], true);
+        assert_eq!(payload["patterns"][0], "qwen*");
+        assert_eq!(payload["supported_actions"][3], "status --json");
     }
 
     #[test]
