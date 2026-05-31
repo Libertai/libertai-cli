@@ -3186,7 +3186,9 @@ enum ClearCommand {
 }
 
 fn clear_usage_text(command: &str) -> String {
-    format!("{command} [status|show|info|json|status --json]")
+    format!(
+        "{command} [status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json]"
+    )
 }
 
 fn clear_command_arg(trimmed: &str) -> Option<(&'static str, &str)> {
@@ -3310,7 +3312,9 @@ enum ExitCommand {
 }
 
 fn exit_usage_text(command: &str) -> String {
-    format!("{command} [status|show|info|json|status --json]")
+    format!(
+        "{command} [status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json]"
+    )
 }
 
 fn exit_command_arg(trimmed: &str) -> Option<(&'static str, &str)> {
@@ -16831,9 +16835,15 @@ mod tests {
         assert_eq!(parse_clear_command("status"), ClearCommand::Status);
         assert_eq!(parse_clear_command("preview"), ClearCommand::Status);
         assert_eq!(parse_clear_command("json"), ClearCommand::Json);
+        assert_eq!(parse_clear_command("--json"), ClearCommand::Json);
         assert_eq!(parse_clear_command("status --json"), ClearCommand::Json);
+        assert_eq!(parse_clear_command("state --json"), ClearCommand::Json);
+        assert_eq!(parse_clear_command("show --json"), ClearCommand::Json);
+        assert_eq!(parse_clear_command("info --json"), ClearCommand::Json);
+        assert_eq!(parse_clear_command("preview --json"), ClearCommand::Json);
         assert_eq!(parse_clear_command("run"), ClearCommand::Usage);
-        assert!(clear_usage_text("/clear").contains("json|status --json"));
+        assert!(clear_usage_text("/clear").contains("json|--json|status --json"));
+        assert!(clear_usage_text("/clear").contains("show --json|info --json|preview --json"));
         let payload = clear_json_payload("/new", "libertai", "qwen", Mode::Plan);
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "new");
@@ -16893,9 +16903,15 @@ mod tests {
         assert_eq!(parse_exit_command("status"), ExitCommand::Status);
         assert_eq!(parse_exit_command("preview"), ExitCommand::Status);
         assert_eq!(parse_exit_command("json"), ExitCommand::Json);
+        assert_eq!(parse_exit_command("--json"), ExitCommand::Json);
         assert_eq!(parse_exit_command("status --json"), ExitCommand::Json);
+        assert_eq!(parse_exit_command("state --json"), ExitCommand::Json);
+        assert_eq!(parse_exit_command("show --json"), ExitCommand::Json);
+        assert_eq!(parse_exit_command("info --json"), ExitCommand::Json);
+        assert_eq!(parse_exit_command("preview --json"), ExitCommand::Json);
         assert_eq!(parse_exit_command("run"), ExitCommand::Usage);
-        assert!(exit_usage_text("/exit").contains("json|status --json"));
+        assert!(exit_usage_text("/exit").contains("json|--json|status --json"));
+        assert!(exit_usage_text("/exit").contains("show --json|info --json|preview --json"));
         let payload = exit_json_payload("/quit");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "quit");
