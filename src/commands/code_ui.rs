@@ -12438,8 +12438,8 @@ fn unset_repl_config_value(cfg: &mut Arc<LibertaiConfig>, key: &str) -> Result<(
 }
 
 const HOOKS_USAGE: &str =
-    "/hooks [status|list|state|diagnostics|diag|json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|show|event|inspect <event>|open|settings|edit]";
-const MCP_USAGE: &str = "/mcp [status|list|state|show|json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|server|inspect <server>|probe|probes|probe --save|probe save|probe --write|probe write|refresh|diagnostics|diag|reset|reset-sessions|open|settings|edit]";
+    "/hooks [status|list|state|diagnostics|diag|json|--json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|show|event|inspect <event>|open|settings|edit]";
+const MCP_USAGE: &str = "/mcp [status|list|state|show|json|--json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|server|inspect <server>|probe|probes|probe --save|probe save|probe --write|probe write|refresh|diagnostics|diag|reset|reset-sessions|open|settings|edit]";
 
 fn print_hooks_command(cfg: &LibertaiConfig, command: HooksCommand) {
     match command {
@@ -16072,7 +16072,7 @@ mod tests {
         assert_eq!(parse_hooks_command("show"), HooksCommand::Usage);
         assert_eq!(parse_hooks_command("show pre post"), HooksCommand::Usage);
         assert!(HOOKS_USAGE.contains("diagnostics|diag"));
-        assert!(HOOKS_USAGE.contains("json|status --json|list --json"));
+        assert!(HOOKS_USAGE.contains("json|--json|status --json|list --json"));
         assert!(HOOKS_USAGE.contains("diagnostics --json|diag --json|show --json"));
         assert!(HOOKS_USAGE.contains("show|event|inspect"));
         assert!(HOOKS_USAGE.contains("settings|edit"));
@@ -16235,7 +16235,7 @@ mod tests {
         assert_eq!(parse_mcp_command("settings"), McpCommand::Open);
         assert_eq!(parse_mcp_command("edit"), McpCommand::Open);
         assert_eq!(parse_mcp_command("remote"), McpCommand::Usage);
-        assert!(MCP_USAGE.contains("show|json|status --json|list --json"));
+        assert!(MCP_USAGE.contains("show|json|--json|status --json|list --json"));
         assert!(MCP_USAGE.contains("diagnostics --json|diag --json|show --json"));
         assert!(MCP_USAGE.contains("probe|probes"));
         assert!(MCP_USAGE.contains("reset|reset-sessions"));
