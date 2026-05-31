@@ -5590,6 +5590,7 @@ fn abort_command_arg(trimmed: &str) -> Option<&str> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HooksCommand {
     Status,
+    Json,
     Open,
     Show(String),
     Usage,
@@ -5611,6 +5612,8 @@ fn parse_hooks_command(input: &str) -> HooksCommand {
     }
     match raw.to_ascii_lowercase().as_str() {
         "" | "status" | "list" | "state" | "diagnostics" | "diag" => HooksCommand::Status,
+        "json" | "--json" | "status --json" | "list --json" | "state --json"
+        | "diagnostics --json" | "diag --json" | "show --json" => HooksCommand::Json,
         "open" | "settings" | "edit" => HooksCommand::Open,
         _ => HooksCommand::Usage,
     }
@@ -11828,12 +11831,13 @@ fn unset_repl_config_value(cfg: &mut Arc<LibertaiConfig>, key: &str) -> Result<(
 }
 
 const HOOKS_USAGE: &str =
-    "/hooks [status|list|state|diagnostics|diag|show|event|inspect <event>|open|settings|edit]";
+    "/hooks [status|list|state|diagnostics|diag|json|status --json|show|event|inspect <event>|open|settings|edit]";
 const MCP_USAGE: &str = "/mcp [status|list|state|show|json|status --json|server|inspect <server>|probe|probes|probe --save|probe save|probe --write|probe write|refresh|diagnostics|diag|reset|reset-sessions|open|settings|edit]";
 
 fn print_hooks_command(cfg: &LibertaiConfig, command: HooksCommand) {
     match command {
         HooksCommand::Status => print_hooks_status(cfg),
+        HooksCommand::Json => print_hooks_json(cfg),
         HooksCommand::Open => print_hooks_open_hint(),
         HooksCommand::Show(event) => print_hook_event_details(cfg, &event),
         HooksCommand::Usage => {
@@ -11869,6 +11873,106 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     println!("{DIM}  command, HTTP, MCP-tool, prompt, and agent hook handlers are executed natively.{RESET}");
     println!("{DIM}  usage:{RESET} {HOOKS_USAGE}");
     println!();
+}
+
+fn hook_event_rows<'a>(
+    cfg: &'a LibertaiConfig,
+) -> [(&'static str, &'a [crate::config::HookCommandConfig]); 8] {
+    [
+        ("UserPromptSubmit", &cfg.hooks.user_prompt_submit),
+        ("PreToolUse", &cfg.hooks.pre_tool_use),
+        ("PostToolUse", &cfg.hooks.post_tool_use),
+        ("SubagentStop", &cfg.hooks.subagent_stop),
+        ("SessionStart", &cfg.hooks.session_start),
+        ("Stop", &cfg.hooks.stop),
+        ("SessionEnd", &cfg.hooks.session_end),
+        ("Notification", &cfg.hooks.notification),
+    ]
+}
+
+fn is_configured_hook(hook: &crate::config::HookCommandConfig) -> bool {
+    let hook_type = normalized_hook_type(&hook.hook_type);
+    if hook_type == "http" {
+        !hook.url.trim().is_empty()
+    } else if hook_type == "prompt" || hook_type == "agent" {
+        !hook.prompt.trim().is_empty()
+    } else if hook_type == "mcp_tool" {
+        !hook.server.trim().is_empty() && !hook.tool.trim().is_empty()
+    } else {
+        (hook_type.is_empty() || hook_type == "command") && !hook.command.trim().is_empty()
+    }
+}
+
+fn hook_json_row(event: &str, index: usize, hook: &crate::config::HookCommandConfig) -> serde_json::Value {
+    let hook_type_key = normalized_hook_type(&hook.hook_type);
+    let hook_type = if hook.hook_type.trim().is_empty() {
+        "command"
+    } else {
+        hook_type_key.as_str()
+    };
+    json!({
+        "event": event,
+        "index": index,
+        "enabled": hook.enabled,
+        "configured": is_configured_hook(hook),
+        "type": hook_type,
+        "matcher": if hook.matcher.trim().is_empty() { "*" } else { hook.matcher.trim() },
+        "target": hook_target_display(hook),
+        "source": if hook.source.trim().is_empty() { serde_json::Value::Null } else { json!(hook.source.trim()) },
+        "timeout_seconds": hook.timeout,
+        "async": hook.async_hook,
+        "async_rewake": hook.async_rewake,
+        "once": hook.once,
+        "continue_on_block": hook.continue_on_block,
+        "status_message": if hook.status_message.trim().is_empty() { serde_json::Value::Null } else { json!(hook.status_message.trim()) },
+        "review_policy": if hook.review_policy.trim().is_empty() { serde_json::Value::Null } else { json!(hook.review_policy.trim()) },
+        "if": if hook.if_condition.trim().is_empty() { serde_json::Value::Null } else { json!(hook.if_condition.trim()) },
+        "headers": hook.headers.len(),
+        "allowed_env_vars": hook.allowed_env_vars.len(),
+        "has_input": hook.input.is_some(),
+        "metadata_keys": hook.extra.keys().map(String::as_str).collect::<Vec<_>>(),
+    })
+}
+
+fn hooks_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
+    let mut rows = Vec::new();
+    let mut events = Vec::new();
+    let mut enabled_total = 0usize;
+    let mut configured_total = 0usize;
+    for (event, hooks) in hook_event_rows(cfg) {
+        let enabled = hooks.iter().filter(|hook| hook.enabled).count();
+        let configured = hooks.iter().filter(|hook| is_configured_hook(hook)).count();
+        enabled_total += enabled;
+        configured_total += configured;
+        events.push(json!({
+            "event": event,
+            "count": hooks.len(),
+            "enabled": enabled,
+            "configured": configured,
+            "types": hook_type_summary(hooks),
+        }));
+        for (index, hook) in hooks.iter().enumerate() {
+            rows.push(hook_json_row(event, index + 1, hook));
+        }
+    }
+    json!({
+        "surface": "terminal",
+        "command": "hooks",
+        "events": events,
+        "count": rows.len(),
+        "enabled_count": enabled_total,
+        "configured_count": configured_total,
+        "hooks": rows,
+        "will_write": false,
+        "supported_actions": ["status", "list", "state", "diagnostics", "diag", "json", "status --json", "show <event>", "open", "settings", "edit"],
+    })
+}
+
+fn print_hooks_json(cfg: &LibertaiConfig) {
+    match serde_json::to_string_pretty(&hooks_json_payload(cfg)) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  /hooks json failed: {e}{RESET}"),
+    }
 }
 
 fn print_hook_event_details(cfg: &LibertaiConfig, event: &str) {
@@ -12436,20 +12540,7 @@ fn print_mcp_probe_inventory(label: &str, items: &[String]) {
 fn count_runnable_hooks(hooks: &[crate::config::HookCommandConfig]) -> usize {
     hooks
         .iter()
-        .filter(|hook| {
-            let hook_type = normalized_hook_type(&hook.hook_type);
-            hook.enabled
-                && if hook_type == "http" {
-                    !hook.url.trim().is_empty()
-                } else if hook_type == "prompt" || hook_type == "agent" {
-                    !hook.prompt.trim().is_empty()
-                } else if hook_type == "mcp_tool" {
-                    !hook.server.trim().is_empty() && !hook.tool.trim().is_empty()
-                } else {
-                    (hook_type.is_empty() || hook_type == "command")
-                        && !hook.command.trim().is_empty()
-                }
-        })
+        .filter(|hook| hook.enabled && is_configured_hook(hook))
         .count()
 }
 
@@ -15087,6 +15178,12 @@ mod tests {
         assert_eq!(parse_hooks_command(""), HooksCommand::Status);
         assert_eq!(parse_hooks_command("list"), HooksCommand::Status);
         assert_eq!(parse_hooks_command("diagnostics"), HooksCommand::Status);
+        assert_eq!(parse_hooks_command("json"), HooksCommand::Json);
+        assert_eq!(parse_hooks_command("status --json"), HooksCommand::Json);
+        assert_eq!(
+            parse_hooks_command("diagnostics --json"),
+            HooksCommand::Json
+        );
         assert_eq!(parse_hooks_command("open"), HooksCommand::Open);
         assert_eq!(parse_hooks_command("settings"), HooksCommand::Open);
         assert_eq!(parse_hooks_command("edit"), HooksCommand::Open);
@@ -15101,8 +15198,68 @@ mod tests {
         assert_eq!(parse_hooks_command("show"), HooksCommand::Usage);
         assert_eq!(parse_hooks_command("show pre post"), HooksCommand::Usage);
         assert!(HOOKS_USAGE.contains("diagnostics|diag"));
+        assert!(HOOKS_USAGE.contains("json|status --json"));
         assert!(HOOKS_USAGE.contains("show|event|inspect"));
         assert!(HOOKS_USAGE.contains("settings|edit"));
+    }
+
+    #[test]
+    fn hooks_json_payload_reports_counts_without_secret_values() {
+        let cfg = LibertaiConfig {
+            hooks: crate::config::HooksConfig {
+                pre_tool_use: vec![
+                    crate::config::HookCommandConfig {
+                        enabled: true,
+                        hook_type: "http".to_string(),
+                        url: "https://hooks.example/pre".to_string(),
+                        headers: std::collections::HashMap::from([(
+                            "Authorization".to_string(),
+                            "Bearer secret-token".to_string(),
+                        )]),
+                        allowed_env_vars: vec!["TOKEN".to_string()],
+                        matcher: "Bash(*)".to_string(),
+                        source: "project".to_string(),
+                        timeout: Some(7),
+                        continue_on_block: true,
+                        review_policy: "strict".to_string(),
+                        extra: std::collections::BTreeMap::from([(
+                            "customFlag".to_string(),
+                            serde_json::json!(true),
+                        )]),
+                        ..Default::default()
+                    },
+                    crate::config::HookCommandConfig {
+                        enabled: false,
+                        hook_type: "mcp-tool".to_string(),
+                        server: "policy".to_string(),
+                        tool: "check".to_string(),
+                        input: Some(serde_json::json!({"level": "strict"})),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let payload = hooks_json_payload(&cfg);
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "hooks");
+        assert_eq!(payload["count"], 2);
+        assert_eq!(payload["enabled_count"], 1);
+        assert_eq!(payload["configured_count"], 2);
+        assert_eq!(payload["hooks"][0]["event"], "PreToolUse");
+        assert_eq!(payload["hooks"][0]["type"], "http");
+        assert_eq!(payload["hooks"][0]["headers"], 1);
+        assert_eq!(payload["hooks"][0]["allowed_env_vars"], 1);
+        assert_eq!(payload["hooks"][0]["metadata_keys"][0], "customFlag");
+        assert_eq!(payload["hooks"][1]["type"], "mcp_tool");
+        assert_eq!(payload["hooks"][1]["has_input"], true);
+        assert_eq!(payload["will_write"], false);
+        assert_eq!(payload["supported_actions"][6], "status --json");
+        let raw = serde_json::to_string(&payload).unwrap();
+        assert!(!raw.contains("secret-token"));
+        assert!(!raw.contains("Authorization"));
     }
 
     #[test]
