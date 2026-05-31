@@ -3001,7 +3001,7 @@ fn print_help() {
     println!("{DIM}  /mcp      — show terminal MCP support status{RESET}");
     println!("{DIM}  {} — customize the input-bar status line{RESET}", status_line_usage_text());
     println!("{DIM}  {} — show input bar keyboard controls{RESET}", hotkeys_usage_text());
-    println!("{DIM}  /tree [path] — show a bounded project tree{RESET}");
+    println!("{DIM}  {} — show a bounded project tree{RESET}", tree_usage_text());
     println!("{DIM}  {} — show recent git commits{RESET}", changelog_usage_text());
     println!("{DIM}  /reload [config|session|now|fresh] — reload config and start a fresh agent session{RESET}");
     println!("{DIM}  /resume [path] — resume the latest or specified saved session{RESET}");
@@ -3445,6 +3445,10 @@ fn tree_json_request_arg(input: &str) -> Option<String> {
         _ if lower.ends_with(" --json") => Some(raw[..raw.len() - 7].trim().to_string()),
         _ => None,
     }
+}
+
+fn tree_usage_text() -> &'static str {
+    "/tree [path|json|--json|status --json|state --json|show --json|path --json]"
 }
 
 fn print_project_tree_json(path: Option<&str>) {
@@ -15122,10 +15126,15 @@ mod tests {
         );
         assert_eq!(tree_json_request_arg("json"), Some(String::new()));
         assert_eq!(tree_json_request_arg("--json"), Some(String::new()));
+        assert_eq!(tree_json_request_arg("status --json"), Some(String::new()));
+        assert_eq!(tree_json_request_arg("state --json"), Some(String::new()));
+        assert_eq!(tree_json_request_arg("show --json"), Some(String::new()));
         assert_eq!(tree_json_request_arg("json src"), Some("src".to_string()));
         assert_eq!(tree_json_request_arg("src --json"), Some("src".to_string()));
         assert_eq!(tree_json_request_arg("MyDir --json"), Some("MyDir".to_string()));
         assert_eq!(tree_json_request_arg("src"), None);
+        assert!(tree_usage_text().contains("json|--json|status --json"));
+        assert!(tree_usage_text().contains("state --json|show --json|path --json"));
         let payload = project_tree_json_payload(temp.path(), 20).unwrap();
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "tree");
