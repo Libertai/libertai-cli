@@ -1108,7 +1108,7 @@ async fn repl_loop(
         if let Some(rest) = abort_command_arg(trimmed) {
             match parse_abort_command(rest) {
                 AbortCommand::Status => println!("{}", abort_status_message()),
-                AbortCommand::Json => print_abort_json(),
+                AbortCommand::Json => print_abort_json(rest),
                 AbortCommand::Usage => {
                     println!("{DIM}  usage:{RESET} {}", abort_usage_text());
                 }
@@ -3895,10 +3895,11 @@ fn abort_status_message() -> String {
     )
 }
 
-fn abort_json_payload() -> serde_json::Value {
+fn abort_json_payload(query: &str) -> serde_json::Value {
     json!({
         "command": "abort",
         "surface": "terminal",
+        "query": query.trim(),
         "aliases": ["abort"],
         "active_turn": false,
         "abort_available": false,
@@ -3908,8 +3909,8 @@ fn abort_json_payload() -> serde_json::Value {
     })
 }
 
-fn print_abort_json() {
-    match serde_json::to_string_pretty(&abort_json_payload()) {
+fn print_abort_json(query: &str) {
+    match serde_json::to_string_pretty(&abort_json_payload(query)) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("{DIM}  /abort json failed: {e}{RESET}"),
     }
@@ -17066,9 +17067,10 @@ mod tests {
         assert_eq!(parse_abort_command("open"), AbortCommand::Usage);
         assert!(abort_usage_text().contains("json|--json|status --json|state --json"));
         assert!(abort_usage_text().contains("show --json|info --json"));
-        let payload = abort_json_payload();
+        let payload = abort_json_payload("status --json");
         assert_eq!(payload["command"], "abort");
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "status --json");
         assert_eq!(payload["active_turn"], false);
         assert_eq!(payload["interrupt_mechanism"], "ctrl-c");
         assert_eq!(payload["aliases"][0], "abort");
