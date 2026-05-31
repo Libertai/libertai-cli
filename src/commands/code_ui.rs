@@ -220,6 +220,7 @@ enum NotifyCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum McpCommand {
     Status,
+    Json,
     Show(String),
     Probe,
     ProbeSave,
@@ -5634,6 +5635,8 @@ fn parse_mcp_command(input: &str) -> McpCommand {
         "" | "status" | "list" | "state" | "diagnostics" | "diag" | "show" => {
             McpCommand::Status
         }
+        "json" | "--json" | "status --json" | "list --json" | "state --json"
+        | "diagnostics --json" | "diag --json" | "show --json" => McpCommand::Json,
         "probe" | "probes" => McpCommand::Probe,
         "refresh" | "probe --save" | "probe save" | "probe --write" | "probe write" => {
             McpCommand::ProbeSave
@@ -11826,7 +11829,7 @@ fn unset_repl_config_value(cfg: &mut Arc<LibertaiConfig>, key: &str) -> Result<(
 
 const HOOKS_USAGE: &str =
     "/hooks [status|list|state|diagnostics|diag|show|event|inspect <event>|open|settings|edit]";
-const MCP_USAGE: &str = "/mcp [status|list|state|show|server|inspect <server>|probe|probes|probe --save|probe save|probe --write|probe write|refresh|diagnostics|diag|reset|reset-sessions|open|settings|edit]";
+const MCP_USAGE: &str = "/mcp [status|list|state|show|json|status --json|server|inspect <server>|probe|probes|probe --save|probe save|probe --write|probe write|refresh|diagnostics|diag|reset|reset-sessions|open|settings|edit]";
 
 fn print_hooks_command(cfg: &LibertaiConfig, command: HooksCommand) {
     match command {
@@ -11961,6 +11964,7 @@ fn print_mcp_status(command: McpCommand) {
             );
             println!("{DIM}  usage:{RESET} {MCP_USAGE}");
         }
+        McpCommand::Json => print_mcp_json(),
         McpCommand::Show(name) => print_mcp_server_details(&name),
         McpCommand::Probe => print_mcp_probe(),
         McpCommand::ProbeSave => print_mcp_probe_save(),
@@ -11982,6 +11986,86 @@ fn print_mcp_status(command: McpCommand) {
         }
     }
     println!();
+}
+
+fn mcp_server_json_row(
+    name: &str,
+    server: &crate::config::McpServerConfig,
+) -> serde_json::Value {
+    let transport = if server.transport.trim().is_empty() {
+        "stdio"
+    } else {
+        server.transport.trim()
+    };
+    let enabled_tools = server
+        .tools
+        .iter()
+        .filter(|tool| tool.enabled && !tool.name.trim().is_empty())
+        .count();
+    let enabled_resources = server
+        .resources
+        .iter()
+        .filter(|resource| resource.enabled && !resource.uri.trim().is_empty())
+        .count();
+    let enabled_prompts = server
+        .prompts
+        .iter()
+        .filter(|prompt| prompt.enabled && !prompt.name.trim().is_empty())
+        .count();
+    json!({
+        "name": name,
+        "transport": transport,
+        "target": mcp_server_target(server),
+        "env_vars": server.env.len(),
+        "headers": server.headers.len(),
+        "roots": server.roots.len(),
+        "tools": server.tools.len(),
+        "resources": server.resources.len(),
+        "prompts": server.prompts.len(),
+        "enabled_tools": enabled_tools,
+        "enabled_resources": enabled_resources,
+        "enabled_prompts": enabled_prompts,
+    })
+}
+
+fn mcp_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
+    let exposure = mcp_exposure_summary(cfg);
+    let mut servers: Vec<serde_json::Value> = cfg
+        .mcp_servers
+        .iter()
+        .map(|(name, server)| mcp_server_json_row(name, server))
+        .collect();
+    servers.sort_by(|a, b| {
+        a["name"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(b["name"].as_str().unwrap_or_default())
+    });
+    json!({
+        "surface": "terminal",
+        "command": "mcp",
+        "configured_servers": cfg.mcp_servers.len(),
+        "exposure": {
+            "mcp_call": exposure.mcp_call,
+            "named_tools": exposure.named_tools,
+            "resource_reader": exposure.resource_reader,
+            "prompt_getter": exposure.prompt_getter,
+            "subscription_candidates": exposure.subscription_candidates,
+        },
+        "servers": servers,
+        "will_write": false,
+        "supported_actions": ["status", "list", "state", "show", "json", "status --json", "server <name>", "inspect <server>", "probe", "probe --save", "refresh", "reset", "open"],
+    })
+}
+
+fn print_mcp_json() {
+    match crate::config::load() {
+        Ok(cfg) => match serde_json::to_string_pretty(&mcp_json_payload(&cfg)) {
+            Ok(raw) => println!("{raw}"),
+            Err(e) => eprintln!("{DIM}  /mcp json failed: {e}{RESET}"),
+        },
+        Err(e) => eprintln!("{DIM}  /mcp json: config load failed: {e:#}{RESET}"),
+    }
 }
 
 fn print_mcp_server_details(name: &str) {
@@ -15077,6 +15161,12 @@ mod tests {
         assert_eq!(mcp_command_arg("/mc"), None);
         assert_eq!(parse_mcp_command(""), McpCommand::Status);
         assert_eq!(parse_mcp_command("list"), McpCommand::Status);
+        assert_eq!(parse_mcp_command("json"), McpCommand::Json);
+        assert_eq!(parse_mcp_command("status --json"), McpCommand::Json);
+        assert_eq!(
+            parse_mcp_command("diagnostics --json"),
+            McpCommand::Json
+        );
         assert_eq!(
             parse_mcp_command("show docs"),
             McpCommand::Show("docs".to_string())
@@ -15096,10 +15186,78 @@ mod tests {
         assert_eq!(parse_mcp_command("settings"), McpCommand::Open);
         assert_eq!(parse_mcp_command("edit"), McpCommand::Open);
         assert_eq!(parse_mcp_command("remote"), McpCommand::Usage);
-        assert!(MCP_USAGE.contains("show|server|inspect"));
+        assert!(MCP_USAGE.contains("show|json|status --json|server|inspect"));
+        assert!(MCP_USAGE.contains("json|status --json"));
         assert!(MCP_USAGE.contains("probe|probes"));
         assert!(MCP_USAGE.contains("reset|reset-sessions"));
         assert!(MCP_USAGE.contains("settings|edit"));
+    }
+
+    #[test]
+    fn mcp_json_payload_reports_exposure_and_servers() {
+        let cfg = LibertaiConfig {
+            mcp_servers: std::collections::HashMap::from([(
+                "docs".to_string(),
+                crate::config::McpServerConfig {
+                    transport: "stdio".to_string(),
+                    command: "npx".to_string(),
+                    args: vec!["-y".to_string(), "@modelcontextprotocol/server-docs".to_string()],
+                    env: std::collections::HashMap::from([(
+                        "DOCS_TOKEN".to_string(),
+                        "secret".to_string(),
+                    )]),
+                    headers: std::collections::HashMap::from([(
+                        "Authorization".to_string(),
+                        "Bearer secret".to_string(),
+                    )]),
+                    roots: vec!["/tmp/project".to_string()],
+                    tools: vec![
+                        crate::config::McpToolConfig {
+                            name: "search".to_string(),
+                            enabled: true,
+                            description: "Search docs".to_string(),
+                            ..crate::config::McpToolConfig::default()
+                        },
+                        crate::config::McpToolConfig {
+                            name: "admin".to_string(),
+                            enabled: false,
+                            ..crate::config::McpToolConfig::default()
+                        },
+                    ],
+                    resources: vec![crate::config::McpResourceConfig {
+                        uri: "file:///tmp/project/README.md".to_string(),
+                        enabled: true,
+                        name: "README".to_string(),
+                        ..crate::config::McpResourceConfig::default()
+                    }],
+                    prompts: vec![crate::config::McpPromptConfig {
+                        name: "summarize".to_string(),
+                        enabled: true,
+                        description: "Summarize docs".to_string(),
+                        ..crate::config::McpPromptConfig::default()
+                    }],
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let payload = mcp_json_payload(&cfg);
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "mcp");
+        assert_eq!(payload["configured_servers"], 1);
+        assert_eq!(payload["exposure"]["mcp_call"], true);
+        assert_eq!(payload["exposure"]["named_tools"], 1);
+        assert_eq!(payload["exposure"]["resource_reader"], true);
+        assert_eq!(payload["servers"][0]["name"], "docs");
+        assert_eq!(payload["servers"][0]["target"], "npx '-y' '@modelcontextprotocol/server-docs'");
+        assert_eq!(payload["servers"][0]["env_vars"], 1);
+        assert_eq!(payload["servers"][0]["headers"], 1);
+        assert_eq!(payload["servers"][0]["enabled_tools"], 1);
+        assert_eq!(payload["servers"][0]["enabled_resources"], 1);
+        assert_eq!(payload["servers"][0]["enabled_prompts"], 1);
+        assert_eq!(payload["will_write"], false);
+        assert_eq!(payload["supported_actions"][5], "status --json");
     }
 
     #[test]
