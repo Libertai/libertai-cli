@@ -3269,13 +3269,14 @@ fn forget_json_payload(approvals: &ApprovalState) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "forget",
+        "aliases": ["forget"],
         "available": true,
         "remembered_approvals": approvals.always_rules().len(),
         "will_clear_saved_allow_rules": true,
         "will_change_permission_mode": false,
         "will_change_read_only_auto_approvals": false,
         "allow_rules_path": allow_rules_path,
-        "supported_actions": ["status", "state", "show", "info", "json", "status --json"],
+        "supported_actions": ["status", "state", "show", "info", "preview", "json", "--json", "status --json", "state --json", "show --json", "info --json", "preview --json"],
     })
 }
 
@@ -3803,11 +3804,12 @@ fn abort_json_payload() -> serde_json::Value {
     json!({
         "command": "abort",
         "surface": "terminal",
+        "aliases": ["abort"],
         "active_turn": false,
         "abort_available": false,
         "interrupt_mechanism": "ctrl-c",
         "terminal_guidance": "Press Ctrl+C while the assistant is streaming to interrupt the running turn.",
-        "supported_actions": ["status", "state", "show", "info", "json", "status --json", "cancel", "stop", "interrupt"],
+        "supported_actions": ["status", "state", "show", "info", "json", "--json", "status --json", "state --json", "show --json", "info --json", "cancel", "stop", "interrupt"],
     })
 }
 
@@ -16262,7 +16264,10 @@ mod tests {
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["active_turn"], false);
         assert_eq!(payload["interrupt_mechanism"], "ctrl-c");
-        assert_eq!(payload["supported_actions"][5], "status --json");
+        assert_eq!(payload["aliases"][0], "abort");
+        assert_eq!(payload["supported_actions"][6], "status --json");
+        assert_eq!(payload["supported_actions"][9], "info --json");
+        assert_eq!(payload["supported_actions"][12], "interrupt");
     }
 
     #[test]
@@ -16341,7 +16346,9 @@ mod tests {
         assert_eq!(payload["remembered_approvals"], 0);
         assert_eq!(payload["will_clear_saved_allow_rules"], true);
         assert_eq!(payload["will_change_permission_mode"], false);
-        assert_eq!(payload["supported_actions"][5], "status --json");
+        assert_eq!(payload["aliases"][0], "forget");
+        assert_eq!(payload["supported_actions"][7], "status --json");
+        assert_eq!(payload["supported_actions"][11], "preview --json");
     }
 
     #[test]
