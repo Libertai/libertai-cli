@@ -318,6 +318,7 @@ enum ScopedModelsCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ThemeCommand {
     Status,
+    Json,
     Requested(String),
 }
 
@@ -4356,10 +4357,11 @@ fn theme_command_arg(trimmed: &str) -> Option<&str> {
 
 fn parse_theme_command(rest: &str) -> ThemeCommand {
     let requested = rest.trim();
-    if matches!(requested, "" | "status" | "show" | "current" | "info") {
-        ThemeCommand::Status
-    } else {
-        ThemeCommand::Requested(requested.to_string())
+    match requested.to_ascii_lowercase().as_str() {
+        "" | "status" | "show" | "current" | "info" => ThemeCommand::Status,
+        "json" | "--json" | "status --json" | "show --json" | "current --json"
+        | "info --json" => ThemeCommand::Json,
+        _ => ThemeCommand::Requested(requested.to_string()),
     }
 }
 
@@ -4715,6 +4717,10 @@ fn is_send_json_request(rest: &str) -> bool {
 }
 
 fn print_theme_status(command: ThemeCommand) {
+    if command == ThemeCommand::Json {
+        print_theme_status_json();
+        return;
+    }
     println!("{BOLD}theme{RESET}");
     println!(
         "{DIM}  desktop:{RESET} /theme system|dark|light|high-contrast updates the app appearance."
@@ -4725,7 +4731,7 @@ fn print_theme_status(command: ThemeCommand) {
     match command {
         ThemeCommand::Status => {
             println!(
-                "{DIM}  status aliases:{RESET} /theme status, /theme show, /theme current, /theme info"
+                "{DIM}  status aliases:{RESET} /theme status, /theme show, /theme current, /theme info, /theme json"
             );
         }
         ThemeCommand::Requested(requested) => {
@@ -4733,6 +4739,24 @@ fn print_theme_status(command: ThemeCommand) {
                 println!("{DIM}  requested theme:{RESET} {requested}");
             }
         }
+        ThemeCommand::Json => {}
+    }
+}
+
+fn print_theme_status_json() {
+    let payload = json!({
+        "surface": "terminal",
+        "command": "theme",
+        "current": null,
+        "resolved": null,
+        "supported": ["system", "dark", "light", "high-contrast"],
+        "terminal_mutates_theme": false,
+        "desktop_settings_target": "Settings > Appearance",
+        "note": "Terminal colors are controlled by the terminal emulator; desktop /theme changes app appearance."
+    });
+    match serde_json::to_string_pretty(&payload) {
+        Ok(raw) => println!("{raw}"),
+        Err(err) => eprintln!("{DIM}  /theme json: {err:#}{RESET}"),
     }
 }
 
@@ -13640,6 +13664,10 @@ mod tests {
         assert_eq!(parse_theme_command("show"), ThemeCommand::Status);
         assert_eq!(parse_theme_command("current"), ThemeCommand::Status);
         assert_eq!(parse_theme_command("info"), ThemeCommand::Status);
+        assert_eq!(parse_theme_command("json"), ThemeCommand::Json);
+        assert_eq!(parse_theme_command("--json"), ThemeCommand::Json);
+        assert_eq!(parse_theme_command("status --json"), ThemeCommand::Json);
+        assert_eq!(parse_theme_command("current --json"), ThemeCommand::Json);
         assert_eq!(
             parse_theme_command("high-contrast"),
             ThemeCommand::Requested("high-contrast".to_string())
