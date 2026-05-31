@@ -13732,7 +13732,7 @@ fn handle_output_style(raw: &str, output_style: &mut Option<String>) {
         value
     };
     if is_output_style_json_request(key) {
-        print_output_style_status_json(output_style.as_deref());
+        print_output_style_status_json(output_style.as_deref(), key);
         return;
     }
     if is_output_style_status_alias(key) {
@@ -13786,12 +13786,13 @@ fn print_output_style_status(output_style: Option<&str>, unknown: Option<&str>) 
     println!();
 }
 
-fn output_style_status_json_payload(output_style: Option<&str>) -> serde_json::Value {
+fn output_style_status_json_payload(output_style: Option<&str>, query: &str) -> serde_json::Value {
     let cwd = std::env::current_dir().ok();
     let styles = crate::commands::code_output_style::load_styles(cwd.as_deref());
     json!({
         "surface": "terminal",
         "command": "output-style",
+        "query": query.trim(),
         "aliases": ["output-style"],
         "current": output_style.unwrap_or("default"),
         "available": styles.into_iter().map(|style| {
@@ -13805,8 +13806,8 @@ fn output_style_status_json_payload(output_style: Option<&str>) -> serde_json::V
     })
 }
 
-fn print_output_style_status_json(output_style: Option<&str>) {
-    let payload = output_style_status_json_payload(output_style);
+fn print_output_style_status_json(output_style: Option<&str>, query: &str) {
+    let payload = output_style_status_json_payload(output_style, query);
     match serde_json::to_string_pretty(&payload) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("{DIM}  /output-style json: {e:#}{RESET}"),
@@ -14412,8 +14413,9 @@ mod tests {
         assert!(output_style_usage_text().contains("json|--json|status --json|show --json"));
         assert!(output_style_usage_text().contains("info --json|list --json"));
         assert!(output_style_usage_text().contains("default|concise|explanatory|review"));
-        let payload = output_style_status_json_payload(Some("review"));
+        let payload = output_style_status_json_payload(Some("review"), "current --json");
         assert_eq!(payload["command"], "output-style");
+        assert_eq!(payload["query"], "current --json");
         assert_eq!(payload["aliases"][0], "output-style");
         assert_eq!(payload["current"], "review");
         assert!(
