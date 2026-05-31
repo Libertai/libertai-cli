@@ -1109,6 +1109,14 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some(rest) = forget_command_arg(trimmed) {
+            match parse_forget_command(rest) {
+                ForgetCommand::Status => print_forget_status(&approvals),
+                ForgetCommand::Json => print_forget_json(&approvals),
+                ForgetCommand::Usage => println!("{DIM}  usage:{RESET} {}", forget_usage_text()),
+            }
+            continue;
+        }
         let mut content_override: Option<Vec<ContentBlock>> = None;
         let mut slash_prompt_handled = false;
         match trimmed {
@@ -3014,6 +3022,64 @@ fn print_clear_json(command: &str, provider: &str, model: &str, mode: Mode) {
     match serde_json::to_string_pretty(&clear_json_payload(command, provider, model, mode)) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  {command} json failed: {e}{RESET}"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForgetCommand {
+    Status,
+    Json,
+    Usage,
+}
+
+fn forget_usage_text() -> &'static str {
+    "/forget [status|show|info|json|status --json]"
+}
+
+fn forget_command_arg(trimmed: &str) -> Option<&str> {
+    match trimmed {
+        "/forget" => None,
+        _ => trimmed.strip_prefix("/forget ").map(str::trim),
+    }
+}
+
+fn parse_forget_command(input: &str) -> ForgetCommand {
+    match normalize_help_command_arg(input).as_str() {
+        "" | "status" | "state" | "show" | "info" | "preview" => ForgetCommand::Status,
+        "json" | "--json" | "status --json" | "state --json" | "show --json"
+        | "info --json" | "preview --json" => ForgetCommand::Json,
+        _ => ForgetCommand::Usage,
+    }
+}
+
+fn forget_json_payload(approvals: &ApprovalState) -> serde_json::Value {
+    let allow_rules_path = crate::config::allow_rules_path()
+        .ok()
+        .map(|path| path.display().to_string());
+    json!({
+        "surface": "terminal",
+        "command": "forget",
+        "available": true,
+        "remembered_approvals": approvals.always_rules().len(),
+        "will_clear_saved_allow_rules": true,
+        "will_change_permission_mode": false,
+        "will_change_read_only_auto_approvals": false,
+        "allow_rules_path": allow_rules_path,
+        "supported_actions": ["status", "state", "show", "info", "json", "status --json"],
+    })
+}
+
+fn print_forget_status(approvals: &ApprovalState) {
+    println!(
+        "{DIM}  /forget: ready. Running `/forget` with no arguments clears {} saved allow rule(s); read-only tools stay auto-approved.{RESET}",
+        approvals.always_rules().len()
+    );
+}
+
+fn print_forget_json(approvals: &ApprovalState) {
+    match serde_json::to_string_pretty(&forget_json_payload(approvals)) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  /forget json failed: {e}{RESET}"),
     }
 }
 
@@ -14470,6 +14536,33 @@ mod tests {
         assert_eq!(payload["available"], true);
         assert_eq!(payload["active_turn"], false);
         assert_eq!(payload["current_mode"], "plan");
+        assert_eq!(payload["supported_actions"][5], "status --json");
+    }
+
+    #[test]
+    fn forget_command_arg_and_parser_capture_preview_aliases() {
+        assert_eq!(forget_command_arg("/forget"), None);
+        assert_eq!(forget_command_arg("/forget status"), Some("status"));
+        assert_eq!(forget_command_arg("/forget json"), Some("json"));
+        assert_eq!(
+            forget_command_arg("/forget status --json"),
+            Some("status --json")
+        );
+        assert_eq!(forget_command_arg("/forgettable"), None);
+        assert_eq!(parse_forget_command("status"), ForgetCommand::Status);
+        assert_eq!(parse_forget_command("preview"), ForgetCommand::Status);
+        assert_eq!(parse_forget_command("json"), ForgetCommand::Json);
+        assert_eq!(parse_forget_command("status --json"), ForgetCommand::Json);
+        assert_eq!(parse_forget_command("run"), ForgetCommand::Usage);
+        assert!(forget_usage_text().contains("json|status --json"));
+        let approvals = ApprovalState::new();
+        let payload = forget_json_payload(&approvals);
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "forget");
+        assert_eq!(payload["available"], true);
+        assert_eq!(payload["remembered_approvals"], 0);
+        assert_eq!(payload["will_clear_saved_allow_rules"], true);
+        assert_eq!(payload["will_change_permission_mode"], false);
         assert_eq!(payload["supported_actions"][5], "status --json");
     }
 
