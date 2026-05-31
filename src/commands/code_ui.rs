@@ -3025,7 +3025,7 @@ fn print_help() {
     );
     println!("{DIM}  /onboarding|/onboard [show|preview|save|path|gist|json|--json|status --json|show --json|preview --json] — preview or write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
-    println!("{DIM}  /agents   — list named sub-agents (/agents show <name> inspects one){RESET}");
+    println!("{DIM}  /agents [list|status|json|status --json|show <name>|show <name> --json] — list or inspect named sub-agents{RESET}");
     println!("{DIM}  /agents create [--worktree|--same-cwd] <name> [description] — create a project sub-agent{RESET}");
     println!("{DIM}  /agents delete <name> — delete the active named sub-agent definition{RESET}");
     println!(
@@ -8420,12 +8420,110 @@ fn print_agents() {
     println!();
 }
 
-const AGENTS_USAGE: &str = "/agents [list|status|show <name>|open|settings|edit|background|bg] | /agents background|bg [list|json|show|inspect|show-json|log|kill|stop [pid|run-id|latest]|prune|clear] | /agents create [--worktree|--same-cwd] <name> [description] | /agents delete|remove <name>";
+fn agents_supported_actions() -> &'static [&'static str] {
+    &[
+        "list",
+        "status",
+        "show",
+        "json",
+        "--json",
+        "list --json",
+        "status --json",
+        "show --json",
+        "show <name>",
+        "show <name> --json",
+        "open",
+        "settings",
+        "edit",
+        "background",
+        "bg",
+        "background json",
+        "background list --json",
+        "background show <pid|run-id|latest>",
+        "background show <pid|run-id|latest> --json",
+        "background show-json <pid|run-id|latest>",
+        "background log <pid|run-id|latest>",
+        "background kill <pid|run-id|latest>",
+        "background stop <pid|run-id|latest>",
+        "background prune",
+        "background clear",
+        "create [--worktree|--same-cwd] <name> [description]",
+        "delete <name>",
+        "remove <name>",
+    ]
+}
+
+fn agent_definition_json(
+    agent: &crate::commands::code_agents::AgentDefinition,
+) -> serde_json::Value {
+    json!({
+        "name": agent.name,
+        "description": if agent.description.trim().is_empty() {
+            "Named sub-agent"
+        } else {
+            agent.description.as_str()
+        },
+        "model": agent.model.as_deref().unwrap_or("default"),
+        "tools": agent.tools.clone().unwrap_or_else(|| {
+            vec!["read".to_string(), "grep".to_string(), "find".to_string(), "ls".to_string()]
+        }),
+        "worktree": agent.worktree,
+        "source": agent_source_label(&agent.source),
+        "path": agent_definition_path(agent),
+        "system_prompt": agent.system_prompt,
+    })
+}
+
+fn agents_json_payload(
+    query: &str,
+    cwd: &Path,
+    agents: &[crate::commands::code_agents::AgentDefinition],
+) -> serde_json::Value {
+    let worktree_count = agents.iter().filter(|agent| agent.worktree).count();
+    json!({
+        "surface": "terminal",
+        "command": "agents",
+        "query": query,
+        "aliases": ["agents"],
+        "cwd": cwd,
+        "count": agents.len(),
+        "worktree_default_count": worktree_count,
+        "same_cwd_count": agents.len().saturating_sub(worktree_count),
+        "agents": agents.iter().map(agent_definition_json).collect::<Vec<_>>(),
+        "will_write": false,
+        "supported_actions": agents_supported_actions(),
+    })
+}
+
+fn print_agents_json(query: &str) {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /agents: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let agents = match crate::commands::code_agents::discover_agents(&cwd) {
+        Ok(agents) => agents,
+        Err(e) => {
+            eprintln!("{DIM}  /agents: failed: {e:#}{RESET}");
+            return;
+        }
+    };
+    match serde_json::to_string_pretty(&agents_json_payload(query, &cwd, &agents)) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  /agents: could not serialize JSON: {e:#}{RESET}"),
+    }
+}
+
+const AGENTS_USAGE: &str = "/agents [list|status|show <name>|json|--json|status --json|show <name> --json|open|settings|edit|background|bg] | /agents background|bg [list|json|show|inspect|show-json|log|kill|stop [pid|run-id|latest]|prune|clear] | /agents create [--worktree|--same-cwd] <name> [description] | /agents delete|remove <name>";
 
 fn handle_agents_command(input: &str) {
     match parse_agents_command(input) {
         AgentsSlashCommand::List => print_agents(),
+        AgentsSlashCommand::ListJson => print_agents_json(input.trim()),
         AgentsSlashCommand::Show(rest) => print_agent_details(rest),
+        AgentsSlashCommand::ShowJson(rest) => print_agent_details_json(rest),
         AgentsSlashCommand::Open => print_agents_open_hint(),
         AgentsSlashCommand::Create(rest) => create_agent_from_slash(rest),
         AgentsSlashCommand::Delete(rest) => delete_agent_from_slash(rest),
@@ -8445,7 +8543,9 @@ fn handle_agents_command(input: &str) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentsSlashCommand<'a> {
     List,
+    ListJson,
     Show(&'a str),
+    ShowJson(&'a str),
     Open,
     Create(&'a str),
     Delete(&'a str),
@@ -8464,7 +8564,16 @@ fn parse_agents_command(input: &str) -> AgentsSlashCommand<'_> {
     if raw.is_empty() || raw == "list" || raw == "show" || raw == "status" {
         return AgentsSlashCommand::List;
     }
+    if matches!(
+        raw,
+        "json" | "--json" | "list --json" | "status --json" | "show --json"
+    ) {
+        return AgentsSlashCommand::ListJson;
+    }
     if let Some(rest) = raw.strip_prefix("show ") {
+        if let Some(rest) = strip_trailing_json_flag(rest) {
+            return AgentsSlashCommand::ShowJson(rest);
+        }
         return AgentsSlashCommand::Show(rest.trim());
     }
     if matches!(raw, "open" | "settings" | "edit") {
@@ -8560,6 +8669,46 @@ fn print_agent_details(input: &str) {
         }
     };
     print!("{}", format_agent_details(&agent));
+}
+
+fn print_agent_details_json(input: &str) {
+    let name = input.trim().trim_start_matches('@');
+    if name.is_empty() || name.split_whitespace().count() != 1 {
+        eprintln!("{DIM}  /agents: usage: /agents show <name> --json{RESET}");
+        return;
+    }
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /agents: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let agent = match crate::commands::code_agents::find_agent(&cwd, name) {
+        Ok(Some(agent)) => agent,
+        Ok(None) => {
+            eprintln!("{DIM}  /agents: no named sub-agent found for `{name}`{RESET}");
+            return;
+        }
+        Err(e) => {
+            eprintln!("{DIM}  /agents: failed: {e:#}{RESET}");
+            return;
+        }
+    };
+    let payload = json!({
+        "surface": "terminal",
+        "command": "agents",
+        "query": format!("show {name} --json"),
+        "aliases": ["agents"],
+        "cwd": cwd,
+        "agent": agent_definition_json(&agent),
+        "will_write": false,
+        "supported_actions": agents_supported_actions(),
+    });
+    match serde_json::to_string_pretty(&payload) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  /agents: could not serialize JSON: {e:#}{RESET}"),
+    }
 }
 
 fn format_agent_details(agent: &crate::commands::code_agents::AgentDefinition) -> String {
@@ -18349,9 +18498,18 @@ mod tests {
         assert_eq!(parse_agents_command(""), AgentsSlashCommand::List);
         assert_eq!(parse_agents_command("list"), AgentsSlashCommand::List);
         assert_eq!(parse_agents_command("show"), AgentsSlashCommand::List);
+        assert_eq!(parse_agents_command("json"), AgentsSlashCommand::ListJson);
+        assert_eq!(
+            parse_agents_command("status --json"),
+            AgentsSlashCommand::ListJson
+        );
         assert_eq!(
             parse_agents_command("show reviewer"),
             AgentsSlashCommand::Show("reviewer")
+        );
+        assert_eq!(
+            parse_agents_command("show reviewer --json"),
+            AgentsSlashCommand::ShowJson("reviewer")
         );
         assert_eq!(parse_agents_command("open"), AgentsSlashCommand::Open);
         assert_eq!(parse_agents_command("settings"), AgentsSlashCommand::Open);
@@ -18372,6 +18530,7 @@ mod tests {
         assert!(AGENTS_USAGE.contains("background|bg"));
         assert!(AGENTS_USAGE.contains("kill|stop"));
         assert!(AGENTS_USAGE.contains("delete|remove"));
+        assert!(AGENTS_USAGE.contains("status --json"));
     }
 
     #[test]
@@ -18395,6 +18554,18 @@ mod tests {
         assert!(details.contains("isolation: worktree"));
         assert!(details.contains("/tmp/project/.libertai/agents/reviewer.md"));
         assert!(details.contains("Review carefully.\nCite files."));
+
+        let payload = agents_json_payload("status --json", Path::new("/tmp/project"), &[agent]);
+        assert_eq!(payload["command"], "agents");
+        assert_eq!(payload["query"], "status --json");
+        assert_eq!(payload["count"], 1);
+        assert_eq!(payload["worktree_default_count"], 1);
+        assert_eq!(payload["agents"][0]["name"], "reviewer");
+        assert_eq!(payload["agents"][0]["path"], "/tmp/project/.libertai/agents/reviewer.md");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show <name> --json")));
     }
 
     #[test]
