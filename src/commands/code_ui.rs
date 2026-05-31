@@ -13086,7 +13086,7 @@ fn is_output_style_json_request(value: &str) -> bool {
 }
 
 fn output_style_usage_text() -> &'static str {
-    "/output-style [default|concise|explanatory|review|status|show|current|info|list|json|list --json]"
+    "/output-style [default|concise|explanatory|review|status|show|current|info|list|json|status --json|list --json]"
 }
 
 fn print_output_style_status(output_style: Option<&str>, unknown: Option<&str>) {
@@ -13104,10 +13104,10 @@ fn print_output_style_status(output_style: Option<&str>, unknown: Option<&str>) 
     println!();
 }
 
-fn print_output_style_status_json(output_style: Option<&str>) {
+fn output_style_status_json_payload(output_style: Option<&str>) -> serde_json::Value {
     let cwd = std::env::current_dir().ok();
     let styles = crate::commands::code_output_style::load_styles(cwd.as_deref());
-    let payload = json!({
+    json!({
         "surface": "terminal",
         "command": "output-style",
         "current": output_style.unwrap_or("default"),
@@ -13118,7 +13118,12 @@ fn print_output_style_status_json(output_style: Option<&str>) {
                 "instruction": style.instruction,
             })
         }).collect::<Vec<_>>(),
-    });
+        "supported_actions": ["default", "concise", "explanatory", "review", "status", "show", "current", "info", "list", "json", "status --json", "list --json"],
+    })
+}
+
+fn print_output_style_status_json(output_style: Option<&str>) {
+    let payload = output_style_status_json_payload(output_style);
     match serde_json::to_string_pretty(&payload) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("{DIM}  /output-style json: {e:#}{RESET}"),
@@ -13717,8 +13722,12 @@ mod tests {
         assert!(is_output_style_json_request("list --json"));
         assert!(!is_output_style_json_request("review --json"));
         assert!(output_style_usage_text().contains("status|show|current|info|list"));
-        assert!(output_style_usage_text().contains("json|list --json"));
+        assert!(output_style_usage_text().contains("json|status --json|list --json"));
         assert!(output_style_usage_text().contains("default|concise|explanatory|review"));
+        let payload = output_style_status_json_payload(Some("review"));
+        assert_eq!(payload["command"], "output-style");
+        assert_eq!(payload["current"], "review");
+        assert_eq!(payload["supported_actions"][10], "status --json");
     }
 
     #[test]
