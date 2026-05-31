@@ -983,7 +983,7 @@ async fn repl_loop(
         if let Some(rest) = hotkeys_command_arg(trimmed) {
             match parse_hotkeys_command(rest) {
                 HotkeysCommand::Show => print_hotkeys(),
-                HotkeysCommand::Json => print_hotkeys_json(),
+                HotkeysCommand::Json => print_hotkeys_json(rest),
                 HotkeysCommand::Usage => {
                     println!(
                         "{DIM}  usage:{RESET} {}",
@@ -3475,7 +3475,7 @@ fn print_hotkeys() {
     }
 }
 
-fn hotkeys_json_payload() -> serde_json::Value {
+fn hotkeys_json_payload(query: &str) -> serde_json::Value {
     let shortcuts: Vec<serde_json::Value> = hotkey_lines()
         .into_iter()
         .map(|line| {
@@ -3489,14 +3489,15 @@ fn hotkeys_json_payload() -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "hotkeys",
+        "query": query.trim(),
         "aliases": ["hotkeys"],
         "supported_actions": ["status", "show", "list", "help", "json", "--json", "status --json", "show --json", "list --json"],
         "shortcuts": shortcuts,
     })
 }
 
-fn print_hotkeys_json() {
-    match serde_json::to_string_pretty(&hotkeys_json_payload()) {
+fn print_hotkeys_json(query: &str) {
+    match serde_json::to_string_pretty(&hotkeys_json_payload(query)) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  /hotkeys json: {e:#}{RESET}"),
     }
@@ -16908,9 +16909,10 @@ mod tests {
         assert_eq!(parse_hotkeys_command("edit"), HotkeysCommand::Usage);
         assert!(hotkeys_usage_text().contains("json|--json|status --json"));
         assert!(hotkeys_usage_text().contains("show --json|list --json"));
-        let payload = hotkeys_json_payload();
+        let payload = hotkeys_json_payload("list --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "hotkeys");
+        assert_eq!(payload["query"], "list --json");
         assert_eq!(payload["aliases"][0], "hotkeys");
         assert_eq!(payload["supported_actions"][6], "status --json");
         assert_eq!(payload["supported_actions"][8], "list --json");
