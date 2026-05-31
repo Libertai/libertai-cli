@@ -3253,7 +3253,7 @@ enum ForgetCommand {
 }
 
 fn forget_usage_text() -> &'static str {
-    "/forget [status|show|info|json|status --json]"
+    "/forget [status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json]"
 }
 
 fn forget_command_arg(trimmed: &str) -> Option<&str> {
@@ -16895,9 +16895,15 @@ mod tests {
         assert_eq!(parse_forget_command("status"), ForgetCommand::Status);
         assert_eq!(parse_forget_command("preview"), ForgetCommand::Status);
         assert_eq!(parse_forget_command("json"), ForgetCommand::Json);
+        assert_eq!(parse_forget_command("--json"), ForgetCommand::Json);
         assert_eq!(parse_forget_command("status --json"), ForgetCommand::Json);
+        assert_eq!(parse_forget_command("state --json"), ForgetCommand::Json);
+        assert_eq!(parse_forget_command("show --json"), ForgetCommand::Json);
+        assert_eq!(parse_forget_command("info --json"), ForgetCommand::Json);
+        assert_eq!(parse_forget_command("preview --json"), ForgetCommand::Json);
         assert_eq!(parse_forget_command("run"), ForgetCommand::Usage);
-        assert!(forget_usage_text().contains("json|status --json"));
+        assert!(forget_usage_text().contains("preview|json|--json|status --json"));
+        assert!(forget_usage_text().contains("show --json|info --json|preview --json"));
         let approvals = ApprovalState::new();
         let payload = forget_json_payload(&approvals);
         assert_eq!(payload["surface"], "terminal");
