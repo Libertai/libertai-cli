@@ -15092,7 +15092,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let result = execute_shell_escape(temp.path(), "pwd", None).unwrap();
         assert_eq!(result.exit_code, Some(0));
-        assert_eq!(result.stdout.trim(), temp.path().display().to_string());
+        let actual = std::fs::canonicalize(result.stdout.trim()).unwrap();
+        let expected = std::fs::canonicalize(temp.path()).unwrap();
+        assert_eq!(actual, expected);
     }
 
     #[test]

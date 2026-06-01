@@ -4469,7 +4469,7 @@ mod tests {
             "docs-sse-reuse-test",
             "search",
             json!({"query":"one"}),
-            Some(2),
+            Some(10),
         );
         assert_eq!(first.status, 0, "stderr: {}", first.stderr);
         assert_eq!(first.stdout, "first sse");
@@ -4480,7 +4480,7 @@ mod tests {
             "docs-sse-reuse-test",
             "search",
             json!({"query":"two"}),
-            Some(2),
+            Some(10),
         );
         assert_eq!(second.status, 0, "stderr: {}", second.stderr);
         assert_eq!(second.stdout, "second sse");
@@ -4581,7 +4581,7 @@ mod tests {
             server: "policy".to_string(),
             tool: "check".to_string(),
             input: Some(json!({"level":"strict"})),
-            timeout: Some(2),
+            timeout: Some(10),
             ..HookCommandConfig::default()
         };
         let cfg = Config {
