@@ -696,13 +696,15 @@ list. CLI
 and prompt preview, and `/agents create [--worktree|--same-cwd] <name>
 [description]` scaffolds project-local `.libertai/agents/<name>.md`
 definitions. Worktree isolation now uses a detached git worktree when
-possible and a copied temp workspace snapshot outside git. Remaining work:
-pi-level child event streaming has now **landed**
+possible and a copied temp workspace snapshot outside git. Pi-level child
+event streaming has now **landed**
 (`pi_agent_rust/src/agent.rs:307` `ToolExecutionUpdate` +
-`src/tools.rs:220-280` native `TaskTool` forwarding), so the open item is
-wiring CLI/desktop `code_task.rs` `render_child` to forward
-`ToolExecutionUpdate`/`ToolExecutionEnd`; durable scheduling controls for
-detached agents remain the other deferred item.
+`src/tools.rs:220-280` native `TaskTool` forwarding), and
+`libertai-cli` forwards child `MessageUpdate`, `ToolExecutionUpdate`, and
+`ToolExecutionEnd` events through the parent task tool update stream so
+desktop can append live child text/tool activity to the running `task`
+preview. Durable scheduling controls for detached agents remain the open
+deferred item.
 
 **Files**: `src/commands/code_agents.rs`, `src/commands/code_task.rs`,
 `src/commands/code_ui.rs`.

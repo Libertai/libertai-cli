@@ -19,16 +19,14 @@ use async_trait::async_trait;
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{
-    create_agent_session, AgentEvent, Result as PiResult, Tool, ToolExecution, ToolOutput,
-    ToolUpdate,
+    AgentEvent, Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate,
+    create_agent_session,
 };
 
-use crate::commands::code_approvals::{ApprovalState, ApprovalUi};
 use crate::commands::code_agents;
+use crate::commands::code_approvals::{ApprovalState, ApprovalUi};
 use crate::commands::code_factory::{LibertaiToolFactory, ModeFlag};
-use crate::commands::code_session::{
-    build_session_options, CodeSessionConfig, SessionPersistence,
-};
+use crate::commands::code_session::{CodeSessionConfig, SessionPersistence, build_session_options};
 use crate::commands::code_skills::{self, SkillPillar};
 use crate::config;
 
@@ -126,9 +124,7 @@ impl Tool for TaskTool {
         let prompt = match input.get("prompt").and_then(|v| v.as_str()) {
             Some(p) => p.to_string(),
             None => {
-                return Ok(err_output(
-                    "task tool requires a `prompt` string argument",
-                ));
+                return Ok(err_output("task tool requires a `prompt` string argument"));
             }
         };
         let subagent_type = input
@@ -189,11 +185,7 @@ impl Tool for TaskTool {
                 .into_iter()
                 .filter(|name| ceiling.iter().any(|allowed| allowed == name))
                 .collect();
-            if f.is_empty() {
-                ceiling
-            } else {
-                f
-            }
+            if f.is_empty() { ceiling } else { f }
         };
 
         // Load our own Config — subtask runs against the same LibertAI
@@ -246,7 +238,7 @@ impl Tool for TaskTool {
                 Err(e) => {
                     return Ok(err_output(&format!(
                         "task: could not create isolated worktree: {e:#}"
-                    )))
+                    )));
                 }
             }
         } else {
@@ -303,9 +295,7 @@ impl Tool for TaskTool {
                 agent.name
             );
         } else if wants_worktree {
-            eprintln!(
-                "\n  \x1b[2m[subagent] running in isolated workspace: {prompt}\x1b[0m"
-            );
+            eprintln!("\n  \x1b[2m[subagent] running in isolated workspace: {prompt}\x1b[0m");
         } else {
             eprintln!("\n  \x1b[2m[subagent] running: {prompt}\x1b[0m");
         }
@@ -316,8 +306,7 @@ impl Tool for TaskTool {
         };
         handle.set_max_tokens(max_tokens);
 
-        let child_updates: Option<Arc<dyn Fn(ToolUpdate) + Send + Sync>> =
-            on_update.map(Arc::from);
+        let child_updates: Option<Arc<dyn Fn(ToolUpdate) + Send + Sync>> = on_update.map(Arc::from);
         let render = {
             let child_updates = child_updates.clone();
             move |event: AgentEvent| render_child(event, child_updates.as_deref())
@@ -488,7 +477,11 @@ fn copy_workspace_snapshot(src: &Path, dst: &Path) -> Result<(), String> {
             copy_workspace_snapshot(&from, &to)?;
         } else if file_type.is_file() {
             std::fs::copy(&from, &to).map_err(|e| {
-                format!("copy snapshot file {} -> {}: {e}", from.display(), to.display())
+                format!(
+                    "copy snapshot file {} -> {}: {e}",
+                    from.display(),
+                    to.display()
+                )
             })?;
         }
     }
@@ -627,12 +620,15 @@ fn err_output(text: &str) -> ToolExecution {
 #[cfg(test)]
 mod tests {
     use super::{
-        named_subagent_prompt, should_skip_snapshot_entry, task_wants_same_cwd,
-        task_wants_worktree, TaskWorktree,
+        TaskWorktree, named_subagent_prompt, render_child, should_skip_snapshot_entry,
+        task_wants_same_cwd, task_wants_worktree,
     };
     use crate::commands::code_agents::{AgentDefinition, AgentSource};
+    use pi::model::{ContentBlock, TextContent};
+    use pi::sdk::{AgentEvent, ToolOutput, ToolUpdate};
     use serde_json::json;
     use std::process::Command;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn task_worktree_flag_accepts_boolean() {
@@ -730,6 +726,70 @@ mod tests {
         assert!(prompt.contains("Do not invent follow-up work"));
         assert!(prompt.contains("### Role instructions"));
         assert!(prompt.contains("Focus on correctness."));
+    }
+
+    #[test]
+    fn render_child_forwards_tool_update_and_end_metadata() {
+        let updates = Arc::new(Mutex::new(Vec::<ToolUpdate>::new()));
+        let sink = {
+            let updates = Arc::clone(&updates);
+            move |update: ToolUpdate| updates.lock().unwrap().push(update)
+        };
+
+        render_child(
+            AgentEvent::ToolExecutionUpdate {
+                tool_call_id: "child-read-1".to_string(),
+                tool_name: "read".to_string(),
+                args: json!({"path": "README.md"}),
+                partial_result: ToolOutput {
+                    content: vec![ContentBlock::Text(TextContent::new("partial child read"))],
+                    details: Some(json!({"path": "README.md", "bytes": 12})),
+                    is_error: false,
+                },
+            },
+            Some(&sink),
+        );
+        render_child(
+            AgentEvent::ToolExecutionEnd {
+                tool_call_id: "child-read-1".to_string(),
+                tool_name: "read".to_string(),
+                result: ToolOutput {
+                    content: vec![ContentBlock::Text(TextContent::new("final child read"))],
+                    details: Some(json!({"path": "README.md", "bytes": 24})),
+                    is_error: false,
+                },
+                is_error: false,
+            },
+            Some(&sink),
+        );
+
+        let updates = updates.lock().unwrap();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(tool_update_text(&updates[0]), "partial child read");
+        assert_eq!(
+            updates[0].details.as_ref().unwrap()["kind"],
+            "subagent_tool_update"
+        );
+        assert_eq!(updates[0].details.as_ref().unwrap()["tool"], "read");
+        assert_eq!(
+            updates[0].details.as_ref().unwrap()["toolCallId"],
+            "child-read-1"
+        );
+        assert_eq!(updates[0].details.as_ref().unwrap()["details"]["bytes"], 12);
+        assert_eq!(tool_update_text(&updates[1]), "final child read");
+        assert_eq!(
+            updates[1].details.as_ref().unwrap()["kind"],
+            "subagent_tool_end"
+        );
+        assert_eq!(updates[1].details.as_ref().unwrap()["isError"], false);
+        assert_eq!(updates[1].details.as_ref().unwrap()["details"]["bytes"], 24);
+    }
+
+    fn tool_update_text(update: &ToolUpdate) -> &str {
+        match update.content.first() {
+            Some(ContentBlock::Text(text)) => text.text.as_str(),
+            other => panic!("expected text update, got {other:?}"),
+        }
     }
 
     fn git(cwd: &std::path::Path, args: &[&str]) {
