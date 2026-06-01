@@ -26,6 +26,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Enable Git long paths
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/cache@v4
@@ -131,6 +135,10 @@ jobs:
             asset: libertai-macos-aarch64
     steps:
       - uses: actions/checkout@v4
+
+      - name: Enable Git long paths
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
 
       - uses: dtolnay/rust-toolchain@stable
         with:
