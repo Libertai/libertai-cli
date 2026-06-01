@@ -3258,7 +3258,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "permissions" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only|open|settings|edit|approvals|forget|clear|reset|bypassPermissions|bypass|danger",
         "plan" => "on|off|status",
         "pr_comments" => "scope|send|resolve <thread_id>|unresolve <thread_id>|reopen <thread_id>|viewed <path>|view <path>|viewed --all|unviewed <path>|unview <path>|unviewed --all|thread <path>:<line> <body>|comment <path>:<line> <body>|draft <path>:<line> <body>|drafts|drafts submit|drafts submit comment <body>|drafts submit request_changes <body>|drafts submit approve [body]|drafts clear|reply <thread_id> <body>|edit <comment_id> <body>|review <approve|comment|request_changes> [body]|submit <approve|comment|request_changes> [body]",
-        "review" | "security-review" => "[instructions]",
+        "review" | "security-review" => "[scope]",
         "reload" => "config|session|now|fresh|json|--json|config --json|session --json|now --json|fresh --json",
         "remember" => "project: <text>|user: <text>|feedback: <text>|reference: <text>|json <text>|--json <text>|<text> --json|status --json|show --json|preview --json",
         "resume" => "status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json|session|path",
@@ -20112,6 +20112,8 @@ mod tests {
         );
         assert_eq!(review_command_parts("/pr_comments"), Some(("/pr_comments", "")));
         assert_eq!(review_command_parts("/reviewer src"), None);
+        assert_eq!(help_command_arg_hint("review"), "[scope]");
+        assert_eq!(help_command_arg_hint("security-review"), "[scope]");
     }
 
     #[test]
