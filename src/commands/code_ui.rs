@@ -3240,7 +3240,8 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "export" => "copy|save|path|json|--json|status --json|show --json|preview --json|[path]",
         "fork" => "list|index|id",
         "help" => "status|show|list|commands|json|--json|status --json|show --json|list --json|commands --json",
-        "hooks" | "mcp" => "status|state|show|list|diagnostics|diag|json|--json|status --json|state --json|show --json|list --json|diagnostics --json|diag --json",
+        "hooks" => "status|list|state|diagnostics|diag|json|--json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|show|event|inspect <event>|open|settings|edit",
+        "mcp" => "status|list|state|show|json|--json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|server|inspect <server>|probe|probes|probe --save|probe save|probe --write|probe write|refresh|diagnostics|diag|reset|reset-sessions|open|settings|edit",
         "hotkeys" => "status|show|list|help|json|--json|status --json|show --json|list --json",
         "ide" => "status|state|show|json|--json|status --json|state --json|show --json|open|settings|edit",
         "init" => "--agent|json|--json|status --json|from-agent json|from-agent preview|from-agent append|from-agent merge|from-agent merge-lines|from-agent replace|from-agent sections N[,M]|N-M|all|[notes]",
@@ -16740,6 +16741,12 @@ mod tests {
         assert!(HOOKS_USAGE.contains("diagnostics --json|diag --json|show --json"));
         assert!(HOOKS_USAGE.contains("show|event|inspect"));
         assert!(HOOKS_USAGE.contains("settings|edit"));
+        assert_eq!(
+            help_command_arg_hint("hooks"),
+            HOOKS_USAGE
+                .trim_start_matches("/hooks [")
+                .trim_end_matches(']')
+        );
     }
 
     #[test]
@@ -16905,6 +16912,10 @@ mod tests {
         assert!(MCP_USAGE.contains("probe|probes"));
         assert!(MCP_USAGE.contains("reset|reset-sessions"));
         assert!(MCP_USAGE.contains("settings|edit"));
+        assert_eq!(
+            help_command_arg_hint("mcp"),
+            MCP_USAGE.trim_start_matches("/mcp [").trim_end_matches(']')
+        );
     }
 
     #[test]
