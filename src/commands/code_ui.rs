@@ -1733,6 +1733,21 @@ async fn repl_loop(
             }
             continue;
         }
+        if let Some(rest) = trimmed.strip_prefix("/plan ") {
+            match parse_plan_command(rest) {
+                PlanCommand::Status => print_plan_status(mode.get()),
+                PlanCommand::On => {
+                    mode.set(Mode::Plan);
+                    announce_mode_change(Mode::Plan);
+                }
+                PlanCommand::Off => {
+                    mode.set(Mode::Normal);
+                    announce_mode_change(Mode::Normal);
+                }
+                PlanCommand::Usage => eprintln!("{DIM}  usage: /plan [on|off|status]{RESET}"),
+            }
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix("/model ") {
             let model_command = parse_model_slash_command(rest);
             match model_command {
@@ -4485,6 +4500,35 @@ fn parse_permissions_command(input: &str) -> PermissionsCommand {
         }
         _ => PermissionsCommand::Show,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanCommand {
+    Status,
+    On,
+    Off,
+    Usage,
+}
+
+fn parse_plan_command(input: &str) -> PlanCommand {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "status" | "show" | "current" | "info" => PlanCommand::Status,
+        "on" | "enable" | "enabled" | "true" | "plan" | "readonly" | "read-only" => {
+            PlanCommand::On
+        }
+        "off" | "disable" | "disabled" | "false" | "normal" | "default" => PlanCommand::Off,
+        _ => PlanCommand::Usage,
+    }
+}
+
+fn print_plan_status(mode: Mode) {
+    let active = matches!(mode, Mode::Plan);
+    println!(
+        "{DIM}  plan mode: {} ({}){RESET}",
+        if active { "on" } else { "off" },
+        mode_label(mode)
+    );
+    println!("{DIM}  use /plan on, /plan off, or bare /plan to cycle modes.{RESET}");
 }
 
 fn status_line_command_arg(input: &str) -> Option<&str> {
@@ -18496,6 +18540,22 @@ mod tests {
         assert!(parse_plan_exit_choice("\n"));
         assert!(!parse_plan_exit_choice("d"));
         assert!(!parse_plan_exit_choice("no"));
+    }
+
+    #[test]
+    fn parse_plan_command_accepts_on_off_and_status_aliases() {
+        assert_eq!(parse_plan_command(""), PlanCommand::Status);
+        assert_eq!(parse_plan_command("status"), PlanCommand::Status);
+        assert_eq!(parse_plan_command("show"), PlanCommand::Status);
+        assert_eq!(parse_plan_command("on"), PlanCommand::On);
+        assert_eq!(parse_plan_command("enable"), PlanCommand::On);
+        assert_eq!(parse_plan_command("plan"), PlanCommand::On);
+        assert_eq!(parse_plan_command("readonly"), PlanCommand::On);
+        assert_eq!(parse_plan_command("off"), PlanCommand::Off);
+        assert_eq!(parse_plan_command("disable"), PlanCommand::Off);
+        assert_eq!(parse_plan_command("normal"), PlanCommand::Off);
+        assert_eq!(parse_plan_command("wat"), PlanCommand::Usage);
+        assert_eq!(help_command_arg_hint("plan"), "on|off|status");
     }
 
     #[test]
