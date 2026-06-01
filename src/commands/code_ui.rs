@@ -3242,7 +3242,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "sandbox" => "info|status|state|show|diagnostics|diag|json|--json|status --json|state --json|show --json|info --json|diagnostics --json|diag --json|reload",
         "schedule" => "in <delay> <prompt>|list|status|state|json|--json|list --json|show <id>|show <id> --json|run <id>|cancel <id>|clear|stop",
         "scoped-models" => "status|show|json|--json|status --json|show --json|patterns|clear|reset|off",
-        "send" => "status|targets|list|queued|queued --json|clear <id|target|all>|json|--json|status --json|targets --json|list --json",
+        "send" => "status|targets|list|json|--json|status --json|state --json|show --json|list --json|targets --json|queued|queue --json|queued --json|pending --json|clear <id|target|all>|session message",
         "share" => "copy|save|path|gist|json|--json|status --json|show --json|preview --json|[path]",
         "skills" => "list|status|show|json|--json|status --json|list --json|show --json|show <name>|show <name> --json|open|settings|edit|enable|on <name>|disable|off <name>",
         "status" => "show|info|current|session|json|--json|show --json|info --json|current --json|session --json",
@@ -6257,7 +6257,7 @@ fn print_send_status(rest: &str) {
         );
     }
     println!(
-        "{DIM}  usage:{RESET} /send status|targets|list|json|queued|queued --json|clear <id|target|all>|<session> <message> (also /send-message)"
+        "{DIM}  usage:{RESET} /send status|targets|list|json|--json|status --json|state --json|show --json|list --json|targets --json|queued|queue --json|queued --json|pending --json|clear <id|target|all>|<session> <message> (also /send-message)"
     );
     println!(
         "{DIM}  remaining gap:{RESET} pi-level streaming child-agent bus or detached inter-agent scheduler."
@@ -6300,15 +6300,31 @@ fn send_json_payload(query: &str) -> serde_json::Value {
             "/send targets",
             "/send list",
             "/send json",
+            "/send --json",
+            "/send status --json",
+            "/send state --json",
+            "/send show --json",
+            "/send list --json",
+            "/send targets --json",
             "/send queued",
+            "/send queue --json",
             "/send queued --json",
+            "/send pending --json",
             "/send clear all",
             "/send-message status",
             "/send-message targets",
             "/send-message list",
             "/send-message json",
+            "/send-message --json",
+            "/send-message status --json",
+            "/send-message state --json",
+            "/send-message show --json",
+            "/send-message list --json",
+            "/send-message targets --json",
             "/send-message queued",
-            "/send-message queued --json"
+            "/send-message queue --json",
+            "/send-message queued --json",
+            "/send-message pending --json"
         ],
         "remaining_gap": "pi-level streaming child-agent bus or detached inter-agent scheduler"
     })
@@ -17740,7 +17756,9 @@ mod tests {
         assert_eq!(send_command_arg("/send targets"), Some("targets"));
         assert_eq!(send_command_arg("/send list"), Some("list"));
         assert_eq!(send_command_arg("/send json"), Some("json"));
+        assert_eq!(send_command_arg("/send show --json"), Some("show --json"));
         assert_eq!(send_command_arg("/send queued --json"), Some("queued --json"));
+        assert_eq!(send_command_arg("/send pending --json"), Some("pending --json"));
         assert_eq!(send_command_arg("/send worker finish tests"), Some("worker finish tests"));
         assert_eq!(send_command_arg("/send-message"), Some(""));
         assert_eq!(
@@ -17750,8 +17768,13 @@ mod tests {
         assert_eq!(send_command_arg("/sender worker finish tests"), None);
         assert!(is_send_json_request("json"));
         assert!(is_send_json_request("status --json"));
+        assert!(is_send_json_request("state --json"));
+        assert!(is_send_json_request("show --json"));
+        assert!(is_send_json_request("list --json"));
         assert!(is_send_json_request("targets --json"));
+        assert!(is_send_json_request("queue --json"));
         assert!(is_send_json_request("queued --json"));
+        assert!(is_send_json_request("pending --json"));
         assert!(!is_send_json_request("worker finish tests"));
 
         let payload = send_json_payload("  queued --json  ");
@@ -17763,12 +17786,14 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .any(|item| item == "queued --json"));
+            .any(|item| item == "pending --json"));
         assert!(payload["desktop_commands"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|item| item == "/send-message queued --json"));
+            .any(|item| item == "/send-message pending --json"));
+        assert!(help_command_arg_hint("send").contains("show --json"));
+        assert!(help_command_arg_hint("send").contains("pending --json"));
     }
 
     #[test]
