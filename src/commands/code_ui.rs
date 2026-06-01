@@ -3266,7 +3266,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "send" => "status|targets|list|json|--json|status --json|state --json|show --json|list --json|targets --json|queued|queue --json|queued --json|pending --json|clear <id|target|all>|session message",
         "share" => "copy|save|path|gist|json|--json|status --json|show --json|preview --json|[path]",
         "skills" => "list|status|show|json|--json|status --json|list --json|show --json|show <name>|show <name> --json|open|settings|edit|enable|on <name>|disable|off <name>",
-        "status" => "show|info|current|session|json|--json|show --json|info --json|current --json|session --json",
+        "status" => "status|state|show|info|current|session|json|--json|status --json|state --json|show --json|info --json|current --json|session --json",
         "statusline" => "status|show|json|--json|status --json|show --json|template --json|info --json|template|command <shell>|command-clear|command reset|command clear|reset|clear",
         "template" => "list|show|json|--json|status --json|list --json|show --json|<name> [args]",
         "theme" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|system|dark|light|high-contrast",
@@ -17348,6 +17348,8 @@ mod tests {
         assert_eq!(parse_status_command("current --json"), StatusCommand::Json);
         assert_eq!(parse_status_command("session --json"), StatusCommand::Json);
         assert_eq!(parse_status_command("open"), StatusCommand::Usage);
+        assert!(help_command_arg_hint("status").contains("status|state|show|info"));
+        assert!(help_command_arg_hint("status").contains("status --json|state --json"));
         assert!(status_usage_text().contains("status|state|show|info"));
         assert!(status_usage_text().contains("current|session|json|--json"));
         assert!(status_usage_text().contains("status --json"));
