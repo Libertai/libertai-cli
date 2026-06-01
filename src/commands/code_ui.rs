@@ -445,6 +445,7 @@ enum SkillsCommand {
     List,
     Json,
     Show(String),
+    ShowJson(String),
     Open,
     Enable(String),
     Disable(String),
@@ -9538,6 +9539,7 @@ fn handle_skills_slash(query: &str) -> Result<()> {
         SkillsCommand::List => print_code_skills(),
         SkillsCommand::Json => print_code_skills_json(query),
         SkillsCommand::Show(name) => print_code_skill_details(&name),
+        SkillsCommand::ShowJson(name) => print_code_skill_details_json(&name),
         SkillsCommand::Open => print_code_skills_open_hint(),
         SkillsCommand::Enable(name) => {
             code_skills::set_skill_enabled(&name, true)?;
@@ -9570,6 +9572,12 @@ fn parse_skills_command(query: &str) -> Result<SkillsCommand> {
     }
     if let Some(name) = raw.strip_prefix("show ") {
         let name = name.trim().trim_start_matches('@');
+        if let Some(name) = name.strip_suffix(" --json").map(str::trim) {
+            if name.is_empty() || name.split_whitespace().count() != 1 {
+                anyhow::bail!("usage: /skills show <name> --json");
+            }
+            return Ok(SkillsCommand::ShowJson(name.to_string()));
+        }
         if name.is_empty() || name.split_whitespace().count() != 1 {
             anyhow::bail!("usage: /skills show <name>");
         }
@@ -9599,7 +9607,7 @@ fn parse_skills_command(query: &str) -> Result<SkillsCommand> {
             Ok(SkillsCommand::Disable(name.to_string()))
         }
         _ => anyhow::bail!(
-            "usage: /skills [list|status|show|json|--json|status --json|list --json|show --json|show <name>|open|settings|edit|enable|on <name>|disable|off <name>]"
+            "usage: /skills [list|status|show|json|--json|status --json|list --json|show --json|show <name>|show <name> --json|open|settings|edit|enable|on <name>|disable|off <name>]"
         ),
     }
 }
@@ -9636,7 +9644,7 @@ fn code_skills_json_payload(
         "disabled_count": rows.len().saturating_sub(enabled),
         "skills": rows,
         "will_write": false,
-        "supported_actions": ["list", "status", "show", "json", "--json", "status --json", "list --json", "show --json", "show <name>", "open", "settings", "edit", "enable <name>", "on <name>", "disable <name>", "off <name>"],
+        "supported_actions": ["list", "status", "show", "json", "--json", "status --json", "list --json", "show --json", "show <name>", "show <name> --json", "open", "settings", "edit", "enable <name>", "on <name>", "disable <name>", "off <name>"],
     })
 }
 
@@ -9721,6 +9729,64 @@ fn print_code_skill_details(name: &str) {
         return;
     };
     print!("{}", format_code_skill_details(skill));
+}
+
+fn code_skill_detail_json_payload(
+    cwd: &Path,
+    query_name: &str,
+    skill: Option<&code_skills::SkillInventoryEntry>,
+) -> serde_json::Value {
+    let mut payload = json!({
+        "surface": "terminal",
+        "command": "skills",
+        "query": format!("show {} --json", query_name.trim()),
+        "aliases": ["skills"],
+        "cwd": cwd.display().to_string(),
+        "name": query_name.trim(),
+        "will_write": false,
+        "supported_actions": ["list", "status", "show", "json", "--json", "status --json", "list --json", "show --json", "show <name>", "show <name> --json", "open", "settings", "edit", "enable <name>", "on <name>", "disable <name>", "off <name>"],
+    });
+    if let Some(skill) = skill {
+        payload["skill"] = json!({
+            "name": skill.name,
+            "description": skill.description,
+            "enabled": skill.enabled,
+            "allowed_tools": skill.allowed_tools,
+            "source": skill.source,
+            "source_kind": skill.source_kind,
+            "path": skill.path.as_ref().map(|path| path.display().to_string()),
+            "agent_created": skill.agent_created,
+            "instruction_preview": skill_prompt_preview(&skill.body, 16, 1200),
+        });
+    } else {
+        payload["error"] = json!("not_found");
+    }
+    payload
+}
+
+fn print_code_skill_details_json(name: &str) {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("{DIM}  /skills: could not resolve cwd: {e}{RESET}");
+            return;
+        }
+    };
+    let skills = match code_skills::skill_inventory(SkillPillar::Code, Some(&cwd)) {
+        Ok(skills) => skills,
+        Err(e) => {
+            eprintln!("{DIM}  /skills: failed: {e:#}{RESET}");
+            return;
+        }
+    };
+    let skill = skills
+        .iter()
+        .find(|skill| skill.name == name)
+        .or_else(|| skills.iter().find(|skill| skill.name.starts_with(name)));
+    match serde_json::to_string_pretty(&code_skill_detail_json_payload(&cwd, name, skill)) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  /skills json failed: {e}{RESET}"),
+    }
 }
 
 fn format_code_skill_details(skill: &code_skills::SkillInventoryEntry) -> String {
@@ -19738,6 +19804,10 @@ mod tests {
             parse_skills_command("show libertai-harness").unwrap(),
             SkillsCommand::Show("libertai-harness".to_string())
         );
+        assert_eq!(
+            parse_skills_command("show libertai-harness --json").unwrap(),
+            SkillsCommand::ShowJson("libertai-harness".to_string())
+        );
         assert_eq!(parse_skills_command("open").unwrap(), SkillsCommand::Open);
         assert_eq!(
             parse_skills_command("settings").unwrap(),
@@ -19758,6 +19828,7 @@ mod tests {
         assert!(usage.contains("json"));
         assert!(usage.contains("--json"));
         assert!(usage.contains("show --json"));
+        assert!(usage.contains("show <name> --json"));
         assert!(usage.contains("on <name>"));
         assert!(usage.contains("off <name>"));
     }
@@ -19812,6 +19883,10 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("off <name>")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show <name> --json")));
     }
 
     #[test]
@@ -19835,6 +19910,23 @@ mod tests {
         assert!(details.contains("/tmp/.libertai/skills/project-review"));
         assert!(details.contains("agent-created: yes"));
         assert!(details.contains("Prefer focused findings.\nCite files."));
+
+        let payload = code_skill_detail_json_payload(Path::new("/tmp/project"), "project-review", Some(&skill));
+        assert_eq!(payload["command"], "skills");
+        assert_eq!(payload["query"], "show project-review --json");
+        assert_eq!(payload["name"], "project-review");
+        assert_eq!(payload["skill"]["name"], "project-review");
+        assert_eq!(payload["skill"]["instruction_preview"], "Prefer focused findings.\nCite files.");
+        assert_eq!(payload["will_write"], false);
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show <name> --json")));
+
+        let missing = code_skill_detail_json_payload(Path::new("/tmp/project"), "missing", None);
+        assert_eq!(missing["error"], "not_found");
+        assert_eq!(missing["query"], "show missing --json");
+        assert_eq!(missing["name"], "missing");
     }
 
     #[test]
