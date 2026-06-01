@@ -4,12 +4,16 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
+mod common;
+
 const PLAN_HEADER: &str = "## Plan mode";
 
 #[test]
 fn plan_mode_addendum_present_with_flag() {
+    let config_home = common::fake_config_home();
     let assert = Command::cargo_bin("libertai")
         .expect("libertai binary built")
+        .env("XDG_CONFIG_HOME", config_home.path())
         .env("LIBERTAI_DUMP_SYSTEM_PROMPT", "1")
         .env("LIBERTAI_DUMP_AND_EXIT", "1")
         .args(["code", "--plan", "-p", "probe-ignored"])
@@ -29,8 +33,10 @@ fn plan_mode_addendum_present_with_flag() {
 
 #[test]
 fn plan_mode_addendum_absent_without_flag() {
+    let config_home = common::fake_config_home();
     Command::cargo_bin("libertai")
         .expect("libertai binary built")
+        .env("XDG_CONFIG_HOME", config_home.path())
         .env("LIBERTAI_DUMP_SYSTEM_PROMPT", "1")
         .env("LIBERTAI_DUMP_AND_EXIT", "1")
         .args(["code", "-p", "probe-ignored"])

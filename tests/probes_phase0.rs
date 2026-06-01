@@ -9,6 +9,8 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use predicates::str::contains;
 
+mod common;
+
 const BEGIN_SENTINEL: &str = "===BEGIN SYSTEM PROMPT===";
 const END_SENTINEL: &str = "===END SYSTEM PROMPT===";
 
@@ -18,8 +20,10 @@ const HARNESS_MARKER: &str = "## Tone and style";
 
 #[test]
 fn dump_env_var_prints_assembled_prompt_and_exits() {
+    let config_home = common::fake_config_home();
     let assert = Command::cargo_bin("libertai")
         .expect("libertai binary built")
+        .env("XDG_CONFIG_HOME", config_home.path())
         .env("LIBERTAI_DUMP_SYSTEM_PROMPT", "1")
         .env("LIBERTAI_DUMP_AND_EXIT", "1")
         .args(["code", "-p", "probe-ignored"])

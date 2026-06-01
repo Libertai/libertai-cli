@@ -14,6 +14,8 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::path::Path;
 
+mod common;
+
 fn encode_cwd(p: &Path) -> String {
     let canonical = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     canonical
@@ -26,6 +28,7 @@ fn encode_cwd(p: &Path) -> String {
 #[test]
 fn memory_file_round_trips_into_prompt() {
     let home = tempfile::tempdir().expect("home tempdir");
+    let config_home = common::fake_config_home();
     let cwd = tempfile::tempdir().expect("cwd tempdir");
 
     let encoded = encode_cwd(cwd.path());
@@ -40,6 +43,7 @@ fn memory_file_round_trips_into_prompt() {
     let assert = Command::cargo_bin("libertai")
         .expect("libertai binary built")
         .current_dir(cwd.path())
+        .env("XDG_CONFIG_HOME", config_home.path())
         .env("LIBERTAI_HOME", home.path())
         .env("LIBERTAI_DUMP_SYSTEM_PROMPT", "1")
         .env("LIBERTAI_DUMP_AND_EXIT", "1")
@@ -61,11 +65,13 @@ fn memory_file_round_trips_into_prompt() {
 #[test]
 fn memory_section_absent_when_no_file() {
     let home = tempfile::tempdir().expect("home tempdir");
+    let config_home = common::fake_config_home();
     let cwd = tempfile::tempdir().expect("cwd tempdir");
 
     Command::cargo_bin("libertai")
         .expect("libertai binary built")
         .current_dir(cwd.path())
+        .env("XDG_CONFIG_HOME", config_home.path())
         .env("LIBERTAI_HOME", home.path())
         .env("LIBERTAI_DUMP_SYSTEM_PROMPT", "1")
         .env("LIBERTAI_DUMP_AND_EXIT", "1")
