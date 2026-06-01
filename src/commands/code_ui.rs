@@ -1981,7 +1981,7 @@ async fn repl_loop(
                 if let Some(rest) = trimmed.strip_prefix("/template ") {
                     let rest = rest.trim();
                     if is_template_json_arg(rest) {
-                        print_templates_json();
+                        print_templates_json(rest);
                         continue;
                     }
                     match build_template_slash_prompt(rest, &handle).await {
@@ -3865,7 +3865,7 @@ fn print_sandbox_status(action: &str) {
                 }
             };
             let profile = detect_strict_profile(&cwd);
-            print_sandbox_json(&profile);
+            print_sandbox_json(&profile, action);
         }
         SandboxAction::Reload => {
             println!(
@@ -3882,11 +3882,12 @@ fn sandbox_usage_text() -> &'static str {
     "/sandbox [info|status|state|show|diagnostics|diag|json|--json|status --json|state --json|show --json|info --json|diagnostics --json|diag --json|reload]"
 }
 
-fn sandbox_json_payload(profile: &StrictProfile) -> serde_json::Value {
+fn sandbox_json_payload(profile: &StrictProfile, query: &str) -> serde_json::Value {
     let count_kind = |kind| profile.binds.iter().filter(|bind| bind.kind == kind).count();
     json!({
         "command": "sandbox",
         "surface": "terminal",
+        "query": query.trim(),
         "aliases": ["sandbox"],
         "cwd": profile.cwd,
         "network_allowed": profile.network_allowed,
@@ -3907,8 +3908,8 @@ fn sandbox_json_payload(profile: &StrictProfile) -> serde_json::Value {
     })
 }
 
-fn print_sandbox_json(profile: &StrictProfile) {
-    match serde_json::to_string_pretty(&sandbox_json_payload(profile)) {
+fn print_sandbox_json(profile: &StrictProfile, query: &str) {
+    match serde_json::to_string_pretty(&sandbox_json_payload(profile, query)) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("{DIM}  /sandbox json failed: {e}{RESET}"),
     }
@@ -9365,7 +9366,7 @@ fn normalize_template_arg(input: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn print_templates_json() {
+fn print_templates_json(query: &str) {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(e) => {
@@ -9373,13 +9374,13 @@ fn print_templates_json() {
             return;
         }
     };
-    match serde_json::to_string_pretty(&template_json_payload(&cwd)) {
+    match serde_json::to_string_pretty(&template_json_payload(&cwd, query)) {
         Ok(body) => println!("{body}"),
         Err(e) => eprintln!("{DIM}  /template: could not render JSON: {e}{RESET}"),
     }
 }
 
-fn template_json_payload(cwd: &Path) -> serde_json::Value {
+fn template_json_payload(cwd: &Path, query: &str) -> serde_json::Value {
     let templates = crate::commands::code_slash_registry::discover(cwd);
     let rows: Vec<serde_json::Value> = templates
         .iter()
@@ -9403,6 +9404,7 @@ fn template_json_payload(cwd: &Path) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "template",
+        "query": query.trim(),
         "aliases": ["template"],
         "cwd": cwd.display().to_string(),
         "count": rows.len(),
@@ -9415,7 +9417,7 @@ fn template_json_payload(cwd: &Path) -> serde_json::Value {
 fn handle_skills_slash(query: &str) -> Result<()> {
     match parse_skills_command(query)? {
         SkillsCommand::List => print_code_skills(),
-        SkillsCommand::Json => print_code_skills_json(),
+        SkillsCommand::Json => print_code_skills_json(query),
         SkillsCommand::Show(name) => print_code_skill_details(&name),
         SkillsCommand::Open => print_code_skills_open_hint(),
         SkillsCommand::Enable(name) => {
@@ -9485,6 +9487,7 @@ fn parse_skills_command(query: &str) -> Result<SkillsCommand> {
 
 fn code_skills_json_payload(
     cwd: &Path,
+    query: &str,
     skills: Vec<code_skills::SkillInventoryEntry>,
 ) -> serde_json::Value {
     let enabled = skills.iter().filter(|skill| skill.enabled).count();
@@ -9506,6 +9509,7 @@ fn code_skills_json_payload(
     json!({
         "surface": "terminal",
         "command": "skills",
+        "query": query.trim(),
         "aliases": ["skills"],
         "cwd": cwd.display().to_string(),
         "count": rows.len(),
@@ -9517,7 +9521,7 @@ fn code_skills_json_payload(
     })
 }
 
-fn print_code_skills_json() {
+fn print_code_skills_json(query: &str) {
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(e) => {
@@ -9532,7 +9536,7 @@ fn print_code_skills_json() {
             return;
         }
     };
-    match serde_json::to_string_pretty(&code_skills_json_payload(&cwd, skills)) {
+    match serde_json::to_string_pretty(&code_skills_json_payload(&cwd, query, skills)) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  /skills json failed: {e}{RESET}"),
     }
@@ -15520,9 +15524,10 @@ mod tests {
         let profile = crate::commands::code_sandbox::detect_strict_profile(Path::new(
             env!("CARGO_MANIFEST_DIR"),
         ));
-        let payload = sandbox_json_payload(&profile);
+        let payload = sandbox_json_payload(&profile, "diagnostics --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "sandbox");
+        assert_eq!(payload["query"], "diagnostics --json");
         assert_eq!(payload["cwd"], env!("CARGO_MANIFEST_DIR"));
         assert_eq!(payload["network_allowed"], false);
         assert_eq!(payload["will_write"], false);
@@ -19386,7 +19391,7 @@ mod tests {
         )
         .unwrap();
 
-        let payload = template_json_payload(temp.path());
+        let payload = template_json_payload(temp.path(), "list --json");
         let row = payload["templates"]
             .as_array()
             .unwrap()
@@ -19396,6 +19401,7 @@ mod tests {
 
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "template");
+        assert_eq!(payload["query"], "list --json");
         assert!(payload["count"].as_u64().unwrap() >= 1);
         assert_eq!(row["name"], "audit");
         assert_eq!(row["description"], "Team audit");
@@ -19489,6 +19495,7 @@ mod tests {
     fn code_skills_json_payload_reports_counts_and_rows() {
         let payload = code_skills_json_payload(
             Path::new("/tmp/project"),
+            "status --json",
             vec![
                 code_skills::SkillInventoryEntry {
                     name: "libertai-harness".to_string(),
@@ -19517,6 +19524,7 @@ mod tests {
 
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "skills");
+        assert_eq!(payload["query"], "status --json");
         assert_eq!(payload["count"], 2);
         assert_eq!(payload["enabled_count"], 1);
         assert_eq!(payload["disabled_count"], 1);
