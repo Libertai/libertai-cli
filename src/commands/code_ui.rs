@@ -9184,7 +9184,14 @@ fn print_background_agent_details(input: &str) {
 
 fn print_background_agent_details_json(input: &str) {
     let query = input.trim();
-    match resolve_background_agent_record(query) {
+    let records = match load_background_agent_records() {
+        Ok(records) => records,
+        Err(e) => {
+            eprintln!("{DIM}  /agents: could not read background agents: {e:#}{RESET}");
+            return;
+        }
+    };
+    match resolve_background_agent_record_from_records(records.clone(), query) {
         Ok(Some(record)) => {
             let status = background_agent_status(record.pid);
             let payload = BackgroundAgentDetailsJson {
@@ -9203,7 +9210,23 @@ fn print_background_agent_details_json(input: &str) {
                 ),
             }
         }
-        Ok(None) => eprintln!("{DIM}  /agents: no matching background agent found{RESET}"),
+        Ok(None) => {
+            let payload = BackgroundAgentMissingJson {
+                surface: "terminal",
+                command: "agents background show",
+                query,
+                aliases: &["agents background show", "agents bg show"],
+                supported_actions: background_agents_supported_actions(),
+                error: "not_found",
+                counts: background_agent_status_counts(&records, background_agent_status),
+            };
+            match serde_json::to_string_pretty(&payload) {
+                Ok(raw) => println!("{raw}"),
+                Err(e) => eprintln!(
+                    "{DIM}  /agents: could not serialize background agent miss: {e:#}{RESET}"
+                ),
+            }
+        }
         Err(e) => eprintln!("{DIM}  /agents: {e:#}{RESET}"),
     }
 }
@@ -9263,6 +9286,17 @@ struct BackgroundAgentDetailsJson<'a> {
     #[serde(flatten)]
     record: &'a BackgroundAgentRecord,
     status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct BackgroundAgentMissingJson<'a> {
+    surface: &'static str,
+    command: &'static str,
+    query: &'a str,
+    aliases: &'static [&'static str],
+    supported_actions: &'static [&'static str],
+    error: &'static str,
+    counts: BackgroundAgentStatusCounts,
 }
 
 fn background_agents_supported_actions() -> &'static [&'static str] {
@@ -10905,6 +10939,9 @@ fn resolve_background_agent_record_from_records(
         .find(|record| background_agent_record_id(record) == input)
     {
         return Ok(Some(record.clone()));
+    }
+    if !input.chars().all(|ch| ch.is_ascii_digit()) {
+        return Ok(None);
     }
     let pid = parse_background_agent_pid(input)?;
     Ok(records.into_iter().rev().find(|record| record.pid == pid))
@@ -19065,6 +19102,30 @@ mod tests {
     }
 
     #[test]
+    fn background_agent_missing_json_includes_counts_and_metadata() {
+        let payload = BackgroundAgentMissingJson {
+            surface: "terminal",
+            command: "agents background show",
+            query: "missing-run",
+            aliases: &["agents background show", "agents bg show"],
+            supported_actions: background_agents_supported_actions(),
+            error: "not_found",
+            counts: BackgroundAgentStatusCounts {
+                total: 1,
+                running: 0,
+                exited: 1,
+                unknown: 0,
+            },
+        };
+        let raw = serde_json::to_string(&payload).unwrap();
+        assert!(raw.contains("\"surface\":\"terminal\""));
+        assert!(raw.contains("\"command\":\"agents background show\""));
+        assert!(raw.contains("\"query\":\"missing-run\""));
+        assert!(raw.contains("\"error\":\"not_found\""));
+        assert!(raw.contains("\"counts\":{\"total\":1,\"running\":0,\"exited\":1,\"unknown\":0}"));
+    }
+
+    #[test]
     fn background_agent_list_json_includes_command_metadata() {
         let record = BackgroundAgentRecord {
             pid: 4242,
@@ -19148,6 +19209,11 @@ mod tests {
                 .unwrap()
                 .pid,
             2222
+        );
+        assert!(
+            resolve_background_agent_record_from_records(records.clone(), "missing-run")
+                .unwrap()
+                .is_none()
         );
         assert_eq!(
             resolve_background_agent_record_from_records(records, "latest")
