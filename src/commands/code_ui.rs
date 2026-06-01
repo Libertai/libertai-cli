@@ -3274,7 +3274,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "thinking" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|off|minimal|low|medium|high|xhigh",
         "tree" => "path|json|--json|status --json|state --json|show --json|path --json",
         "usage" => "status|show|summary|tools|json|--json|status --json|show --json|summary --json|tools --json|csv|export|export json|export csv",
-        "vim" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|on|off|enable|disable|toggle",
+        "vim" => "status|state|show|current|info|json|--json|status --json|state --json|show --json|current --json|info --json|on|enable|enabled|true|off|disable|disabled|false",
         _ => "",
     }
 }
@@ -17087,6 +17087,10 @@ mod tests {
         assert!(VIM_USAGE.contains("current --json|info --json"));
         assert!(VIM_USAGE.contains("enable|enabled|true"));
         assert!(VIM_USAGE.contains("disable|disabled|false"));
+        assert_eq!(
+            help_command_arg_hint("vim"),
+            VIM_USAGE.trim_start_matches("/vim [").trim_end_matches(']')
+        );
         VIM_INPUT_ENABLED.store(true, Ordering::SeqCst);
         let payload = vim_json_payload("current --json");
         assert_eq!(payload["command"], "vim");
