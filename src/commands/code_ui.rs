@@ -3244,7 +3244,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "mcp" => "status|list|state|show|json|--json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|server|inspect <server>|probe|probes|probe --save|probe save|probe --write|probe write|refresh|diagnostics|diag|reset|reset-sessions|open|settings|edit",
         "hotkeys" => "status|show|list|help|json|--json|status --json|show --json|list --json",
         "ide" => "status|state|show|json|--json|status --json|state --json|show --json|open|settings|edit",
-        "init" => "--agent|json|--json|status --json|from-agent json|from-agent preview|from-agent append|from-agent merge|from-agent merge-lines|from-agent replace|from-agent sections N[,M]|N-M|all|[notes]",
+        "init" => "--agent|json|--json|status --json|show --json|preview --json|from-agent|from-agent json|from-agent status --json|from-agent preview append|from-agent preview merge|from-agent preview merge-lines|from-agent preview replace|from-agent append|from-agent merge|from-agent merge-lines|from-agent replace|from-agent preview sections N[,M]|N-M|all|from-agent preview append sections N[,M]|from-agent preview merge sections N[,M]|from-agent preview merge-lines sections N[,M]|from-agent append sections N[,M]|from-agent merge sections N[,M]|from-agent merge-lines sections N[,M]|[notes]",
         "login" | "logout" => "status|show|info|json|--json|status --json|show --json|info --json|libertai|account|key|api-key|api|provider|show <provider>|show <provider> --json|info <provider>|info <provider> --json|inspect <provider>|inspect <provider> --json|provider <provider>|provider <provider> --json|<provider> --json",
         "loop" => "[turns] [goal]|json [turns] [goal]|--json [turns] [goal]|status --json",
         "memory" => "show|status|edit|open|list|files|file <number|path>|references|refs|verify|import <path>|import-claude|import-claude-all|clear|path|json|--json|status --json|show --json|list --json",
@@ -14847,6 +14847,14 @@ mod tests {
         assert_eq!(parse_init_from_agent_action("from-agent sections all,1"), None);
         assert_eq!(parse_init_from_agent_action("from-agent sections 1 1"), None);
         assert_eq!(parse_init_from_agent_action("from-agent nope"), None);
+
+        let hint = help_command_arg_hint("init");
+        assert!(hint.contains("show --json|preview --json"));
+        assert!(hint.contains("from-agent preview append|from-agent preview merge|from-agent preview merge-lines|from-agent preview replace"));
+        assert!(hint.contains("from-agent append|from-agent merge|from-agent merge-lines|from-agent replace"));
+        assert!(hint.contains("from-agent preview sections N[,M]|N-M|all"));
+        assert!(hint.contains("from-agent preview append sections N[,M]"));
+        assert!(hint.contains("from-agent merge-lines sections N[,M]"));
     }
 
     #[test]
