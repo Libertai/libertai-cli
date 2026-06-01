@@ -3247,7 +3247,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "init" => "--agent|json|--json|status --json|show --json|preview --json|from-agent|from-agent json|from-agent status --json|from-agent preview append|from-agent preview merge|from-agent preview merge-lines|from-agent preview replace|from-agent append|from-agent merge|from-agent merge-lines|from-agent replace|from-agent preview sections N[,M]|N-M|all|from-agent preview append sections N[,M]|from-agent preview merge sections N[,M]|from-agent preview merge-lines sections N[,M]|from-agent append sections N[,M]|from-agent merge sections N[,M]|from-agent merge-lines sections N[,M]|[notes]",
         "login" | "logout" => "status|show|info|json|--json|status --json|show --json|info --json|libertai|account|key|api-key|api|provider|show <provider>|show <provider> --json|info <provider>|info <provider> --json|inspect <provider>|inspect <provider> --json|provider <provider>|provider <provider> --json|<provider> --json",
         "loop" => "[turns] [goal]|json [turns] [goal]|--json [turns] [goal]|status --json",
-        "memory" => "show|status|edit|open|list|files|file <number|path>|references|refs|verify|import <path>|import-claude|import-claude-all|clear|path|json|--json|status --json|show --json|list --json",
+        "memory" => "show|status|edit|open|list|files|file <number|path>|read <number|path>|show-file <number|path>|references|refs|verify|import <path>|import-claude|migrate-claude|claude|import-claude-all|migrate-claude-all|claude-all|clear|path|json|--json|status --json|show --json",
         "mention" => "<path> [prompt]",
         "mode" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only",
         "model" => "status|show|current|json|--json|status --json|show --json|current --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model",
@@ -15117,6 +15117,12 @@ mod tests {
         assert_eq!(memory_file_selector("show-file entry.md"), Some("entry.md"));
         assert_eq!(memory_file_selector("files"), None);
         assert_eq!(memory_file_selector("file"), None);
+
+        let hint = help_command_arg_hint("memory");
+        assert!(hint.contains("file <number|path>|read <number|path>|show-file <number|path>"));
+        assert!(hint.contains("import-claude|migrate-claude|claude"));
+        assert!(hint.contains("import-claude-all|migrate-claude-all|claude-all"));
+        assert!(!hint.contains("list --json"));
     }
 
     #[test]
