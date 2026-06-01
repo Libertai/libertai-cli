@@ -3055,7 +3055,7 @@ fn print_help() {
     );
     println!("{DIM}  /onboarding|/onboard [show|preview|save|path|gist|json|--json|status --json|show --json|preview --json] — preview or write a local project onboarding guide{RESET}");
     println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
-    println!("{DIM}  /agents [list|status|show <name>|json|--json|list --json|status --json|show --json|show <name> --json] — list or inspect named sub-agents{RESET}");
+    println!("{DIM}  /agents [list|status|show <name>|json|--json|list --json|status --json|show --json|show <name> --json|open|settings|edit|background|bg|create [--worktree|--same-cwd] <name>|delete|remove <name>] — list or inspect named sub-agents{RESET}");
     println!("{DIM}  /agents create [--worktree|--same-cwd] <name> [description] — create a project sub-agent{RESET}");
     println!("{DIM}  /agents delete <name> — delete the active named sub-agent definition{RESET}");
     println!(
@@ -3206,7 +3206,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
     match command {
         "abort" => "status|state|show|info|json|--json|status --json|state --json|show --json|info --json|cancel|stop|interrupt",
         "agent" => "[--worktree|--same-cwd|--background|--detached] <name> <task>",
-        "agents" => "list|status|show <name>|json|--json|list --json|status --json|show --json|show <name> --json|create|delete|background",
+        "agents" => "list|status|show <name>|json|--json|list --json|status --json|show --json|show <name> --json|open|settings|edit|background|bg|create [--worktree|--same-cwd] <name>|delete|remove <name>",
         "attach" | "image" => "<path> [prompt]",
         "auto" => "on [turns] [goal]|off|stop|cancel|status|state|json|--json|status --json|state --json",
         "bug" => "report|template|status|show|json|--json|status --json|show --json|template --json|report --json",
@@ -8763,7 +8763,7 @@ fn print_agents_json(query: &str) {
     }
 }
 
-const AGENTS_USAGE: &str = "/agents [list|status|show <name>|json|--json|status --json|show <name> --json|open|settings|edit|background|bg] | /agents background|bg [list|json|show|inspect|show-json|log|kill|stop [pid|run-id|latest]|prune|clear] | /agents create [--worktree|--same-cwd] <name> [description] | /agents delete|remove <name>";
+const AGENTS_USAGE: &str = "/agents [list|status|show <name>|json|--json|list --json|status --json|show --json|show <name> --json|open|settings|edit|background|bg] | /agents background|bg [list|json|show|inspect|show-json|log|kill|stop [pid|run-id|latest]|prune|clear] | /agents create [--worktree|--same-cwd] <name> [description] | /agents delete|remove <name>";
 
 fn handle_agents_command(input: &str) {
     match parse_agents_command(input) {
@@ -19469,7 +19469,14 @@ mod tests {
         assert!(AGENTS_USAGE.contains("background|bg"));
         assert!(AGENTS_USAGE.contains("kill|stop"));
         assert!(AGENTS_USAGE.contains("delete|remove"));
+        assert!(AGENTS_USAGE.contains("list --json"));
+        assert!(AGENTS_USAGE.contains("show --json"));
         assert!(AGENTS_USAGE.contains("status --json"));
+        let hint = help_command_arg_hint("agents");
+        assert!(hint.contains("open|settings|edit"));
+        assert!(hint.contains("background|bg"));
+        assert!(hint.contains("create [--worktree|--same-cwd] <name>"));
+        assert!(hint.contains("delete|remove <name>"));
     }
 
     #[test]
