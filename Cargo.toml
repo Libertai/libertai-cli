@@ -1,6 +1,6 @@
 [package]
 name = "libertai-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Command-line tool for LibertAI: inference, image generation, and launching agent tools (Claude Code, OpenCode, Aider) with LibertAI as the backend."
@@ -54,8 +54,8 @@ sha3 = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 
 # `libertai code` — linked pi_agent_rust. MIT + OpenAI/Anthropic rider;
-# license field above stays "MIT" on the integrated-code branch pending a
-# policy call before merging to master.
+# license field above stays "MIT" for the release branch while the bundled
+# dependency rider is tracked in the pinned fork.
 #
 # Pinned to our fork at Libertai/pi_agent_rust which carries four
 # patches on top of upstream main:

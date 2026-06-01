@@ -6,7 +6,7 @@ release once everything is wired up. The overall design mirrors the Aleph
 Rust CLI (`github.com/aleph-im/aleph-rs`) per CTO direction — hand-rolled, no
 third-party release tooling (cargo-dist, axoupdater, etc.).
 
-## Status (2026-04-22)
+## Status (2026-06-01)
 
 ### In the repo and ready
 
@@ -24,8 +24,10 @@ third-party release tooling (cargo-dist, axoupdater, etc.).
 
 ### Blocked on manual setup (see below)
 
-No release can cut until every item in [Prerequisites](#prerequisites) is
-done. Once they are, push a `v*.*.*` tag and the workflow does the rest.
+Before a stable release, confirm every item in
+[Prerequisites](#prerequisites) exists in GitHub/crates.io and then push a
+`v*.*.*` tag. The workflow does the binary build, package publication, and
+crates.io publish gate from that tag.
 
 ---
 
@@ -121,7 +123,7 @@ way the token is only exposed to jobs that actually need it.
 
 Once all prerequisites are done:
 
-1. Bump `version = "0.2.0"` in `Cargo.toml`. Commit, merge to `main`.
+1. Bump `version = "0.2.0"` in `Cargo.toml` and `Cargo.lock`. Commit, merge to `master`.
 2. On `github.com/Libertai/libertai-cli` → Releases → **Draft a new release**:
    - Tag: `v0.2.0` (do not yet push; Draft reserves the tag).
    - Title, release notes. Publish.
