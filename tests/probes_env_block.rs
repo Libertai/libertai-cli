@@ -11,6 +11,16 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::process::Command as ShCommand;
 
+fn write_test_config(config_home: &std::path::Path) {
+    let config_dir = config_home.join("libertai");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[auth]\napi_key = \"LTAI_sk_probe_env_block_0000000000000000\"\n",
+    )
+    .unwrap();
+}
+
 fn init_git_repo(dir: &std::path::Path) {
     let run = |args: &[&str]| {
         let status = ShCommand::new("git")
@@ -36,11 +46,14 @@ fn init_git_repo(dir: &std::path::Path) {
 #[test]
 fn git_context_block_present_in_repo() {
     let tmp = tempfile::tempdir().expect("tempdir");
+    let config_home = tempfile::tempdir().expect("config tempdir");
+    write_test_config(config_home.path());
     init_git_repo(tmp.path());
 
     let assert = Command::cargo_bin("libertai")
         .expect("libertai binary built")
         .current_dir(tmp.path())
+        .env("XDG_CONFIG_HOME", config_home.path())
         .env("LIBERTAI_DUMP_SYSTEM_PROMPT", "1")
         .env("LIBERTAI_DUMP_AND_EXIT", "1")
         .args(["code", "-p", "probe-ignored"])
@@ -64,10 +77,13 @@ fn git_context_block_present_in_repo() {
 #[test]
 fn git_context_block_absent_outside_repo() {
     let tmp = tempfile::tempdir().expect("tempdir");
+    let config_home = tempfile::tempdir().expect("config tempdir");
+    write_test_config(config_home.path());
 
     Command::cargo_bin("libertai")
         .expect("libertai binary built")
         .current_dir(tmp.path())
+        .env("XDG_CONFIG_HOME", config_home.path())
         .env("LIBERTAI_DUMP_SYSTEM_PROMPT", "1")
         .env("LIBERTAI_DUMP_AND_EXIT", "1")
         .args(["code", "-p", "probe-ignored"])
