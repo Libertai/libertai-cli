@@ -3049,7 +3049,7 @@ fn print_help() {
     println!("{DIM}  {} — inspect auth or run libertai login{RESET}", login_usage_text());
     println!("{DIM}  {} — run libertai logout or explain provider logout{RESET}", logout_usage_text());
     println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
-    println!("{DIM}  /skills [list|status|show|json|--json|status --json|list --json|show --json|show <name>|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions{RESET}");
+    println!("{DIM}  /skills [list|status|show|json|--json|status --json|list --json|show --json|show <name>|show <name> --json|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions{RESET}");
     println!(
         "{DIM}  /init [--agent|from-agent json|from-agent preview append|preview merge|preview merge-lines|preview replace|preview [append|merge|merge-lines] sections N[,M]|N-M|all|append sections N[,M]|N-M|all|merge sections N[,M]|N-M|all|merge-lines sections N[,M]|N-M|all|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}"
     );
@@ -3244,7 +3244,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "scoped-models" => "status|show|json|--json|status --json|show --json|patterns|clear|reset|off",
         "send" => "status|targets|list|queued|queued --json|clear <id|target|all>|json|--json|status --json|targets --json|list --json",
         "share" => "copy|save|path|gist|json|--json|status --json|show --json|preview --json|[path]",
-        "skills" => "list|status|show|json|--json|status --json|list --json|show --json|show <name>|open|settings|edit|enable|on <name>|disable|off <name>",
+        "skills" => "list|status|show|json|--json|status --json|list --json|show --json|show <name>|show <name> --json|open|settings|edit|enable|on <name>|disable|off <name>",
         "status" => "show|info|current|session|json|--json|show --json|info --json|current --json|session --json",
         "statusline" => "status|show|json|--json|status --json|show --json|template --json|info --json|template|command <shell>|command-clear|command reset|command clear|reset|clear",
         "template" => "list|show|json|--json|status --json|list --json|show --json|<name> [args]",
