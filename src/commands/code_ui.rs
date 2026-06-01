@@ -1465,7 +1465,7 @@ async fn repl_loop(
         if let Some(rest) = trimmed.strip_prefix("/history ") {
             if let Some(limit_input) = history_json_request_arg(rest) {
                 match parse_history_limit(&limit_input) {
-                    Ok(limit) => print_history_json(&history, limit),
+                    Ok(limit) => print_history_json(&history, limit, rest),
                     Err(e) => eprintln!("{DIM}  /history: {e:#}{RESET}"),
                 }
             } else {
@@ -1483,7 +1483,7 @@ async fn repl_loop(
                 } else {
                     Some(path_input.as_str())
                 };
-                print_project_tree_json(path);
+                print_project_tree_json(path, rest);
             } else {
                 print_project_tree(Some(rest.trim()));
             }
@@ -1492,7 +1492,7 @@ async fn repl_loop(
         if let Some(rest) = trimmed.strip_prefix("/changelog ") {
             if let Some(limit_input) = changelog_json_request_arg(rest) {
                 match parse_changelog_limit(&limit_input) {
-                    Ok(limit) => print_changelog_json(limit),
+                    Ok(limit) => print_changelog_json(limit, rest),
                     Err(e) => eprintln!("{DIM}  /changelog: {e:#}{RESET}"),
                 }
             } else {
@@ -3551,7 +3551,7 @@ fn tree_usage_text() -> &'static str {
     "/tree [path|json|--json|status --json|state --json|show --json|path --json]"
 }
 
-fn print_project_tree_json(path: Option<&str>) {
+fn print_project_tree_json(path: Option<&str>, query: &str) {
     let root = match tree_root(path) {
         Ok(root) => root,
         Err(e) => {
@@ -3559,7 +3559,7 @@ fn print_project_tree_json(path: Option<&str>) {
             return;
         }
     };
-    match project_tree_json_payload(&root, TREE_MAX_ENTRIES) {
+    match project_tree_json_payload(&root, TREE_MAX_ENTRIES, query) {
         Ok(payload) => match serde_json::to_string_pretty(&payload) {
             Ok(raw) => println!("{raw}"),
             Err(e) => eprintln!("{DIM}  /tree json: {e:#}{RESET}"),
@@ -3595,7 +3595,11 @@ fn render_project_tree(root: &Path, max_entries: usize) -> Result<String> {
     Ok(out)
 }
 
-fn project_tree_json_payload(root: &Path, max_entries: usize) -> Result<serde_json::Value> {
+fn project_tree_json_payload(
+    root: &Path,
+    max_entries: usize,
+    query: &str,
+) -> Result<serde_json::Value> {
     let meta = std::fs::metadata(root).with_context(|| format!("read {}", root.display()))?;
     if !meta.is_dir() {
         anyhow::bail!("{} is not a directory", root.display());
@@ -3606,6 +3610,7 @@ fn project_tree_json_payload(root: &Path, max_entries: usize) -> Result<serde_js
     Ok(json!({
         "surface": "terminal",
         "command": "tree",
+        "query": query.trim(),
         "aliases": ["tree"],
         "root": root.display().to_string(),
         "limit": max_entries,
@@ -3800,7 +3805,7 @@ fn changelog_json_request_arg(input: &str) -> Option<String> {
     }
 }
 
-fn changelog_json_payload(limit: usize, lines: Vec<String>) -> serde_json::Value {
+fn changelog_json_payload(limit: usize, query: &str, lines: Vec<String>) -> serde_json::Value {
     let commits = lines
         .into_iter()
         .map(|line| {
@@ -3817,6 +3822,7 @@ fn changelog_json_payload(limit: usize, lines: Vec<String>) -> serde_json::Value
     json!({
         "surface": "terminal",
         "command": "changelog",
+        "query": query.trim(),
         "aliases": ["changelog"],
         "limit": limit,
         "count": commits.len(),
@@ -3825,9 +3831,11 @@ fn changelog_json_payload(limit: usize, lines: Vec<String>) -> serde_json::Value
     })
 }
 
-fn print_changelog_json(limit: usize) {
+fn print_changelog_json(limit: usize, query: &str) {
     match recent_git_commits(limit) {
-        Ok(lines) => match serde_json::to_string_pretty(&changelog_json_payload(limit, lines)) {
+        Ok(lines) => match serde_json::to_string_pretty(&changelog_json_payload(
+            limit, query, lines,
+        )) {
             Ok(raw) => println!("{raw}"),
             Err(e) => eprintln!("{DIM}  /changelog json: {e:#}{RESET}"),
         },
@@ -4242,7 +4250,11 @@ fn history_json_request_arg(input: &str) -> Option<String> {
     }
 }
 
-fn history_json_payload(history: &VecDeque<String>, limit: usize) -> serde_json::Value {
+fn history_json_payload(
+    history: &VecDeque<String>,
+    limit: usize,
+    query: &str,
+) -> serde_json::Value {
     let shown = history.len().min(limit);
     let start = history.len().saturating_sub(shown);
     let prompts = history
@@ -4259,6 +4271,7 @@ fn history_json_payload(history: &VecDeque<String>, limit: usize) -> serde_json:
     json!({
         "surface": "terminal",
         "command": "history",
+        "query": query.trim(),
         "aliases": ["history"],
         "total": history.len(),
         "limit": limit,
@@ -4268,8 +4281,8 @@ fn history_json_payload(history: &VecDeque<String>, limit: usize) -> serde_json:
     })
 }
 
-fn print_history_json(history: &VecDeque<String>, limit: usize) {
-    let payload = history_json_payload(history, limit);
+fn print_history_json(history: &VecDeque<String>, limit: usize, query: &str) {
+    let payload = history_json_payload(history, limit, query);
     match serde_json::to_string_pretty(&payload) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  /history json: {e:#}{RESET}"),
@@ -15314,8 +15327,9 @@ mod tests {
         let mut history = VecDeque::new();
         history.push_back("first prompt".to_string());
         history.push_back("second prompt".to_string());
-        let payload = history_json_payload(&history, 1);
+        let payload = history_json_payload(&history, 1, "list --json");
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "list --json");
         assert_eq!(payload["aliases"][0], "history");
         assert_eq!(payload["total"], 2);
         assert_eq!(payload["shown"], 1);
@@ -15394,9 +15408,10 @@ mod tests {
         assert_eq!(tree_json_request_arg("src"), None);
         assert!(tree_usage_text().contains("json|--json|status --json"));
         assert!(tree_usage_text().contains("state --json|show --json|path --json"));
-        let payload = project_tree_json_payload(temp.path(), 20).unwrap();
+        let payload = project_tree_json_payload(temp.path(), 20, "src --json").unwrap();
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "tree");
+        assert_eq!(payload["query"], "src --json");
         assert_eq!(payload["aliases"][0], "tree");
         assert_eq!(payload["supported_actions"][1], "--json");
         assert_eq!(payload["supported_actions"][2], "status --json");
@@ -15453,12 +15468,14 @@ mod tests {
         assert_eq!(changelog_json_request_arg("status"), None);
         let payload = changelog_json_payload(
             2,
+            "latest --json",
             vec![
                 "abc1234 first commit".to_string(),
                 "def5678 (HEAD -> main) second commit".to_string(),
             ],
         );
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "latest --json");
         assert_eq!(payload["aliases"][0], "changelog");
         assert_eq!(payload["limit"], 2);
         assert_eq!(payload["count"], 2);
