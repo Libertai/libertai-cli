@@ -3037,6 +3037,7 @@ dependencies = [
  "ctrlc",
  "dialoguer",
  "dirs 5.0.1",
+ "franken-decision",
  "futures",
  "hex",
  "indicatif",

@@ -69,6 +69,9 @@ zeroize = { version = "1", features = ["derive"] }
 # - native `task` subagent tool for research/code-search delegation
 pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "9c650da4", default-features = false }
 asupersync = { version = "=0.3.1", default-features = false, features = ["tls-native-roots"] }
+# asupersync 0.3.1 is not source-compatible with franken-decision 0.3.2.
+# Keep unlocked release/user builds on the compatible trait API.
+franken-decision = "=0.3.1"
 async-trait = "0.1"
 futures = "0.3"
 # `libertai code` interactive REPL — raw-mode input bar, cursor control,
