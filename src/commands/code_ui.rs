@@ -8774,7 +8774,7 @@ fn handle_agents_command(input: &str) {
         AgentsSlashCommand::Create(rest) => create_agent_from_slash(rest),
         AgentsSlashCommand::Delete(rest) => delete_agent_from_slash(rest),
         AgentsSlashCommand::BackgroundList => print_background_agents(),
-        AgentsSlashCommand::BackgroundListJson => print_background_agents_json(),
+        AgentsSlashCommand::BackgroundListJson => print_background_agents_json(input.trim()),
         AgentsSlashCommand::BackgroundShow(rest) => print_background_agent_details(rest),
         AgentsSlashCommand::BackgroundShowJson(rest) => print_background_agent_details_json(rest),
         AgentsSlashCommand::BackgroundLog(rest) => print_background_agent_log(rest),
@@ -9140,11 +9140,16 @@ fn print_background_agents() {
     }
 }
 
-fn print_background_agents_json() {
+fn print_background_agents_json(query: &str) {
     match load_background_agent_records() {
         Ok(records) => {
             let counts = background_agent_status_counts(&records, background_agent_status);
             let payload = BackgroundAgentListJson {
+                surface: "terminal",
+                command: "agents background",
+                query: query.trim(),
+                aliases: &["agents background", "agents bg"],
+                supported_actions: background_agents_supported_actions(),
                 counts,
                 records: records
                     .iter()
@@ -9226,6 +9231,11 @@ fn format_background_agent_details(
 
 #[derive(Debug, Serialize)]
 struct BackgroundAgentListJson<'a> {
+    surface: &'static str,
+    command: &'static str,
+    query: &'a str,
+    aliases: &'static [&'static str],
+    supported_actions: &'static [&'static str],
     counts: BackgroundAgentStatusCounts,
     records: Vec<BackgroundAgentRecordJson<'a>>,
 }
@@ -9235,6 +9245,24 @@ struct BackgroundAgentRecordJson<'a> {
     #[serde(flatten)]
     record: &'a BackgroundAgentRecord,
     status: &'static str,
+}
+
+fn background_agents_supported_actions() -> &'static [&'static str] {
+    &[
+        "list",
+        "json",
+        "list --json",
+        "show <pid|run-id|latest>",
+        "show <pid|run-id|latest> --json",
+        "show-json <pid|run-id|latest>",
+        "inspect <pid|run-id|latest>",
+        "inspect <pid|run-id|latest> --json",
+        "log <pid|run-id|latest>",
+        "kill <pid|run-id|latest>",
+        "stop <pid|run-id|latest>",
+        "prune",
+        "clear",
+    ]
 }
 
 fn format_background_agent_command(record: &BackgroundAgentRecord) -> String {
@@ -18982,6 +19010,47 @@ mod tests {
         let raw = serde_json::to_string(&payload).unwrap();
         assert!(raw.contains("\"run_id\":\"bg-0-4242\""));
         assert!(raw.contains("\"status\":\"running\""));
+    }
+
+    #[test]
+    fn background_agent_list_json_includes_command_metadata() {
+        let record = BackgroundAgentRecord {
+            pid: 4242,
+            run_id: "bg-0-4242".to_string(),
+            name: "reviewer".to_string(),
+            provider: "libertai".to_string(),
+            model: "qwen".to_string(),
+            mode: "plan".to_string(),
+            prompt_preview: "Run review".to_string(),
+            cwd: "/tmp/project".to_string(),
+            log_path: "/tmp/reviewer.log".to_string(),
+            started_at_ms: 0,
+            launched_argv: Vec::new(),
+        };
+        let payload = BackgroundAgentListJson {
+            surface: "terminal",
+            command: "agents background",
+            query: "background list --json",
+            aliases: &["agents background", "agents bg"],
+            supported_actions: background_agents_supported_actions(),
+            counts: BackgroundAgentStatusCounts {
+                total: 1,
+                running: 1,
+                exited: 0,
+                unknown: 0,
+            },
+            records: vec![BackgroundAgentRecordJson {
+                record: &record,
+                status: BackgroundAgentStatus::Running.label(),
+            }],
+        };
+        let raw = serde_json::to_string(&payload).unwrap();
+        assert!(raw.contains("\"surface\":\"terminal\""));
+        assert!(raw.contains("\"command\":\"agents background\""));
+        assert!(raw.contains("\"query\":\"background list --json\""));
+        assert!(raw.contains("\"aliases\":[\"agents background\",\"agents bg\"]"));
+        assert!(raw.contains("\"show <pid|run-id|latest> --json\""));
+        assert!(raw.contains("\"run_id\":\"bg-0-4242\""));
     }
 
     #[test]
