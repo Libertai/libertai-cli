@@ -1142,7 +1142,7 @@ async fn repl_loop(
         if let Some(rest) = compact_preview_arg(trimmed) {
             match parse_compact_preview_command(rest) {
                 CompactPreviewCommand::Status => print_compact_status(&cfg),
-                CompactPreviewCommand::Json => print_compact_json(&cfg),
+                CompactPreviewCommand::Json => print_compact_json(&cfg, rest),
                 CompactPreviewCommand::Usage => {
                     println!("{DIM}  usage:{RESET} {}", compact_usage_text())
                 }
@@ -1157,7 +1157,7 @@ async fn repl_loop(
                     }
                 }
                 ResumePreviewCommand::Json => {
-                    if let Err(e) = print_resume_json() {
+                    if let Err(e) = print_resume_json(rest) {
                         eprintln!("{DIM}  /resume json: {e:#}{RESET}");
                     }
                 }
@@ -2680,11 +2680,16 @@ fn resume_session_rows(cwd: &Path) -> Result<Vec<serde_json::Value>> {
         .collect())
 }
 
-fn resume_json_payload_from_rows(cwd: &Path, sessions: Vec<serde_json::Value>) -> serde_json::Value {
+fn resume_json_payload_from_rows(
+    cwd: &Path,
+    query: &str,
+    sessions: Vec<serde_json::Value>,
+) -> serde_json::Value {
     let default_target = sessions.first().cloned();
     json!({
         "surface": "terminal",
         "command": "resume",
+        "query": query.trim(),
         "cwd": cwd.display().to_string(),
         "available": !sessions.is_empty(),
         "candidate_count": sessions.len(),
@@ -2698,14 +2703,14 @@ fn resume_json_payload_from_rows(cwd: &Path, sessions: Vec<serde_json::Value>) -
     })
 }
 
-fn resume_json_payload() -> Result<serde_json::Value> {
+fn resume_json_payload(query: &str) -> Result<serde_json::Value> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let rows = resume_session_rows(&cwd)?;
-    Ok(resume_json_payload_from_rows(&cwd, rows))
+    Ok(resume_json_payload_from_rows(&cwd, query, rows))
 }
 
 fn print_resume_status() -> Result<()> {
-    let payload = resume_json_payload()?;
+    let payload = resume_json_payload("status")?;
     let count = payload["candidate_count"].as_u64().unwrap_or(0);
     let default_path = payload["default_target"]["path"].as_str().unwrap_or("(none)");
     println!(
@@ -2714,8 +2719,8 @@ fn print_resume_status() -> Result<()> {
     Ok(())
 }
 
-fn print_resume_json() -> Result<()> {
-    match serde_json::to_string_pretty(&resume_json_payload()?) {
+fn print_resume_json(query: &str) -> Result<()> {
+    match serde_json::to_string_pretty(&resume_json_payload(query)?) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  /resume json failed: {e}{RESET}"),
     }
@@ -5554,10 +5559,11 @@ fn parse_compact_preview_command(input: &str) -> CompactPreviewCommand {
     }
 }
 
-fn compact_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
+fn compact_json_payload(cfg: &LibertaiConfig, query: &str) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "compact",
+        "query": query.trim(),
         "aliases": ["compact"],
         "available": true,
         "active_turn": false,
@@ -5586,8 +5592,8 @@ fn print_compact_status(cfg: &LibertaiConfig) {
     );
 }
 
-fn print_compact_json(cfg: &LibertaiConfig) {
-    match serde_json::to_string_pretty(&compact_json_payload(cfg)) {
+fn print_compact_json(cfg: &LibertaiConfig, query: &str) {
+    match serde_json::to_string_pretty(&compact_json_payload(cfg, query)) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  /compact json failed: {e}{RESET}"),
     }
@@ -15868,6 +15874,7 @@ mod tests {
         let cwd = PathBuf::from("/tmp/project");
         let payload = resume_json_payload_from_rows(
             &cwd,
+            "status --json",
             vec![json!({
                 "id": "s1",
                 "name": "release",
@@ -15881,6 +15888,7 @@ mod tests {
         );
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "resume");
+        assert_eq!(payload["query"], "status --json");
         assert_eq!(payload["aliases"][0], "resume");
         assert_eq!(payload["available"], true);
         assert_eq!(payload["candidate_count"], 1);
@@ -16106,9 +16114,10 @@ mod tests {
         assert!(compact_usage_text().contains("json|--json|status --json"));
         assert!(compact_usage_text().contains("show --json|info --json|preview --json|notes"));
         let cfg = LibertaiConfig::default();
-        let payload = compact_json_payload(&cfg);
+        let payload = compact_json_payload(&cfg, "preview --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "compact");
+        assert_eq!(payload["query"], "preview --json");
         assert_eq!(payload["available"], true);
         assert_eq!(payload["active_turn"], false);
         assert_eq!(payload["will_compact_history"], true);
