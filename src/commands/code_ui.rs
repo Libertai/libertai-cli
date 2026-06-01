@@ -3150,7 +3150,7 @@ fn help_command_rows() -> &'static [(&'static str, &'static [&'static str], &'st
         ("changelog", &[], "show recent git commits"),
         ("clear", &["new"], "wipe the screen and start a fresh session"),
         ("compact", &[], "compact older conversation history"),
-        ("config", &[], "show or update active config"),
+        ("config", &["settings"], "show or update active config"),
         ("copy", &[], "copy the last assistant response"),
         ("doctor", &[], "run local session/config diagnostics"),
         ("exit", &["quit"], "quit the REPL"),
@@ -16643,6 +16643,17 @@ mod tests {
             .unwrap()
             .iter()
             .any(|item| item == "set <key> <value>"));
+        let config_help = help_json_payload("commands --json")["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["name"] == "config")
+            .unwrap()
+            .clone();
+        assert!(config_help["aliases"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("settings")));
         let hint = help_command_arg_hint("config");
         assert!(hint.contains("backends|defaults|agents|skills"));
         assert!(hint.contains("hooks|mcp|approvals|appearance|sandbox|advanced"));
