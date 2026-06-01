@@ -41,7 +41,12 @@ jobs:
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
+        if: runner.os != 'Windows'
         run: cargo test --verbose -- --test-threads=1
+
+      - name: Run Windows integration tests
+        if: runner.os == 'Windows'
+        run: cargo test --verbose --tests -- --test-threads=1
 
       - name: Build release
         run: cargo build --release
