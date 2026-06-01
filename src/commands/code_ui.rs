@@ -6264,6 +6264,7 @@ fn print_send_status(rest: &str) {
 }
 
 fn send_json_payload(query: &str) -> serde_json::Value {
+    let query = query.trim();
     json!({
         "command": "send",
         "surface": "terminal",
@@ -6854,6 +6855,7 @@ fn schedule_json_payload(
     now: Instant,
     query: &str,
 ) -> ScheduleJsonPayload {
+    let query = query.trim();
     let counts = schedule_status_counts(scheduled_runs, now);
     let runs = scheduled_runs
         .iter()
@@ -7019,6 +7021,7 @@ fn auto_supported_actions() -> &'static [&'static str] {
 }
 
 fn auto_json_payload(auto_run: Option<&AutoRun>, query: &str) -> AutoJsonPayload {
+    let query = query.trim();
     match auto_run {
         Some(run) => AutoJsonPayload {
             surface: "terminal",
@@ -8721,6 +8724,7 @@ fn agents_json_payload(
     cwd: &Path,
     agents: &[crate::commands::code_agents::AgentDefinition],
 ) -> serde_json::Value {
+    let query = query.trim();
     let worktree_count = agents.iter().filter(|agent| agent.worktree).count();
     json!({
         "surface": "terminal",
@@ -17580,7 +17584,7 @@ mod tests {
         assert!(is_send_json_request("queued --json"));
         assert!(!is_send_json_request("worker finish tests"));
 
-        let payload = send_json_payload("queued --json");
+        let payload = send_json_payload("  queued --json  ");
         assert_eq!(payload["command"], "send");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["query"], "queued --json");
@@ -17780,7 +17784,7 @@ mod tests {
             scheduled_run_for_test("sch_1", "due", now - Duration::from_millis(1)),
             scheduled_run_for_test("sch_2", "later", now + Duration::from_secs(5)),
         ];
-        let payload = schedule_json_payload(&runs, now, "list --json");
+        let payload = schedule_json_payload(&runs, now, "  list --json  ");
         assert_eq!(payload.surface, "terminal");
         assert_eq!(payload.command, "schedule");
         assert_eq!(payload.query, "list --json");
@@ -17897,7 +17901,7 @@ mod tests {
     #[test]
     fn auto_json_payload_reports_active_and_inactive_state() {
         assert_eq!(
-            auto_json_payload(None, "status --json"),
+            auto_json_payload(None, "  status --json  "),
             AutoJsonPayload {
                 surface: "terminal",
                 command: "auto",
@@ -17918,7 +17922,7 @@ mod tests {
             goal: "finish parity".to_string(),
         };
         assert_eq!(
-            auto_json_payload(Some(&run), "json"),
+            auto_json_payload(Some(&run), "  json  "),
             AutoJsonPayload {
                 surface: "terminal",
                 command: "auto",
@@ -19216,7 +19220,7 @@ mod tests {
         assert!(details.contains("/tmp/project/.libertai/agents/reviewer.md"));
         assert!(details.contains("Review carefully.\nCite files."));
 
-        let payload = agents_json_payload("status --json", Path::new("/tmp/project"), &[agent]);
+        let payload = agents_json_payload("  status --json  ", Path::new("/tmp/project"), &[agent]);
         assert_eq!(payload["command"], "agents");
         assert_eq!(payload["query"], "status --json");
         assert_eq!(payload["count"], 1);
