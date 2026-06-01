@@ -1816,7 +1816,7 @@ async fn repl_loop(
                     continue;
                 }
                 NameCommand::Json => {
-                    print_name_json(session_name.as_deref());
+                    print_name_json(session_name.as_deref(), rest);
                     continue;
                 }
                 NameCommand::Set => {}
@@ -5345,10 +5345,11 @@ fn name_usage_text() -> &'static str {
     "/name <name> | /name [status|state|show|current|info|json|--json|status --json|state --json|show --json|current --json|info --json]"
 }
 
-fn name_json_payload(name: Option<&str>) -> serde_json::Value {
+fn name_json_payload(name: Option<&str>, query: &str) -> serde_json::Value {
     json!({
         "command": "name",
         "surface": "terminal",
+        "query": query.trim(),
         "aliases": ["name", "rename"],
         "current": name,
         "is_named": name.is_some(),
@@ -5356,8 +5357,8 @@ fn name_json_payload(name: Option<&str>) -> serde_json::Value {
     })
 }
 
-fn print_name_json(name: Option<&str>) {
-    match serde_json::to_string_pretty(&name_json_payload(name)) {
+fn print_name_json(name: Option<&str>, query: &str) {
+    match serde_json::to_string_pretty(&name_json_payload(name, query)) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("{DIM}  /name json failed: {e}{RESET}"),
     }
@@ -6128,7 +6129,7 @@ fn parse_notify_command(input: &str) -> NotifyCommand {
 fn handle_notify_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Result<()> {
     match parse_notify_command(raw) {
         NotifyCommand::Status => print_notify_status(cfg),
-        NotifyCommand::Json => print_notify_json(cfg),
+        NotifyCommand::Json => print_notify_json(cfg, raw),
         NotifyCommand::On => {
             set_turn_notifications(cfg, true)?;
             println!("{DIM}  /notify: turn-complete terminal notifications enabled.{RESET}");
@@ -6174,10 +6175,11 @@ fn notify_usage_text() -> &'static str {
     "/notify [on|enable|enabled|off|disable|disabled|clear|status|state|show|json|--json|status --json|state --json|show --json|test|ping]"
 }
 
-fn notify_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
+fn notify_json_payload(cfg: &LibertaiConfig, query: &str) -> serde_json::Value {
     json!({
         "command": "notify",
         "surface": "terminal",
+        "query": query.trim(),
         "aliases": ["notify", "notifications"],
         "turn_notifications": cfg.code_turn_notifications,
         "agent_push_notifications": {
@@ -6189,8 +6191,8 @@ fn notify_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
     })
 }
 
-fn print_notify_json(cfg: &LibertaiConfig) {
-    match serde_json::to_string_pretty(&notify_json_payload(cfg)) {
+fn print_notify_json(cfg: &LibertaiConfig, query: &str) {
+    match serde_json::to_string_pretty(&notify_json_payload(cfg, query)) {
         Ok(s) => println!("{s}"),
         Err(e) => eprintln!("{DIM}  /notify json failed: {e}{RESET}"),
     }
@@ -16053,9 +16055,10 @@ mod tests {
         assert!(name_usage_text().contains("json|--json|status --json"));
         assert!(name_usage_text().contains("state --json|show --json"));
         assert!(name_usage_text().contains("current --json|info --json"));
-        let payload = name_json_payload(Some("release work"));
+        let payload = name_json_payload(Some("release work"), "current --json");
         assert_eq!(payload["command"], "name");
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "current --json");
         assert_eq!(payload["aliases"][1], "rename");
         assert_eq!(payload["current"], "release work");
         assert_eq!(payload["is_named"], true);
@@ -16267,9 +16270,10 @@ mod tests {
             code_turn_notifications: true,
             ..LibertaiConfig::default()
         };
-        let payload = notify_json_payload(&cfg);
+        let payload = notify_json_payload(&cfg, "status --json");
         assert_eq!(payload["command"], "notify");
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "status --json");
         assert_eq!(payload["aliases"][1], "notifications");
         assert_eq!(payload["turn_notifications"], true);
         assert!(payload["supported_actions"]
