@@ -936,11 +936,11 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = hooks_command_arg(trimmed) {
-            print_hooks_command(&cfg, parse_hooks_command(rest));
+            print_hooks_command(&cfg, rest, parse_hooks_command(rest));
             continue;
         }
         if let Some(rest) = mcp_command_arg(trimmed) {
-            print_mcp_status(parse_mcp_command(rest));
+            print_mcp_status(rest, parse_mcp_command(rest));
             continue;
         }
         if let Some(rest) = send_command_arg(trimmed) {
@@ -1228,7 +1228,7 @@ async fn repl_loop(
                 continue;
             }
             "/mcp" => {
-                print_mcp_status(McpCommand::Status);
+                print_mcp_status("status", McpCommand::Status);
                 continue;
             }
             "/statusline" | "/status-line" => {
@@ -12675,10 +12675,10 @@ const HOOKS_USAGE: &str =
     "/hooks [status|list|state|diagnostics|diag|json|--json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|show|event|inspect <event>|open|settings|edit]";
 const MCP_USAGE: &str = "/mcp [status|list|state|show|json|--json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|server|inspect <server>|probe|probes|probe --save|probe save|probe --write|probe write|refresh|diagnostics|diag|reset|reset-sessions|open|settings|edit]";
 
-fn print_hooks_command(cfg: &LibertaiConfig, command: HooksCommand) {
+fn print_hooks_command(cfg: &LibertaiConfig, query: &str, command: HooksCommand) {
     match command {
         HooksCommand::Status => print_hooks_status(cfg),
-        HooksCommand::Json => print_hooks_json(cfg),
+        HooksCommand::Json => print_hooks_json(cfg, query),
         HooksCommand::Open => print_hooks_open_hint(),
         HooksCommand::Show(event) => print_hook_event_details(cfg, &event),
         HooksCommand::Usage => {
@@ -12775,7 +12775,7 @@ fn hook_json_row(event: &str, index: usize, hook: &crate::config::HookCommandCon
     })
 }
 
-fn hooks_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
+fn hooks_json_payload(cfg: &LibertaiConfig, query: &str) -> serde_json::Value {
     let mut rows = Vec::new();
     let mut events = Vec::new();
     let mut enabled_total = 0usize;
@@ -12799,6 +12799,7 @@ fn hooks_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "hooks",
+        "query": query.trim(),
         "events": events,
         "count": rows.len(),
         "enabled_count": enabled_total,
@@ -12810,8 +12811,8 @@ fn hooks_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
     })
 }
 
-fn print_hooks_json(cfg: &LibertaiConfig) {
-    match serde_json::to_string_pretty(&hooks_json_payload(cfg)) {
+fn print_hooks_json(cfg: &LibertaiConfig, query: &str) {
+    match serde_json::to_string_pretty(&hooks_json_payload(cfg, query)) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  /hooks json failed: {e}{RESET}"),
     }
@@ -12876,7 +12877,7 @@ fn print_hooks_open_hint() {
     println!();
 }
 
-fn print_mcp_status(command: McpCommand) {
+fn print_mcp_status(query: &str, command: McpCommand) {
     println!("{BOLD}mcp{RESET}");
     match command {
         McpCommand::Status => {
@@ -12910,7 +12911,7 @@ fn print_mcp_status(command: McpCommand) {
             );
             println!("{DIM}  usage:{RESET} {MCP_USAGE}");
         }
-        McpCommand::Json => print_mcp_json(),
+        McpCommand::Json => print_mcp_json(query),
         McpCommand::Show(name) => print_mcp_server_details(&name),
         McpCommand::Probe => print_mcp_probe(),
         McpCommand::ProbeSave => print_mcp_probe_save(),
@@ -12974,7 +12975,7 @@ fn mcp_server_json_row(
     })
 }
 
-fn mcp_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
+fn mcp_json_payload(cfg: &LibertaiConfig, query: &str) -> serde_json::Value {
     let exposure = mcp_exposure_summary(cfg);
     let mut servers: Vec<serde_json::Value> = cfg
         .mcp_servers
@@ -12990,6 +12991,7 @@ fn mcp_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "mcp",
+        "query": query.trim(),
         "configured_servers": cfg.mcp_servers.len(),
         "exposure": {
             "mcp_call": exposure.mcp_call,
@@ -13005,9 +13007,9 @@ fn mcp_json_payload(cfg: &LibertaiConfig) -> serde_json::Value {
     })
 }
 
-fn print_mcp_json() {
+fn print_mcp_json(query: &str) {
     match crate::config::load() {
-        Ok(cfg) => match serde_json::to_string_pretty(&mcp_json_payload(&cfg)) {
+        Ok(cfg) => match serde_json::to_string_pretty(&mcp_json_payload(&cfg, query)) {
             Ok(raw) => println!("{raw}"),
             Err(e) => eprintln!("{DIM}  /mcp json failed: {e}{RESET}"),
         },
@@ -16484,9 +16486,10 @@ mod tests {
             ..Default::default()
         };
 
-        let payload = hooks_json_payload(&cfg);
+        let payload = hooks_json_payload(&cfg, "diagnostics --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "hooks");
+        assert_eq!(payload["query"], "diagnostics --json");
         assert_eq!(payload["count"], 2);
         assert_eq!(payload["enabled_count"], 1);
         assert_eq!(payload["configured_count"], 2);
@@ -16658,9 +16661,10 @@ mod tests {
             ..Default::default()
         };
 
-        let payload = mcp_json_payload(&cfg);
+        let payload = mcp_json_payload(&cfg, "state --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "mcp");
+        assert_eq!(payload["query"], "state --json");
         assert_eq!(payload["configured_servers"], 1);
         assert_eq!(payload["exposure"]["mcp_call"], true);
         assert_eq!(payload["exposure"]["named_tools"], 1);
