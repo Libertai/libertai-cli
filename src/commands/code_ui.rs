@@ -3197,7 +3197,11 @@ fn help_command_rows() -> &'static [(&'static str, &'static [&'static str], &'st
         ("output-style", &[], "show or change output style"),
         ("permissions", &[], "show or change permission mode"),
         ("plan", &[], "toggle plan mode"),
-        ("pr_comments", &[], "inspect or update GitHub PR review comments"),
+        (
+            "pr_comments",
+            &["pr-comments"],
+            "inspect or update GitHub PR review comments",
+        ),
         ("reload", &[], "reload config and start a fresh agent session"),
         ("remember", &[], "append typed project memory"),
         ("resume", &[], "resume a saved session"),
@@ -3276,7 +3280,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "output-style" => "style|status|show|current|info|list|json|--json|status --json|show --json|current --json|info --json|list --json",
         "permissions" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only|open|settings|edit|approvals|forget|clear|reset|bypassPermissions|bypass|danger",
         "plan" => "on|off|status",
-        "pr_comments" => "scope|send|resolve <thread_id>|unresolve <thread_id>|reopen <thread_id>|viewed <path>|view <path>|viewed --all|unviewed <path>|unview <path>|unviewed --all|thread <path>:<line> <body>|comment <path>:<line> <body>|draft <path>:<line> <body>|drafts|drafts submit|drafts submit comment <body>|drafts submit request_changes <body>|drafts submit approve [body]|drafts clear|reply <thread_id> <body>|edit <comment_id> <body>|review <approve|comment|request_changes> [body]|submit <approve|comment|request_changes> [body]",
+        "pr_comments" | "pr-comments" => "scope|send|resolve <thread_id>|unresolve <thread_id>|reopen <thread_id>|viewed <path>|view <path>|viewed --all|unviewed <path>|unview <path>|unviewed --all|thread <path>:<line> <body>|comment <path>:<line> <body>|draft <path>:<line> <body>|drafts|drafts submit|drafts submit comment <body>|drafts submit request_changes <body>|drafts submit approve [body]|drafts clear|reply <thread_id> <body>|edit <comment_id> <body>|review <approve|comment|request_changes> [body]|submit <approve|comment|request_changes> [body]",
         "review" | "security-review" => "[scope]",
         "reload" => "config|session|now|fresh|json|--json|config --json|session --json|now --json|fresh --json",
         "remember" => "project: <text>|user: <text>|feedback: <text>|reference: <text>|json <text>|--json <text>|<text> --json|status --json|show --json|preview --json",
@@ -20318,6 +20322,7 @@ mod tests {
         assert!(parse_pr_comments_draft_submit_review("submit comment").is_err());
 
         let hint = help_command_arg_hint("pr_comments");
+        assert_eq!(help_command_arg_hint("pr-comments"), hint);
         assert!(hint.contains("resolve <thread_id>|unresolve <thread_id>|reopen <thread_id>"));
         assert!(hint.contains("viewed <path>|view <path>|viewed --all"));
         assert!(hint.contains("thread <path>:<line> <body>|comment <path>:<line> <body>"));
