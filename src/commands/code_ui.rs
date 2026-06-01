@@ -962,6 +962,7 @@ async fn repl_loop(
         if let Some(rest) = bug_command_arg(trimmed) {
             print_bug_command(
                 parse_bug_command(rest),
+                rest,
                 &provider,
                 &model,
                 mode.get(),
@@ -4795,7 +4796,7 @@ fn strip_login_json_suffix(query: &str) -> (&str, bool) {
 fn handle_login_slash(query: &str, cfg: &LibertaiConfig) {
     match parse_login_slash_target(query) {
         LoginSlashTarget::Status => print_login_status(cfg),
-        LoginSlashTarget::StatusJson => print_login_status_json("login", cfg),
+        LoginSlashTarget::StatusJson => print_login_status_json("login", query, cfg),
         LoginSlashTarget::Account => {
             println!("{BOLD}login{RESET}");
             println!("{DIM}  LibertAI API key:{RESET} {}", login_key_state(cfg));
@@ -4805,7 +4806,7 @@ fn handle_login_slash(query: &str, cfg: &LibertaiConfig) {
         }
         LoginSlashTarget::ProviderStatus(provider) => print_provider_login_details(provider, cfg),
         LoginSlashTarget::ProviderStatusJson(provider) => {
-            print_provider_login_details_json("login", provider, cfg)
+            print_provider_login_details_json("login", query, provider, cfg)
         }
         LoginSlashTarget::Provider(provider) => print_provider_login_note(provider, cfg),
     }
@@ -4814,7 +4815,7 @@ fn handle_login_slash(query: &str, cfg: &LibertaiConfig) {
 fn handle_logout_slash(query: &str, cfg: &LibertaiConfig) {
     match parse_login_slash_target(query) {
         LoginSlashTarget::Status => print_login_status(cfg),
-        LoginSlashTarget::StatusJson => print_login_status_json("logout", cfg),
+        LoginSlashTarget::StatusJson => print_login_status_json("logout", query, cfg),
         LoginSlashTarget::Account => {
             println!("{BOLD}logout{RESET}");
             println!(
@@ -4823,7 +4824,7 @@ fn handle_logout_slash(query: &str, cfg: &LibertaiConfig) {
         }
         LoginSlashTarget::ProviderStatus(provider) => print_provider_logout_details(provider, cfg),
         LoginSlashTarget::ProviderStatusJson(provider) => {
-            print_provider_login_details_json("logout", provider, cfg)
+            print_provider_login_details_json("logout", query, provider, cfg)
         }
         LoginSlashTarget::Provider(provider) => {
             println!("{BOLD}logout{RESET}");
@@ -4858,10 +4859,11 @@ fn print_login_status(cfg: &LibertaiConfig) {
     );
 }
 
-fn login_status_payload(command: &str, cfg: &LibertaiConfig) -> serde_json::Value {
+fn login_status_payload(command: &str, query: &str, cfg: &LibertaiConfig) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": command,
+        "query": query.trim(),
         "aliases": [command],
         "supported_actions": login_supported_actions(),
         "libertai": {
@@ -4905,8 +4907,8 @@ fn login_supported_actions() -> &'static [&'static str] {
     ]
 }
 
-fn print_login_status_json(command: &str, cfg: &LibertaiConfig) {
-    match serde_json::to_string_pretty(&login_status_payload(command, cfg)) {
+fn print_login_status_json(command: &str, query: &str, cfg: &LibertaiConfig) {
+    match serde_json::to_string_pretty(&login_status_payload(command, query, cfg)) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("{DIM}  /{command} json: {e:#}{RESET}"),
     }
@@ -4931,11 +4933,17 @@ fn print_provider_login_note(provider: &str, cfg: &LibertaiConfig) {
     println!("{DIM}  terminal LibertAI API key:{RESET} {}", login_key_state(cfg));
 }
 
-fn provider_login_payload(command: &str, provider: &str, cfg: &LibertaiConfig) -> serde_json::Value {
+fn provider_login_payload(
+    command: &str,
+    query: &str,
+    provider: &str,
+    cfg: &LibertaiConfig,
+) -> serde_json::Value {
     let is_libertai = provider.eq_ignore_ascii_case("libertai");
     json!({
         "surface": "terminal",
         "command": command,
+        "query": query.trim(),
         "aliases": [command],
         "supported_actions": login_supported_actions(),
         "provider": provider,
@@ -4950,8 +4958,13 @@ fn provider_login_payload(command: &str, provider: &str, cfg: &LibertaiConfig) -
     })
 }
 
-fn print_provider_login_details_json(command: &str, provider: &str, cfg: &LibertaiConfig) {
-    match serde_json::to_string_pretty(&provider_login_payload(command, provider, cfg)) {
+fn print_provider_login_details_json(
+    command: &str,
+    query: &str,
+    provider: &str,
+    cfg: &LibertaiConfig,
+) {
+    match serde_json::to_string_pretty(&provider_login_payload(command, query, provider, cfg)) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("{DIM}  /{command} show {provider} --json: {e:#}{RESET}"),
     }
@@ -6521,6 +6534,7 @@ fn print_ide_json(query: &str) {
 
 fn print_bug_command(
     command: BugCommand,
+    query: &str,
     provider: &str,
     model: &str,
     mode: Mode,
@@ -6528,7 +6542,7 @@ fn print_bug_command(
 ) {
     match command {
         BugCommand::Template => print_bug_template(provider, model, mode, output_style),
-        BugCommand::Json => print_bug_json(provider, model, mode, output_style),
+        BugCommand::Json => print_bug_json(provider, model, mode, output_style, query),
         BugCommand::Usage => {
             println!("{BOLD}bug report{RESET}");
             println!("{DIM}  usage:{RESET} {BUG_USAGE}");
@@ -13904,6 +13918,7 @@ fn bug_json_payload(
     model: &str,
     mode: Mode,
     output_style: Option<&str>,
+    query: &str,
 ) -> serde_json::Value {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -13911,6 +13926,7 @@ fn bug_json_payload(
     json!({
         "command": "bug",
         "surface": "terminal",
+        "query": query.trim(),
         "aliases": ["bug"],
         "app": "libertai-cli",
         "branch": "integrated-code",
@@ -13929,8 +13945,20 @@ fn bug_json_payload(
     })
 }
 
-fn print_bug_json(provider: &str, model: &str, mode: Mode, output_style: Option<&str>) {
-    match serde_json::to_string_pretty(&bug_json_payload(provider, model, mode, output_style)) {
+fn print_bug_json(
+    provider: &str,
+    model: &str,
+    mode: Mode,
+    output_style: Option<&str>,
+    query: &str,
+) {
+    match serde_json::to_string_pretty(&bug_json_payload(
+        provider,
+        model,
+        mode,
+        output_style,
+        query,
+    )) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("{DIM}  /bug json failed: {e}{RESET}"),
     }
@@ -16904,9 +16932,16 @@ mod tests {
         assert_eq!(parse_bug_command("open"), BugCommand::Usage);
         assert!(BUG_USAGE.contains("report|template|status|show|json|--json"));
         assert!(BUG_USAGE.contains("show --json|template --json|report --json"));
-        let payload = bug_json_payload("libertai", "test-model", Mode::Plan, Some("review"));
+        let payload = bug_json_payload(
+            "libertai",
+            "test-model",
+            Mode::Plan,
+            Some("review"),
+            "template --json",
+        );
         assert_eq!(payload["command"], "bug");
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "template --json");
         assert_eq!(payload["app"], "libertai-cli");
         assert_eq!(payload["mode"], "plan");
         assert_eq!(payload["output_style"], "review");
@@ -18085,15 +18120,22 @@ mod tests {
         assert!(logout_usage_text().contains("inspect <provider>"));
         assert!(logout_usage_text().contains("provider <provider>"));
         let cfg = LibertaiConfig::default();
-        let payload = login_status_payload("login", &cfg);
+        let payload = login_status_payload("login", "status --json", &cfg);
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "login");
+        assert_eq!(payload["query"], "status --json");
         assert_eq!(payload["aliases"][0], "login");
         assert_eq!(payload["supported_actions"][4], "--json");
         assert_eq!(payload["supported_actions"][5], "status --json");
         assert_eq!(payload["supported_actions"][15], "show provider --json");
-        let provider_payload = provider_login_payload("logout", "anthropic", &cfg);
+        let provider_payload = provider_login_payload(
+            "logout",
+            "show anthropic --json",
+            "anthropic",
+            &cfg,
+        );
         assert_eq!(provider_payload["command"], "logout");
+        assert_eq!(provider_payload["query"], "show anthropic --json");
         assert_eq!(provider_payload["provider"], "anthropic");
         assert_eq!(provider_payload["managed_by_desktop_settings"], true);
         assert_eq!(provider_payload["supported_actions"][22], "provider --json");
