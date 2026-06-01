@@ -3252,7 +3252,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "mode" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only",
         "model" => "status|show|current|json|--json|status --json|show --json|current --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model",
         "name" => "<name>|status|state|show|current|info|json|--json|status --json|state --json|show --json|current --json|info --json",
-        "notify" => "on|enable|enabled|off|disable|disabled|clear|status|state|show|test|ping|json|--json|status --json|state --json|show --json",
+        "notify" => "on|enable|enabled|off|disable|disabled|clear|status|state|show|json|--json|status --json|state --json|show --json|test|ping",
         "onboarding" => "show|preview|save|path|gist|json|--json|status --json|show --json|preview --json",
         "output-style" => "style|status|show|current|info|list|json|--json|status --json|show --json|current --json|info --json|list --json",
         "permissions" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only|open|settings|edit|approvals|forget|clear|reset|bypassPermissions|bypass|danger",
@@ -16582,6 +16582,12 @@ mod tests {
         assert_eq!(parse_notify_command("wat"), NotifyCommand::Usage);
         assert!(notify_usage_text().contains("json|--json|status --json"));
         assert!(notify_usage_text().contains("state --json|show --json"));
+        assert_eq!(
+            help_command_arg_hint("notify"),
+            notify_usage_text()
+                .trim_start_matches("/notify [")
+                .trim_end_matches(']')
+        );
         let cfg = LibertaiConfig {
             code_turn_notifications: true,
             ..LibertaiConfig::default()
