@@ -213,6 +213,8 @@ jobs:
     environment: apt
     permissions:
       contents: write
+    env:
+      HAVE_APT_REPO_SECRETS: ${{ secrets.APT_GPG_PRIVATE_KEY != '' && secrets.APT_REPO_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -243,15 +245,22 @@ jobs:
             "$DEB_FILE" \
             --repo "$REPO" --clobber
 
+      - name: Skip APT repository publish
+        if: env.HAVE_APT_REPO_SECRETS != 'true'
+        run: echo "APT repository secrets are not configured; .deb is attached to the GitHub Release."
+
       - name: Import GPG signing key
+        if: env.HAVE_APT_REPO_SECRETS == 'true'
         env:
           GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
         run: printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
 
       - name: Install reprepro
+        if: env.HAVE_APT_REPO_SECRETS == 'true'
         run: sudo apt-get update && sudo apt-get install -y reprepro
 
       - name: Checkout APT repository
+        if: env.HAVE_APT_REPO_SECRETS == 'true'
         uses: actions/checkout@v4
         with:
           repository: Libertai/apt
@@ -259,6 +268,7 @@ jobs:
           path: apt-repo
 
       - name: Ensure reprepro config exists
+        if: env.HAVE_APT_REPO_SECRETS == 'true'
         run: |
           mkdir -p apt-repo/conf
           cat > apt-repo/conf/distributions <<EOF
@@ -276,14 +286,17 @@ jobs:
           EOF
 
       - name: Export public GPG key
+        if: env.HAVE_APT_REPO_SECRETS == 'true'
         run: gpg --export --armor > apt-repo/gpg.key
 
       - name: Ensure GitHub Pages files exist
+        if: env.HAVE_APT_REPO_SECRETS == 'true'
         run: |
           echo "apt.libertai.io" > apt-repo/CNAME
           cp packaging/apt/install.sh apt-repo/install.sh
 
       - name: Update APT repository
+        if: env.HAVE_APT_REPO_SECRETS == 'true'
         run: |
           cd apt-repo
           DEB_FILE=$(find ../target/debian -name "libertai-cli_*.deb" | head -1)
@@ -291,6 +304,7 @@ jobs:
           reprepro includedeb stable "$DEB_FILE"
 
       - name: Push APT repository
+        if: env.HAVE_APT_REPO_SECRETS == 'true'
         env:
           VERSION: ${{ needs.check-version.outputs.version }}
         run: |
@@ -311,10 +325,18 @@ jobs:
     if: needs.check-version.outputs.is-prerelease != 'true'
     runs-on: ubuntu-latest
     environment: brew
+    env:
+      HAVE_BREW_REPO_TOKEN: ${{ secrets.BREW_REPO_TOKEN != '' }}
     steps:
+      - name: Skip Homebrew tap publish
+        if: env.HAVE_BREW_REPO_TOKEN != 'true'
+        run: echo "BREW_REPO_TOKEN is not configured; skipping Homebrew tap update."
+
       - uses: actions/checkout@v4
+        if: env.HAVE_BREW_REPO_TOKEN == 'true'
 
       - name: Download macOS release assets
+        if: env.HAVE_BREW_REPO_TOKEN == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.check-version.outputs.version }}
@@ -326,11 +348,13 @@ jobs:
             --dir ./artifacts
 
       - name: Verify downloads
+        if: env.HAVE_BREW_REPO_TOKEN == 'true'
         run: |
           test -f ./artifacts/libertai-macos-aarch64 || { echo "Missing aarch64 binary"; exit 1; }
           test -f ./artifacts/libertai-macos-x86_64 || { echo "Missing x86_64 binary"; exit 1; }
 
       - name: Generate formula from template
+        if: env.HAVE_BREW_REPO_TOKEN == 'true'
         env:
           VERSION: ${{ needs.check-version.outputs.version }}
         run: |
@@ -351,6 +375,7 @@ jobs:
           cat libertai.rb
 
       - name: Checkout Homebrew tap
+        if: env.HAVE_BREW_REPO_TOKEN == 'true'
         uses: actions/checkout@v4
         with:
           repository: Libertai/homebrew-tap
@@ -358,6 +383,7 @@ jobs:
           path: homebrew-tap
 
       - name: Update formula and push
+        if: env.HAVE_BREW_REPO_TOKEN == 'true'
         env:
           VERSION: ${{ needs.check-version.outputs.version }}
         run: |
@@ -394,17 +420,33 @@ jobs:
     name: Publish to crates.io
     runs-on: ubuntu-latest
     needs: [check-version, request-publish-approval]
+    env:
+      HAVE_CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Publish libertai-cli
+        id: publish_crate
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked
+        run: |
+          if [ "$HAVE_CARGO_REGISTRY_TOKEN" != "true" ]; then
+            echo "CARGO_REGISTRY_TOKEN is not configured; skipping crates.io publish."
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if grep -Eq 'pi_agent_rust[[:space:]]*=[[:space:]]*\{[^}]*git[[:space:]]*=' Cargo.toml; then
+            echo "pi_agent_rust is pinned to a git dependency; skipping crates.io publish until a registry dependency is available."
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cargo publish --locked
+          echo "published=true" >> "$GITHUB_OUTPUT"
 
       - name: Update release notes with crates.io link
+        if: steps.publish_crate.outputs.published == 'true'
         uses: actions/github-script@v7
         env:
           VERSION: ${{ needs.check-version.outputs.version }}
