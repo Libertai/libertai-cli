@@ -150,6 +150,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build release binary
+        shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: cargo build --release --target "$TARGET"
