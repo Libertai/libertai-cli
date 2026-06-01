@@ -1739,10 +1739,10 @@ async fn repl_loop(
                     print_model_status(&handle, &cfg, &scoped_model_patterns)
                 }
                 ModelSlashCommand::Json => {
-                    print_model_json(&handle, &cfg, &scoped_model_patterns, false)
+                    print_model_json(&handle, &cfg, &scoped_model_patterns, rest, false)
                 }
                 ModelSlashCommand::JsonList => {
-                    print_model_json(&handle, &cfg, &scoped_model_patterns, true)
+                    print_model_json(&handle, &cfg, &scoped_model_patterns, rest, true)
                 }
                 ModelSlashCommand::List => {
                     print_model_list(&cfg, &provider, &scoped_model_patterns)
@@ -5063,7 +5063,7 @@ fn parse_scoped_model_patterns(input: &str) -> Vec<String> {
 fn handle_scoped_models_command(raw: &str, scoped_model_patterns: &mut Vec<String>) {
     match parse_scoped_models_command(raw) {
         ScopedModelsCommand::Status => print_scoped_model_status(scoped_model_patterns),
-        ScopedModelsCommand::Json => print_scoped_model_json(scoped_model_patterns),
+        ScopedModelsCommand::Json => print_scoped_model_json(scoped_model_patterns, raw),
         ScopedModelsCommand::Clear => {
             scoped_model_patterns.clear();
             println!("{DIM}  scoped models cleared; /model list shows all discovered models.{RESET}");
@@ -5096,10 +5096,11 @@ fn print_scoped_model_status(scoped_model_patterns: &[String]) {
     println!();
 }
 
-fn scoped_model_json_payload(scoped_model_patterns: &[String]) -> serde_json::Value {
+fn scoped_model_json_payload(scoped_model_patterns: &[String], query: &str) -> serde_json::Value {
     json!({
         "command": "scoped-models",
         "surface": "terminal",
+        "query": query.trim(),
         "patterns": scoped_model_patterns,
         "is_scoped": !scoped_model_patterns.is_empty(),
         "aliases": ["scoped-models", "scoped"],
@@ -5107,8 +5108,8 @@ fn scoped_model_json_payload(scoped_model_patterns: &[String]) -> serde_json::Va
     })
 }
 
-fn print_scoped_model_json(scoped_model_patterns: &[String]) {
-    match serde_json::to_string_pretty(&scoped_model_json_payload(scoped_model_patterns)) {
+fn print_scoped_model_json(scoped_model_patterns: &[String], query: &str) {
+    match serde_json::to_string_pretty(&scoped_model_json_payload(scoped_model_patterns, query)) {
         Ok(s) => println!("{s}"),
         Err(e) => eprintln!("{DIM}  /scoped-models json failed: {e}{RESET}"),
     }
@@ -5139,11 +5140,13 @@ fn model_json_payload(
     model: &str,
     cfg: &LibertaiConfig,
     scoped_model_patterns: &[String],
+    query: &str,
     available_models: Option<Vec<String>>,
 ) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "model",
+        "query": query.trim(),
         "current": {
             "provider": provider,
             "model": model,
@@ -5168,6 +5171,7 @@ fn print_model_json(
     handle: &AgentSessionHandle,
     cfg: &LibertaiConfig,
     scoped_model_patterns: &[String],
+    query: &str,
     include_list: bool,
 ) {
     let (provider, model) = handle.model();
@@ -5190,6 +5194,7 @@ fn print_model_json(
         &model,
         cfg,
         scoped_model_patterns,
+        query,
         available_models,
     )) {
         Ok(text) => println!("{text}"),
@@ -18129,10 +18134,12 @@ mod tests {
             "qwen3",
             &cfg,
             &["qwen*".to_string()],
+            "list --json",
             Some(vec!["qwen3".to_string()]),
         );
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "model");
+        assert_eq!(payload["query"], "list --json");
         assert_eq!(payload["current"]["id"], "libertai/qwen3");
         assert_eq!(payload["scope"]["is_scoped"], true);
         assert_eq!(payload["available_models"][0], "qwen3");
@@ -18213,9 +18220,13 @@ mod tests {
             ids
         );
 
-        let payload = scoped_model_json_payload(&["qwen*".to_string(), "openai/gpt-*".to_string()]);
+        let payload = scoped_model_json_payload(
+            &["qwen*".to_string(), "openai/gpt-*".to_string()],
+            "show --json",
+        );
         assert_eq!(payload["command"], "scoped-models");
         assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "show --json");
         assert_eq!(payload["is_scoped"], true);
         assert_eq!(payload["patterns"][0], "qwen*");
         assert!(
