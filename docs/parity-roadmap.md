@@ -93,6 +93,12 @@ SDK; those are flagged **(upstream)**.
   due/pending counts, git status, and usage.
 - **CLI `/resume` command** — REPL users can switch to the latest saved
   session for the current cwd or an explicit session JSONL path.
+- **CLI/desktop slash parity cleanup** — `/plan on|off|status` now works
+  on both surfaces while bare `/plan` still cycles modes; `/template
+  list|show` lists custom slash templates on both surfaces; `/resume
+  <path>` is explicitly advertised and tested in desktop; and
+  `/pr-comments` is exposed in CLI help metadata as the dashed alias for
+  `/pr_comments`.
 - **CLI `/fork` command** — REPL users can list forkable user messages
   and fork from the latest, an index, or an entry ID/prefix.
 - **CLI `/thinking` command** — REPL users can inspect and set pi's
@@ -475,10 +481,11 @@ local-command set. Add help routing so `/help` includes pi's commands.
 **Desktop note**: common and diagnostic slash commands are now wired in
 the desktop composer and command palette, including direct Settings-tab
 targets for account, backends, defaults, agents, skills, hooks, MCP,
-approvals, appearance, sandbox, and advanced. The remaining work here is
-deeper Claude-specific semantics and any future decision to delegate
-unknown typed `/foo` lines into pi's slash dispatcher instead of handling
-them locally.
+approvals, appearance, sandbox, and advanced. CLI and desktop built-in
+arg hints now match for the shared local command set; the remaining work
+here is deeper Claude-specific semantics and any future decision to
+delegate unknown typed `/foo` lines into pi's slash dispatcher instead
+of handling them locally.
 
 Machine-readable status/preview forms are now also part of the shipped
 contract for the local command set: CLI and desktop accept `json`,
