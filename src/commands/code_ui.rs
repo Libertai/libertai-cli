@@ -3046,7 +3046,7 @@ fn print_help() {
     println!("{DIM}  {} — show token usage for this REPL session{RESET}", usage_slash_usage_text());
     println!("{DIM}  {} — show recent submitted prompts{RESET}", history_usage_text());
     println!("{DIM}  {} — copy the last assistant response to the terminal clipboard{RESET}", copy_usage_text());
-    println!("{DIM}  /config [status|show|current|info|path|open|advanced|set <key> <value>|unset <key>] — show or update active config{RESET}");
+    println!("{DIM}  /config [status|show|current|info|path|open|backends|defaults|agents|skills|hooks|mcp|approvals|appearance|sandbox|advanced|set <key> <value>|unset <key>] — show or update active config{RESET}");
     println!("{DIM}  /hooks    — show configured command hooks (/hook is accepted too){RESET}");
     println!("{DIM}  /mcp      — show terminal MCP support status{RESET}");
     println!("{DIM}  {} — customize the input-bar status line{RESET}", status_line_usage_text());
@@ -3234,7 +3234,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "changelog" | "history" => "count|list|recent|latest|status|state|show|json|--json|status --json|state --json|show --json|list --json|recent --json|latest --json",
         "clear" | "exit" | "forget" => "status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json",
         "compact" => "status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json|[notes]",
-        "config" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|path|open|settings|set <key> <value>|unset <key>|reset <key>",
+        "config" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|path|open|settings|backends|defaults|agents|skills|hooks|mcp|approvals|appearance|sandbox|advanced|set <key> <value>|unset <key>|reset <key>",
         "copy" => "status|show|info|json|--json|status --json|show --json|info --json|last|latest|response|assistant|assistant-response",
         "doctor" => "status|state|show|info|health|diagnostics|diag|json|--json|status --json|state --json|show --json|info --json|health --json|diagnostics --json|diag --json",
         "export" => "copy|save|path|json|--json|status --json|show --json|preview --json|[path]",
@@ -16642,6 +16642,9 @@ mod tests {
             .unwrap()
             .iter()
             .any(|item| item == "set <key> <value>"));
+        let hint = help_command_arg_hint("config");
+        assert!(hint.contains("backends|defaults|agents|skills"));
+        assert!(hint.contains("hooks|mcp|approvals|appearance|sandbox|advanced"));
     }
 
     #[test]
