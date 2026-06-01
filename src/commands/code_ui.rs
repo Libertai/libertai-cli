@@ -1985,6 +1985,10 @@ async fn repl_loop(
                         print_templates_json(rest);
                         continue;
                     }
+                    if is_template_list_arg(rest) {
+                        print_templates();
+                        continue;
+                    }
                     match build_template_slash_prompt(rest, &handle).await {
                         Ok(prompt) => {
                             line = prompt;
@@ -9515,6 +9519,10 @@ fn is_template_json_arg(input: &str) -> bool {
         normalize_template_arg(input).as_str(),
         "json" | "--json" | "status --json" | "list --json" | "show --json"
     )
+}
+
+fn is_template_list_arg(input: &str) -> bool {
+    matches!(normalize_template_arg(input).as_str(), "list" | "show")
 }
 
 fn normalize_template_arg(input: &str) -> String {
@@ -19885,6 +19893,15 @@ mod tests {
         assert!(is_template_json_arg("list --json"));
         assert!(is_template_json_arg("show --json"));
         assert!(!is_template_json_arg("review src/lib.rs"));
+    }
+
+    #[test]
+    fn template_list_arg_accepts_plain_list_aliases() {
+        assert!(is_template_list_arg("list"));
+        assert!(is_template_list_arg("show"));
+        assert!(is_template_list_arg(" SHOW "));
+        assert!(!is_template_list_arg("show --json"));
+        assert!(!is_template_list_arg("review src/lib.rs"));
     }
 
     #[test]
