@@ -74,6 +74,7 @@ libertai claude         # launch Claude Code against LibertAI
 | `libertai opencode [args]` | Writes a `libertai` provider into `~/.config/opencode/opencode.json`, sets `LIBERTAI_API_KEY`, then launches OpenCode. |
 | `libertai aider [args]` | `run` preset for Aider; auto-passes `--model openai/<default_code_model>`. |
 | `libertai claw [args]` | `run` preset for [Claw Code](https://github.com/ultraworkers/claw-code); auto-passes `--model openai/<default_code_model>`. |
+| `libertai hermes [args]` | Launch [Hermes Agent](https://hermes-agent.nousresearch.com) with LibertAI credentials injected (env vars). |
 | `libertai config show\|path\|set\|unset` | Inspect or edit `~/.config/libertai/config.toml`. |
 | `libertai skills install\|list\|uninstall` | Manage bundled Claude Code skills (image gen etc). |
 
@@ -93,10 +94,59 @@ opus_model   = "gemma-4-31b-it"
 sonnet_model = "qwen3.6-35b-a3b"
 haiku_model  = "qwen3.6-35b-a3b"
 
+[[hooks.UserPromptSubmit]]
+command = "scripts/user-prompt-submit.sh"
+timeout = 5
+
+[[hooks.PreToolUse]]
+matcher = "bash|write|edit"
+command = "scripts/pre-tool-use.sh"
+timeout = 5
+reviewPolicy = "strict"
+continueOnBlock = true
+
+[[hooks.PostToolUse]]
+matcher = "bash|write|edit"
+command = "scripts/post-tool-use.sh"
+timeout = 5
+async = true
+
+[[hooks.SubagentStop]]
+matcher = "task"
+command = "scripts/subagent-stop.sh"
+
+[[hooks.SessionStart]]
+command = "scripts/session-start.sh"
+
+[[hooks.Stop]]
+command = "scripts/stop.sh"
+
+[[hooks.SessionEnd]]
+command = "scripts/session-end.sh"
+
 [auth]
 api_key = "LTAI_..."
 # wallet_address / chain are only written when you log in via wallet.
 ```
+
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStop`,
+`SessionStart`, `Stop`, and `SessionEnd` hooks are command-only in the
+native CLI. They receive a JSON payload on stdin. `UserPromptSubmit` hooks run before the prompt
+reaches the agent and may add `additionalContext` or block on nonzero exit.
+`PreToolUse` hooks may print Claude-style JSON such as
+`{"permissionDecision":"deny","permissionDecisionReason":"no writes"}`.
+`SubagentStop` hooks run after native `task` tool subagents finish.
+Tool hook `matcher` values support case-sensitive exact names, `*` globs,
+`|` alternatives, `regex:<pattern>`, and slash-delimited regex patterns
+such as `/^(bash|write)$/`.
+Claude-style hook metadata such as `source`, `statusMessage`,
+`reviewPolicy`, `once`, `asyncRewake`, and `continueOnBlock` round-trips as
+named fields; unknown hook metadata is preserved for config-save fidelity.
+Set `async = true` (or imported `asyncHook = true`) to launch a command
+hook without waiting for completion; async hook output is discarded and
+cannot affect prompt/tool decisions.
+Native command, HTTP, prompt, agent, and MCP-tool hook handlers are supported
+for session hook events.
 
 Set values with:
 
@@ -254,5 +304,5 @@ cargo test                       # config round-trip + masking
 - Solana wallet signing.
 - Browser-based device pairing (console.libertai.io issues a one-time code the
   CLI exchanges for a key — removes the private-key prompt).
-- `libertai openclaw` and `libertai hermes` launchers.
+- `libertai openclaw` launcher.
 - OS keyring storage as an alternative to the TOML file.

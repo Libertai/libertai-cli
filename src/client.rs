@@ -104,6 +104,8 @@ pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 pub fn post_chat_blocking(cfg: &Config, req: &ChatRequest) -> Result<reqwest::blocking::Response> {
@@ -234,37 +236,6 @@ pub fn post_search(cfg: &Config, req: &SearchRequest<'_>) -> Result<SearchRespon
     let resp = check_status(resp, &url)?;
     resp.json::<SearchResponse>()
         .context("parsing /search response")
-}
-
-#[derive(Debug, Serialize)]
-pub struct FetchRequest<'a> {
-    pub url: &'a str,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct FetchResponse {
-    #[serde(default)]
-    pub url: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub content: Option<String>,
-    #[serde(default)]
-    pub word_count: Option<u32>,
-}
-
-pub fn post_fetch(cfg: &Config, target: &str) -> Result<FetchResponse> {
-    let key = require_api_key(cfg)?;
-    let url = format!("{}/fetch", cfg.search_base.trim_end_matches('/'));
-    let resp = http(cfg)?
-        .post(&url)
-        .bearer_auth(key)
-        .json(&FetchRequest { url: target })
-        .send()
-        .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
-    let resp = check_status(resp, &url)?;
-    resp.json::<FetchResponse>()
-        .context("parsing /fetch response")
 }
 
 // ── Account (/auth, /api-keys) ──────────────────────────────────────────────

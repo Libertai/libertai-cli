@@ -223,6 +223,18 @@ pub fn claw(model: Option<String>, mut args: Vec<String>) -> Result<()> {
     exec_with_env("claw", &args, env)
 }
 
+/// Launch Hermes Agent against LibertAI.
+///
+/// Sets the OpenAI/Anthropic credential env vars (see `base_env`) and exports
+/// `LIBERTAI_MODEL` so Hermes picks up the libertai-cli default when the user
+/// doesn't pass `--model`.
+pub fn hermes(model: Option<String>, args: Vec<String>) -> Result<()> {
+    let cfg = config::load()?;
+    let chosen = model.unwrap_or_else(|| cfg.default_code_model.clone());
+    let env = base_env(&cfg, Some(&chosen))?;
+    exec_with_env("hermes", &args, env)
+}
+
 pub fn aider(model: Option<String>, mut args: Vec<String>) -> Result<()> {
     let cfg = config::load()?;
     let env = base_env(&cfg, model.as_deref())?;

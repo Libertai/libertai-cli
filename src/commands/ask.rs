@@ -14,6 +14,7 @@ pub fn run(prompt: String, model: Option<String>) -> Result<()> {
             content: prompt,
         }],
         stream: Some(false),
+        max_tokens: None,
     };
 
     let resp = post_chat_blocking(&cfg, &req)?;

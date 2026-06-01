@@ -148,6 +148,62 @@ pub enum Command {
         args: Vec<String>,
     },
 
+    /// Launch Hermes Agent against LibertAI.
+    ///
+    /// Sets up LibertAI credentials (OPENAI_API_KEY, ANTHROPIC_AUTH_TOKEN, etc.)
+    /// in the environment before exec'ing `hermes`.
+    Hermes {
+        /// Override the default model.
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// LibertAI's own coding agent, powered by pi_agent_rust.
+    ///
+    /// Alias: `lcode` (as a separate binary).
+    Code {
+        /// Model override (defaults to `default_code_model` from config).
+        #[arg(long)]
+        model: Option<String>,
+        /// Provider override (defaults to `default_code_provider` from config, or "libertai").
+        #[arg(long)]
+        provider: Option<String>,
+        /// Start in plan mode: the agent can read/grep/find/ls but
+        /// cannot run bash, write, or edit files until you toggle
+        /// back to normal (Shift+Tab or /plan).
+        #[arg(long)]
+        plan: bool,
+        /// Resume a specific saved session by JSONL path
+        /// (see `--list-sessions` to find one).
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["continue_recent", "list_sessions"])]
+        resume: Option<std::path::PathBuf>,
+        /// Resume the most recent session for the current working directory.
+        #[arg(long = "continue", conflicts_with_all = ["resume", "list_sessions"])]
+        continue_recent: bool,
+        /// Print recent sessions (most recent first) and exit, without
+        /// starting the agent. Filters to the current cwd by default;
+        /// pass `--all` to list every project.
+        #[arg(long, conflicts_with_all = ["resume", "continue_recent"])]
+        list_sessions: bool,
+        /// With `--list-sessions`, show sessions across every project.
+        #[arg(long, requires = "list_sessions")]
+        all: bool,
+        /// Sandbox the bash tool. `off` (default) runs bash with the
+        /// user's full host privileges. `strict` wraps it in `bwrap`
+        /// (Linux only today) with no network, read-only system dirs,
+        /// and a tmpfs `/tmp` — useful for untrusted models or
+        /// reviewing third-party agent scripts. `auto` resolves per
+        /// pillar; on the CLI that's currently the same as `off`.
+        /// Also honours the `LIBERTAI_SANDBOX` env var.
+        #[arg(long, value_enum, env = "LIBERTAI_SANDBOX", default_value_t = crate::commands::code_sandbox::SandboxMode::Off)]
+        sandbox: crate::commands::code_sandbox::SandboxMode,
+        /// Initial prompt (non-interactive mode if `--print`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Config file operations.
     Config {
         #[command(subcommand)]
@@ -158,6 +214,114 @@ pub enum Command {
     Skills {
         #[command(subcommand)]
         action: SkillsAction,
+    },
+
+    /// Inspect the bash-sandbox configuration.
+    Sandbox {
+        #[command(subcommand)]
+        action: SandboxAction,
+    },
+
+    /// Import data from other coding agents into a LibertAI session.
+    Import {
+        #[command(subcommand)]
+        action: ImportAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ImportAction {
+    /// Claude Code transcripts (`~/.claude/projects/...`).
+    #[command(name = "claude-code")]
+    ClaudeCode {
+        #[command(subcommand)]
+        action: ClaudeCodeImportAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ClaudeCodeImportAction {
+    /// List Claude Code sessions discovered for the current project.
+    /// Use `--all` to scan every project Claude Code has on disk.
+    List {
+        /// Scan every project under `~/.claude/projects/`, not just
+        /// the encoded directory for the current cwd.
+        #[arg(long)]
+        all: bool,
+        /// Emit JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Render the live branch of a Claude Code session as a plain-text
+    /// transcript. Same source that the (still-WIP) summary import
+    /// will feed to the model; use this to preview the input.
+    Show {
+        /// Session UUID (resolved against the current cwd's encoded
+        /// project dir) or an absolute path to a `.jsonl` file.
+        id_or_path: String,
+        /// Look across every project under `~/.claude/projects/`
+        /// when resolving a bare UUID.
+        #[arg(long)]
+        all: bool,
+        /// Emit a JSON `LinearizedSession` instead of the human transcript.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Build a `/compact`-style summary of a Claude Code session by
+    /// calling the configured LibertAI chat model. Prints the summary
+    /// to stdout. The next slice wires this into a real pi session as
+    /// a `Compaction` checkpoint; for now this lets you eyeball quality.
+    Summarize {
+        /// Session UUID or absolute path (same resolver as `show`).
+        id_or_path: String,
+        /// Look across every project when resolving a bare UUID.
+        #[arg(long)]
+        all: bool,
+        /// Override the chat model (defaults to `default_chat_model`).
+        #[arg(long)]
+        model: Option<String>,
+        /// Print the constructed prompt and exit without calling the
+        /// backend — useful for inspecting what the model would see.
+        #[arg(long = "print-prompt")]
+        print_prompt: bool,
+    },
+    /// Summarise the Claude Code session and write a new pi session
+    /// file whose first entry is the resulting `/compact`-style
+    /// checkpoint. Prints the new session path on success — open it
+    /// with `libertai code --resume <path>` or pick it from the
+    /// session picker.
+    Import {
+        /// Session UUID or absolute path (same resolver as `show`).
+        id_or_path: String,
+        /// Look across every project when resolving a bare UUID.
+        #[arg(long)]
+        all: bool,
+        /// Override the chat model used for the summary call.
+        #[arg(long)]
+        model: Option<String>,
+        /// Provider written into the pi session header (defaults to
+        /// `default_code_provider` from config).
+        #[arg(long)]
+        provider: Option<String>,
+        /// Render the pi session JSONL to stdout instead of writing
+        /// it. Useful for inspecting the output shape.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SandboxAction {
+    /// Print the resolved strict profile for this host: which bin /
+    /// lib / config paths would be exposed, which are present vs
+    /// missing, plus the bwrap location and the inside-sandbox PATH.
+    /// Useful for debugging when something the model wants to run
+    /// isn't reachable inside `--sandbox=strict`.
+    Info {
+        /// Emit JSON instead of the human summary. Suitable for piping
+        /// into other tools or consuming from a wrapper script.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -247,8 +411,32 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Opencode { model, args } => crate::commands::launchers::opencode(model, args),
         Command::Aider { model, args } => crate::commands::launchers::aider(model, args),
         Command::Claw { model, args } => crate::commands::launchers::claw(model, args),
+        Command::Hermes { model, args } => crate::commands::launchers::hermes(model, args),
+        Command::Code {
+            model,
+            provider,
+            plan,
+            resume,
+            continue_recent,
+            list_sessions,
+            all,
+            sandbox,
+            args,
+        } => crate::commands::code::run(
+            model,
+            provider,
+            plan,
+            resume,
+            continue_recent,
+            list_sessions,
+            all,
+            sandbox,
+            args,
+        ),
         Command::Config { action } => crate::commands::config_cmd::run(action),
         Command::Skills { action } => crate::commands::skills::run(action),
+        Command::Sandbox { action } => crate::commands::code_sandbox_cli::run(action),
+        Command::Import { action } => crate::commands::claude_code_import_cli::run(action),
     }
 }
 
@@ -269,7 +457,11 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::Opencode { .. } => "opencode",
         Command::Aider { .. } => "aider",
         Command::Claw { .. } => "claw",
+        Command::Hermes { .. } => "hermes",
+        Command::Code { .. } => "code",
         Command::Config { .. } => "config",
         Command::Skills { .. } => "skills",
+        Command::Sandbox { .. } => "sandbox",
+        Command::Import { .. } => "import",
     }
 }
