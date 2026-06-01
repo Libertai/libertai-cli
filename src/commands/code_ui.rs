@@ -8906,7 +8906,7 @@ fn print_agent_details(input: &str) {
     let agent = match crate::commands::code_agents::find_agent(&cwd, name) {
         Ok(Some(agent)) => agent,
         Ok(None) => {
-            eprintln!("{DIM}  /agents: no named sub-agent found for `{name}`{RESET}");
+            print_agent_missing_json(name, &cwd);
             return;
         }
         Err(e) => {
@@ -8952,6 +8952,27 @@ fn print_agent_details_json(input: &str) {
         "supported_actions": agents_supported_actions(),
     });
     match serde_json::to_string_pretty(&payload) {
+        Ok(raw) => println!("{raw}"),
+        Err(e) => eprintln!("{DIM}  /agents: could not serialize JSON: {e:#}{RESET}"),
+    }
+}
+
+fn agent_missing_json_payload(name: &str, cwd: &Path) -> serde_json::Value {
+    json!({
+        "surface": "terminal",
+        "command": "agents",
+        "query": format!("show {name} --json"),
+        "aliases": ["agents"],
+        "cwd": cwd,
+        "error": "not_found",
+        "name": name,
+        "will_write": false,
+        "supported_actions": agents_supported_actions(),
+    })
+}
+
+fn print_agent_missing_json(name: &str, cwd: &Path) {
+    match serde_json::to_string_pretty(&agent_missing_json_payload(name, cwd)) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  /agents: could not serialize JSON: {e:#}{RESET}"),
     }
@@ -19415,6 +19436,17 @@ mod tests {
         assert_eq!(payload["agents"][0]["name"], "reviewer");
         assert_eq!(payload["agents"][0]["path"], "/tmp/project/.libertai/agents/reviewer.md");
         assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show <name> --json")));
+
+        let missing = agent_missing_json_payload("missing", Path::new("/tmp/project"));
+        assert_eq!(missing["command"], "agents");
+        assert_eq!(missing["query"], "show missing --json");
+        assert_eq!(missing["error"], "not_found");
+        assert_eq!(missing["name"], "missing");
+        assert_eq!(missing["will_write"], false);
+        assert!(missing["supported_actions"]
             .as_array()
             .unwrap()
             .contains(&json!("show <name> --json")));
