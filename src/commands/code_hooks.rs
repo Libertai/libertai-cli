@@ -4007,16 +4007,16 @@ mod tests {
                 }
             }
 
-            fn write_sse_chunk(stream: &mut impl Write, event: &str) {
-                write!(stream, "{:x}\r\n{}\r\n", event.len(), event).unwrap();
+            fn write_sse_event(stream: &mut impl Write, event: &str) {
+                stream.write_all(event.as_bytes()).unwrap();
                 stream.flush().unwrap();
             }
 
             let mut sse_stream = accept_with_timeout(&listener);
             let response =
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n";
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n";
             sse_stream.write_all(response.as_bytes()).unwrap();
-            write_sse_chunk(
+            write_sse_event(
                 &mut sse_stream,
                 &format!("event: endpoint\ndata: http://{addr}/messages\n\n"),
             );
@@ -4053,21 +4053,21 @@ mod tests {
                     "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 post_stream.write_all(post_response.as_bytes()).unwrap();
                 match idx {
-                    0 => write_sse_chunk(
+                    0 => write_sse_event(
                         &mut sse_stream,
                         "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"resources\":{\"subscribe\":true}},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}}}\n\n",
                     ),
                     2 => {
                         assert!(text.contains("resources/subscribe"), "{text}");
                         assert!(text.contains("file:///repo/context.md"), "{text}");
-                        write_sse_chunk(
+                        write_sse_event(
                             &mut sse_stream,
                             "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n",
                         );
                     }
                     3 => {
                         assert!(text.contains("tools/call"), "{text}");
-                        write_sse_chunk(
+                        write_sse_event(
                             &mut sse_stream,
                             concat!(
                                 "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":{\"uri\":\"file:///repo/context.md\"}}\n\n",
@@ -4078,7 +4078,7 @@ mod tests {
                     4 => {
                         assert!(text.contains("resources/read"), "{text}");
                         assert!(text.contains("file:///repo/context.md"), "{text}");
-                        write_sse_chunk(
+                        write_sse_event(
                             &mut sse_stream,
                             "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"contents\":[{\"uri\":\"file:///repo/context.md\",\"mimeType\":\"text/plain\",\"text\":\"fresh sse context\"}]}}\n\n",
                         );
@@ -4392,16 +4392,16 @@ mod tests {
                 }
             }
 
-            fn write_sse_chunk(stream: &mut impl Write, event: &str) {
-                write!(stream, "{:x}\r\n{}\r\n", event.len(), event).unwrap();
+            fn write_sse_event(stream: &mut impl Write, event: &str) {
+                stream.write_all(event.as_bytes()).unwrap();
                 stream.flush().unwrap();
             }
 
             let mut sse_stream = accept_with_timeout(&listener);
             let response =
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n";
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n";
             sse_stream.write_all(response.as_bytes()).unwrap();
-            write_sse_chunk(
+            write_sse_event(
                 &mut sse_stream,
                 &format!("event: endpoint\ndata: http://{addr}/messages\n\n"),
             );
@@ -4438,15 +4438,15 @@ mod tests {
                     "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 post_stream.write_all(post_response.as_bytes()).unwrap();
                 match idx {
-                    0 => write_sse_chunk(
+                    0 => write_sse_event(
                         &mut sse_stream,
                         "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{}}}\n\n",
                     ),
-                    2 => write_sse_chunk(
+                    2 => write_sse_event(
                         &mut sse_stream,
                         "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"first sse\"}],\"isError\":false}}\n\n",
                     ),
-                    3 => write_sse_chunk(
+                    3 => write_sse_event(
                         &mut sse_stream,
                         "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"second sse\"}],\"isError\":false}}\n\n",
                     ),
@@ -4517,16 +4517,16 @@ mod tests {
                 }
             }
 
-            fn write_sse_chunk(stream: &mut impl Write, event: &str) {
-                write!(stream, "{:x}\r\n{}\r\n", event.len(), event).unwrap();
+            fn write_sse_event(stream: &mut impl Write, event: &str) {
+                stream.write_all(event.as_bytes()).unwrap();
                 stream.flush().unwrap();
             }
 
             let mut sse_stream = accept_with_timeout(&listener);
             let response =
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n";
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n";
             sse_stream.write_all(response.as_bytes()).unwrap();
-            write_sse_chunk(
+            write_sse_event(
                 &mut sse_stream,
                 &format!("event: endpoint\ndata: http://{addr}/messages\n\n"),
             );
@@ -4563,11 +4563,11 @@ mod tests {
                     "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 post_stream.write_all(post_response.as_bytes()).unwrap();
                 match idx {
-                    0 => write_sse_chunk(
+                    0 => write_sse_event(
                         &mut sse_stream,
                         "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{}}}\n\n",
                     ),
-                    2 => write_sse_chunk(
+                    2 => write_sse_event(
                         &mut sse_stream,
                         "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"sse policy ok\"}],\"isError\":false}}\n\n",
                     ),
