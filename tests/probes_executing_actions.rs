@@ -22,6 +22,7 @@ fn executing_actions_block_reaches_assembled_prompt() {
     let assert = Command::cargo_bin("libertai")
         .expect("libertai binary built")
         .env("XDG_CONFIG_HOME", config_home.path())
+        .env("HOME", config_home.path())
         .env("LIBERTAI_DUMP_SYSTEM_PROMPT", "1")
         .env("LIBERTAI_DUMP_AND_EXIT", "1")
         .args(["code", "-p", "probe-ignored"])
