@@ -48,8 +48,7 @@ use crate::commands::code_sandbox::{
     binary_on_path, detect_strict_profile, format_profile_text, BindKind, StrictProfile,
 };
 use crate::commands::code_session::{
-    build_session_options, list_past_sessions, most_recent_session, CodeSessionConfig,
-    SessionPersistence,
+    build_session_options, list_past_sessions, CodeSessionConfig, SessionPersistence,
 };
 use crate::commands::code_skills::{self, SkillPillar};
 use crate::commands::code_term::TerminalApprovalUi;
@@ -2620,17 +2619,38 @@ async fn resume_repl_session(
 
 fn resolve_repl_resume_path(input: &str) -> Result<PathBuf> {
     let raw = input.trim();
+    let cwd = std::env::current_dir().context("resolve current directory")?;
+    let sessions = list_past_sessions(Some(&cwd))?;
+    resolve_repl_resume_path_from_sessions(raw, &sessions)
+}
+
+fn resolve_repl_resume_path_from_sessions(
+    raw: &str,
+    sessions: &[crate::commands::code_session::SessionMeta],
+) -> Result<PathBuf> {
     if raw.is_empty() {
-        let cwd = std::env::current_dir().context("resolve current directory")?;
-        let recent = most_recent_session(&cwd)?
-            .ok_or_else(|| anyhow::anyhow!("no past sessions for {}", cwd.display()))?;
-        return Ok(PathBuf::from(recent.path));
+        let recent = sessions
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("no past sessions for this project"))?;
+        return Ok(PathBuf::from(recent.path.clone()));
     }
     let path = PathBuf::from(raw);
-    if !path.exists() {
-        anyhow::bail!("session file not found: {}", path.display());
+    if path.exists() {
+        return Ok(path);
     }
-    Ok(path)
+    if let Some(session) = sessions.iter().find(|session| {
+        session.id == raw
+            || session.name.as_deref() == Some(raw)
+            || Path::new(&session.path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some(raw)
+    }) {
+        return Ok(PathBuf::from(&session.path));
+    }
+    anyhow::bail!(
+        "session target not found: {raw} (expected saved session id, name, filename, or path)"
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2641,7 +2661,7 @@ enum ResumePreviewCommand {
 }
 
 fn resume_usage_text() -> &'static str {
-    "/resume [status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json|path]"
+    "/resume [status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json|session|path]"
 }
 
 fn resume_preview_arg(trimmed: &str) -> Option<&str> {
@@ -2699,9 +2719,10 @@ fn resume_json_payload_from_rows(
         "candidates": sessions,
         "will_replace_current_repl_session": true,
         "accepts_path": true,
+        "query_argument": "/resume SESSION",
         "path_argument": "/resume PATH",
         "aliases": ["resume"],
-        "supported_actions": ["status", "state", "show", "info", "preview", "json", "--json", "status --json", "state --json", "show --json", "info --json", "preview --json", "path"],
+        "supported_actions": ["status", "state", "show", "info", "preview", "json", "--json", "status --json", "state --json", "show --json", "info --json", "preview --json", "session", "path"],
     })
 }
 
@@ -3033,7 +3054,7 @@ fn print_help() {
     println!("{DIM}  {} — show a bounded project tree{RESET}", tree_usage_text());
     println!("{DIM}  {} — show recent git commits{RESET}", changelog_usage_text());
     println!("{DIM}  /reload [config|session|now|fresh] — reload config and start a fresh agent session{RESET}");
-    println!("{DIM}  /resume [path] — resume the latest or specified saved session{RESET}");
+    println!("{DIM}  /resume [session|path] — resume the latest or specified saved session{RESET}");
     println!("{DIM}  /fork [list|index|id] — fork from a previous user message{RESET}");
     println!("{DIM}  /thinking [off|minimal|low|medium|high|xhigh] — show or set thinking{RESET}");
     println!("{DIM}  {}{RESET}", scoped_models_usage_text());
@@ -3238,7 +3259,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "pr_comments" | "review" | "security-review" => "[instructions]",
         "reload" => "config|session|now|fresh|json|--json|config --json|session --json|now --json|fresh --json",
         "remember" => "project: <text>|user: <text>|feedback: <text>|reference: <text>|json <text>|--json <text>|<text> --json|status --json|show --json|preview --json",
-        "resume" => "status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json|path",
+        "resume" => "status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json|session|path",
         "sandbox" => "info|status|state|show|diagnostics|diag|json|--json|status --json|state --json|show --json|info --json|diagnostics --json|diag --json|reload",
         "schedule" => "in <delay> <prompt>|list|status|state|json|--json|list --json|show|inspect|show-json|run|now|trigger|cancel|delete|rm|clear|stop",
         "scoped-models" => "status|show|json|--json|status --json|show --json|patterns|clear|reset|off",
@@ -16088,6 +16109,49 @@ mod tests {
     }
 
     #[test]
+    fn resolve_repl_resume_path_accepts_session_identifiers() {
+        let sessions = vec![
+            crate::commands::code_session::SessionMeta {
+                path: "/tmp/project/release.jsonl".to_string(),
+                id: "s_release".to_string(),
+                cwd: "/tmp/project".to_string(),
+                timestamp: "2026-05-31T00:00:00Z".to_string(),
+                message_count: 3,
+                last_modified_ms: 1,
+                size_bytes: 128,
+                name: Some("release".to_string()),
+            },
+            crate::commands::code_session::SessionMeta {
+                path: "/tmp/project/other.jsonl".to_string(),
+                id: "s_other".to_string(),
+                cwd: "/tmp/project".to_string(),
+                timestamp: "2026-05-30T00:00:00Z".to_string(),
+                message_count: 1,
+                last_modified_ms: 0,
+                size_bytes: 64,
+                name: None,
+            },
+        ];
+        assert_eq!(
+            resolve_repl_resume_path_from_sessions("", &sessions).unwrap(),
+            PathBuf::from("/tmp/project/release.jsonl")
+        );
+        assert_eq!(
+            resolve_repl_resume_path_from_sessions("s_release", &sessions).unwrap(),
+            PathBuf::from("/tmp/project/release.jsonl")
+        );
+        assert_eq!(
+            resolve_repl_resume_path_from_sessions("release", &sessions).unwrap(),
+            PathBuf::from("/tmp/project/release.jsonl")
+        );
+        assert_eq!(
+            resolve_repl_resume_path_from_sessions("other.jsonl", &sessions).unwrap(),
+            PathBuf::from("/tmp/project/other.jsonl")
+        );
+        assert!(resolve_repl_resume_path_from_sessions("missing", &sessions).is_err());
+    }
+
+    #[test]
     fn resume_preview_arg_preserves_explicit_paths() {
         assert_eq!(resume_preview_arg("/resume"), None);
         assert_eq!(resume_preview_arg("/resume status"), Some("status"));
@@ -16119,7 +16183,8 @@ mod tests {
             ResumePreviewCommand::Usage
         );
         assert!(resume_usage_text().contains("json|--json|status --json|state --json"));
-        assert!(resume_usage_text().contains("preview --json|path"));
+        assert!(resume_usage_text().contains("preview --json|session|path"));
+        assert!(help_command_arg_hint("resume").contains("session|path"));
 
         let cwd = PathBuf::from("/tmp/project");
         let payload = resume_json_payload_from_rows(
@@ -16145,6 +16210,7 @@ mod tests {
         assert_eq!(payload["default_target"]["id"], "s1");
         assert_eq!(payload["will_replace_current_repl_session"], true);
         assert_eq!(payload["accepts_path"], true);
+        assert_eq!(payload["query_argument"], "/resume SESSION");
         assert!(
             payload["supported_actions"]
                 .as_array()
@@ -16156,6 +16222,12 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .contains(&json!("preview --json"))
+        );
+        assert!(
+            payload["supported_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("session"))
         );
     }
 
