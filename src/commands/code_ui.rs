@@ -3208,7 +3208,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "agent" => "[--worktree|--same-cwd|--background|--detached] <name> <task>",
         "agents" => "list|status|show <name>|json|--json|list --json|status --json|show --json|show <name> --json|open|settings|edit|background|bg|create [--worktree|--same-cwd] <name>|delete|remove <name>",
         "attach" | "image" => "<path> [prompt]",
-        "auto" => "on [turns] [goal]|off|stop|cancel|status|state|json|--json|status --json|state --json",
+        "auto" => "on [turns] [goal]|off|stop|cancel|status|state|json|--json|status --json|state --json|status-json|state-json",
         "bug" => "report|template|status|show|json|--json|status --json|show --json|template --json|report --json",
         "changelog" | "history" => "count|list|recent|latest|status|state|show|json|--json|status --json|state --json|show --json|list --json|recent --json|latest --json",
         "clear" | "exit" | "forget" => "status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json",
@@ -3240,7 +3240,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "remember" => "project: <text>|user: <text>|feedback: <text>|reference: <text>|json <text>|--json <text>|<text> --json|status --json|show --json|preview --json",
         "resume" => "status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json|path",
         "sandbox" => "info|status|state|show|diagnostics|diag|json|--json|status --json|state --json|show --json|info --json|diagnostics --json|diag --json|reload",
-        "schedule" => "in <delay> <prompt>|list|status|state|json|--json|list --json|show <id>|show <id> --json|run <id>|cancel <id>|clear|stop",
+        "schedule" => "in <delay> <prompt>|list|status|state|json|--json|list --json|show|inspect|show-json|run|now|trigger|cancel|delete|rm|clear|stop",
         "scoped-models" => "status|show|json|--json|status --json|show --json|patterns|clear|reset|off",
         "send" => "status|targets|list|json|--json|status --json|state --json|show --json|list --json|targets --json|queued|queue --json|queued --json|pending --json|clear <id|target|all>|session message",
         "share" => "copy|save|path|gist|json|--json|status --json|show --json|preview --json|[path]",
@@ -17859,6 +17859,10 @@ mod tests {
             parse_schedule_command("show-json sch_2"),
             ScheduleCommand::ShowJson("sch_2".to_string())
         );
+        assert_eq!(
+            parse_schedule_command("inspect-json sch_2"),
+            ScheduleCommand::ShowJson("sch_2".to_string())
+        );
         assert_eq!(parse_schedule_command("status"), ScheduleCommand::Status);
         assert_eq!(parse_schedule_command("state"), ScheduleCommand::Status);
         assert_eq!(
@@ -17926,6 +17930,12 @@ mod tests {
             }
         );
         assert!(matches!(parse_schedule_command("10m"), ScheduleCommand::Usage));
+        let hint = help_command_arg_hint("schedule");
+        assert!(hint.contains("inspect"));
+        assert!(hint.contains("show-json"));
+        assert!(hint.contains("trigger"));
+        assert!(hint.contains("delete"));
+        assert!(hint.contains("rm"));
     }
 
     #[test]
@@ -18074,6 +18084,7 @@ mod tests {
         assert_eq!(parse_auto_command("status --json"), AutoCommand::Json);
         assert_eq!(parse_auto_command("state json"), AutoCommand::Json);
         assert_eq!(parse_auto_command("status-json"), AutoCommand::Json);
+        assert_eq!(parse_auto_command("state-json"), AutoCommand::Json);
         assert_eq!(parse_auto_command("off"), AutoCommand::Off);
         assert_eq!(parse_auto_command("stop"), AutoCommand::Off);
         assert_eq!(parse_auto_command("cancel"), AutoCommand::Off);
@@ -18091,6 +18102,9 @@ mod tests {
                 goal: "keep going".to_string(),
             }
         );
+        let hint = help_command_arg_hint("auto");
+        assert!(hint.contains("status-json"));
+        assert!(hint.contains("state-json"));
     }
 
     #[test]
