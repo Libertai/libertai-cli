@@ -2911,8 +2911,7 @@ async fn run_agent_hook_async(
                 };
             }
         };
-    let append_system_prompt =
-        crate::commands::code_env_prompt::append_environment_prompt(append_system_prompt, cwd.as_deref());
+    // Git context is injected once by pi (build_git_context); do not duplicate it here.
     let prompt = prompt_hook_user_content(&hook.prompt, &payload);
     let model = hook
         .model

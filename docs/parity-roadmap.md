@@ -1,6 +1,6 @@
 # libertai-cli — Claude-Code-parity & Hermes-inspired roadmap
 
-Snapshot 2026-05-12.
+Snapshot 2026-05-31.
 
 This is the CLI-side plan. The desktop's parity story is in
 `../libertai-code-desktop/docs/claude-code-parity.md`. The companion
@@ -636,18 +636,21 @@ remains a handoff item.
 
 ### 4B. Background skill-review fork (learning loop)
 
-After every N tool-using iterations, spawn a child `AgentSession` with
-the conversation snapshot + a curator prompt; child has access to a
-restricted "skill write" tool and can create/patch SKILL.md files under
-`~/.config/libertai/skills/`. Triggered async; doesn't block user turn.
+**Status: deferred — NOT yet implemented.** No `code_curator.rs` exists;
+`code_skills.rs` only passively detects agent-created skills via the
+`libertai.created_by` metadata. The background skill-review fork /
+curator described below is the planned design, not shipped behavior.
+
+The intended design: after every N tool-using iterations, spawn a child
+`AgentSession` with the conversation snapshot + a curator prompt; child
+has access to a restricted "skill write" tool and can create/patch
+SKILL.md files under `~/.config/libertai/skills/`. Triggered async;
+doesn't block user turn.
 (`/tmp/hermes-agent/run_agent.py:4234-4340`, `15419-15441`)
 
 Hermes's curator (weekly consolidation pass) is **deferred** until we
 have ~50 agent-created skills.
 
-**Files**: new `src/commands/code_curator.rs`,
-`src/commands/code_skills.rs` (writer tool),
-`src/commands/code_session.rs` (trigger hook).
 **Effort**: M (2-3 days).
 **Desktop note**: handoff doc item D-3 — desktop should ship a
 "review proposed skills" tray UI before this hits prod, otherwise
@@ -693,9 +696,13 @@ list. CLI
 and prompt preview, and `/agents create [--worktree|--same-cwd] <name>
 [description]` scaffolds project-local `.libertai/agents/<name>.md`
 definitions. Worktree isolation now uses a detached git worktree when
-possible and a copied temp workspace snapshot outside git. Remaining work
-is pi-level child event streaming and durable scheduling controls for
-detached agents.
+possible and a copied temp workspace snapshot outside git. Remaining work:
+pi-level child event streaming has now **landed**
+(`pi_agent_rust/src/agent.rs:307` `ToolExecutionUpdate` +
+`src/tools.rs:220-280` native `TaskTool` forwarding), so the open item is
+wiring CLI/desktop `code_task.rs` `render_child` to forward
+`ToolExecutionUpdate`/`ToolExecutionEnd`; durable scheduling controls for
+detached agents remain the other deferred item.
 
 **Files**: `src/commands/code_agents.rs`, `src/commands/code_task.rs`,
 `src/commands/code_ui.rs`.
@@ -888,7 +895,7 @@ demand emerges.
 | 3D secret redaction | ✓ | — | Tool-level invariant shipped in LibertAI fork. |
 | 3E loop detector | ✓ | ✓ | Wraps tools at factory level. |
 | 4A smart-approval | — | ✓ | Reuses our provider config. |
-| 4B skill-review fork | — | ✓ | Spawns child via SDK. |
+| 4B skill-review fork | — | — / (deferred) | Not yet implemented; no `code_curator.rs`. |
 | 4C compaction prefix | ✓ | — | Upstream the prefix; config local. |
 | 4D agent registry | — | ✓ | Local registry directory. |
 | 4E memory v1 | partial | ✓ | Pi loads it via hook; libertai-cli writes it. |

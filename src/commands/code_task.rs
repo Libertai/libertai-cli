@@ -269,10 +269,7 @@ impl Tool for TaskTool {
         } else {
             Some(append_parts.join("\n\n"))
         };
-        let append_system_prompt = crate::commands::code_env_prompt::append_environment_prompt(
-            append_system_prompt,
-            Some(&child_cwd),
-        );
+        // Git context is injected once by pi (build_git_context); do not duplicate it here.
         let model = agent
             .as_ref()
             .and_then(|a| a.model.clone())
@@ -557,6 +554,44 @@ fn render_child(event: AgentEvent, on_update: Option<&(dyn Fn(ToolUpdate) + Send
                 "subagent_tool_start",
                 &format!("\n[subagent tool] {tool_name}\n"),
             );
+        }
+        AgentEvent::ToolExecutionUpdate {
+            tool_name,
+            tool_call_id,
+            partial_result,
+            ..
+        } => {
+            if let Some(on_update) = on_update {
+                on_update(ToolUpdate {
+                    content: partial_result.content,
+                    details: Some(serde_json::json!({
+                        "kind": "subagent_tool_update",
+                        "tool": tool_name,
+                        "toolCallId": tool_call_id,
+                        "details": partial_result.details,
+                    })),
+                });
+            }
+        }
+        AgentEvent::ToolExecutionEnd {
+            tool_name,
+            tool_call_id,
+            result,
+            is_error,
+        } => {
+            eprintln!("  \x1b[2m[subagent tool done] {tool_name}\x1b[0m");
+            if let Some(on_update) = on_update {
+                on_update(ToolUpdate {
+                    content: result.content,
+                    details: Some(serde_json::json!({
+                        "kind": "subagent_tool_end",
+                        "tool": tool_name,
+                        "toolCallId": tool_call_id,
+                        "isError": is_error,
+                        "details": result.details,
+                    })),
+                });
+            }
         }
         AgentEvent::AgentEnd { .. } => {
             eprintln!();
