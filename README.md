@@ -48,7 +48,7 @@ automatically in non-interactive shells and CI.
 ## Quick start
 
 ```sh
-libertai login          # pick: [1] paste API key  [2] sign with wallet  [3] open console
+libertai login          # pick: [1] browser sign-in  [2] paste API key  [3] wallet private key
 libertai ask "explain EIP-191 signing in two sentences"
 libertai chat           # streaming REPL, Ctrl-D to exit
 libertai image "a lighthouse at dusk" --out dusk.png
@@ -59,7 +59,7 @@ libertai claude         # launch Claude Code against LibertAI
 
 | Command | Description |
 | --- | --- |
-| `libertai login` | Interactive login: API key, wallet signing (Base), or browser fallback. |
+| `libertai login` | Interactive login: browser SSO (any method), paste API key, or wallet private key. |
 | `libertai logout` | Back up the current config to `config.toml.bak.<epoch>`. |
 | `libertai status` | Show current auth state and default models. |
 | `libertai models` | List models available from `/v1/models`. |
@@ -260,11 +260,18 @@ appear in opencode's tool list alongside native ones).
 
 ## Authentication
 
-Two supported flows today:
+Three supported flows today:
 
-1. **API key** — create one at [console.libertai.io](https://console.libertai.io)
+1. **Browser sign-in (recommended)** — `libertai login` starts a local
+   loopback server and opens [console.libertai.io](https://console.libertai.io)`/cli`.
+   Sign in there by any method (email, wallet, OAuth) and approve; the console
+   hands a one-time, PKCE-bound code back to the CLI, which exchanges it
+   (`/auth/exchange`) for a session token and mints a device CLI API key
+   (`/api-keys/cli`, 30-day expiry — re-run `libertai login` to renew). Set
+   `LIBERTAI_CONSOLE_URL` to point at a non-default console.
+2. **API key** — create one at [console.libertai.io](https://console.libertai.io)
    and paste it into `libertai login`.
-2. **Wallet signing on Base** — `libertai login` prompts for a hex-encoded
+3. **Wallet signing on Base** — `libertai login` prompts for a hex-encoded
    secp256k1 private key, fetches an auth message from `/auth/message`,
    **shows you the message and host and asks for confirmation before
    signing**, then submits the EIP-191 signature to `/auth/login` and

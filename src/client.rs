@@ -292,6 +292,49 @@ pub fn auth_login(cfg: &Config, chain: &str, address: &str, signature: &str) -> 
     Ok(resp.json::<AuthLoginResponse>()?.access_token)
 }
 
+// ── CLI browser-SSO (loopback + PKCE) ────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct ExchangeRequest<'a> {
+    pub code: &'a str,
+    pub verifier: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExchangeResponse {
+    pub access_token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CliApiKeyCreate<'a> {
+    pub host: &'a str,
+}
+
+/// Exchange a one-time code (+ PKCE verifier) for a session access token.
+pub fn exchange_code(cfg: &Config, code: &str, verifier: &str) -> Result<String> {
+    let url = format!("{}/auth/exchange", cfg.account_base.trim_end_matches('/'));
+    let resp = http(cfg)?
+        .post(&url)
+        .json(&ExchangeRequest { code, verifier })
+        .send()
+        .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
+    let resp = check_status(resp, &url)?;
+    Ok(resp.json::<ExchangeResponse>()?.access_token)
+}
+
+/// Mint (or rotate) this device's CLI API key, authenticating with the session token.
+pub fn create_cli_api_key(cfg: &Config, access_token: &str, host: &str) -> Result<FullApiKey> {
+    let url = format!("{}/api-keys/cli", cfg.account_base.trim_end_matches('/'));
+    let resp = http(cfg)?
+        .post(&url)
+        .bearer_auth(access_token)
+        .json(&CliApiKeyCreate { host })
+        .send()
+        .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
+    let resp = check_status(resp, &url)?;
+    resp.json::<FullApiKey>().context("parsing CLI key response")
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ApiKeyRow {
     pub id: String,
