@@ -122,6 +122,16 @@ pub fn run() -> Result<()> {
         ),
     }
 
+    if let Some(exp) = cfg.auth.expires_at.as_deref() {
+        let date = exp.split('T').next().unwrap_or(exp);
+        println!(
+            "  {:<22} {} {}",
+            "Key expires:".dimmed(),
+            date,
+            "(run `libertai login` to renew)".dimmed()
+        );
+    }
+
     if let Some(addr) = cfg.auth.wallet_address.as_deref() {
         let chain = cfg.auth.chain.as_deref().unwrap_or("?");
         println!(

@@ -923,6 +923,10 @@ pub struct Auth {
     pub wallet_address: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain: Option<String>,
+    /// ISO-8601 expiry of the stored key (set for CLI browser-SSO keys). Informational:
+    /// the server enforces expiry; the CLI uses this to show the date and warn near expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 fn default_api_base() -> String {
