@@ -49,7 +49,13 @@ pub fn run() -> Result<()> {
         .map(mask_key)
         .unwrap_or_else(|| "<none>".to_string());
     let path = config_path()?;
-    eprintln!("Logged in. Key: {masked}  →  {}", path.display());
+    let expiry_note = cfg
+        .auth
+        .expires_at
+        .as_deref()
+        .map(|e| format!("  (expires {})", e.split('T').next().unwrap_or(e)))
+        .unwrap_or_default();
+    eprintln!("Logged in. Key: {masked}{expiry_note}  →  {}", path.display());
     Ok(())
 }
 
@@ -101,6 +107,7 @@ fn login_with_browser(cfg: &mut Config) -> Result<()> {
     let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "local".into());
     let created = create_cli_api_key(cfg, &access_token, &host).context("creating CLI API key")?;
 
+    cfg.auth.expires_at = created.expires_at;
     cfg.auth.api_key = Some(created.full_key);
     cfg.auth.wallet_address = None;
     cfg.auth.chain = None;
@@ -112,6 +119,24 @@ fn console_base() -> String {
         .unwrap_or_else(|_| DEFAULT_CONSOLE_BASE.to_string())
         .trim_end_matches('/')
         .to_string()
+}
+
+/// A clean, centered standalone page shown in the browser after the redirect.
+fn callback_page(accent: &str, glyph: &str, title: &str, message: &str) -> String {
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>LibertAI CLI</title>\
+<style>html,body{{height:100%;margin:0}}\
+body{{display:flex;align-items:center;justify-content:center;\
+font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\
+background:#0b0b0f;color:#e5e7eb}}\
+.card{{text-align:center;padding:2.5rem 3rem;max-width:24rem}}\
+.badge{{width:56px;height:56px;border-radius:9999px;background:{accent};color:#fff;\
+font-size:30px;line-height:56px;margin:0 auto 1.25rem}}\
+h1{{font-size:1.25rem;font-weight:600;margin:0 0 .5rem}}\
+p{{margin:0;color:#9ca3af;font-size:.95rem;line-height:1.4}}</style></head>\
+<body><div class=\"card\"><div class=\"badge\">{glyph}</div>\
+<h1>{title}</h1><p>{message}</p></div></body></html>"
+    )
 }
 
 /// Serve one request to `/callback`, reply with a "you can close this tab" page,
@@ -136,12 +161,19 @@ fn wait_for_callback(server: tiny_http::Server) -> Result<(String, String)> {
 
     let ok = code.is_some() && err.is_none();
     let body = if ok {
-        "<html><body style=\"font-family:sans-serif;text-align:center;padding-top:3rem\">\
-         <h2>\u{2713} Signed in to LibertAI</h2><p>You can close this tab and return to your terminal.</p>\
-         </body></html>"
+        callback_page(
+            "#10b981",
+            "\u{2713}",
+            "Signed in to LibertAI",
+            "You can now close this page and return to your terminal.",
+        )
     } else {
-        "<html><body style=\"font-family:sans-serif;text-align:center;padding-top:3rem\">\
-         <h2>Sign-in failed</h2><p>Return to your terminal and try again.</p></body></html>"
+        callback_page(
+            "#ef4444",
+            "\u{00d7}",
+            "Sign-in failed",
+            "Something went wrong. Return to your terminal and run libertai login again.",
+        )
     };
     let header = "Content-Type: text/html; charset=utf-8"
         .parse::<tiny_http::Header>()
@@ -175,6 +207,7 @@ fn login_with_api_key(cfg: &mut Config, term: &Term) -> Result<()> {
     list_models(&probe).context("verifying API key via /v1/models")?;
 
     cfg.auth.api_key = Some(key);
+    cfg.auth.expires_at = None; // pasted keys carry no CLI expiry
     Ok(())
 }
 
@@ -234,6 +267,7 @@ fn login_with_wallet(cfg: &mut Config, term: &Term) -> Result<()> {
     cfg.auth.api_key = Some(created.full_key);
     cfg.auth.wallet_address = Some(address);
     cfg.auth.chain = Some("base".into());
+    cfg.auth.expires_at = None; // wallet-created keys don't expire
     Ok(())
 }
 

@@ -363,6 +363,9 @@ pub struct FullApiKey {
     /// `full_key`; the sibling `key` field on the upstream model is only the
     /// masked preview and is intentionally ignored here.
     pub full_key: String,
+    /// ISO-8601 expiry (CLI keys expire; null for keys that never do).
+    #[serde(default)]
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -435,5 +438,13 @@ fn check_status(
     } else {
         body
     };
+    // A 401 on an authenticated call almost always means the stored key is invalid,
+    // revoked, or (for CLI keys) expired — point the user at a fresh login.
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(anyhow!(
+            "{url} → {status}: {truncated}\n\
+             Your API key may be invalid or expired — run `libertai login` to sign in again."
+        ));
+    }
     Err(anyhow!("{url} → {status}: {truncated}"))
 }
