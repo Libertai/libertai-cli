@@ -260,13 +260,12 @@ appear in opencode's tool list alongside native ones).
 
 ## Authentication
 
-`libertai login` offers three flows:
+`libertai login` offers two flows:
 
 1. **Browser sign-in (recommended)** — opens the console, you sign in (email,
    wallet, or OAuth) and approve; the CLI gets a device key (90-day expiry, re-run
    to renew). Uses a standard OAuth loopback + PKCE flow.
 2. **API key** — paste a key from [console.libertai.io](https://console.libertai.io).
-3. **Wallet private key** — sign on Base to mint a key; the key is never persisted.
 
 Set `LIBERTAI_CONSOLE_URL` to use a non-default console.
 

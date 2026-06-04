@@ -1,26 +1,18 @@
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use dialoguer::console::Term;
-use dialoguer::{Input, Select};
+use dialoguer::Select;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
-use crate::auth::wallet::{address_from_signing_key, personal_sign, signing_key_from_hex};
-use crate::client::{
-    auth_login, auth_message, create_api_key, create_cli_api_key, exchange_code, list_models, ApiKeyCreate,
-};
-use crate::commands::auth_ui::{confirm_signing, validate_limit};
+use crate::client::{create_cli_api_key, exchange_code, list_models};
 use crate::config::{self, config_path, mask_key, Auth, Config};
 
 const DEFAULT_CONSOLE_BASE: &str = "https://console.libertai.io";
 
 pub fn run() -> Result<()> {
     let term = Term::stderr();
-    let options = &[
-        "Sign in with your browser (recommended)",
-        "Paste API key",
-        "Sign with wallet private key (Base)",
-    ];
+    let options = &["Sign in with your browser (recommended)", "Paste API key"];
 
     let choice = Select::new()
         .with_prompt("How would you like to log in?")
@@ -36,7 +28,6 @@ pub fn run() -> Result<()> {
     match choice {
         0 => login_with_browser(&mut cfg)?,
         1 => login_with_api_key(&mut cfg, &term)?,
-        2 => login_with_wallet(&mut cfg, &term)?,
         _ => unreachable!(),
     }
 
@@ -264,66 +255,6 @@ fn login_with_api_key(cfg: &mut Config, term: &Term) -> Result<()> {
 
     cfg.auth.api_key = Some(key);
     cfg.auth.expires_at = None; // pasted keys carry no CLI expiry
-    Ok(())
-}
-
-fn login_with_wallet(cfg: &mut Config, term: &Term) -> Result<()> {
-    eprint!("Private key (hex, with or without 0x): ");
-    let pk_hex = zeroize::Zeroizing::new(
-        term.read_secure_line().context("reading private key")?,
-    );
-
-    let sk = signing_key_from_hex(pk_hex.trim())?;
-    let address = address_from_signing_key(&sk);
-    eprintln!("Address: {address}");
-
-    let message = auth_message(cfg, "base", &address).context("fetching auth message")?;
-    confirm_signing(term, &cfg.account_base, &message)?;
-    let signature = personal_sign(&sk, &message)?;
-    let jwt = auth_login(cfg, "base", &address, &signature)
-        .context("logging in with signature")?;
-
-    let default_name = format!(
-        "libertai-cli@{}",
-        std::env::var("HOSTNAME").unwrap_or_else(|_| "local".into())
-    );
-    let name: String = Input::new()
-        .with_prompt("API key name")
-        .default(default_name)
-        .interact_on(term)
-        .context("reading key name")?;
-
-    let limit_str: String = Input::new()
-        .with_prompt("Monthly limit in USD (leave empty for none)")
-        .allow_empty(true)
-        .default(String::new())
-        .interact_on(term)
-        .context("reading monthly limit")?;
-    let monthly_limit = if limit_str.trim().is_empty() {
-        None
-    } else {
-        let v: f64 = limit_str
-            .trim()
-            .parse()
-            .context("monthly limit must be a number")?;
-        validate_limit(v)?;
-        Some(v)
-    };
-
-    let created = create_api_key(
-        cfg,
-        &jwt,
-        &ApiKeyCreate {
-            name: &name,
-            monthly_limit,
-        },
-    )
-    .context("creating API key")?;
-
-    cfg.auth.api_key = Some(created.full_key);
-    cfg.auth.wallet_address = Some(address);
-    cfg.auth.chain = Some("base".into());
-    cfg.auth.expires_at = None; // wallet-created keys don't expire
     Ok(())
 }
 
