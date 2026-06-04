@@ -260,26 +260,15 @@ appear in opencode's tool list alongside native ones).
 
 ## Authentication
 
-Three supported flows today:
+`libertai login` offers three flows:
 
-1. **Browser sign-in (recommended)** — `libertai login` starts a local
-   loopback server and opens [console.libertai.io](https://console.libertai.io)`/cli`.
-   Sign in there by any method (email, wallet, OAuth) and approve; the console
-   hands a one-time, PKCE-bound code back to the CLI, which exchanges it
-   (`/auth/exchange`) for a session token and mints a device CLI API key
-   (`/api-keys/cli`, 30-day expiry — re-run `libertai login` to renew). Set
-   `LIBERTAI_CONSOLE_URL` to point at a non-default console.
-2. **API key** — create one at [console.libertai.io](https://console.libertai.io)
-   and paste it into `libertai login`.
-3. **Wallet signing on Base** — `libertai login` prompts for a hex-encoded
-   secp256k1 private key, fetches an auth message from `/auth/message`,
-   **shows you the message and host and asks for confirmation before
-   signing**, then submits the EIP-191 signature to `/auth/login` and
-   creates an inference API key via `/api-keys`.
+1. **Browser sign-in (recommended)** — opens the console, you sign in (email,
+   wallet, or OAuth) and approve; the CLI gets a device key (90-day expiry, re-run
+   to renew). Uses a standard OAuth loopback + PKCE flow.
+2. **API key** — paste a key from [console.libertai.io](https://console.libertai.io).
+3. **Wallet private key** — sign on Base to mint a key; the key is never persisted.
 
-The private key is never persisted. Only the derived address and chain are
-saved, so `keys list/create/delete` can re-prompt for signing when they need a
-fresh JWT.
+Set `LIBERTAI_CONSOLE_URL` to use a non-default console.
 
 ## Security notes
 
