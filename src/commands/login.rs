@@ -59,12 +59,26 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-/// Browser SSO via OAuth-style loopback + PKCE:
+/// CLI wrapper around the reusable browser-SSO flow: prints progress + the
+/// manual-fallback URL to stderr and opens the system browser.
+fn login_with_browser(cfg: &mut Config) -> Result<()> {
+    browser_sso_login(cfg, |url| {
+        eprintln!("Opening your browser to sign in…");
+        eprintln!("If it doesn't open, visit:\n  {url}");
+        let _ = open_url(url);
+    })
+}
+
+/// Reusable browser SSO via OAuth-style loopback + PKCE. Shared by the CLI and the
+/// desktop app (which depends on this crate):
 ///  1. start a local one-shot HTTP server on 127.0.0.1:<port>
-///  2. open the console /cli page (the user signs in by any method, then approves)
+///  2. call `open` with the console /cli authorize URL so the frontend opens it
+///     (system browser, webview, …) and can surface it as a manual fallback
 ///  3. the console redirects the browser back to the loopback with a one-time code
 ///  4. exchange code + PKCE verifier for a session token, then mint this device's CLI key
-fn login_with_browser(cfg: &mut Config) -> Result<()> {
+///
+/// On success, `cfg.auth` is updated with the minted key (the caller persists `cfg`).
+pub fn browser_sso_login(cfg: &mut Config, open: impl FnOnce(&str)) -> Result<()> {
     // PKCE: keep `verifier` secret; send only its SHA256 (the challenge).
     let mut vbytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut vbytes);
@@ -93,9 +107,7 @@ fn login_with_browser(cfg: &mut Config) -> Result<()> {
         .append_pair("challenge", &challenge);
     let authorize = authorize.to_string();
 
-    eprintln!("Opening your browser to sign in…");
-    eprintln!("If it doesn't open, visit:\n  {authorize}");
-    let _ = open_url(&authorize);
+    open(&authorize);
 
     // Block until the browser hits the loopback callback (single request).
     let (code, returned_state) = wait_for_callback(server)?;
