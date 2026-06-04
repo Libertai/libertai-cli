@@ -104,7 +104,17 @@ fn login_with_browser(cfg: &mut Config) -> Result<()> {
     }
 
     let access_token = exchange_code(cfg, &code, &verifier).context("exchanging login code")?;
-    let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "local".into());
+
+    // Per-device key: a stable random id (persisted in config) keeps this device's key
+    // name unique, so logging in elsewhere mints a separate key instead of rotating —
+    // and disconnecting — this one. Re-login on this device reuses the id (rotates in place).
+    let device_id = cfg
+        .auth
+        .device_id
+        .clone()
+        .unwrap_or_else(new_device_id);
+    cfg.auth.device_id = Some(device_id.clone());
+    let host = format!("{}-{}", device_hostname(), device_id);
     let created = create_cli_api_key(cfg, &access_token, &host).context("creating CLI API key")?;
 
     cfg.auth.expires_at = created.expires_at;
@@ -112,6 +122,28 @@ fn login_with_browser(cfg: &mut Config) -> Result<()> {
     cfg.auth.wallet_address = None;
     cfg.auth.chain = None;
     Ok(())
+}
+
+/// Random 8-hex-char id identifying this CLI install (not security-sensitive).
+fn new_device_id() -> String {
+    let mut b = [0u8; 4];
+    rand::thread_rng().fill_bytes(&mut b);
+    hex::encode(b)
+}
+
+/// Best-effort short hostname for a recognizable key name in the console; falls back
+/// to the HOSTNAME env var, then "device". Uniqueness comes from the device id, not this.
+fn device_hostname() -> String {
+    let raw = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "device".into());
+    // Strip the mDNS suffix and keep the leading label: "Rezas-MBP.local" -> "Rezas-MBP".
+    raw.split('.').next().unwrap_or("device").to_string()
 }
 
 fn console_base() -> String {

@@ -930,6 +930,11 @@ pub struct Auth {
     /// the server enforces expiry; the CLI uses this to show the date and warn near expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    /// Stable per-install id, generated on first browser login. Makes this device's CLI
+    /// key name unique so logging in on another device gets its own key instead of
+    /// rotating (and invalidating) this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 fn default_api_base() -> String {
