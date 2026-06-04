@@ -4,6 +4,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 pub const DEFAULT_API_BASE: &str = "https://api.libertai.io";
+// Account/auth API (/auth/*, /api-keys/*) is a different host than the OpenAI-compatible
+// inference gateway (DEFAULT_API_BASE, which serves /v1/*).
+pub const DEFAULT_ACCOUNT_BASE: &str = "https://inference.api.libertai.io";
 pub const DEFAULT_SEARCH_BASE: &str = "https://search.libertai.io";
 pub const DEFAULT_CHAT_MODEL: &str = "qwen3.5-122b-a10b";
 pub const DEFAULT_CODE_MODEL: &str = "qwen3.6-35b-a3b";
@@ -146,7 +149,7 @@ fn is_default_api_base(s: &str) -> bool {
     s == DEFAULT_API_BASE
 }
 fn is_default_account_base(s: &str) -> bool {
-    s == DEFAULT_API_BASE
+    s == DEFAULT_ACCOUNT_BASE
 }
 fn is_default_search_base(s: &str) -> bool {
     s == DEFAULT_SEARCH_BASE
@@ -933,7 +936,7 @@ fn default_api_base() -> String {
     DEFAULT_API_BASE.into()
 }
 fn default_account_base() -> String {
-    DEFAULT_API_BASE.into()
+    DEFAULT_ACCOUNT_BASE.into()
 }
 fn default_search_base_s() -> String {
     DEFAULT_SEARCH_BASE.into()
