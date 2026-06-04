@@ -62,7 +62,7 @@ pub fn run() -> Result<()> {
 /// CLI wrapper around the reusable browser-SSO flow: prints progress + the
 /// manual-fallback URL to stderr and opens the system browser.
 fn login_with_browser(cfg: &mut Config) -> Result<()> {
-    browser_sso_login(cfg, |url| {
+    browser_sso_login(cfg, "LibertAI CLI", |url| {
         eprintln!("Opening your browser to sign in…");
         eprintln!("If it doesn't open, visit:\n  {url}");
         let _ = open_url(url);
@@ -77,8 +77,11 @@ fn login_with_browser(cfg: &mut Config) -> Result<()> {
 ///  3. the console redirects the browser back to the loopback with a one-time code
 ///  4. exchange code + PKCE verifier for a session token, then mint this device's CLI key
 ///
+/// `client` is a human label for the app starting the flow (e.g. "LibertAI CLI",
+/// "LibertAI Desktop"); the console authorize page shows it.
+///
 /// On success, `cfg.auth` is updated with the minted key (the caller persists `cfg`).
-pub fn browser_sso_login(cfg: &mut Config, open: impl FnOnce(&str)) -> Result<()> {
+pub fn browser_sso_login(cfg: &mut Config, client: &str, open: impl FnOnce(&str)) -> Result<()> {
     // PKCE: keep `verifier` secret; send only its SHA256 (the challenge).
     let mut vbytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut vbytes);
@@ -104,7 +107,8 @@ pub fn browser_sso_login(cfg: &mut Config, open: impl FnOnce(&str)) -> Result<()
         .query_pairs_mut()
         .append_pair("redirect_uri", &redirect_uri)
         .append_pair("state", &state)
-        .append_pair("challenge", &challenge);
+        .append_pair("challenge", &challenge)
+        .append_pair("client", client);
     let authorize = authorize.to_string();
 
     open(&authorize);
@@ -186,7 +190,15 @@ p{{margin:0;color:#9ca3af;font-size:.95rem;line-height:1.4}}</style></head>\
 /// Serve one request to `/callback`, reply with a "you can close this tab" page,
 /// and return its `code` + `state` query params.
 fn wait_for_callback(server: tiny_http::Server) -> Result<(String, String)> {
-    let request = server.recv().context("waiting for the browser login callback")?;
+    // Bound the wait so a closed/abandoned browser doesn't hang the caller forever
+    // (the loopback can't otherwise detect that the user gave up).
+    let request = match server
+        .recv_timeout(std::time::Duration::from_secs(300))
+        .context("waiting for the browser login callback")?
+    {
+        Some(req) => req,
+        None => anyhow::bail!("timed out waiting for browser sign-in — no response after 5 minutes"),
+    };
 
     // The request line carries only the path+query; parse it with a dummy base.
     let parsed = url::Url::parse(&format!("http://127.0.0.1{}", request.url()))
