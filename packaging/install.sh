@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/Libertai/libertai-cli/main/packaging/install.sh | sh
 #
 # Environment overrides:
-#   LIBERTAI_VERSION      — pin to a specific tag (e.g. v0.2.0). Default: latest.
+#   LIBERTAI_VERSION      — pin to a specific tag (e.g. v0.3.0). Default: latest.
 #   LIBERTAI_INSTALL_DIR  — where to drop the binary. Default: $HOME/.local/bin.
 
 set -eu

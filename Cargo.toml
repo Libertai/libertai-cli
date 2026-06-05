@@ -1,6 +1,6 @@
 [package]
 name = "libertai-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Command-line tool for LibertAI: inference, image generation, and launching agent tools (Claude Code, OpenCode, Aider) with LibertAI as the backend."

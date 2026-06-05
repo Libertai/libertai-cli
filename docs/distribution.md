@@ -119,18 +119,18 @@ way the token is only exposed to jobs that actually need it.
 
 ---
 
-## First-release playbook (v0.2.0)
+## Release playbook (v0.3.0)
 
 Once all prerequisites are done:
 
-1. Bump `version = "0.2.0"` in `Cargo.toml` and `Cargo.lock`. Commit, merge to `master`.
+1. Bump `version = "0.3.0"` in `Cargo.toml` and `Cargo.lock`. Commit, merge to `master`.
 2. On `github.com/Libertai/libertai-cli` → Releases → **Draft a new release**:
-   - Tag: `v0.2.0` (do not yet push; Draft reserves the tag).
+   - Tag: `v0.3.0` (do not yet push; Draft reserves the tag).
    - Title, release notes. Publish.
    - Alternatively: create the tag locally, push it; then go draft the
      release against the existing tag. Either order works — what matters is
      that a GH Release exists before `build-binaries` runs.
-3. Push the tag if you haven't: `git tag v0.2.0 && git push origin v0.2.0`.
+3. Push the tag if you haven't: `git tag v0.3.0 && git push origin v0.3.0`.
 4. The workflow fires. Watch Actions tab. Expected timeline:
    - `verify` — ~3 min
    - `check-version`, `check-release` — seconds
@@ -147,7 +147,7 @@ Once all prerequisites are done:
 
 ### Dry run before the real thing
 
-Cut `v0.2.0-rc1` first. The workflow treats any version with a `-` as a
+Cut `v0.3.0-rc1` first. The workflow treats any version with a `-` as a
 prerelease: `publish-apt` and `publish-brew` are **skipped**, but
 `build-binaries` and (after approval) `publish-crates` still run. Lets you
 exercise the full pipeline without polluting the apt repo or the brew tap.
@@ -156,16 +156,16 @@ exercise the full pipeline without polluting the apt repo or the brew tap.
 
 ## Recurring release workflow
 
-After v0.2.0 is out, every subsequent release follows the same pattern:
+After v0.3.0 is out, every subsequent release follows the same pattern:
 
 ```sh
 # bump Cargo.toml version
-$EDITOR Cargo.toml          # version = "0.2.1"
-git commit -am "release: v0.2.1"
+$EDITOR Cargo.toml          # version = "0.3.1"
+git commit -am "release: v0.3.1"
 git push
 
 # draft the release on GitHub web UI with notes, then:
-git tag v0.2.1 && git push origin v0.2.1
+git tag v0.3.1 && git push origin v0.3.1
 
 # wait, approve crates-io-publish when prompted
 ```

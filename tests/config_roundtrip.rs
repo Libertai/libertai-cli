@@ -37,6 +37,8 @@ fn save_then_load_preserves_fields() {
             api_key: Some("LTAI_sk_abcdefgh12345678".into()),
             wallet_address: Some("0xabcdef".into()),
             chain: Some("base".into()),
+            expires_at: Some("2026-09-03T12:00:00Z".into()),
+            device_id: Some("test-device-id".into()),
         },
         launcher_defaults: LauncherDefaults {
             opus_model: "opus-x".into(),
@@ -132,6 +134,11 @@ fn save_then_load_preserves_fields() {
     );
     assert_eq!(round.auth.wallet_address.as_deref(), Some("0xabcdef"));
     assert_eq!(round.auth.chain.as_deref(), Some("base"));
+    assert_eq!(
+        round.auth.expires_at.as_deref(),
+        Some("2026-09-03T12:00:00Z")
+    );
+    assert_eq!(round.auth.device_id.as_deref(), Some("test-device-id"));
     assert_eq!(round.launcher_defaults.opus_model, "opus-x");
     assert_eq!(round.status_line_template, "{model} {ctx}");
     assert_eq!(round.hooks.user_prompt_submit.len(), 2);
