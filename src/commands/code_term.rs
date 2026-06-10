@@ -11,8 +11,10 @@ use std::io::Write;
 use anyhow::Result;
 use async_trait::async_trait;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
-    terminal,
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+    },
+    execute, terminal,
 };
 
 use crate::commands::code_approvals::{ApprovalUi, NotifyOutcome, PromptChoice};
@@ -31,6 +33,31 @@ impl RawModeGuard {
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
+    }
+}
+
+/// RAII guard that enables bracketed paste (`ESC[?2004h`) on
+/// construction and disables it (`ESC[?2004l`) on drop — including the
+/// panic-unwind path, so a crash mid-edit can't leave the user's shell
+/// receiving `ESC[200~`-wrapped pastes.
+///
+/// Kept separate from [`RawModeGuard`]: the approval micro-prompt wants
+/// raw mode for a single keystroke and must *not* capture pastes, while
+/// the input bar wants both. Terminals without bracketed-paste support
+/// ignore the enable sequence and keep delivering plain key events.
+pub struct BracketedPasteGuard;
+
+impl BracketedPasteGuard {
+    pub fn enter() -> Result<Self> {
+        execute!(std::io::stdout(), EnableBracketedPaste)
+            .map_err(|e| anyhow::anyhow!("enable bracketed paste: {e}"))?;
+        Ok(Self)
+    }
+}
+
+impl Drop for BracketedPasteGuard {
+    fn drop(&mut self) {
+        let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     }
 }
 

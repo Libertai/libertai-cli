@@ -8,7 +8,16 @@
 //!
 //! v0 non-goals: typing during a running prompt (pi callback fires on the
 //! runtime thread; mixing that with a parallel stdin reader is out of
-//! scope); multi-line paste; syntax highlighting.
+//! scope); syntax highlighting.
+//!
+//! Multi-line input: bracketed paste (`ESC[?2004h`) is enabled while the
+//! bar is active, so a pasted stack trace arrives as one `Event::Paste`
+//! — newlines included — and lands in the buffer as a single edit
+//! instead of submitting line by line. Alt+Enter / Ctrl+J (and
+//! Shift+Enter on terminals that report it, e.g. the kitty keyboard
+//! protocol) insert a deliberate newline. The bar grows one row per
+//! buffer line up to `MAX_INPUT_ROWS`, then scrolls a window that keeps
+//! the cursor visible.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -702,7 +711,8 @@ enum LineResult {
 
 // RawModeGuard lives in `code_term` so both this module and
 // code_approvals can share the same panic-safe raw-mode wrapper.
-use crate::commands::code_term::RawModeGuard;
+// BracketedPasteGuard sits beside it for the same panic-safety reason.
+use crate::commands::code_term::{BracketedPasteGuard, RawModeGuard};
 
 /// Entry point from `code::run` when the command line has no prompt.
 ///
@@ -3021,6 +3031,7 @@ fn print_help() {
     println!("{DIM}  /help     — show this message{RESET}");
     println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
+    println!("{DIM}  multi-line — paste keeps newlines; Alt+Enter or Ctrl+J inserts one; Enter submits{RESET}");
     println!("{DIM}  {}{RESET}", permissions_usage_text());
     println!(
         "{DIM}  {} — alias for /permissions{RESET}",
@@ -3605,11 +3616,13 @@ fn scoped_models_usage_text() -> &'static str {
 fn hotkey_lines() -> &'static [&'static str] {
     &[
         "Shift+Tab — cycle default / acceptEdits / plan modes",
-        "Up / Down — walk submitted prompt history",
+        "Up / Down — move between draft lines, then walk submitted prompt history",
         "Left / Right — move cursor in the current line",
         "Backspace / Delete — edit the current line",
-        "Home / End — jump to start or end of the line",
-        "Enter — submit the current line",
+        "Home / End — jump to start or end of the current line",
+        "Enter — submit the current prompt",
+        "Alt+Enter / Ctrl+J — insert a newline (Shift+Enter on terminals that report it)",
+        "Paste — bracketed paste inserts text, newlines included, without submitting",
         "Ctrl+C — clear the current line or interrupt streaming",
         "Ctrl+D — exit when the line is empty",
     ]
@@ -14578,19 +14591,27 @@ fn render_event(event: AgentEvent) {
 // Input bar — raw-mode line editor
 // ---------------------------------------------------------------------------
 
-/// Read a single line with a Claude-Code-style input bar:
+/// Read one prompt with a Claude-Code-style input bar:
 ///
 /// ```text
 /// ────────────────────
 /// ❯ hello wor_
 /// ```
 ///
-/// Stays in raw mode for the duration, redrawing on every keystroke and
-/// on `Resize`. Returns `LineResult::Submit` on Enter,
-/// `LineResult::Interrupted` on Ctrl+C, `LineResult::Eof` on Ctrl+D of an
-/// empty buffer.
+/// Stays in raw mode (with bracketed paste enabled) for the duration,
+/// redrawing on every keystroke and on `Resize`. The buffer may contain
+/// newlines — from a bracketed paste or Alt+Enter / Ctrl+J — and the bar
+/// grows one row per line up to `MAX_INPUT_ROWS`. Returns
+/// `LineResult::Submit` on Enter, `LineResult::Interrupted` on Ctrl+C,
+/// `LineResult::Eof` on Ctrl+D of an empty buffer.
 fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
     let _guard = RawModeGuard::enter()?;
+    // Best-effort bracketed paste: supporting terminals deliver a paste
+    // as one `Event::Paste` (newlines intact) instead of a burst of key
+    // events, so pasting a stack trace can't submit line by line. The
+    // guard drops on every exit path — including panics and before the
+    // agent (or any child process) runs with the cooked terminal.
+    let _paste_guard = BracketedPasteGuard::enter().ok();
 
     let mut stdout = io::stdout();
     execute!(stdout, cursor::Show)?;
@@ -14610,19 +14631,20 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
         None
     };
 
-    // First paint lays down two fresh lines; every subsequent paint moves
-    // back up to the rule line and overwrites in place so the bar stays
-    // anchored to its starting position instead of marching down.
-    let mut painted = false;
-    repaint(
+    // Bar geometry from the previous paint: `Some(n)` means the rule row
+    // sits `n` lines above the cursor, so the next paint steps back up
+    // and overwrites the bar in place instead of marching down. `None`
+    // paints fresh where the cursor already is (first paint and after a
+    // resize).
+    let mut rows_above: Option<u16> = None;
+    rows_above = Some(repaint(
         &mut stdout,
         &buffer,
         cursor_pos,
         mode,
         vim_input_mode,
-        painted,
-    )?;
-    painted = true;
+        rows_above,
+    )?);
 
     loop {
         let ev = event::read().map_err(|e| anyhow::anyhow!("event::read: {e}"))?;
@@ -14632,51 +14654,58 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
             }) => match (code, modifiers) {
                 (KeyCode::Esc, _) if vim_enabled => {
                     vim_input_mode = Some(VimInputMode::Normal);
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
+                }
+                // Deliberate newline — Alt+Enter / Ctrl+J everywhere,
+                // Shift+Enter where the terminal reports it (kitty
+                // keyboard protocol). Insert flavour only: vim-normal
+                // keeps Enter-family keys as submit.
+                (code, modifiers)
+                    if is_newline_key(code, modifiers)
+                        && vim_input_mode != Some(VimInputMode::Normal) =>
+                {
+                    if hist_idx.is_some() {
+                        hist_idx = None;
+                        stashed_live = None;
+                    }
+                    buffer.insert(cursor_pos, '\n');
+                    cursor_pos += 1;
                 }
                 (KeyCode::Enter, _) => {
-                    // Erase both bar lines so the caller's printlns flow
-                    // naturally where the bar used to be — no stale rule,
+                    // Erase the bar so the caller's printlns flow
+                    // naturally where it used to be — no stale rule,
                     // no doubled-up prompt text.
-                    clear_bar(&mut stdout)?;
+                    clear_bar(&mut stdout, rows_above)?;
                     let line: String = buffer.into_iter().collect();
                     return Ok(LineResult::Submit(line));
                 }
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                    clear_bar(&mut stdout)?;
+                    clear_bar(&mut stdout, rows_above)?;
                     return Ok(LineResult::Interrupted);
                 }
                 // Ctrl+D on an empty buffer → EOF. In the middle of a line
                 // it's a no-op (matches most readline implementations).
                 (KeyCode::Char('d'), KeyModifiers::CONTROL) if buffer.is_empty() => {
-                    clear_bar(&mut stdout)?;
+                    clear_bar(&mut stdout, rows_above)?;
                     return Ok(LineResult::Eof);
                 }
                 // Shift+Tab → toggle Normal ↔ Plan. crossterm surfaces it
                 // as BackTab regardless of whether Shift is in modifiers
                 // (terminfo handling varies by terminal).
                 (KeyCode::BackTab, _) => {
-                    clear_bar(&mut stdout)?;
+                    clear_bar(&mut stdout, rows_above)?;
                     return Ok(LineResult::ToggleMode);
                 }
                 (code, modifiers) if vim_input_mode == Some(VimInputMode::Normal) => {
                     match vim_normal_key_action(code, modifiers) {
                         VimNormalAction::Submit => {
-                            clear_bar(&mut stdout)?;
+                            clear_bar(&mut stdout, rows_above)?;
                             let line: String = buffer.into_iter().collect();
                             return Ok(LineResult::Submit(line));
                         }
                         VimNormalAction::MoveLeft if cursor_pos > 0 => cursor_pos -= 1,
                         VimNormalAction::MoveRight if cursor_pos < buffer.len() => cursor_pos += 1,
-                        VimNormalAction::Home => cursor_pos = 0,
-                        VimNormalAction::End => cursor_pos = buffer.len(),
+                        VimNormalAction::Home => cursor_pos = line_bounds(&buffer, cursor_pos).0,
+                        VimNormalAction::End => cursor_pos = line_bounds(&buffer, cursor_pos).1,
                         VimNormalAction::Delete if cursor_pos < buffer.len() => {
                             buffer.remove(cursor_pos);
                         }
@@ -14690,90 +14719,34 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
                             vim_input_mode = Some(VimInputMode::Insert);
                         }
                         VimNormalAction::InsertHome => {
-                            cursor_pos = 0;
+                            cursor_pos = line_bounds(&buffer, cursor_pos).0;
                             vim_input_mode = Some(VimInputMode::Insert);
                         }
                         VimNormalAction::InsertEnd => {
-                            cursor_pos = buffer.len();
+                            cursor_pos = line_bounds(&buffer, cursor_pos).1;
                             vim_input_mode = Some(VimInputMode::Insert);
                         }
                         _ => {}
                     }
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
                 }
                 (KeyCode::Backspace, _) if cursor_pos > 0 => {
                     buffer.remove(cursor_pos - 1);
                     cursor_pos -= 1;
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
                 }
                 (KeyCode::Delete, _) if cursor_pos < buffer.len() => {
                     buffer.remove(cursor_pos);
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
                 }
                 (KeyCode::Left, _) if cursor_pos > 0 => {
                     cursor_pos -= 1;
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
                 }
                 (KeyCode::Right, _) if cursor_pos < buffer.len() => {
                     cursor_pos += 1;
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
                 }
                 (KeyCode::Home, _) => {
-                    cursor_pos = 0;
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
+                    cursor_pos = line_bounds(&buffer, cursor_pos).0;
                 }
                 (KeyCode::End, _) => {
-                    cursor_pos = buffer.len();
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
+                    cursor_pos = line_bounds(&buffer, cursor_pos).1;
                 }
                 (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                     // Any edit to the buffer ends history navigation —
@@ -14784,129 +14757,153 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
                     }
                     buffer.insert(cursor_pos, c);
                     cursor_pos += 1;
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
                 }
                 (KeyCode::Up, _) => {
-                    if history.is_empty() {
-                        continue;
-                    }
-                    let next = hist_idx.map_or(0, |i| (i + 1).min(history.len() - 1));
-                    if hist_idx.is_none() {
-                        stashed_live = Some(std::mem::take(&mut buffer));
-                    }
-                    hist_idx = Some(next);
-                    let recalled = history
-                        .get(history.len() - 1 - next)
-                        .cloned()
-                        .unwrap_or_default();
-                    buffer = recalled.chars().collect();
-                    cursor_pos = buffer.len();
-                    vim_input_mode = if vim_enabled {
-                        Some(VimInputMode::Insert)
+                    let (cur_line, cur_col) = cursor_line_col(&buffer, cursor_pos);
+                    if cur_line > 0 {
+                        // Multi-line draft: Up walks lines first; history
+                        // only engages from the top line.
+                        cursor_pos = pos_at_line_col(&buffer, cur_line - 1, cur_col);
                     } else {
-                        None
-                    };
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
+                        if history.is_empty() {
+                            continue;
+                        }
+                        let next = hist_idx.map_or(0, |i| (i + 1).min(history.len() - 1));
+                        if hist_idx.is_none() {
+                            stashed_live = Some(std::mem::take(&mut buffer));
+                        }
+                        hist_idx = Some(next);
+                        let recalled = history
+                            .get(history.len() - 1 - next)
+                            .cloned()
+                            .unwrap_or_default();
+                        buffer = recalled.chars().collect();
+                        cursor_pos = buffer.len();
+                        vim_input_mode = if vim_enabled {
+                            Some(VimInputMode::Insert)
+                        } else {
+                            None
+                        };
+                    }
                 }
                 (KeyCode::Down, _) => {
-                    match hist_idx {
-                        None => continue,
-                        Some(0) => {
-                            // Back to live buffer.
-                            buffer = stashed_live.take().unwrap_or_default();
-                            cursor_pos = buffer.len();
-                            hist_idx = None;
-                        }
-                        Some(i) => {
-                            let next = i - 1;
-                            hist_idx = Some(next);
-                            let recalled = history
-                                .get(history.len() - 1 - next)
-                                .cloned()
-                                .unwrap_or_default();
-                            buffer = recalled.chars().collect();
-                            cursor_pos = buffer.len();
-                        }
-                    }
-                    vim_input_mode = if vim_enabled {
-                        Some(VimInputMode::Insert)
+                    let (cur_line, cur_col) = cursor_line_col(&buffer, cursor_pos);
+                    let last_line = buffer.iter().filter(|c| **c == '\n').count();
+                    if cur_line < last_line {
+                        // Mirror of Up: walk down the draft's lines;
+                        // history only engages from the bottom line.
+                        cursor_pos = pos_at_line_col(&buffer, cur_line + 1, cur_col);
                     } else {
-                        None
-                    };
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
+                        match hist_idx {
+                            None => continue,
+                            Some(0) => {
+                                // Back to live buffer.
+                                buffer = stashed_live.take().unwrap_or_default();
+                                cursor_pos = buffer.len();
+                                hist_idx = None;
+                            }
+                            Some(i) => {
+                                let next = i - 1;
+                                hist_idx = Some(next);
+                                let recalled = history
+                                    .get(history.len() - 1 - next)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                buffer = recalled.chars().collect();
+                                cursor_pos = buffer.len();
+                            }
+                        }
+                        vim_input_mode = if vim_enabled {
+                            Some(VimInputMode::Insert)
+                        } else {
+                            None
+                        };
+                    }
                 }
                 // Old TODO retired: history nav is wired above.
-                _ => {}
+                _ => continue,
             },
+            // Bracketed paste: the whole payload — newlines included —
+            // lands as one edit. Enter is never synthesized, so a pasted
+            // stack trace sits in the buffer for review instead of
+            // submitting mid-paste.
+            Event::Paste(data) => {
+                if hist_idx.is_some() {
+                    hist_idx = None;
+                    stashed_live = None;
+                }
+                cursor_pos = insert_paste(&mut buffer, cursor_pos, &data);
+            }
             Event::Resize(_, _) => {
                 // Don't try to MoveToPreviousLine onto a row that may
                 // no longer exist after a shrink — treat as a fresh
                 // paint. The previous bar position is left as-is in
                 // scrollback rather than risk drifting into row 0.
-                painted = false;
-                repaint(
-                    &mut stdout,
-                    &buffer,
-                    cursor_pos,
-                    mode,
-                    vim_input_mode,
-                    painted,
-                )?;
-                painted = true;
+                rows_above = None;
             }
-            _ => {}
+            _ => continue,
         }
+        rows_above = Some(repaint(
+            &mut stdout,
+            &buffer,
+            cursor_pos,
+            mode,
+            vim_input_mode,
+            rows_above,
+        )?);
     }
 }
 
-/// Paint the two-line input bar (separator + prompt) in place.
+/// Hard ceiling on the number of buffer rows the input bar paints. The
+/// bar is additionally capped at `terminal_rows - 2` so the rule plus at
+/// least one row of prior output stay on screen.
+const MAX_INPUT_ROWS: usize = 10;
+
+/// Paint the input bar (separator + one row per visible buffer line) in
+/// place.
 ///
 /// Layout:
 /// ```text
 /// ──────────── (dim, terminal-width)
-/// ❯ <buffer>
+/// ❯ first line of the buffer
+///   continuation lines, aligned under the prompt
 /// ```
 ///
-/// On the first paint of a `read_line` call we paint where the cursor
-/// already is (typically column 0 of a fresh line after the banner or
-/// prior agent output). On every later paint we step up one line so the
-/// rule lands back on its original row — otherwise each keystroke would
-/// shove the bar one line further down.
+/// On the first paint of a `read_line` call (`prev_rows_above == None`)
+/// we paint where the cursor already is (typically column 0 of a fresh
+/// line after the banner or prior agent output). On every later paint we
+/// step back up to the rule row and overwrite in place — otherwise each
+/// keystroke would shove the bar further down. When the buffer has more
+/// lines than fit, a window centred on the cursor is shown and the rule
+/// gains a `first–last/total` marker. Returns the new "rows above the
+/// cursor" count the caller must hand to the next repaint/clear.
 fn repaint(
     stdout: &mut io::Stdout,
     buffer: &[char],
     cursor_pos: usize,
     mode: Mode,
     vim_input_mode: Option<VimInputMode>,
-    painted_before: bool,
-) -> Result<()> {
-    let cols = terminal::size()
+    prev_rows_above: Option<u16>,
+) -> Result<u16> {
+    let (cols, rows) = terminal::size()
         .ok()
-        .map(|(c, _)| c as usize)
-        .filter(|c| *c > 0)
-        .unwrap_or(80);
-    let rule: String = rule_chip(cols, mode);
+        .filter(|(c, r)| *c > 0 && *r > 0)
+        .unwrap_or((80, 24));
+    let cols = cols as usize;
+    let max_rows = (rows as usize).saturating_sub(2).clamp(1, MAX_INPUT_ROWS);
+
+    // Logical lines. `split` on an empty buffer still yields one empty
+    // line, so there is always at least one content row to paint.
+    let lines: Vec<&[char]> = buffer.split(|c| *c == '\n').collect();
+    let (cur_line, cur_col) = cursor_line_col(buffer, cursor_pos);
+    let total = lines.len();
+    let shown = total.min(max_rows);
+    let start = vertical_window(total, cur_line, shown);
+
+    let mut rule: String = rule_chip(cols, mode);
+    if total > shown {
+        rule = splice_rule_hint(&rule, start, shown, total);
+    }
 
     // Mode chip printed in-line with the prompt, left of ❯. Dimmed so
     // it's a status cue, not a shout.
@@ -14929,17 +14926,16 @@ fn repaint(
     };
 
     // Prefix width: mode chip + `❯ ` (2 cells). Anything past
-    // `cols - prefix_cols - 1` characters of the buffer would wrap the
-    // terminal onto a third row — which breaks `clear_bar`'s two-line
-    // erase assumption. Slide a window over the buffer so the cursor is
-    // always visible and the line never wraps.
+    // `cols - prefix_cols - 1` characters of a line would wrap the
+    // terminal onto an extra row — which breaks the row arithmetic the
+    // in-place overwrite relies on. Slide a window over each line so the
+    // cursor is always visible and no row ever wraps.
     let prefix_cols_usize = chip_text.chars().count() + 2;
     let avail = cols.saturating_sub(prefix_cols_usize).max(1);
-    let (display_text, display_cursor) = slide_window(buffer, cursor_pos, avail);
 
-    if painted_before {
+    if let Some(rows_above) = prev_rows_above.filter(|n| *n > 0) {
         // Jump back to the rule line so we overwrite in place.
-        queue!(stdout, cursor::MoveToPreviousLine(1))?;
+        queue!(stdout, cursor::MoveToPreviousLine(rows_above))?;
     }
 
     queue!(
@@ -14951,28 +14947,171 @@ fn repaint(
         Print(&rule),
         ResetColor,
         SetAttribute(Attribute::Reset),
-        Print("\r\n"),
-        Clear(ClearType::CurrentLine),
-        SetForegroundColor(chip_colour),
-        SetAttribute(Attribute::Dim),
-        Print(&chip_text),
-        ResetColor,
-        SetAttribute(Attribute::Reset),
-        SetForegroundColor(Color::Cyan),
-        SetAttribute(Attribute::Bold),
-        Print("\u{276f} "),
-        ResetColor,
-        SetAttribute(Attribute::Reset),
-        Print(&display_text),
     )?;
 
-    let prefix_cols = u16::try_from(prefix_cols_usize).unwrap_or(u16::MAX);
-    let cursor_cell = u16::try_from(display_cursor).unwrap_or(u16::MAX);
-    let col = prefix_cols.saturating_add(cursor_cell);
+    let mut cursor_row_in_window = shown.saturating_sub(1);
+    let mut cursor_col_cell = prefix_cols_usize;
+    for (i, line) in lines[start..start + shown].iter().enumerate() {
+        let is_cursor_row = start + i == cur_line;
+        let (display_text, display_cursor) = if is_cursor_row {
+            slide_window(line, cur_col, avail)
+        } else {
+            // Cursor pinned to 0 ⇒ plain left-anchored clip with a
+            // trailing `…` when the line overflows.
+            slide_window(line, 0, avail)
+        };
+        // Tabs would desync the one-cell-per-char cursor arithmetic;
+        // render them as single spaces (the submitted text keeps the
+        // real tab).
+        let display_text = display_text.replace('\t', " ");
+        queue!(stdout, Print("\r\n"), Clear(ClearType::CurrentLine))?;
+        if i == 0 {
+            queue!(
+                stdout,
+                SetForegroundColor(chip_colour),
+                SetAttribute(Attribute::Dim),
+                Print(&chip_text),
+                ResetColor,
+                SetAttribute(Attribute::Reset),
+                SetForegroundColor(Color::Cyan),
+                SetAttribute(Attribute::Bold),
+                Print("\u{276f} "),
+                ResetColor,
+                SetAttribute(Attribute::Reset),
+            )?;
+        } else {
+            // Continuation rows: blank prefix so text columns align
+            // under the first row's content.
+            queue!(stdout, Print(" ".repeat(prefix_cols_usize)))?;
+        }
+        queue!(stdout, Print(&display_text))?;
+        if is_cursor_row {
+            cursor_row_in_window = i;
+            cursor_col_cell = prefix_cols_usize + display_cursor;
+        }
+    }
+
+    // Erase leftovers from a previously taller paint (e.g. after a
+    // Backspace joined two lines).
+    queue!(stdout, Clear(ClearType::FromCursorDown))?;
+
+    // Park the terminal cursor on the buffer cursor's row/column.
+    let up = shown - 1 - cursor_row_in_window;
+    if up > 0 {
+        queue!(
+            stdout,
+            cursor::MoveToPreviousLine(u16::try_from(up).unwrap_or(u16::MAX))
+        )?;
+    }
+    let col = u16::try_from(cursor_col_cell).unwrap_or(u16::MAX);
     queue!(stdout, cursor::MoveToColumn(col))?;
 
     stdout.flush()?;
-    Ok(())
+    Ok(u16::try_from(cursor_row_in_window + 1).unwrap_or(u16::MAX))
+}
+
+/// First visible line of the vertical window: keeps the cursor line
+/// roughly centred and never scrolls past the last page.
+fn vertical_window(total: usize, cursor_line: usize, shown: usize) -> usize {
+    if total <= shown {
+        return 0;
+    }
+    cursor_line.saturating_sub(shown / 2).min(total - shown)
+}
+
+/// Overlay a ` first–last/total ` marker near the right edge of the rule
+/// so a clipped multi-line draft advertises which slice is visible.
+fn splice_rule_hint(rule: &str, start: usize, shown: usize, total: usize) -> String {
+    let hint: Vec<char> = format!(" {}\u{2013}{}/{} ", start + 1, start + shown, total)
+        .chars()
+        .collect();
+    let mut out: Vec<char> = rule.chars().collect();
+    if out.len() < hint.len() + 2 {
+        return rule.to_string();
+    }
+    let at = out.len() - hint.len() - 1;
+    out[at..at + hint.len()].copy_from_slice(&hint);
+    out.into_iter().collect()
+}
+
+/// (line index, column) of `cursor_pos` within `buffer`, counting
+/// logical lines separated by `\n`.
+fn cursor_line_col(buffer: &[char], cursor_pos: usize) -> (usize, usize) {
+    let upto = &buffer[..cursor_pos.min(buffer.len())];
+    let line = upto.iter().filter(|c| **c == '\n').count();
+    let col = upto.iter().rev().take_while(|c| **c != '\n').count();
+    (line, col)
+}
+
+/// Char index of `(line, col)` in `buffer`, clamping `col` to the line's
+/// length and `line` past the end to `buffer.len()`.
+fn pos_at_line_col(buffer: &[char], line: usize, col: usize) -> usize {
+    let mut idx = 0usize;
+    for _ in 0..line {
+        match buffer[idx..].iter().position(|c| *c == '\n') {
+            Some(off) => idx += off + 1,
+            None => return buffer.len(),
+        }
+    }
+    let line_len = buffer[idx..]
+        .iter()
+        .position(|c| *c == '\n')
+        .unwrap_or(buffer.len() - idx);
+    idx + col.min(line_len)
+}
+
+/// Char-index bounds `[start, end)` of the logical line containing
+/// `cursor_pos` (`end` excludes the trailing `\n`, if any). Drives the
+/// line-scoped Home / End / vim `0` / `$` motions.
+fn line_bounds(buffer: &[char], cursor_pos: usize) -> (usize, usize) {
+    let pos = cursor_pos.min(buffer.len());
+    let start = buffer[..pos]
+        .iter()
+        .rposition(|c| *c == '\n')
+        .map_or(0, |i| i + 1);
+    let end = buffer[pos..]
+        .iter()
+        .position(|c| *c == '\n')
+        .map_or(buffer.len(), |i| pos + i);
+    (start, end)
+}
+
+/// True when the key event should insert a newline instead of
+/// submitting: Alt+Enter, Shift+Enter (only terminals speaking an
+/// enhanced keyboard protocol such as kitty's report the modifier — on
+/// the rest Shift+Enter arrives as plain Enter), and Ctrl+J — which in
+/// raw mode is how crossterm surfaces a literal `\n` — as the portable
+/// fallback.
+fn is_newline_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    match code {
+        KeyCode::Enter => modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT),
+        KeyCode::Char('j') | KeyCode::Char('J') => modifiers.contains(KeyModifiers::CONTROL),
+        _ => false,
+    }
+}
+
+/// Normalize a bracketed-paste payload: CRLF / lone CR become `\n`, and
+/// other control characters (stray ESC sequences, BEL, DEL, …) are
+/// dropped so they can't corrupt the bar's cell arithmetic. Tabs are
+/// kept — the submitted text should stay faithful — and rendered as
+/// spaces by `repaint`.
+fn sanitize_paste(data: &str) -> String {
+    data.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .filter(|c| *c == '\n' || *c == '\t' || !c.is_control())
+        .collect()
+}
+
+/// Insert a paste into the buffer at `cursor_pos` as one edit — newlines
+/// included, never submitting. Returns the new cursor position (just
+/// past the pasted text).
+fn insert_paste(buffer: &mut Vec<char>, cursor_pos: usize, data: &str) -> usize {
+    let inserted: Vec<char> = sanitize_paste(data).chars().collect();
+    let at = cursor_pos.min(buffer.len());
+    let count = inserted.len();
+    buffer.splice(at..at, inserted);
+    at + count
 }
 
 /// Slide a visible window of `avail` cells over `buffer`. When the
@@ -15003,16 +15142,17 @@ fn slide_window(buffer: &[char], cursor_pos: usize, avail: usize) -> (String, us
     (out, cursor_pos - start)
 }
 
-/// Wipe the two-line bar and leave the cursor at column 0 of where the
-/// rule used to be, so the caller's subsequent `println!`s flow naturally
-/// from that point.
-fn clear_bar(stdout: &mut io::Stdout) -> Result<()> {
+/// Wipe the whole bar (rule + every buffer row) and leave the cursor at
+/// column 0 of where the rule used to be, so the caller's subsequent
+/// `println!`s flow naturally from that point. `rows_above` is the
+/// geometry returned by the last `repaint`; `None` (possible only before
+/// the first paint) conservatively assumes the original two-row bar.
+fn clear_bar(stdout: &mut io::Stdout, rows_above: Option<u16>) -> Result<()> {
+    let up = rows_above.unwrap_or(1).max(1);
     queue!(
         stdout,
-        Print("\r"),
-        Clear(ClearType::CurrentLine),
-        cursor::MoveToPreviousLine(1),
-        Clear(ClearType::CurrentLine),
+        cursor::MoveToPreviousLine(up),
+        Clear(ClearType::FromCursorDown),
     )?;
     stdout.flush()?;
     Ok(())
@@ -16015,6 +16155,112 @@ mod tests {
         assert!(joined.contains("Up / Down"));
         assert!(joined.contains("Ctrl+C"));
         assert!(joined.contains("Ctrl+D"));
+        assert!(joined.contains("Alt+Enter / Ctrl+J"));
+        assert!(joined.contains("bracketed paste"));
+    }
+
+    #[test]
+    fn newline_keys_insert_instead_of_submitting() {
+        // Alt+Enter and the portable Ctrl+J fallback insert a newline…
+        assert!(is_newline_key(KeyCode::Enter, KeyModifiers::ALT));
+        assert!(is_newline_key(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        // …and so does Shift+Enter where the terminal reports it.
+        assert!(is_newline_key(KeyCode::Enter, KeyModifiers::SHIFT));
+        // Plain Enter (and unrelated keys) still submit / type.
+        assert!(!is_newline_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!is_newline_key(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(!is_newline_key(KeyCode::Char('a'), KeyModifiers::ALT));
+    }
+
+    #[test]
+    fn paste_sanitizer_normalizes_newlines_and_strips_control_chars() {
+        assert_eq!(sanitize_paste("a\r\nb\rc"), "a\nb\nc");
+        // Tabs survive (rendered as spaces, submitted verbatim); other
+        // control bytes — stray ESC, BEL, DEL — are dropped.
+        assert_eq!(sanitize_paste("x\ty\x1b[31mz\x07\x7f"), "x\ty[31mz");
+        assert_eq!(sanitize_paste("plain"), "plain");
+    }
+
+    #[test]
+    fn paste_inserts_multiline_text_as_single_edit_without_submitting() {
+        let mut buffer: Vec<char> = "fix: ".chars().collect();
+        let end = buffer.len();
+        let cursor = insert_paste(&mut buffer, end, "Error\r\n  at main.rs:3\n");
+        let text: String = buffer.iter().collect();
+        // Newlines land in the buffer — nothing was split off or
+        // submitted line by line — and the cursor trails the paste.
+        assert_eq!(text, "fix: Error\n  at main.rs:3\n");
+        assert_eq!(cursor, text.chars().count());
+
+        // Mid-buffer paste splices at the cursor.
+        let mut buffer: Vec<char> = "ab".chars().collect();
+        let cursor = insert_paste(&mut buffer, 1, "1\n2");
+        assert_eq!(buffer.iter().collect::<String>(), "a1\n2b");
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
+    fn cursor_line_col_and_pos_round_trip_across_lines() {
+        let buffer: Vec<char> = "ab\ncdef\n\ngh".chars().collect();
+        assert_eq!(cursor_line_col(&buffer, 0), (0, 0));
+        assert_eq!(cursor_line_col(&buffer, 2), (0, 2));
+        assert_eq!(cursor_line_col(&buffer, 3), (1, 0));
+        assert_eq!(cursor_line_col(&buffer, 8), (2, 0));
+        assert_eq!(cursor_line_col(&buffer, buffer.len()), (3, 2));
+
+        assert_eq!(pos_at_line_col(&buffer, 1, 2), 5);
+        // Column clamps to the line length; line past the end clamps to
+        // the buffer end.
+        assert_eq!(pos_at_line_col(&buffer, 0, 99), 2);
+        assert_eq!(pos_at_line_col(&buffer, 2, 5), 8);
+        assert_eq!(pos_at_line_col(&buffer, 42, 0), buffer.len());
+    }
+
+    #[test]
+    fn line_bounds_scope_home_and_end_to_the_current_line() {
+        let buffer: Vec<char> = "ab\ncdef\ngh".chars().collect();
+        assert_eq!(line_bounds(&buffer, 0), (0, 2));
+        assert_eq!(line_bounds(&buffer, 5), (3, 7));
+        assert_eq!(line_bounds(&buffer, buffer.len()), (8, 10));
+        let empty: Vec<char> = Vec::new();
+        assert_eq!(line_bounds(&empty, 0), (0, 0));
+    }
+
+    #[test]
+    fn vertical_window_keeps_cursor_visible_and_clamps_to_last_page() {
+        // Everything fits: window pinned to the top.
+        assert_eq!(vertical_window(3, 2, 3), 0);
+        // Tall buffer: roughly centred on the cursor…
+        assert_eq!(vertical_window(100, 50, 10), 45);
+        // …clamped at both ends.
+        assert_eq!(vertical_window(100, 1, 10), 0);
+        assert_eq!(vertical_window(100, 99, 10), 90);
+    }
+
+    #[test]
+    fn rule_hint_splices_visible_slice_near_right_edge() {
+        let rule = "\u{2500}".repeat(40);
+        let spliced = splice_rule_hint(&rule, 4, 10, 30);
+        assert_eq!(spliced.chars().count(), 40);
+        assert!(spliced.contains(" 5\u{2013}14/30 "));
+        assert!(spliced.ends_with('\u{2500}'));
+        // Too narrow to fit: rule returned untouched.
+        let narrow = "\u{2500}".repeat(6);
+        assert_eq!(splice_rule_hint(&narrow, 0, 10, 30), narrow);
+    }
+
+    #[test]
+    fn slide_window_clips_lines_without_wrapping() {
+        let line: Vec<char> = "abcdefgh".chars().collect();
+        // Fits: unchanged.
+        assert_eq!(slide_window(&line, 3, 10), ("abcdefgh".to_string(), 3));
+        // Cursor at 0 (non-cursor rows): left-anchored with trailing …
+        let (text, cur) = slide_window(&line, 0, 5);
+        assert_eq!((text.as_str(), cur), ("abcd\u{2026}", 0));
+        // Cursor at the end of the line: window slides so it stays
+        // visible, with a leading … marking the clipped prefix.
+        let (text, cur) = slide_window(&line, 8, 5);
+        assert_eq!((text.as_str(), cur), ("\u{2026}fgh", 4));
     }
 
     #[test]

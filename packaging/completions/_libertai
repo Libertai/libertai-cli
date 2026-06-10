@@ -1,0 +1,1654 @@
+#compdef libertai
+
+autoload -U is-at-least
+
+_libertai() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_libertai_commands" \
+"*::: :->libertai" \
+&& ret=0
+    case $state in
+    (libertai)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-command-$line[1]:"
+        case $line[1] in
+            (login)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(logout)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(keys)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_libertai__subcmd__keys_commands" \
+"*::: :->keys" \
+&& ret=0
+
+    case $state in
+    (keys)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-keys-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(create)
+_arguments "${_arguments_options[@]}" : \
+'--limit=[Monthly spending limit in USD]:LIMIT:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':id:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__keys__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-keys-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(create)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(models)
+_arguments "${_arguments_options[@]}" : \
+'--refresh[Bypass cache (not yet used; placeholder for future caching)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(ask)
+_arguments "${_arguments_options[@]}" : \
+'--model=[]:MODEL:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::prompt -- The prompt (rest of the args are joined with spaces):_default' \
+&& ret=0
+;;
+(chat)
+_arguments "${_arguments_options[@]}" : \
+'--model=[]:MODEL:_default' \
+'--system=[Optional system prompt]:SYSTEM:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+'*--engines=[Engines to query (comma-separated). Defaults to google,bing,duckduckgo]:ENGINES:_default' \
+'--max-results=[]:MAX_RESULTS:_default' \
+'--type=[web | news | images (defaults to web)]:SEARCH_TYPE:_default' \
+'--json[Dump the raw JSON response instead of a pretty list]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::query -- The search query:_default' \
+&& ret=0
+;;
+(fetch)
+_arguments "${_arguments_options[@]}" : \
+'--json[Dump the raw JSON response instead of pretty-printed text]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':url -- The URL to fetch:_default' \
+&& ret=0
+;;
+(image)
+_arguments "${_arguments_options[@]}" : \
+'--model=[]:MODEL:_default' \
+'--size=[WIDTHxHEIGHT, e.g. 1024x1024]:SIZE:_default' \
+'-n+[]:N:_default' \
+'--n=[]:N:_default' \
+'-o+[Output file (single image) or prefix (multi, e.g. \`out\` → out-0.png, out-1.png)]:OUT:_default' \
+'--out=[Output file (single image) or prefix (multi, e.g. \`out\` → out-0.png, out-1.png)]:OUT:_default' \
+'-f[Overwrite \`--out\` if it already exists]' \
+'--force[Overwrite \`--out\` if it already exists]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::prompt:_default' \
+&& ret=0
+;;
+(run)
+_arguments "${_arguments_options[@]}" : \
+'--model=[]:MODEL:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::argv -- Command and its arguments after `--`:_default' \
+&& ret=0
+;;
+(claude)
+_arguments "${_arguments_options[@]}" : \
+'--model=[Override all three model tiers at once]:MODEL:_default' \
+'--opus=[]:OPUS:_default' \
+'--sonnet=[]:SONNET:_default' \
+'--haiku=[]:HAIKU:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::args:_default' \
+&& ret=0
+;;
+(opencode)
+_arguments "${_arguments_options[@]}" : \
+'--model=[]:MODEL:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::args:_default' \
+&& ret=0
+;;
+(aider)
+_arguments "${_arguments_options[@]}" : \
+'--model=[]:MODEL:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::args:_default' \
+&& ret=0
+;;
+(claw)
+_arguments "${_arguments_options[@]}" : \
+'--model=[]:MODEL:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::args:_default' \
+&& ret=0
+;;
+(hermes)
+_arguments "${_arguments_options[@]}" : \
+'--model=[Override the default model]:MODEL:_default' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::args:_default' \
+&& ret=0
+;;
+(code)
+_arguments "${_arguments_options[@]}" : \
+'--model=[Model override (defaults to \`default_code_model\` from config)]:MODEL:_default' \
+'--provider=[Provider override (defaults to \`default_code_provider\` from config, or "libertai")]:PROVIDER:_default' \
+'(--continue --list-sessions)--resume=[Resume a specific saved session by JSONL path (see \`--list-sessions\` to find one)]:PATH:_files' \
+'--sandbox=[Sandbox the bash tool. \`off\` (default) runs bash with the user'\''s full host privileges. \`strict\` wraps it in \`bwrap\` (Linux only today) with no network, read-only system dirs, and a tmpfs \`/tmp\` — useful for untrusted models or reviewing third-party agent scripts. \`auto\` resolves per pillar; on the CLI that'\''s currently the same as \`off\`. Also honours the \`LIBERTAI_SANDBOX\` env var]:SANDBOX:(off strict auto)' \
+'--plan[Start in plan mode\: the agent can read/grep/find/ls but cannot run bash, write, or edit files until you toggle back to normal (Shift+Tab or /plan)]' \
+'(--resume --list-sessions)--continue[Resume the most recent session for the current working directory]' \
+'(--resume --continue)--list-sessions[Print recent sessions (most recent first) and exit, without starting the agent. Filters to the current cwd by default; pass \`--all\` to list every project]' \
+'--all[With \`--list-sessions\`, show sessions across every project]' \
+'(--list-sessions)-p[Print mode (like \`claude -p\`)\: run a single agent turn headlessly and exit — no TUI, no interactive prompts. The assistant'\''s text streams to stdout; turn/tool noise goes to stderr. Tool calls not already covered by an allow rule are auto-denied instead of prompting, so scripts never hang. The prompt comes from the trailing args, piped stdin, or both (stdin becomes context above the args prompt). Composes with \`--resume\` / \`--continue\` to run one more headless turn against a saved session]' \
+'(--list-sessions)--print[Print mode (like \`claude -p\`)\: run a single agent turn headlessly and exit — no TUI, no interactive prompts. The assistant'\''s text streams to stdout; turn/tool noise goes to stderr. Tool calls not already covered by an allow rule are auto-denied instead of prompting, so scripts never hang. The prompt comes from the trailing args, piped stdin, or both (stdin becomes context above the args prompt). Composes with \`--resume\` / \`--continue\` to run one more headless turn against a saved session]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
+'*::args -- Initial prompt. When given, runs a single one-shot turn and exits (tool approvals still prompt on the terminal unless `--print` is also set). Without a prompt and without `--print`, starts the interactive REPL:_default' \
+&& ret=0
+;;
+(config)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_libertai__subcmd__config_commands" \
+"*::: :->config" \
+&& ret=0
+
+    case $state in
+    (config)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-config-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(path)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':key:_default' \
+':value:_default' \
+&& ret=0
+;;
+(unset)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':key:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__config__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-config-help-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(path)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(unset)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(skills)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_libertai__subcmd__skills_commands" \
+"*::: :->skills" \
+&& ret=0
+
+    case $state in
+    (skills)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-skills-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(install)
+_arguments "${_arguments_options[@]}" : \
+'--project[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(uninstall)
+_arguments "${_arguments_options[@]}" : \
+'--project[]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__skills__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-skills-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(install)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(uninstall)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(sandbox)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_libertai__subcmd__sandbox_commands" \
+"*::: :->sandbox" \
+&& ret=0
+
+    case $state in
+    (sandbox)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-sandbox-command-$line[1]:"
+        case $line[1] in
+            (info)
+_arguments "${_arguments_options[@]}" : \
+'--json[Emit JSON instead of the human summary. Suitable for piping into other tools or consuming from a wrapper script]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__sandbox__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-sandbox-help-command-$line[1]:"
+        case $line[1] in
+            (info)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_libertai__subcmd__import_commands" \
+"*::: :->import" \
+&& ret=0
+
+    case $state in
+    (import)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-import-command-$line[1]:"
+        case $line[1] in
+            (claude-code)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_libertai__subcmd__import__subcmd__claude-code_commands" \
+"*::: :->claude-code" \
+&& ret=0
+
+    case $state in
+    (claude-code)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-import-claude-code-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--all[Scan every project under \`~/.claude/projects/\`, not just the encoded directory for the current cwd]' \
+'--json[Emit JSON instead of the human summary]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'--all[Look across every project under \`~/.claude/projects/\` when resolving a bare UUID]' \
+'--json[Emit a JSON \`LinearizedSession\` instead of the human transcript]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':id_or_path -- Session UUID (resolved against the current cwd'\''s encoded project dir) or an absolute path to a `.jsonl` file:_default' \
+&& ret=0
+;;
+(summarize)
+_arguments "${_arguments_options[@]}" : \
+'--model=[Override the chat model (defaults to \`default_chat_model\`)]:MODEL:_default' \
+'--all[Look across every project when resolving a bare UUID]' \
+'--print-prompt[Print the constructed prompt and exit without calling the backend — useful for inspecting what the model would see]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':id_or_path -- Session UUID or absolute path (same resolver as `show`):_default' \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+'--model=[Override the chat model used for the summary call]:MODEL:_default' \
+'--provider=[Provider written into the pi session header (defaults to \`default_code_provider\` from config)]:PROVIDER:_default' \
+'--all[Look across every project when resolving a bare UUID]' \
+'--dry-run[Render the pi session JSONL to stdout instead of writing it. Useful for inspecting the output shape]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':id_or_path -- Session UUID or absolute path (same resolver as `show`):_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__import__subcmd__claude-code__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-import-claude-code-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(summarize)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__import__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-import-help-command-$line[1]:"
+        case $line[1] in
+            (claude-code)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__import__subcmd__help__subcmd__claude-code_commands" \
+"*::: :->claude-code" \
+&& ret=0
+
+    case $state in
+    (claude-code)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-import-help-claude-code-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(summarize)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(completions)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':shell -- Shell to generate the script for:(bash elvish fish powershell zsh)' \
+&& ret=0
+;;
+(man)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-help-command-$line[1]:"
+        case $line[1] in
+            (login)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(logout)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(keys)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__help__subcmd__keys_commands" \
+"*::: :->keys" \
+&& ret=0
+
+    case $state in
+    (keys)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-help-keys-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(create)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(models)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(ask)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(chat)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(fetch)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(image)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(run)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(claude)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(opencode)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(aider)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(claw)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(hermes)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(code)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(config)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__help__subcmd__config_commands" \
+"*::: :->config" \
+&& ret=0
+
+    case $state in
+    (config)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-help-config-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(path)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(unset)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(skills)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__help__subcmd__skills_commands" \
+"*::: :->skills" \
+&& ret=0
+
+    case $state in
+    (skills)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-help-skills-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(install)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(uninstall)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(sandbox)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__help__subcmd__sandbox_commands" \
+"*::: :->sandbox" \
+&& ret=0
+
+    case $state in
+    (sandbox)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-help-sandbox-command-$line[1]:"
+        case $line[1] in
+            (info)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__help__subcmd__import_commands" \
+"*::: :->import" \
+&& ret=0
+
+    case $state in
+    (import)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-help-import-command-$line[1]:"
+        case $line[1] in
+            (claude-code)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__help__subcmd__import__subcmd__claude-code_commands" \
+"*::: :->claude-code" \
+&& ret=0
+
+    case $state in
+    (claude-code)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-help-import-claude-code-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(summarize)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(completions)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(man)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+}
+
+(( $+functions[_libertai_commands] )) ||
+_libertai_commands() {
+    local commands; commands=(
+'login:Log in (browser sign-in or paste an API key)' \
+'logout:Clear saved credentials (secrets removed; other settings kept)' \
+'status:Show current auth state and defaults' \
+'keys:Manage API keys' \
+'models:List available models' \
+'ask:One-shot prompt, non-streaming' \
+'chat:Streaming chat REPL (Ctrl-D to exit)' \
+'search:Web search via LibertAI'\''s search API (search.libertai.io)' \
+'fetch:Fetch a URL and return cleaned article text via search.libertai.io' \
+'image:Generate an image' \
+'run:Launch an arbitrary command with LibertAI env vars injected' \
+'claude:Launch Claude Code against LibertAI' \
+'opencode:Launch OpenCode against LibertAI' \
+'aider:Launch Aider against LibertAI' \
+'claw:Launch Claw Code (ultraworkers/claw-code) against LibertAI' \
+'hermes:Launch Hermes Agent against LibertAI' \
+'code:LibertAI'\''s own coding agent, powered by pi_agent_rust' \
+'config:Config file operations' \
+'skills:Install/list/uninstall the bundled agent skills (image gen etc)' \
+'sandbox:Inspect the bash-sandbox configuration' \
+'import:Import data from other coding agents into a LibertAI session' \
+'completions:Print a shell completion script to stdout.' \
+'man:Render the top-level man page (roff) to stdout' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__aider_commands] )) ||
+_libertai__subcmd__aider_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai aider commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__ask_commands] )) ||
+_libertai__subcmd__ask_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai ask commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__chat_commands] )) ||
+_libertai__subcmd__chat_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai chat commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__claude_commands] )) ||
+_libertai__subcmd__claude_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai claude commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__claw_commands] )) ||
+_libertai__subcmd__claw_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai claw commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__code_commands] )) ||
+_libertai__subcmd__code_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai code commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__completions_commands] )) ||
+_libertai__subcmd__completions_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai completions commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__config_commands] )) ||
+_libertai__subcmd__config_commands() {
+    local commands; commands=(
+'show:Print current config' \
+'path:Print config file path' \
+'set:Set a single dotted key, e.g. \`default_chat_model gemma-3-27b\`' \
+'unset:Reset a key to its current built-in default so future bumps propagate. Use \`all\` to reset every non-auth field' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai config commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__config__subcmd__help_commands] )) ||
+_libertai__subcmd__config__subcmd__help_commands() {
+    local commands; commands=(
+'show:Print current config' \
+'path:Print config file path' \
+'set:Set a single dotted key, e.g. \`default_chat_model gemma-3-27b\`' \
+'unset:Reset a key to its current built-in default so future bumps propagate. Use \`all\` to reset every non-auth field' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai config help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__config__subcmd__help__subcmd__help_commands] )) ||
+_libertai__subcmd__config__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai config help help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__config__subcmd__help__subcmd__path_commands] )) ||
+_libertai__subcmd__config__subcmd__help__subcmd__path_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai config help path commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__config__subcmd__help__subcmd__set_commands] )) ||
+_libertai__subcmd__config__subcmd__help__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai config help set commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__config__subcmd__help__subcmd__show_commands] )) ||
+_libertai__subcmd__config__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai config help show commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__config__subcmd__help__subcmd__unset_commands] )) ||
+_libertai__subcmd__config__subcmd__help__subcmd__unset_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai config help unset commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__config__subcmd__path_commands] )) ||
+_libertai__subcmd__config__subcmd__path_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai config path commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__config__subcmd__set_commands] )) ||
+_libertai__subcmd__config__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai config set commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__config__subcmd__show_commands] )) ||
+_libertai__subcmd__config__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai config show commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__config__subcmd__unset_commands] )) ||
+_libertai__subcmd__config__subcmd__unset_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai config unset commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__fetch_commands] )) ||
+_libertai__subcmd__fetch_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai fetch commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help_commands] )) ||
+_libertai__subcmd__help_commands() {
+    local commands; commands=(
+'login:Log in (browser sign-in or paste an API key)' \
+'logout:Clear saved credentials (secrets removed; other settings kept)' \
+'status:Show current auth state and defaults' \
+'keys:Manage API keys' \
+'models:List available models' \
+'ask:One-shot prompt, non-streaming' \
+'chat:Streaming chat REPL (Ctrl-D to exit)' \
+'search:Web search via LibertAI'\''s search API (search.libertai.io)' \
+'fetch:Fetch a URL and return cleaned article text via search.libertai.io' \
+'image:Generate an image' \
+'run:Launch an arbitrary command with LibertAI env vars injected' \
+'claude:Launch Claude Code against LibertAI' \
+'opencode:Launch OpenCode against LibertAI' \
+'aider:Launch Aider against LibertAI' \
+'claw:Launch Claw Code (ultraworkers/claw-code) against LibertAI' \
+'hermes:Launch Hermes Agent against LibertAI' \
+'code:LibertAI'\''s own coding agent, powered by pi_agent_rust' \
+'config:Config file operations' \
+'skills:Install/list/uninstall the bundled agent skills (image gen etc)' \
+'sandbox:Inspect the bash-sandbox configuration' \
+'import:Import data from other coding agents into a LibertAI session' \
+'completions:Print a shell completion script to stdout.' \
+'man:Render the top-level man page (roff) to stdout' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__aider_commands] )) ||
+_libertai__subcmd__help__subcmd__aider_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help aider commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__ask_commands] )) ||
+_libertai__subcmd__help__subcmd__ask_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help ask commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__chat_commands] )) ||
+_libertai__subcmd__help__subcmd__chat_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help chat commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__claude_commands] )) ||
+_libertai__subcmd__help__subcmd__claude_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help claude commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__claw_commands] )) ||
+_libertai__subcmd__help__subcmd__claw_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help claw commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__code_commands] )) ||
+_libertai__subcmd__help__subcmd__code_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help code commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__completions_commands] )) ||
+_libertai__subcmd__help__subcmd__completions_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help completions commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__config_commands] )) ||
+_libertai__subcmd__help__subcmd__config_commands() {
+    local commands; commands=(
+'show:Print current config' \
+'path:Print config file path' \
+'set:Set a single dotted key, e.g. \`default_chat_model gemma-3-27b\`' \
+'unset:Reset a key to its current built-in default so future bumps propagate. Use \`all\` to reset every non-auth field' \
+    )
+    _describe -t commands 'libertai help config commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__config__subcmd__path_commands] )) ||
+_libertai__subcmd__help__subcmd__config__subcmd__path_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help config path commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__config__subcmd__set_commands] )) ||
+_libertai__subcmd__help__subcmd__config__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help config set commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__config__subcmd__show_commands] )) ||
+_libertai__subcmd__help__subcmd__config__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help config show commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__config__subcmd__unset_commands] )) ||
+_libertai__subcmd__help__subcmd__config__subcmd__unset_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help config unset commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__fetch_commands] )) ||
+_libertai__subcmd__help__subcmd__fetch_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help fetch commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__help_commands] )) ||
+_libertai__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__hermes_commands] )) ||
+_libertai__subcmd__help__subcmd__hermes_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help hermes commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__image_commands] )) ||
+_libertai__subcmd__help__subcmd__image_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help image commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__import_commands] )) ||
+_libertai__subcmd__help__subcmd__import_commands() {
+    local commands; commands=(
+'claude-code:Claude Code transcripts (\`~/.claude/projects/...\`)' \
+    )
+    _describe -t commands 'libertai help import commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__import__subcmd__claude-code_commands] )) ||
+_libertai__subcmd__help__subcmd__import__subcmd__claude-code_commands() {
+    local commands; commands=(
+'list:List Claude Code sessions discovered for the current project. Use \`--all\` to scan every project Claude Code has on disk' \
+'show:Render the live branch of a Claude Code session as a plain-text transcript. Same source that the (still-WIP) summary import will feed to the model; use this to preview the input' \
+'summarize:Build a \`/compact\`-style summary of a Claude Code session by calling the configured LibertAI chat model. Prints the summary to stdout. The next slice wires this into a real pi session as a \`Compaction\` checkpoint; for now this lets you eyeball quality' \
+'import:Summarise the Claude Code session and write a new pi session file whose first entry is the resulting \`/compact\`-style checkpoint. Prints the new session path on success — open it with \`libertai code --resume <path>\` or pick it from the session picker' \
+    )
+    _describe -t commands 'libertai help import claude-code commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__import__subcmd__claude-code__subcmd__import_commands] )) ||
+_libertai__subcmd__help__subcmd__import__subcmd__claude-code__subcmd__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help import claude-code import commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__import__subcmd__claude-code__subcmd__list_commands] )) ||
+_libertai__subcmd__help__subcmd__import__subcmd__claude-code__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help import claude-code list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__import__subcmd__claude-code__subcmd__show_commands] )) ||
+_libertai__subcmd__help__subcmd__import__subcmd__claude-code__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help import claude-code show commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__import__subcmd__claude-code__subcmd__summarize_commands] )) ||
+_libertai__subcmd__help__subcmd__import__subcmd__claude-code__subcmd__summarize_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help import claude-code summarize commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__keys_commands] )) ||
+_libertai__subcmd__help__subcmd__keys_commands() {
+    local commands; commands=(
+'list:List all API keys for the current account' \
+'create:Create a new API key' \
+'delete:Delete an API key by id' \
+    )
+    _describe -t commands 'libertai help keys commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__keys__subcmd__create_commands] )) ||
+_libertai__subcmd__help__subcmd__keys__subcmd__create_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help keys create commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__keys__subcmd__delete_commands] )) ||
+_libertai__subcmd__help__subcmd__keys__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help keys delete commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__keys__subcmd__list_commands] )) ||
+_libertai__subcmd__help__subcmd__keys__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help keys list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__login_commands] )) ||
+_libertai__subcmd__help__subcmd__login_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help login commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__logout_commands] )) ||
+_libertai__subcmd__help__subcmd__logout_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help logout commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__man_commands] )) ||
+_libertai__subcmd__help__subcmd__man_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help man commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__models_commands] )) ||
+_libertai__subcmd__help__subcmd__models_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help models commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__opencode_commands] )) ||
+_libertai__subcmd__help__subcmd__opencode_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help opencode commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__run_commands] )) ||
+_libertai__subcmd__help__subcmd__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help run commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__sandbox_commands] )) ||
+_libertai__subcmd__help__subcmd__sandbox_commands() {
+    local commands; commands=(
+'info:Print the resolved strict profile for this host\: which bin / lib / config paths would be exposed, which are present vs missing, plus the bwrap location and the inside-sandbox PATH. Useful for debugging when something the model wants to run isn'\''t reachable inside \`--sandbox=strict\`' \
+    )
+    _describe -t commands 'libertai help sandbox commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__sandbox__subcmd__info_commands] )) ||
+_libertai__subcmd__help__subcmd__sandbox__subcmd__info_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help sandbox info commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__search_commands] )) ||
+_libertai__subcmd__help__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help search commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__skills_commands] )) ||
+_libertai__subcmd__help__subcmd__skills_commands() {
+    local commands; commands=(
+'list:List the bundled skills this CLI knows how to install' \
+'install:Install (or refresh) the bundled skills into Claude Code'\''s skill dir. Defaults to the user-wide location (\`~/.claude/skills/\`); pass \`--project\` to install into \`.claude/skills/\` in the current directory' \
+'uninstall:Remove the bundled skills installed by this CLI' \
+    )
+    _describe -t commands 'libertai help skills commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__skills__subcmd__install_commands] )) ||
+_libertai__subcmd__help__subcmd__skills__subcmd__install_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help skills install commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__skills__subcmd__list_commands] )) ||
+_libertai__subcmd__help__subcmd__skills__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help skills list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__skills__subcmd__uninstall_commands] )) ||
+_libertai__subcmd__help__subcmd__skills__subcmd__uninstall_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help skills uninstall commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__status_commands] )) ||
+_libertai__subcmd__help__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help status commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__hermes_commands] )) ||
+_libertai__subcmd__hermes_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai hermes commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__image_commands] )) ||
+_libertai__subcmd__image_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai image commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import_commands] )) ||
+_libertai__subcmd__import_commands() {
+    local commands; commands=(
+'claude-code:Claude Code transcripts (\`~/.claude/projects/...\`)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai import commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__claude-code_commands] )) ||
+_libertai__subcmd__import__subcmd__claude-code_commands() {
+    local commands; commands=(
+'list:List Claude Code sessions discovered for the current project. Use \`--all\` to scan every project Claude Code has on disk' \
+'show:Render the live branch of a Claude Code session as a plain-text transcript. Same source that the (still-WIP) summary import will feed to the model; use this to preview the input' \
+'summarize:Build a \`/compact\`-style summary of a Claude Code session by calling the configured LibertAI chat model. Prints the summary to stdout. The next slice wires this into a real pi session as a \`Compaction\` checkpoint; for now this lets you eyeball quality' \
+'import:Summarise the Claude Code session and write a new pi session file whose first entry is the resulting \`/compact\`-style checkpoint. Prints the new session path on success — open it with \`libertai code --resume <path>\` or pick it from the session picker' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai import claude-code commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__claude-code__subcmd__help_commands] )) ||
+_libertai__subcmd__import__subcmd__claude-code__subcmd__help_commands() {
+    local commands; commands=(
+'list:List Claude Code sessions discovered for the current project. Use \`--all\` to scan every project Claude Code has on disk' \
+'show:Render the live branch of a Claude Code session as a plain-text transcript. Same source that the (still-WIP) summary import will feed to the model; use this to preview the input' \
+'summarize:Build a \`/compact\`-style summary of a Claude Code session by calling the configured LibertAI chat model. Prints the summary to stdout. The next slice wires this into a real pi session as a \`Compaction\` checkpoint; for now this lets you eyeball quality' \
+'import:Summarise the Claude Code session and write a new pi session file whose first entry is the resulting \`/compact\`-style checkpoint. Prints the new session path on success — open it with \`libertai code --resume <path>\` or pick it from the session picker' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai import claude-code help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__claude-code__subcmd__help__subcmd__help_commands] )) ||
+_libertai__subcmd__import__subcmd__claude-code__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai import claude-code help help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__claude-code__subcmd__help__subcmd__import_commands] )) ||
+_libertai__subcmd__import__subcmd__claude-code__subcmd__help__subcmd__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai import claude-code help import commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__claude-code__subcmd__help__subcmd__list_commands] )) ||
+_libertai__subcmd__import__subcmd__claude-code__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai import claude-code help list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__claude-code__subcmd__help__subcmd__show_commands] )) ||
+_libertai__subcmd__import__subcmd__claude-code__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai import claude-code help show commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__claude-code__subcmd__help__subcmd__summarize_commands] )) ||
+_libertai__subcmd__import__subcmd__claude-code__subcmd__help__subcmd__summarize_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai import claude-code help summarize commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__claude-code__subcmd__import_commands] )) ||
+_libertai__subcmd__import__subcmd__claude-code__subcmd__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai import claude-code import commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__claude-code__subcmd__list_commands] )) ||
+_libertai__subcmd__import__subcmd__claude-code__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai import claude-code list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__claude-code__subcmd__show_commands] )) ||
+_libertai__subcmd__import__subcmd__claude-code__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai import claude-code show commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__claude-code__subcmd__summarize_commands] )) ||
+_libertai__subcmd__import__subcmd__claude-code__subcmd__summarize_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai import claude-code summarize commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__help_commands] )) ||
+_libertai__subcmd__import__subcmd__help_commands() {
+    local commands; commands=(
+'claude-code:Claude Code transcripts (\`~/.claude/projects/...\`)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai import help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__help__subcmd__claude-code_commands] )) ||
+_libertai__subcmd__import__subcmd__help__subcmd__claude-code_commands() {
+    local commands; commands=(
+'list:List Claude Code sessions discovered for the current project. Use \`--all\` to scan every project Claude Code has on disk' \
+'show:Render the live branch of a Claude Code session as a plain-text transcript. Same source that the (still-WIP) summary import will feed to the model; use this to preview the input' \
+'summarize:Build a \`/compact\`-style summary of a Claude Code session by calling the configured LibertAI chat model. Prints the summary to stdout. The next slice wires this into a real pi session as a \`Compaction\` checkpoint; for now this lets you eyeball quality' \
+'import:Summarise the Claude Code session and write a new pi session file whose first entry is the resulting \`/compact\`-style checkpoint. Prints the new session path on success — open it with \`libertai code --resume <path>\` or pick it from the session picker' \
+    )
+    _describe -t commands 'libertai import help claude-code commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__help__subcmd__claude-code__subcmd__import_commands] )) ||
+_libertai__subcmd__import__subcmd__help__subcmd__claude-code__subcmd__import_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai import help claude-code import commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__help__subcmd__claude-code__subcmd__list_commands] )) ||
+_libertai__subcmd__import__subcmd__help__subcmd__claude-code__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai import help claude-code list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__help__subcmd__claude-code__subcmd__show_commands] )) ||
+_libertai__subcmd__import__subcmd__help__subcmd__claude-code__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai import help claude-code show commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__help__subcmd__claude-code__subcmd__summarize_commands] )) ||
+_libertai__subcmd__import__subcmd__help__subcmd__claude-code__subcmd__summarize_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai import help claude-code summarize commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__import__subcmd__help__subcmd__help_commands] )) ||
+_libertai__subcmd__import__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai import help help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__keys_commands] )) ||
+_libertai__subcmd__keys_commands() {
+    local commands; commands=(
+'list:List all API keys for the current account' \
+'create:Create a new API key' \
+'delete:Delete an API key by id' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai keys commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__keys__subcmd__create_commands] )) ||
+_libertai__subcmd__keys__subcmd__create_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai keys create commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__keys__subcmd__delete_commands] )) ||
+_libertai__subcmd__keys__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai keys delete commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__keys__subcmd__help_commands] )) ||
+_libertai__subcmd__keys__subcmd__help_commands() {
+    local commands; commands=(
+'list:List all API keys for the current account' \
+'create:Create a new API key' \
+'delete:Delete an API key by id' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai keys help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__keys__subcmd__help__subcmd__create_commands] )) ||
+_libertai__subcmd__keys__subcmd__help__subcmd__create_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai keys help create commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__keys__subcmd__help__subcmd__delete_commands] )) ||
+_libertai__subcmd__keys__subcmd__help__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai keys help delete commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__keys__subcmd__help__subcmd__help_commands] )) ||
+_libertai__subcmd__keys__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai keys help help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__keys__subcmd__help__subcmd__list_commands] )) ||
+_libertai__subcmd__keys__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai keys help list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__keys__subcmd__list_commands] )) ||
+_libertai__subcmd__keys__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai keys list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__login_commands] )) ||
+_libertai__subcmd__login_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai login commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__logout_commands] )) ||
+_libertai__subcmd__logout_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai logout commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__man_commands] )) ||
+_libertai__subcmd__man_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai man commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__models_commands] )) ||
+_libertai__subcmd__models_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai models commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__opencode_commands] )) ||
+_libertai__subcmd__opencode_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai opencode commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__run_commands] )) ||
+_libertai__subcmd__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai run commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__sandbox_commands] )) ||
+_libertai__subcmd__sandbox_commands() {
+    local commands; commands=(
+'info:Print the resolved strict profile for this host\: which bin / lib / config paths would be exposed, which are present vs missing, plus the bwrap location and the inside-sandbox PATH. Useful for debugging when something the model wants to run isn'\''t reachable inside \`--sandbox=strict\`' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai sandbox commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__sandbox__subcmd__help_commands] )) ||
+_libertai__subcmd__sandbox__subcmd__help_commands() {
+    local commands; commands=(
+'info:Print the resolved strict profile for this host\: which bin / lib / config paths would be exposed, which are present vs missing, plus the bwrap location and the inside-sandbox PATH. Useful for debugging when something the model wants to run isn'\''t reachable inside \`--sandbox=strict\`' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai sandbox help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__sandbox__subcmd__help__subcmd__help_commands] )) ||
+_libertai__subcmd__sandbox__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai sandbox help help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__sandbox__subcmd__help__subcmd__info_commands] )) ||
+_libertai__subcmd__sandbox__subcmd__help__subcmd__info_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai sandbox help info commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__sandbox__subcmd__info_commands] )) ||
+_libertai__subcmd__sandbox__subcmd__info_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai sandbox info commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__search_commands] )) ||
+_libertai__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai search commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__skills_commands] )) ||
+_libertai__subcmd__skills_commands() {
+    local commands; commands=(
+'list:List the bundled skills this CLI knows how to install' \
+'install:Install (or refresh) the bundled skills into Claude Code'\''s skill dir. Defaults to the user-wide location (\`~/.claude/skills/\`); pass \`--project\` to install into \`.claude/skills/\` in the current directory' \
+'uninstall:Remove the bundled skills installed by this CLI' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai skills commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__skills__subcmd__help_commands] )) ||
+_libertai__subcmd__skills__subcmd__help_commands() {
+    local commands; commands=(
+'list:List the bundled skills this CLI knows how to install' \
+'install:Install (or refresh) the bundled skills into Claude Code'\''s skill dir. Defaults to the user-wide location (\`~/.claude/skills/\`); pass \`--project\` to install into \`.claude/skills/\` in the current directory' \
+'uninstall:Remove the bundled skills installed by this CLI' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai skills help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__skills__subcmd__help__subcmd__help_commands] )) ||
+_libertai__subcmd__skills__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai skills help help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__skills__subcmd__help__subcmd__install_commands] )) ||
+_libertai__subcmd__skills__subcmd__help__subcmd__install_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai skills help install commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__skills__subcmd__help__subcmd__list_commands] )) ||
+_libertai__subcmd__skills__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai skills help list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__skills__subcmd__help__subcmd__uninstall_commands] )) ||
+_libertai__subcmd__skills__subcmd__help__subcmd__uninstall_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai skills help uninstall commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__skills__subcmd__install_commands] )) ||
+_libertai__subcmd__skills__subcmd__install_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai skills install commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__skills__subcmd__list_commands] )) ||
+_libertai__subcmd__skills__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai skills list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__skills__subcmd__uninstall_commands] )) ||
+_libertai__subcmd__skills__subcmd__uninstall_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai skills uninstall commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__status_commands] )) ||
+_libertai__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai status commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_libertai" ]; then
+    _libertai "$@"
+else
+    compdef _libertai libertai
+fi

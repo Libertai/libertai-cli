@@ -153,11 +153,12 @@ fn new_device_id() -> String {
 
 /// Best-effort short hostname for a recognizable key name in the console; falls back
 /// to the HOSTNAME env var, then "device". Uniqueness comes from the device id, not this.
+/// Uses the gethostname(2) syscall wrapper rather than shelling out to a `hostname`
+/// binary, which doesn't exist on minimal containers or Windows.
 fn device_hostname() -> String {
-    let raw = std::process::Command::new("hostname")
-        .output()
+    let raw = gethostname::gethostname()
+        .into_string()
         .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .or_else(|| std::env::var("HOSTNAME").ok())

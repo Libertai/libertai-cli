@@ -1173,6 +1173,28 @@ pub fn set_file_mode_600(_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Chmod an existing directory to `0o700` if it is group/world-accessible.
+/// No-op when the directory is already owner-only (or on non-unix).
+#[cfg(unix)]
+pub(crate) fn tighten_dir_mode_700(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    let mut perm = metadata.permissions();
+    if perm.mode() & 0o077 != 0 {
+        perm.set_mode(0o700);
+        std::fs::set_permissions(path, perm)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn tighten_dir_mode_700(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
 /// `LTAI_****abcd` — first 4 + last 4 of a key.
 pub fn mask_key(key: &str) -> String {
     let len = key.chars().count();

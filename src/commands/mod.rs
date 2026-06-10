@@ -1,6 +1,7 @@
 pub mod ask;
 pub mod auth_ui;
 pub mod chat;
+pub mod chat_render;
 pub mod claude_code_import;
 pub mod claude_code_import_cli;
 pub mod code;
@@ -33,6 +34,7 @@ pub mod code_term;
 pub mod code_todo;
 pub mod code_tool_preview;
 pub mod code_ui;
+pub mod completions;
 pub mod config_cmd;
 pub mod fetch;
 pub mod fetch_tool;

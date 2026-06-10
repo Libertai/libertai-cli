@@ -15,9 +15,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Log in (paste API key or sign with wallet).
+    /// Log in (browser sign-in or paste an API key).
     Login,
-    /// Clear saved credentials (keeps a .bak of the previous config).
+    /// Clear saved credentials (secrets removed; other settings kept).
     Logout,
     /// Show current auth state and defaults.
     Status,
@@ -241,6 +241,27 @@ pub enum Command {
         #[command(subcommand)]
         action: ImportAction,
     },
+
+    /// Print a shell completion script to stdout.
+    ///
+    /// Examples:
+    ///   libertai completions bash > ~/.local/share/bash-completion/completions/libertai
+    ///   libertai completions zsh  > "${fpath[1]}/_libertai"
+    ///   libertai completions fish > ~/.config/fish/completions/libertai.fish
+    #[command(verbatim_doc_comment)]
+    Completions {
+        /// Shell to generate the script for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+
+    /// Render the top-level man page (roff) to stdout.
+    ///
+    /// Hidden: exists so packaging can capture it at build time
+    /// (`libertai man > libertai.1`); see packaging/generate-assets.sh
+    /// and the brew formula template.
+    #[command(hide = true)]
+    Man,
 }
 
 #[derive(Debug, Subcommand)]
@@ -453,6 +474,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Skills { action } => crate::commands::skills::run(action),
         Command::Sandbox { action } => crate::commands::code_sandbox_cli::run(action),
         Command::Import { action } => crate::commands::claude_code_import_cli::run(action),
+        Command::Completions { shell } => crate::commands::completions::run(shell),
+        Command::Man => crate::commands::completions::man(),
     }
 }
 
@@ -479,5 +502,7 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::Skills { .. } => "skills",
         Command::Sandbox { .. } => "sandbox",
         Command::Import { .. } => "import",
+        Command::Completions { .. } => "completions",
+        Command::Man => "man",
     }
 }

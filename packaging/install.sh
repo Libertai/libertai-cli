@@ -94,6 +94,21 @@ install -m 0755 "$TMP" "$DEST/$BIN" \
 info ""
 info "Installed ${BIN} ${VERSION} to $DEST/$BIN"
 
+# Best-effort user-level bash completions: bash-completion v2 picks up
+# ${XDG_DATA_HOME:-~/.local/share}/bash-completion/completions automatically,
+# so this needs no rc-file edits. $TMP_SHA is free again after verification
+# above, so reuse it as the scratch file (trap already cleans it up). Skipped
+# silently for releases predating the `completions` subcommand or if anything
+# else goes wrong — never fatal.
+COMP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
+if "$DEST/$BIN" completions bash > "$TMP_SHA" 2>/dev/null \
+    && [ -s "$TMP_SHA" ] \
+    && mkdir -p "$COMP_DIR" 2>/dev/null \
+    && install -m 0644 "$TMP_SHA" "$COMP_DIR/$BIN" 2>/dev/null; then
+    info "Installed bash completions to $COMP_DIR/$BIN"
+    info "For zsh or fish, see '$BIN completions --help'."
+fi
+
 case ":$PATH:" in
     *":$DEST:"*) ;;
     *)
