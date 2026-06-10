@@ -39,6 +39,12 @@ pub const CATALOG_URL_ENV: &str = "LIBERTAI_MODEL_CATALOG_URL";
 /// context windows untouched.
 pub const LEGACY_PLACEHOLDER_CONTEXT_WINDOW: u64 = 32_768;
 
+/// Fallback `contextWindow` the desktop app (`liberclaw-code`) writes for
+/// models whose backend reports no window (pi's own default for unknown
+/// models — settings_cmd.rs `resolve_context_window`). Machine-written,
+/// so enrichment may replace it just like the legacy 32768 placeholder.
+pub const DESKTOP_FALLBACK_CONTEXT_WINDOW: u64 = 128_000;
+
 const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 const CACHE_FILE: &str = "model-catalog.json";
 
@@ -193,6 +199,17 @@ pub fn token_rates_for(model: &str) -> Option<(f64, f64)> {
     load()?.token_rates(model)
 }
 
+/// Convenience lookup: real context window for a model id (with the same
+/// redirection / `-thinking` fallback as the rest of the catalog).
+/// Used by the desktop app (`liberclaw-code`) when a backend's
+/// `/v1/models` reports no window.
+pub fn context_window_for(model: &str) -> Option<u32> {
+    load()?
+        .find_text(model)
+        .and_then(|m| m.text_capabilities())
+        .and_then(|caps| caps.context_window)
+}
+
 /// Load the catalog: fresh cache → use it; stale/missing cache → fetch
 /// (and rewrite the cache); fetch failure → stale cache if any, else
 /// `None`. Never errors — metadata is an enhancement, not a requirement.
@@ -329,8 +346,9 @@ pub fn new_pi_model_entry(id: &str, catalog: Option<&Catalog>) -> Value {
 /// Merge catalog metadata into one pi `providers.libertai.models[]` entry
 /// in place. Never clobbers a user's richer hand-set values:
 ///
-/// - `contextWindow` is written only when missing, non-numeric, or still
-///   the legacy 32768 placeholder this CLI used to seed;
+/// - `contextWindow` is written only when missing, non-numeric, or one of
+///   the machine-written placeholders (this CLI's legacy 32768, the
+///   desktop's 128000 fallback);
 /// - `cost` / `reasoning` / `input` are written only when absent;
 /// - `name` only when absent or equal to the id (our placeholder shape).
 ///
@@ -347,8 +365,9 @@ pub fn enrich_pi_model_entry(entry: &mut Map<String, Value>, catalog: &Catalog) 
     if let Some(caps) = model.text_capabilities() {
         if let Some(ctx) = caps.context_window {
             let current = entry.get("contextWindow").and_then(Value::as_u64);
-            let replaceable =
-                current.is_none() || current == Some(LEGACY_PLACEHOLDER_CONTEXT_WINDOW);
+            let replaceable = current.is_none()
+                || current == Some(LEGACY_PLACEHOLDER_CONTEXT_WINDOW)
+                || current == Some(DESKTOP_FALLBACK_CONTEXT_WINDOW);
             if replaceable && current != Some(u64::from(ctx)) {
                 entry.insert("contextWindow".to_string(), json!(ctx));
                 changed = true;
