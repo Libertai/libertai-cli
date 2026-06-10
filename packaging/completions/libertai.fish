@@ -54,6 +54,7 @@ complete -c libertai -n "__fish_libertai_using_subcommand login" -s h -l help -d
 complete -c libertai -n "__fish_libertai_using_subcommand login" -s V -l version -d 'Print version'
 complete -c libertai -n "__fish_libertai_using_subcommand logout" -s h -l help -d 'Print help'
 complete -c libertai -n "__fish_libertai_using_subcommand logout" -s V -l version -d 'Print version'
+complete -c libertai -n "__fish_libertai_using_subcommand status" -l json -d 'Emit JSON (auth state, base URLs, defaults) instead of the human summary'
 complete -c libertai -n "__fish_libertai_using_subcommand status" -s h -l help -d 'Print help'
 complete -c libertai -n "__fish_libertai_using_subcommand status" -s V -l version -d 'Print version'
 complete -c libertai -n "__fish_libertai_using_subcommand keys; and not __fish_seen_subcommand_from list create delete help" -s h -l help -d 'Print help'
@@ -62,6 +63,7 @@ complete -c libertai -n "__fish_libertai_using_subcommand keys; and not __fish_s
 complete -c libertai -n "__fish_libertai_using_subcommand keys; and not __fish_seen_subcommand_from list create delete help" -f -a "create" -d 'Create a new API key'
 complete -c libertai -n "__fish_libertai_using_subcommand keys; and not __fish_seen_subcommand_from list create delete help" -f -a "delete" -d 'Delete an API key by id'
 complete -c libertai -n "__fish_libertai_using_subcommand keys; and not __fish_seen_subcommand_from list create delete help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c libertai -n "__fish_libertai_using_subcommand keys; and __fish_seen_subcommand_from list" -l json -d 'Emit the key rows as JSON (mirrors the `/api-keys` response) instead of the table'
 complete -c libertai -n "__fish_libertai_using_subcommand keys; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help'
 complete -c libertai -n "__fish_libertai_using_subcommand keys; and __fish_seen_subcommand_from list" -s V -l version -d 'Print version'
 complete -c libertai -n "__fish_libertai_using_subcommand keys; and __fish_seen_subcommand_from create" -l limit -d 'Monthly spending limit in USD' -r
@@ -73,7 +75,8 @@ complete -c libertai -n "__fish_libertai_using_subcommand keys; and __fish_seen_
 complete -c libertai -n "__fish_libertai_using_subcommand keys; and __fish_seen_subcommand_from help" -f -a "create" -d 'Create a new API key'
 complete -c libertai -n "__fish_libertai_using_subcommand keys; and __fish_seen_subcommand_from help" -f -a "delete" -d 'Delete an API key by id'
 complete -c libertai -n "__fish_libertai_using_subcommand keys; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c libertai -n "__fish_libertai_using_subcommand models" -l refresh -d 'Bypass cache (not yet used; placeholder for future caching)'
+complete -c libertai -n "__fish_libertai_using_subcommand models" -l refresh -d 'Re-sync the persisted model catalog: fetches `/v1/models` and merges any new models into pi\'s `models.json` so they become selectable in `libertai code` (`/model`)'
+complete -c libertai -n "__fish_libertai_using_subcommand models" -l json -d 'Emit the `/v1/models` listing as JSON instead of the table'
 complete -c libertai -n "__fish_libertai_using_subcommand models" -s h -l help -d 'Print help'
 complete -c libertai -n "__fish_libertai_using_subcommand models" -s V -l version -d 'Print version'
 complete -c libertai -n "__fish_libertai_using_subcommand ask" -l model -r
@@ -130,6 +133,7 @@ complete -c libertai -n "__fish_libertai_using_subcommand code" -l plan -d 'Star
 complete -c libertai -n "__fish_libertai_using_subcommand code" -l continue -d 'Resume the most recent session for the current working directory'
 complete -c libertai -n "__fish_libertai_using_subcommand code" -l list-sessions -d 'Print recent sessions (most recent first) and exit, without starting the agent. Filters to the current cwd by default; pass `--all` to list every project'
 complete -c libertai -n "__fish_libertai_using_subcommand code" -l all -d 'With `--list-sessions`, show sessions across every project'
+complete -c libertai -n "__fish_libertai_using_subcommand code" -l json -d 'With `--list-sessions`, emit a JSON array (path, name, message_count, …) instead of the human list'
 complete -c libertai -n "__fish_libertai_using_subcommand code" -s p -l print -d 'Print mode (like `claude -p`): run a single agent turn headlessly and exit — no TUI, no interactive prompts. The assistant\'s text streams to stdout; turn/tool noise goes to stderr. Tool calls not already covered by an allow rule are auto-denied instead of prompting, so scripts never hang. The prompt comes from the trailing args, piped stdin, or both (stdin becomes context above the args prompt). Composes with `--resume` / `--continue` to run one more headless turn against a saved session'
 complete -c libertai -n "__fish_libertai_using_subcommand code" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c libertai -n "__fish_libertai_using_subcommand code" -s V -l version -d 'Print version'

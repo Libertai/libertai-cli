@@ -3,12 +3,99 @@
 //! — blocking simplifies the REPL + launcher code and removes the tokio
 //! runtime from the dependency tree.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::config::Config;
+
+// ── error classification ────────────────────────────────────────────────────
+
+/// Failure category threaded through the anyhow chain so `main` can map
+/// errors onto differentiated exit codes (auth → 3, network → 4, API → 5;
+/// see `exit_code` in `main.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorClass {
+    /// Login required or credentials rejected (missing key, HTTP 401).
+    Auth,
+    /// The backend could not be reached (connect/DNS/TLS/timeout — the
+    /// request never produced an HTTP response).
+    Network,
+    /// The backend answered with a non-success HTTP status other than 401.
+    Api,
+}
+
+/// An error carrying an [`ErrorClass`]. It lives somewhere in the anyhow
+/// source chain (possibly wrapped by `.context(..)` layers); classify a
+/// final error with [`error_class`].
+#[derive(Debug)]
+pub struct ClassifiedError {
+    pub class: ErrorClass,
+    message: String,
+    source: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+impl ClassifiedError {
+    pub fn new(class: ErrorClass, message: impl Into<String>) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            class,
+            message: message.into(),
+            source: None,
+        })
+    }
+
+    fn with_source(
+        class: ErrorClass,
+        message: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            class,
+            message: message.into(),
+            source: Some(Box::new(source)),
+        })
+    }
+}
+
+impl std::fmt::Display for ClassifiedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ClassifiedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|e| e as &(dyn std::error::Error + 'static))
+    }
+}
+
+/// First [`ErrorClass`] found in the error chain (outermost first), or
+/// `None` for unclassified errors (generic exit code 1).
+pub fn error_class(err: &anyhow::Error) -> Option<ErrorClass> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<ClassifiedError>().map(|c| c.class))
+}
+
+/// The CLI's exit-code contract, shared by the `libertai` and `lcode`
+/// binaries (documented in the README "Scripting" section):
+///
+///   0  success
+///   1  generic failure
+///   2  usage error (emitted by clap before dispatch runs)
+///   3  auth required or rejected — run `libertai login`
+///   4  network/connect failure (backend unreachable, DNS, timeout)
+///   5  server-side API error (the backend answered a non-401 4xx/5xx)
+pub fn exit_code(err: &anyhow::Error) -> i32 {
+    match error_class(err) {
+        Some(ErrorClass::Auth) => 3,
+        Some(ErrorClass::Network) => 4,
+        Some(ErrorClass::Api) => 5,
+        None => 1,
+    }
+}
 
 pub fn http(cfg: &Config) -> Result<Client> {
     Client::builder()
@@ -33,13 +120,18 @@ fn annotate_send_err(
         let bump = timeout_secs
             .map(|s| s.saturating_mul(2).max(300))
             .unwrap_or(300);
-        return anyhow!(
-            "{ctx}: request timed out{after} — the model may still be generating. \
-             Raise the timeout with `libertai config set http_timeout_secs {bump}`, \
-             or try a faster/smaller model."
+        return ClassifiedError::new(
+            ErrorClass::Network,
+            format!(
+                "{ctx}: request timed out{after} — the model may still be generating. \
+                 Raise the timeout with `libertai config set http_timeout_secs {bump}`, \
+                 or try a faster/smaller model."
+            ),
         );
     }
-    anyhow::Error::new(e).context(format!("{ctx}"))
+    // Any other `send()` failure means no HTTP response was received
+    // (connection refused, DNS, TLS, broken pipe) — a network failure.
+    ClassifiedError::with_source(ErrorClass::Network, format!("{ctx}"), e)
 }
 
 /// Client for long-lived streaming responses (e.g. SSE chat completions).
@@ -59,22 +151,26 @@ pub fn http_stream() -> Result<Client> {
 }
 
 pub fn require_api_key(cfg: &Config) -> Result<&str> {
-    cfg.auth
-        .api_key
-        .as_deref()
-        .ok_or_else(|| anyhow!("not logged in — run `libertai login` first"))
+    cfg.auth.api_key.as_deref().ok_or_else(|| {
+        ClassifiedError::new(
+            ErrorClass::Auth,
+            "not logged in — run `libertai login` first",
+        )
+    })
 }
 
 // ── Inference (OpenAI-compatible) ───────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ModelEntry {
     pub id: String,
     #[serde(default)]
     pub owned_by: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Mirrors the `/v1/models` wire shape (`{"data": [...]}`), so
+/// `libertai models --json` can emit the listing as returned.
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ModelList {
     pub data: Vec<ModelEntry>,
 }
@@ -216,8 +312,9 @@ pub struct SearchResult {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SearchResponse {
     pub results: Vec<SearchResult>,
+    /// Opaque server-side metadata — never read by the CLI itself, but
+    /// round-tripped into `libertai search --json` output.
     #[serde(default)]
-    #[allow(dead_code)]
     pub meta: Option<serde_json::Value>,
 }
 
@@ -255,12 +352,11 @@ pub struct AuthLoginRequest<'a> {
     pub signature: &'a str,
 }
 
+// The upstream response also carries an `address` field; serde ignores
+// unknown fields, and the CLI never reads it, so it is not modelled here.
 #[derive(Debug, Deserialize)]
 pub struct AuthLoginResponse {
     pub access_token: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub address: Option<String>,
 }
 
 pub fn auth_message(cfg: &Config, chain: &str, address: &str) -> Result<String> {
@@ -333,7 +429,9 @@ pub fn create_cli_api_key(cfg: &Config, access_token: &str, host: &str) -> Resul
         .context("parsing CLI key response")
 }
 
-#[derive(Debug, Deserialize)]
+/// One row from `GET /api-keys`. Also serialized verbatim into
+/// `libertai keys list --json` output, so field names are stable.
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ApiKeyRow {
     pub id: String,
     pub name: String,
@@ -344,7 +442,6 @@ pub struct ApiKeyRow {
     #[serde(default)]
     pub is_active: bool,
     #[serde(default)]
-    #[allow(dead_code)]
     pub user_address: Option<String>,
 }
 
@@ -437,10 +534,45 @@ fn check_status(
     // A 401 on an authenticated call almost always means the stored key is invalid,
     // revoked, or (for CLI keys) expired — point the user at a fresh login.
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(anyhow!(
-            "{url} → {status}: {truncated}\n\
-             Your API key may be invalid or expired — run `libertai login` to sign in again."
+        return Err(ClassifiedError::new(
+            ErrorClass::Auth,
+            format!(
+                "{url} → {status}: {truncated}\n\
+                 Your API key may be invalid or expired — run `libertai login` to sign in again."
+            ),
         ));
     }
-    Err(anyhow!("{url} → {status}: {truncated}"))
+    Err(ClassifiedError::new(
+        ErrorClass::Api,
+        format!("{url} → {status}: {truncated}"),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_class_found_through_context_layers() {
+        let err = ClassifiedError::new(ErrorClass::Auth, "no key")
+            .context("loading models")
+            .context("outermost");
+        assert_eq!(error_class(&err), Some(ErrorClass::Auth));
+    }
+
+    #[test]
+    fn error_class_none_for_plain_anyhow() {
+        let err = anyhow::anyhow!("something else").context("outer");
+        assert_eq!(error_class(&err), None);
+    }
+
+    #[test]
+    fn classified_error_preserves_source_in_display_chain() {
+        let io = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+        let err = ClassifiedError::with_source(ErrorClass::Network, "GET http://x", io);
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("GET http://x"), "got: {rendered}");
+        assert!(rendered.contains("refused"), "got: {rendered}");
+        assert_eq!(error_class(&err), Some(ErrorClass::Network));
+    }
 }

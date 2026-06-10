@@ -20,7 +20,12 @@ pub enum Command {
     /// Clear saved credentials (secrets removed; other settings kept).
     Logout,
     /// Show current auth state and defaults.
-    Status,
+    Status {
+        /// Emit JSON (auth state, base URLs, defaults) instead of the
+        /// human summary.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Manage API keys.
     Keys {
@@ -30,9 +35,14 @@ pub enum Command {
 
     /// List available models.
     Models {
-        /// Bypass cache (not yet used; placeholder for future caching).
+        /// Re-sync the persisted model catalog: fetches `/v1/models` and
+        /// merges any new models into pi's `models.json` so they become
+        /// selectable in `libertai code` (`/model`).
         #[arg(long)]
         refresh: bool,
+        /// Emit the `/v1/models` listing as JSON instead of the table.
+        #[arg(long)]
+        json: bool,
     },
 
     /// One-shot prompt, non-streaming.
@@ -190,6 +200,10 @@ pub enum Command {
         /// With `--list-sessions`, show sessions across every project.
         #[arg(long, requires = "list_sessions")]
         all: bool,
+        /// With `--list-sessions`, emit a JSON array (path, name,
+        /// message_count, …) instead of the human list.
+        #[arg(long, requires = "list_sessions")]
+        json: bool,
         /// Sandbox the bash tool. `off` (default) runs bash with the
         /// user's full host privileges. `strict` wraps it in `bwrap`
         /// (Linux only today) with no network, read-only system dirs,
@@ -363,7 +377,12 @@ pub enum SandboxAction {
 #[derive(Debug, Subcommand)]
 pub enum KeysAction {
     /// List all API keys for the current account.
-    List,
+    List {
+        /// Emit the key rows as JSON (mirrors the `/api-keys` response)
+        /// instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Create a new API key.
     Create {
         name: String,
@@ -414,9 +433,9 @@ pub fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Login => crate::commands::login::run(),
         Command::Logout => crate::commands::logout::run(),
-        Command::Status => crate::commands::status::run(),
+        Command::Status { json } => crate::commands::status::run(json),
         Command::Keys { action } => crate::commands::keys::run(action),
-        Command::Models { refresh } => crate::commands::models::run(refresh),
+        Command::Models { refresh, json } => crate::commands::models::run(refresh, json),
         Command::Ask { prompt, model } => crate::commands::ask::run(prompt.join(" "), model),
         Command::Search {
             query,
@@ -455,6 +474,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             continue_recent,
             list_sessions,
             all,
+            json,
             sandbox,
             print,
             args,
@@ -466,6 +486,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             continue_recent,
             list_sessions,
             all,
+            json,
             sandbox,
             print,
             args,
@@ -483,7 +504,7 @@ fn command_name(cmd: &Command) -> &'static str {
     match cmd {
         Command::Login => "login",
         Command::Logout => "logout",
-        Command::Status => "status",
+        Command::Status { .. } => "status",
         Command::Keys { .. } => "keys",
         Command::Models { .. } => "models",
         Command::Ask { .. } => "ask",

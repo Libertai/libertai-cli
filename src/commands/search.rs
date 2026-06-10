@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use owo_colors::OwoColorize;
 
 use crate::client::{post_search, SearchRequest};
+use crate::commands::output::Styler;
 use crate::config::load;
 
 pub fn run(
@@ -31,13 +31,18 @@ pub fn run(
         return Ok(());
     }
 
+    let st = Styler::stdout();
     for (i, r) in resp.results.iter().enumerate() {
         let title = r.title.as_deref().unwrap_or("(no title)");
         let url = r.url.as_deref().unwrap_or("");
         let snippet = r.snippet.as_deref().unwrap_or("");
-        println!("{} {}", format!("{:>2}.", i + 1).dimmed(), title.bold());
+        println!(
+            "{} {}",
+            st.dimmed(&format!("{:>2}.", i + 1)),
+            st.bold(title)
+        );
         if !url.is_empty() {
-            println!("    {}", url.cyan());
+            println!("    {}", st.cyan(url));
         }
         if !snippet.is_empty() {
             println!("    {snippet}");
@@ -48,7 +53,7 @@ pub fn run(
             } else {
                 String::new()
             };
-            println!("    {}{found}", format!("via {engine}").dimmed());
+            println!("    {}{found}", st.dimmed(&format!("via {engine}")));
         }
         println!();
     }

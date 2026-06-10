@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use dialoguer::console::Term;
 use dialoguer::{Confirm, Password};
-use owo_colors::OwoColorize;
 
 use crate::auth::wallet::{address_from_signing_key, personal_sign, signing_key_from_hex};
 use crate::cli::KeysAction;
@@ -10,12 +9,13 @@ use crate::client::{
 };
 use crate::commands::auth_ui::{confirm_signing, validate_limit};
 use crate::commands::login::{browser_sso_access_token, open_url};
+use crate::commands::output::Styler;
 use crate::config::{load, Config};
 
 pub fn run(action: KeysAction) -> Result<()> {
     let cfg = load()?;
     match action {
-        KeysAction::List => list(&cfg),
+        KeysAction::List { json } => list(&cfg, json),
         KeysAction::Create { name, limit } => create(&cfg, name, limit),
         KeysAction::Delete { id } => delete(&cfg, id),
     }
@@ -36,9 +36,10 @@ fn acquire_jwt(cfg: &Config) -> Result<String> {
 }
 
 fn acquire_jwt_browser(cfg: &Config) -> Result<String> {
+    let st = Styler::stderr();
     eprintln!(
         "{} Managing keys needs a quick sign-in confirmation in your browser.",
-        "!".yellow()
+        st.yellow("!")
     );
     browser_sso_access_token(cfg, "LibertAI CLI (key management)", |url| {
         eprintln!("Opening your browser to sign in…");
@@ -48,7 +49,8 @@ fn acquire_jwt_browser(cfg: &Config) -> Result<String> {
 }
 
 fn acquire_jwt_wallet(cfg: &Config, address: &str, chain: &str) -> Result<String> {
-    eprintln!("{} Signing in as {} on {}.", "!".yellow(), address, chain);
+    let st = Styler::stderr();
+    eprintln!("{} Signing in as {} on {}.", st.yellow("!"), address, chain);
     let pk = zeroize::Zeroizing::new(
         Password::new()
             .with_prompt("Private key (hex)")
@@ -72,15 +74,27 @@ fn acquire_jwt_wallet(cfg: &Config, address: &str, chain: &str) -> Result<String
     Ok(jwt)
 }
 
-fn list(cfg: &Config) -> Result<()> {
+fn list(cfg: &Config, json: bool) -> Result<()> {
     let jwt = acquire_jwt(cfg)?;
     let rows = list_api_keys(cfg, &jwt)?;
+
+    if json {
+        // Mirrors the `/api-keys` wire shape (`{"keys": [...]}`); the
+        // sign-in chatter above goes to stderr, so stdout is pure JSON.
+        let value = serde_json::json!({ "keys": rows });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).context("rendering key list")?
+        );
+        return Ok(());
+    }
 
     if rows.is_empty() {
         eprintln!("No API keys.");
         return Ok(());
     }
 
+    let st = Styler::stdout();
     let id_w = rows
         .iter()
         .map(|r| r.id.chars().count())
@@ -96,11 +110,11 @@ fn list(cfg: &Config) -> Result<()> {
 
     println!(
         "{:<id_w$}  {:<name_w$}  {:>14}  {:<20}  {}",
-        "ID".bold(),
-        "NAME".bold(),
-        "MONTHLY LIMIT".bold(),
-        "CREATED".bold(),
-        "ACTIVE".bold(),
+        st.bold("ID"),
+        st.bold("NAME"),
+        st.bold("MONTHLY LIMIT"),
+        st.bold("CREATED"),
+        st.bold("ACTIVE"),
         id_w = id_w,
         name_w = name_w,
     );
@@ -139,13 +153,14 @@ fn create(cfg: &Config, name: String, limit: Option<f64>) -> Result<()> {
         },
     )?;
 
-    eprintln!("{} created API key:", "ok:".green());
+    let st = Styler::stderr();
+    eprintln!("{} created API key:", st.green("ok:"));
     eprintln!("id:   {}", created.id);
     eprintln!("name: {}", created.name);
-    eprintln!("key:  {}", created.full_key.bold());
+    eprintln!("key:  {}", st.bold(&created.full_key));
     eprintln!(
         "{} This is the only time this key will be shown.",
-        "!".yellow().bold()
+        st.yellow_bold("!")
     );
     Ok(())
 }
@@ -162,6 +177,6 @@ fn delete(cfg: &Config, id: String) -> Result<()> {
     }
     let jwt = acquire_jwt(cfg)?;
     delete_api_key(cfg, &jwt, &id)?;
-    eprintln!("{} deleted key {}", "ok:".green(), id);
+    eprintln!("{} deleted key {}", Styler::stderr().green("ok:"), id);
     Ok(())
 }

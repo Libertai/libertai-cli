@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use owo_colors::OwoColorize;
 
 use crate::commands::fetch_tool::local_fetch;
+use crate::commands::output::Styler;
 
 const MAX_CHARS: usize = 16_000;
 
@@ -19,8 +19,9 @@ pub fn run(url: String, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("{}", page.title.bold());
-    println!("{}", page.final_url.cyan());
+    let st = Styler::stdout();
+    println!("{}", st.bold(&page.title));
+    println!("{}", st.cyan(&page.final_url));
     println!();
     if page.text.is_empty() {
         eprintln!("no content extracted");

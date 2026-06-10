@@ -129,15 +129,15 @@ Model and provider default to `default_code_model` /
 | --- | --- |
 | `libertai login` | Interactive login: browser SSO (recommended) or paste an API key. |
 | `libertai logout` | Clear saved credentials (backs up the config to `config.toml.bak.<epoch>`). |
-| `libertai status` | Show current auth state and default models. |
-| `libertai models` | List models available from `/v1/models`. |
+| `libertai status` | Show current auth state and default models. `--json`. |
+| `libertai models` | List models available from `/v1/models`. `--json`; `--refresh` re-syncs the model catalog persisted for `libertai code`. |
 | `libertai ask <prompt>` | One-shot, non-streaming completion. |
 | `libertai chat` | Streaming chat REPL with history. `--system` for a system prompt. |
-| `libertai code [prompt]` | The coding agent (see above). `--print/-p`, `--plan`, `--resume`, `--continue`, `--list-sessions`, `--sandbox`, `--model`, `--provider`. Alias binary: `lcode`. |
+| `libertai code [prompt]` | The coding agent (see above). `--print/-p`, `--plan`, `--resume`, `--continue`, `--list-sessions` (`--json`), `--sandbox`, `--model`, `--provider`. Alias binary: `lcode`. |
 | `libertai search <query>` | Web search via `search.libertai.io`. `--max-results`, `--type web\|news\|images`, `--engines`, `--json`. |
 | `libertai fetch <url>` | Fetch a URL and return its cleaned article text (title, content, word count). `--json` for the raw response. |
 | `libertai image <prompt>` | Generate and save images. `--n`, `--size`, `--out`, `--model`, `--force`. |
-| `libertai keys list\|create\|delete` | Manage your account's API keys. |
+| `libertai keys list\|create\|delete` | Manage your account's API keys. `list --json`. |
 | `libertai run -- <cmd>` | Exec any command with LibertAI env vars injected. |
 | `libertai claude [args]` | `run` preset for [Claude Code](https://docs.claude.com/en/docs/claude-code). |
 | `libertai opencode [args]` | Writes a `libertai` provider into `~/.config/opencode/opencode.json`, sets `LIBERTAI_API_KEY`, then launches OpenCode. |
@@ -148,6 +148,29 @@ Model and provider default to `default_code_model` /
 | `libertai skills install\|list\|uninstall` | Manage the bundled Claude Code skills (image gen, web search). |
 | `libertai sandbox info` | Print the resolved bash-sandbox profile for this host. `--json`. |
 | `libertai import claude-code …` | Import Claude Code transcripts into resumable `libertai code` sessions. |
+
+### Scripting
+
+The CLI is built to compose with pipes and scripts:
+
+- **`--json`** — `status`, `models`, `keys list`, `code --list-sessions`,
+  `search`, `fetch`, `sandbox info`, and `import claude-code list|show`
+  emit machine-readable JSON. JSON is the *only* thing written to stdout;
+  progress notes and human extras go to stderr.
+- **Styling** — ANSI colors are emitted only when the destination stream
+  is a terminal; piped output is plain text. `NO_COLOR` (per
+  [no-color.org](https://no-color.org)) and `TERM=dumb` disable styling
+  everywhere.
+- **Exit codes** —
+
+  | Code | Meaning |
+  | --- | --- |
+  | 0 | success |
+  | 1 | generic failure |
+  | 2 | usage error (bad flags/arguments) |
+  | 3 | auth required or rejected — run `libertai login` |
+  | 4 | network/connect failure (backend unreachable, DNS, timeout) |
+  | 5 | server-side API error (non-401 4xx/5xx response) |
 
 ## Config
 

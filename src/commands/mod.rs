@@ -46,6 +46,7 @@ pub mod login;
 pub mod logout;
 pub mod models;
 pub mod notebook_tool;
+pub mod output;
 pub mod run;
 pub mod search;
 pub mod search_tool;

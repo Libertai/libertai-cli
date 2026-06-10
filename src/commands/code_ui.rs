@@ -57,7 +57,7 @@ use crate::commands::code_sandbox::{
     binary_on_path, detect_strict_profile, format_profile_text, BindKind, StrictProfile,
 };
 use crate::commands::code_session::{
-    build_session_options, list_past_sessions, CodeSessionConfig, SessionPersistence,
+    build_session_options, list_past_sessions, CodeSessionConfig, SessionMeta, SessionPersistence,
 };
 use crate::commands::code_skills::{self, SkillPillar};
 use crate::commands::code_term::TerminalApprovalUi;
@@ -67,6 +67,9 @@ use crate::config::{mask_key, Config as LibertaiConfig};
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
+/// Brand accent for the welcome header — matches the cyan `❯` prompt
+/// chevron the input bar paints via crossterm.
+const CYAN: &str = "\x1b[36m";
 
 const SHELL_ESCAPE_MAX_DISPLAY_BYTES: usize = 256 * 1024;
 const SHELL_ESCAPE_CONTEXT_LIMIT: usize = 5;
@@ -89,7 +92,8 @@ const STATUS_LINE_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
 const STATUS_LINE_COMMAND_CACHE_TTL: Duration = Duration::from_secs(5);
 const BACKGROUND_AGENT_LOG_TAIL_BYTES: usize = 64 * 1024;
 const STATUS_LINE_TOKENS: &[&str] = &[
-    "project", "path", "session", "backend", "model", "mode", "style", "tokens", "ctx", "live",
+    "project", "path", "session", "backend", "model", "mode", "style", "tokens", "ctx", "cost",
+    "live",
 ];
 
 /// Snapshot of the last completed turn's token usage. Written in
@@ -103,6 +107,10 @@ struct BarStatus {
     output_style: Option<String>,
     status_line_template: String,
     status_line_command: String,
+    /// Estimated session cost so far (pricing-table lookup over this
+    /// session's usage records). `None` before the first turn or when
+    /// the model has no pricing entry.
+    estimated_cost: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -541,7 +549,7 @@ fn rule_chip(cols: usize, mode: Mode) -> String {
         Some(s) => {
             let text = status_line_command_text(&s.status_line_command)
                 .or_else(|| expand_status_line_template(&s.status_line_template, &s, mode))
-                .unwrap_or_else(|| default_rule_text(&s));
+                .unwrap_or_else(|| default_rule_text(&s, mode));
             format!(" {text} ")
         }
         None => String::new(),
@@ -659,18 +667,24 @@ fn first_status_line(text: &str) -> String {
         .collect()
 }
 
-fn default_rule_text(status: &BarStatus) -> String {
+/// Default status-line text when no template/command is configured:
+/// `model · mode · context-used% (used/cap)` plus an estimated session
+/// cost when the pricing table knows the model. Mode is included so a
+/// Shift+Tab toggle is visible in the bar, not just in the prompt chip.
+fn default_rule_text(status: &BarStatus, mode: Mode) -> String {
+    let mut text = format!("{} · {}", status.model_label, mode_label(mode));
     if status.context_window > 0 {
         let pct = context_percent(status.input_tokens, status.context_window);
-        format!(
-            "{pct}% · {} / {} · {}",
+        text.push_str(&format!(
+            " · {pct}% ctx ({} / {})",
             human_tokens(status.input_tokens),
             human_tokens(u64::from(status.context_window)),
-            status.model_label
-        )
-    } else {
-        status.model_label.clone()
+        ));
     }
+    if let Some(cost) = status.estimated_cost.filter(|cost| *cost > 0.0) {
+        text.push_str(&format!(" · ~{}", dollar(cost)));
+    }
+    text
 }
 
 fn context_percent(input_tokens: u64, context_window: u32) -> u32 {
@@ -726,7 +740,35 @@ pub fn run_interactive(
     bash_command_wrapper: Option<Vec<String>>,
     cfg: Arc<LibertaiConfig>,
 ) -> Result<()> {
-    print_banner(&provider, &model, mode);
+    let styled = welcome_styling_enabled();
+    // `--continue`/`--resume`: one-line summary of what came back,
+    // printed above the welcome header.
+    let resumed = resume_path
+        .as_ref()
+        .and_then(|path| resume_session_meta(path));
+    if let Some(meta) = resumed.as_ref() {
+        let summary = resume_summary_text(meta, unix_now_ms());
+        if styled {
+            println!("{DIM}  {summary}{RESET}");
+        } else {
+            println!("  {summary}");
+        }
+    }
+    let cwd_label = std::env::current_dir()
+        .map(|cwd| abbreviate_home(&cwd))
+        .unwrap_or_else(|_| "?".to_string());
+    let welcome = WelcomeInfo {
+        provider: provider.clone(),
+        model: model.clone(),
+        mode,
+        cwd: cwd_label,
+        session: session_state_label(resumed.as_ref()),
+        sandbox: sandbox_welcome_label(bash_command_wrapper.as_deref()),
+    };
+    for line in welcome_lines(&welcome, styled) {
+        println!("{line}");
+    }
+    println!();
 
     // Prime the status bar so the rule renders a useful label even
     // before the first turn completes.
@@ -737,6 +779,7 @@ pub fn run_interactive(
         output_style: None,
         status_line_template: cfg.status_line_template.clone(),
         status_line_command: cfg.status_line_command.clone(),
+        estimated_cost: None,
     });
 
     // Forward Ctrl-C during streaming to pi's AbortHandle.
@@ -771,15 +814,174 @@ pub fn run_interactive(
     })
 }
 
-fn print_banner(provider: &str, model: &str, mode: Mode) {
-    let mode_tag = match mode {
-        Mode::Normal => String::new(),
-        Mode::AcceptEdits => format!(" {DIM}[accept-edits]{RESET}"),
-        Mode::Plan => format!(" {DIM}[plan]{RESET}"),
+/// Inputs for the session-start welcome header. Plain data so
+/// [`welcome_lines`] stays pure and unit-testable without a TTY.
+struct WelcomeInfo {
+    provider: String,
+    model: String,
+    mode: Mode,
+    /// Working directory, already `~`-abbreviated.
+    cwd: String,
+    /// `new session` or `resumed "name"` / `resumed session <id8>`.
+    session: String,
+    /// `sandbox off` or `sandbox <wrapper>` (e.g. `sandbox bwrap`).
+    sandbox: String,
+}
+
+/// Assemble the welcome header printed once at session start.
+///
+/// `styled == false` (NO_COLOR, `TERM=dumb`, piped stdout) emits the
+/// same content as plain text — no ANSI, no accent mark. Kept at six
+/// lines so the whole header plus its trailing blank stays under eight.
+fn welcome_lines(info: &WelcomeInfo, styled: bool) -> Vec<String> {
+    let identity = format!("{}/{}", info.provider, info.model);
+    let mode = format!("{} mode", mode_label(info.mode));
+    let hint_keys = "/help commands · Shift+Tab plan mode · /model switch · /resume sessions";
+    let hint_input = "/mention <file> attach · Alt+Enter newline · Ctrl+C interrupt · Ctrl+D quit";
+    if styled {
+        vec![
+            format!("{CYAN}{BOLD}\u{258c}{RESET} {BOLD}LibertAI Code{RESET}"),
+            format!(
+                "{CYAN}\u{258c}{RESET} {BOLD}{identity}{RESET}{DIM} · {mode} · {}{RESET}",
+                info.sandbox
+            ),
+            format!(
+                "{CYAN}\u{258c}{RESET} {DIM}{} · {}{RESET}",
+                info.cwd, info.session
+            ),
+            String::new(),
+            format!("  {DIM}{hint_keys}{RESET}"),
+            format!("  {DIM}{hint_input}{RESET}"),
+        ]
+    } else {
+        vec![
+            "LibertAI Code".to_string(),
+            format!("{identity} · {mode} · {}", info.sandbox),
+            format!("{} · {}", info.cwd, info.session),
+            String::new(),
+            format!("  {hint_keys}"),
+            format!("  {hint_input}"),
+        ]
+    }
+}
+
+/// Whether the welcome header (and resume summary) should carry ANSI
+/// styling: stdout is a TTY, NO_COLOR is unset, and TERM isn't dumb.
+/// The raw-mode input bar below only runs on a TTY anyway; this gate
+/// keeps the one-shot cooked-mode header honest when output is piped
+/// or the user opted out of color.
+fn welcome_styling_enabled() -> bool {
+    use std::io::IsTerminal;
+    crate::commands::chat_render::styling_enabled(io::stdout().is_terminal())
+}
+
+/// `~`-abbreviate a path when it sits under the user's home directory.
+fn abbreviate_home(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rest) = path.strip_prefix(&home) {
+            return if rest.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", rest.display())
+            };
+        }
+    }
+    path.display().to_string()
+}
+
+/// `new session`, `resumed "name"`, or `resumed session <id8>`.
+fn session_state_label(resumed: Option<&SessionMeta>) -> String {
+    match resumed {
+        Some(meta) => match meta
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            Some(name) => format!("resumed \"{name}\""),
+            None => format!("resumed {}", short_session_id(&meta.id)),
+        },
+        None => "new session".to_string(),
+    }
+}
+
+fn short_session_id(id: &str) -> String {
+    let short: String = id.chars().take(8).collect();
+    if short.is_empty() {
+        "session".to_string()
+    } else {
+        format!("session {short}")
+    }
+}
+
+/// `sandbox off` when bash runs unwrapped, otherwise the wrapper's
+/// binary name (e.g. `sandbox bwrap` for `--sandbox=strict`).
+fn sandbox_welcome_label(wrapper: Option<&[String]>) -> String {
+    match wrapper.and_then(|argv| argv.first()) {
+        Some(first) => {
+            let name = Path::new(first)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(first.as_str());
+            format!("sandbox {name}")
+        }
+        None => "sandbox off".to_string(),
+    }
+}
+
+/// Locate the on-disk index entry for the session being resumed so the
+/// welcome header can show its name/age/message count. Best-effort:
+/// a session file that pi never indexed just yields `None`.
+fn resume_session_meta(path: &Path) -> Option<SessionMeta> {
+    let sessions = list_past_sessions(None).ok()?;
+    let canonical = path.canonicalize().ok();
+    sessions.into_iter().find(|meta| {
+        let meta_path = Path::new(&meta.path);
+        meta_path == path
+            || canonical
+                .as_deref()
+                .is_some_and(|target| meta_path.canonicalize().is_ok_and(|p| p == target))
+    })
+}
+
+/// One-line `--continue`/`--resume` summary: which session came back,
+/// how old it is, and how many messages it carries.
+fn resume_summary_text(meta: &SessionMeta, now_ms: i64) -> String {
+    let label = match meta
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        Some(name) => format!("\"{name}\""),
+        None => short_session_id(&meta.id),
     };
-    println!("{BOLD}libertai code{RESET} {DIM}— interactive ({provider}/{model}){RESET}{mode_tag}");
-    println!("{DIM}  type /help for commands, /exit or Ctrl+D to quit{RESET}");
-    println!();
+    let age = human_age_ms(now_ms.saturating_sub(meta.last_modified_ms));
+    let messages = match meta.message_count {
+        1 => "1 message".to_string(),
+        n => format!("{n} messages"),
+    };
+    format!("\u{21ba} resumed {label} · {age} · {messages}")
+}
+
+fn human_age_ms(delta_ms: i64) -> String {
+    let secs = (delta_ms / 1000).max(0);
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+fn unix_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 async fn repl_loop(
@@ -1785,6 +1987,7 @@ async fn repl_loop(
                                         output_style: output_style.clone(),
                                         status_line_template: cfg.status_line_template.clone(),
                                         status_line_command: cfg.status_line_command.clone(),
+                                        estimated_cost: None,
                                     });
                                     println!("{DIM}  → model set to {provider}/{model}{RESET}");
                                 }
@@ -1810,6 +2013,7 @@ async fn repl_loop(
                                     output_style: output_style.clone(),
                                     status_line_template: cfg.status_line_template.clone(),
                                     status_line_command: cfg.status_line_command.clone(),
+                                    estimated_cost: None,
                                 });
                                 println!("{DIM}  → model set to {provider}/{model}{RESET}");
                             }
@@ -2208,6 +2412,8 @@ async fn repl_loop(
                     output_style: output_style.clone(),
                     status_line_template: cfg.status_line_template.clone(),
                     status_line_command: cfg.status_line_command.clone(),
+                    estimated_cost: usage_summary(&usage_history)
+                        .and_then(|summary| summary.model_token_cost()),
                 });
                 eprintln!(
                     "{DIM}  {}/{}  stop: {:?}  in={} out={}{RESET}",
@@ -2591,6 +2797,7 @@ async fn reload_repl_session(
         output_style: None,
         status_line_template: cfg.status_line_template.clone(),
         status_line_command: cfg.status_line_command.clone(),
+        estimated_cost: None,
     });
     println!("{DIM}  → {label}; fresh session using {provider}/{model}.{RESET}");
     Ok(handle)
@@ -3027,142 +3234,143 @@ fn print_rehydrated_transcript(messages: &[Message]) {
     println!();
 }
 
+/// One `/help` category: a scannable header plus its command lines.
+struct HelpSection {
+    title: &'static str,
+    lines: Vec<String>,
+}
+
+/// `/help` content grouped by category. Pure (no printing) so tests can
+/// assert section structure and that key commands stay documented.
+fn help_sections() -> Vec<HelpSection> {
+    vec![
+        HelpSection {
+            title: "session",
+            lines: vec![
+                "/help — show this message".to_string(),
+                "/exit — quit the REPL (also /quit, Ctrl+D)".to_string(),
+                "/clear — wipe the screen and start a fresh session (also /new)".to_string(),
+                "/resume [session|path] — resume the latest or specified saved session".to_string(),
+                "/fork [list|index|id] — fork from a previous user message".to_string(),
+                "/reload [config|session|now|fresh] — reload config and start a fresh agent session".to_string(),
+                format!("{} — set/show this session's display name (also /rename)", name_usage_text()),
+                format!("{} — show current REPL session status", status_usage_text()),
+                "/export [path] — write this session transcript as Markdown".to_string(),
+                "/share [path] — write this session transcript as shareable HTML".to_string(),
+                "/share gist [public|secret] [filename.html] — publish the HTML transcript with gh".to_string(),
+            ],
+        },
+        HelpSection {
+            title: "modes & permissions",
+            lines: vec![
+                "/plan — toggle plan mode (also Shift+Tab)".to_string(),
+                permissions_usage_text().to_string(),
+                format!("{} — alias for /permissions", mode_usage_text()),
+                "/forget — clear saved allow rules".to_string(),
+                format!("{} — inspect the bash sandbox profile", sandbox_usage_text()),
+            ],
+        },
+        HelpSection {
+            title: "model & output",
+            lines: vec![
+                model_usage_text().to_string(),
+                "/thinking [off|minimal|low|medium|high|xhigh] — show or set thinking".to_string(),
+                scoped_models_usage_text().to_string(),
+                output_style_usage_text().to_string(),
+                "/theme [status|show|current|system|dark|light|high-contrast] — show terminal theme status".to_string(),
+                "/compact — compact older conversation history now".to_string(),
+                format!("{} — show token usage for this REPL session", usage_slash_usage_text()),
+                format!("{} — customize the input-bar status line", status_line_usage_text()),
+            ],
+        },
+        HelpSection {
+            title: "context & files",
+            lines: vec![
+                "/image <path> [prompt] — attach a local image to the next prompt".to_string(),
+                "/attach <path> [prompt] — alias for /image".to_string(),
+                "/mention <path> [prompt] — attach a local text file to the next prompt".to_string(),
+                format!("{} — show a bounded project tree", tree_usage_text()),
+                format!("{} — show recent git commits", changelog_usage_text()),
+                "/memory — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path)".to_string(),
+                "/remember [kind:] <text> — append typed project memory (user, feedback, project, reference)".to_string(),
+                "/init [--agent|from-agent json|from-agent preview append|preview merge|preview merge-lines|preview replace|preview [append|merge|merge-lines] sections N[,M]|N-M|all|append sections N[,M]|N-M|all|merge sections N[,M]|N-M|all|merge-lines sections N[,M]|N-M|all|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance".to_string(),
+                "/onboarding|/onboard [show|preview|save|path|gist|json|--json|status --json|show --json|preview --json] — preview or write a local project onboarding guide".to_string(),
+                "/onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh".to_string(),
+            ],
+        },
+        HelpSection {
+            title: "automation & agents",
+            lines: vec![
+                "/loop [turns] [goal]|json [turns] [goal]|--json [turns] [goal]|status --json — run bounded autonomous follow-up turns".to_string(),
+                "/auto on [turns] [goal] — bounded continuous execution (/auto off|stop|cancel|status|state|json|--json|status --json|state --json; also /autorun, /continuous)".to_string(),
+                "/schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|status|state|json|--json|list --json|show|inspect|show-json|run|now|trigger|cancel|delete|rm|clear|stop; also /cron)".to_string(),
+                "/agents [list|status|show <name>|json|--json|list --json|status --json|show --json|show <name> --json|open|settings|edit|background|bg|create [--worktree|--same-cwd] <name>|delete|remove <name>] — list or inspect named sub-agents".to_string(),
+                "/agents create [--worktree|--same-cwd] <name> [description] — create a project sub-agent".to_string(),
+                "/agents delete <name> — delete the active named sub-agent definition".to_string(),
+                "/agent [--worktree|--same-cwd|--background|--detached] <name> <task> — run a named sub-agent task".to_string(),
+                "/agent --background|--detached <name> <task> — start a detached terminal agent and write a log under ~/.config/libertai/code-background-agents".to_string(),
+                "/agents background [list|show|log|kill|prune|clear] — inspect, stop, or prune terminal background agents".to_string(),
+                "/template <name> [args] — expand a prompt template".to_string(),
+                "/skills [list|status|show|json|--json|status --json|list --json|show --json|show <name>|show <name> --json|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions".to_string(),
+                "/send [target message] — show terminal inter-session send status".to_string(),
+            ],
+        },
+        HelpSection {
+            title: "review & integrations",
+            lines: vec![
+                "/review [scope] — ask the agent to review current code changes".to_string(),
+                "/security-review [scope] — ask for a focused security review".to_string(),
+                "/pr_comments [scope] — ask the agent to inspect PR review comments".to_string(),
+                "/pr_comments reply <thread_id> <body> — reply to a GitHub PR review thread".to_string(),
+                "/pr_comments resolve <thread_id> — resolve a GitHub PR review thread".to_string(),
+                "/pr_comments unresolve <thread_id> — reopen a GitHub PR review thread".to_string(),
+                "/pr_comments viewed <path> — mark a pull request file as viewed".to_string(),
+                "/pr_comments unviewed <path> — mark a pull request file as unviewed".to_string(),
+                "/pr_comments thread <path>:<line> <body> — add a GitHub PR line review thread".to_string(),
+                "/pr_comments edit <comment_id> <body> — edit a GitHub PR review comment".to_string(),
+                "/pr_comments review <approve|comment|request_changes> <body> — submit a GitHub PR summary review".to_string(),
+                "/pr_comments drafts submit [approve|comment|request_changes] [body] — publish queued draft threads, optionally with a review event".to_string(),
+                "/hooks — show configured command hooks (/hook is accepted too)".to_string(),
+                "/mcp — show terminal MCP support status".to_string(),
+                "/ide — show IDE integration status".to_string(),
+            ],
+        },
+        HelpSection {
+            title: "config & diagnostics",
+            lines: vec![
+                "/config [status|show|current|info|path|open|backends|defaults|agents|skills|hooks|mcp|approvals|appearance|sandbox|advanced|set <key> <value>|unset <key>] — show or update active config".to_string(),
+                format!("{} — inspect auth or run libertai login", login_usage_text()),
+                format!("{} — run libertai logout or explain provider logout", logout_usage_text()),
+                format!("{} — run a local session/config diagnostic report", doctor_usage_text()),
+                "/notify on|enable|enabled|off|disable|disabled|clear|status|state|show|test|ping — turn-complete terminal notifications".to_string(),
+                "/abort [status|cancel|stop|interrupt] — show how to interrupt the active CLI turn".to_string(),
+                "/vim — show Vim-input status".to_string(),
+                "/bug — print a bug report template".to_string(),
+            ],
+        },
+        HelpSection {
+            title: "input & keys",
+            lines: vec![
+                "multi-line — paste keeps newlines; Alt+Enter or Ctrl+J inserts one; Enter submits".to_string(),
+                "!<cmd> — run a local shell command in this cwd".to_string(),
+                format!("{} — show input bar keyboard controls", hotkeys_usage_text()),
+                format!("{} — show recent submitted prompts", history_usage_text()),
+                format!("{} — copy the last assistant response to the terminal clipboard", copy_usage_text()),
+                "↑ / ↓ — walk through previously submitted prompts".to_string(),
+                "← / → — move cursor in the current line".to_string(),
+                "Ctrl+C — cancel the line / interrupt streaming".to_string(),
+            ],
+        },
+    ]
+}
+
 fn print_help() {
-    println!("{DIM}  /help     — show this message{RESET}");
-    println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
-    println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
-    println!("{DIM}  multi-line — paste keeps newlines; Alt+Enter or Ctrl+J inserts one; Enter submits{RESET}");
-    println!("{DIM}  {}{RESET}", permissions_usage_text());
-    println!(
-        "{DIM}  {} — alias for /permissions{RESET}",
-        mode_usage_text()
-    );
-    println!("{DIM}  {}{RESET}", model_usage_text());
-    println!(
-        "{DIM}  {} — set/show this session's display name (also /rename){RESET}",
-        name_usage_text()
-    );
-    println!(
-        "{DIM}  {} — show current REPL session status{RESET}",
-        status_usage_text()
-    );
-    println!(
-        "{DIM}  {} — run a local session/config diagnostic report{RESET}",
-        doctor_usage_text()
-    );
-    println!("{DIM}  /abort [status|cancel|stop|interrupt] — show how to interrupt the active CLI turn{RESET}");
-    println!("{DIM}  /review [scope] — ask the agent to review current code changes{RESET}");
-    println!("{DIM}  /security-review [scope] — ask for a focused security review{RESET}");
-    println!("{DIM}  /pr_comments [scope] — ask the agent to inspect PR review comments{RESET}");
-    println!(
-        "{DIM}  /pr_comments reply <thread_id> <body> — reply to a GitHub PR review thread{RESET}"
-    );
-    println!("{DIM}  /pr_comments resolve <thread_id> — resolve a GitHub PR review thread{RESET}");
-    println!("{DIM}  /pr_comments unresolve <thread_id> — reopen a GitHub PR review thread{RESET}");
-    println!("{DIM}  /pr_comments viewed <path> — mark a pull request file as viewed{RESET}");
-    println!("{DIM}  /pr_comments unviewed <path> — mark a pull request file as unviewed{RESET}");
-    println!(
-        "{DIM}  /pr_comments thread <path>:<line> <body> — add a GitHub PR line review thread{RESET}"
-    );
-    println!(
-        "{DIM}  /pr_comments edit <comment_id> <body> — edit a GitHub PR review comment{RESET}"
-    );
-    println!(
-        "{DIM}  /pr_comments review <approve|comment|request_changes> <body> — submit a GitHub PR summary review{RESET}"
-    );
-    println!(
-        "{DIM}  /pr_comments drafts submit [approve|comment|request_changes] [body] — publish queued draft threads, optionally with a review event{RESET}"
-    );
-    println!(
-        "{DIM}  {} — inspect the bash sandbox profile{RESET}",
-        sandbox_usage_text()
-    );
-    println!(
-        "{DIM}  {} — show token usage for this REPL session{RESET}",
-        usage_slash_usage_text()
-    );
-    println!(
-        "{DIM}  {} — show recent submitted prompts{RESET}",
-        history_usage_text()
-    );
-    println!(
-        "{DIM}  {} — copy the last assistant response to the terminal clipboard{RESET}",
-        copy_usage_text()
-    );
-    println!("{DIM}  /config [status|show|current|info|path|open|backends|defaults|agents|skills|hooks|mcp|approvals|appearance|sandbox|advanced|set <key> <value>|unset <key>] — show or update active config{RESET}");
-    println!("{DIM}  /hooks    — show configured command hooks (/hook is accepted too){RESET}");
-    println!("{DIM}  /mcp      — show terminal MCP support status{RESET}");
-    println!(
-        "{DIM}  {} — customize the input-bar status line{RESET}",
-        status_line_usage_text()
-    );
-    println!(
-        "{DIM}  {} — show input bar keyboard controls{RESET}",
-        hotkeys_usage_text()
-    );
-    println!(
-        "{DIM}  {} — show a bounded project tree{RESET}",
-        tree_usage_text()
-    );
-    println!(
-        "{DIM}  {} — show recent git commits{RESET}",
-        changelog_usage_text()
-    );
-    println!("{DIM}  /reload [config|session|now|fresh] — reload config and start a fresh agent session{RESET}");
-    println!("{DIM}  /resume [session|path] — resume the latest or specified saved session{RESET}");
-    println!("{DIM}  /fork [list|index|id] — fork from a previous user message{RESET}");
-    println!("{DIM}  /thinking [off|minimal|low|medium|high|xhigh] — show or set thinking{RESET}");
-    println!("{DIM}  {}{RESET}", scoped_models_usage_text());
-    println!("{DIM}  /compact — compact older conversation history now{RESET}");
-    println!("{DIM}  /loop [turns] [goal]|json [turns] [goal]|--json [turns] [goal]|status --json — run bounded autonomous follow-up turns{RESET}");
-    println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|stop|cancel|status|state|json|--json|status --json|state --json; also /autorun, /continuous){RESET}");
-    println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|status|state|json|--json|list --json|show|inspect|show-json|run|now|trigger|cancel|delete|rm|clear|stop; also /cron){RESET}");
-    println!("{DIM}  /send [target message] — show terminal inter-session send status{RESET}");
-    println!("{DIM}  /notify on|enable|enabled|off|disable|disabled|clear|status|state|show|test|ping — turn-complete terminal notifications{RESET}");
-    println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
-    println!("{DIM}  /attach <path> [prompt] — alias for /image{RESET}");
-    println!(
-        "{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}"
-    );
-    println!(
-        "{DIM}  {} — inspect auth or run libertai login{RESET}",
-        login_usage_text()
-    );
-    println!(
-        "{DIM}  {} — run libertai logout or explain provider logout{RESET}",
-        logout_usage_text()
-    );
-    println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
-    println!("{DIM}  /skills [list|status|show|json|--json|status --json|list --json|show --json|show <name>|show <name> --json|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions{RESET}");
-    println!(
-        "{DIM}  /init [--agent|from-agent json|from-agent preview append|preview merge|preview merge-lines|preview replace|preview [append|merge|merge-lines] sections N[,M]|N-M|all|append sections N[,M]|N-M|all|merge sections N[,M]|N-M|all|merge-lines sections N[,M]|N-M|all|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}"
-    );
-    println!("{DIM}  /onboarding|/onboard [show|preview|save|path|gist|json|--json|status --json|show --json|preview --json] — preview or write a local project onboarding guide{RESET}");
-    println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
-    println!("{DIM}  /agents [list|status|show <name>|json|--json|list --json|status --json|show --json|show <name> --json|open|settings|edit|background|bg|create [--worktree|--same-cwd] <name>|delete|remove <name>] — list or inspect named sub-agents{RESET}");
-    println!("{DIM}  /agents create [--worktree|--same-cwd] <name> [description] — create a project sub-agent{RESET}");
-    println!("{DIM}  /agents delete <name> — delete the active named sub-agent definition{RESET}");
-    println!(
-        "{DIM}  /agent [--worktree|--same-cwd|--background|--detached] <name> <task> — run a named sub-agent task{RESET}"
-    );
-    println!("{DIM}  /agent --background|--detached <name> <task> — start a detached terminal agent and write a log under ~/.config/libertai/code-background-agents{RESET}");
-    println!("{DIM}  /agents background [list|show|log|kill|prune|clear] — inspect, stop, or prune terminal background agents{RESET}");
-    println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
-    println!("{DIM}  /theme [status|show|current|system|dark|light|high-contrast] — show terminal theme status{RESET}");
-    println!("{DIM}  /export [path] — write this session transcript as Markdown{RESET}");
-    println!("{DIM}  /share [path] — write this session transcript as shareable HTML{RESET}");
-    println!("{DIM}  /share gist [public|secret] [filename.html] — publish the HTML transcript with gh{RESET}");
-    println!("{DIM}  {}{RESET}", output_style_usage_text());
-    println!("{DIM}  /vim      — show Vim-input status{RESET}");
-    println!("{DIM}  /ide      — show IDE integration status{RESET}");
-    println!("{DIM}  /bug      — print a bug report template{RESET}");
-    println!("{DIM}  /clear    — wipe the screen and start a fresh session (also /new){RESET}");
-    println!("{DIM}  /forget   — clear saved allow rules{RESET}");
-    println!("{DIM}  /remember [kind:] <text> — append typed project memory (user, feedback, project, reference){RESET}");
-    println!("{DIM}  !<cmd>    — run a local shell command in this cwd{RESET}");
-    println!("{DIM}  ↑ / ↓     — walk through previously submitted prompts{RESET}");
-    println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
-    println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");
+    for section in help_sections() {
+        println!("{BOLD}  {}{RESET}", section.title);
+        for line in &section.lines {
+            println!("{DIM}    {line}{RESET}");
+        }
+    }
     println!();
 }
 
@@ -4730,6 +4938,11 @@ fn expand_status_line_template(template: &str, status: &BarStatus, mode: Mode) -
         "-".to_string()
     };
     let output_style = status.output_style.as_deref().unwrap_or("default");
+    let cost = status
+        .estimated_cost
+        .filter(|cost| *cost > 0.0)
+        .map(|cost| format!("~{}", dollar(cost)))
+        .unwrap_or_else(|| "-".to_string());
 
     Some(replace_status_line_tokens(&template, |name| match name {
         "project" => Some(project.to_string()),
@@ -4741,6 +4954,7 @@ fn expand_status_line_template(template: &str, status: &BarStatus, mode: Mode) -
         "style" => Some(output_style.to_string()),
         "tokens" => Some(human_tokens(status.input_tokens)),
         "ctx" => Some(ctx.clone()),
+        "cost" => Some(cost.clone()),
         "live" => Some("idle".to_string()),
         _ => None,
     }))
@@ -15965,13 +16179,34 @@ mod tests {
             input_tokens: 2048,
             context_window: 4096,
             output_style: Some("review".to_string()),
-            status_line_template: "{backend}/{model} {mode} {style} {tokens} {ctx} {unknown}"
-                .to_string(),
+            status_line_template:
+                "{backend}/{model} {mode} {style} {tokens} {ctx} {cost} {unknown}".to_string(),
             status_line_command: String::new(),
+            estimated_cost: Some(0.1234),
         };
         let expanded =
             expand_status_line_template(&status.status_line_template, &status, Mode::Plan).unwrap();
-        assert_eq!(expanded, "libertai/qwen plan review 2.0k 50% {unknown}");
+        assert_eq!(
+            expanded,
+            "libertai/qwen plan review 2.0k 50% ~$0.12 {unknown}"
+        );
+    }
+
+    #[test]
+    fn status_line_cost_token_dashes_when_unpriced() {
+        let status = BarStatus {
+            model_label: "libertai/qwen".to_string(),
+            input_tokens: 0,
+            context_window: 4096,
+            output_style: None,
+            status_line_template: "{cost}".to_string(),
+            status_line_command: String::new(),
+            estimated_cost: None,
+        };
+        let expanded =
+            expand_status_line_template(&status.status_line_template, &status, Mode::Normal)
+                .unwrap();
+        assert_eq!(expanded, "-");
     }
 
     fn empty_tool_output() -> pi::sdk::ToolOutput {
@@ -15991,12 +16226,209 @@ mod tests {
             output_style: None,
             status_line_template: String::new(),
             status_line_command: String::new(),
+            estimated_cost: None,
         };
         assert!(expand_status_line_template("", &status, Mode::Normal).is_none());
         assert_eq!(
-            default_rule_text(&status),
-            "50% · 512 / 1.0k · libertai/qwen"
+            default_rule_text(&status, Mode::Normal),
+            "libertai/qwen · normal · 50% ctx (512 / 1.0k)"
         );
+    }
+
+    #[test]
+    fn default_rule_text_tracks_mode_and_cost() {
+        let mut status = BarStatus {
+            model_label: "libertai/qwen".to_string(),
+            input_tokens: 512,
+            context_window: 1024,
+            output_style: None,
+            status_line_template: String::new(),
+            status_line_command: String::new(),
+            estimated_cost: Some(0.4567),
+        };
+        assert_eq!(
+            default_rule_text(&status, Mode::Plan),
+            "libertai/qwen · plan · 50% ctx (512 / 1.0k) · ~$0.46"
+        );
+        // Shift+Tab back to normal is visible in the same snapshot.
+        assert_eq!(
+            default_rule_text(&status, Mode::AcceptEdits),
+            "libertai/qwen · accept-edits · 50% ctx (512 / 1.0k) · ~$0.46"
+        );
+        // No context window (unknown model) degrades to model · mode.
+        status.context_window = 0;
+        status.estimated_cost = None;
+        assert_eq!(
+            default_rule_text(&status, Mode::Normal),
+            "libertai/qwen · normal"
+        );
+    }
+
+    fn sample_welcome_info() -> WelcomeInfo {
+        WelcomeInfo {
+            provider: "libertai".to_string(),
+            model: "qwen3-coder-480b".to_string(),
+            mode: Mode::Plan,
+            cwd: "~/repos/demo".to_string(),
+            session: "new session".to_string(),
+            sandbox: "sandbox bwrap".to_string(),
+        }
+    }
+
+    #[test]
+    fn welcome_lines_styled_carry_identity_state_and_hints() {
+        let lines = welcome_lines(&sample_welcome_info(), true);
+        // Header + trailing blank printed by the caller stays ≤ 8 rows.
+        assert!(lines.len() <= 7, "welcome header too tall: {}", lines.len());
+        let joined = lines.join("\n");
+        assert!(joined.contains("LibertAI Code"));
+        assert!(joined.contains("libertai/qwen3-coder-480b"));
+        assert!(joined.contains("plan mode"));
+        assert!(joined.contains("sandbox bwrap"));
+        assert!(joined.contains("~/repos/demo"));
+        assert!(joined.contains("new session"));
+        assert!(joined.contains("/help commands"));
+        assert!(joined.contains("Shift+Tab plan mode"));
+        assert!(joined.contains("Alt+Enter newline"));
+        assert!(joined.contains("\u{1b}["), "styled header should use ANSI");
+    }
+
+    #[test]
+    fn welcome_lines_plain_fallback_has_no_ansi() {
+        let lines = welcome_lines(&sample_welcome_info(), false);
+        let joined = lines.join("\n");
+        assert!(!joined.contains('\u{1b}'), "plain header must be ANSI-free");
+        assert!(!joined.contains('\u{258c}'), "plain header drops the mark");
+        assert!(joined.contains("LibertAI Code"));
+        assert!(joined.contains("libertai/qwen3-coder-480b · plan mode · sandbox bwrap"));
+        assert!(joined.contains("~/repos/demo · new session"));
+        assert!(joined.contains("/help commands"));
+    }
+
+    fn sample_session_meta(name: Option<&str>) -> SessionMeta {
+        SessionMeta {
+            path: "/tmp/sessions/abc.jsonl".to_string(),
+            id: "abcdef1234567890".to_string(),
+            cwd: "/tmp/demo".to_string(),
+            timestamp: "2026-06-10T00:00:00Z".to_string(),
+            message_count: 14,
+            last_modified_ms: 1_000_000,
+            size_bytes: 2048,
+            name: name.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn resume_summary_text_reports_name_age_and_message_count() {
+        let meta = sample_session_meta(Some("refactor-bar"));
+        // Two hours after last_modified_ms.
+        let now = meta.last_modified_ms + 2 * 3600 * 1000;
+        assert_eq!(
+            resume_summary_text(&meta, now),
+            "\u{21ba} resumed \"refactor-bar\" · 2h ago · 14 messages"
+        );
+    }
+
+    #[test]
+    fn resume_summary_text_falls_back_to_short_id_and_singular_message() {
+        let mut meta = sample_session_meta(None);
+        meta.message_count = 1;
+        assert_eq!(
+            resume_summary_text(&meta, meta.last_modified_ms + 5_000),
+            "\u{21ba} resumed session abcdef12 · just now · 1 message"
+        );
+    }
+
+    #[test]
+    fn session_state_label_distinguishes_new_and_resumed() {
+        assert_eq!(session_state_label(None), "new session");
+        let named = sample_session_meta(Some("polish"));
+        assert_eq!(session_state_label(Some(&named)), "resumed \"polish\"");
+        let unnamed = sample_session_meta(Some("   "));
+        assert_eq!(
+            session_state_label(Some(&unnamed)),
+            "resumed session abcdef12"
+        );
+    }
+
+    #[test]
+    fn human_age_ms_scales_units_and_clamps_negative() {
+        assert_eq!(human_age_ms(-5), "just now");
+        assert_eq!(human_age_ms(59_999), "just now");
+        assert_eq!(human_age_ms(5 * 60 * 1000), "5m ago");
+        assert_eq!(human_age_ms(3 * 3600 * 1000), "3h ago");
+        assert_eq!(human_age_ms(2 * 86_400 * 1000), "2d ago");
+    }
+
+    #[test]
+    fn sandbox_welcome_label_names_wrapper_binary() {
+        assert_eq!(sandbox_welcome_label(None), "sandbox off");
+        let wrapper = vec!["/usr/bin/bwrap".to_string(), "--ro-bind".to_string()];
+        assert_eq!(sandbox_welcome_label(Some(&wrapper)), "sandbox bwrap");
+    }
+
+    #[test]
+    fn abbreviate_home_tilde_compresses_home_paths() {
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(abbreviate_home(&home), "~");
+            assert_eq!(
+                abbreviate_home(&home.join("repos/demo")),
+                "~/repos/demo".to_string()
+            );
+        }
+        assert_eq!(
+            abbreviate_home(Path::new("/opt/elsewhere")),
+            "/opt/elsewhere"
+        );
+    }
+
+    #[test]
+    fn help_sections_group_commands_under_scannable_headers() {
+        let sections = help_sections();
+        let titles: Vec<&str> = sections.iter().map(|s| s.title).collect();
+        assert_eq!(
+            titles,
+            vec![
+                "session",
+                "modes & permissions",
+                "model & output",
+                "context & files",
+                "automation & agents",
+                "review & integrations",
+                "config & diagnostics",
+                "input & keys",
+            ]
+        );
+        for section in &sections {
+            assert!(
+                !section.lines.is_empty(),
+                "section {} has no entries",
+                section.title
+            );
+        }
+        let all: String = sections
+            .iter()
+            .flat_map(|s| s.lines.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in [
+            "/help",
+            "/exit",
+            "/plan",
+            "/model",
+            "/resume",
+            "/compact",
+            "/loop",
+            "/agents",
+            "/pr_comments",
+            "/config",
+            "/mention",
+            "multi-line",
+            "!<cmd>",
+        ] {
+            assert!(all.contains(needle), "help no longer documents {needle}");
+        }
     }
 
     #[test]

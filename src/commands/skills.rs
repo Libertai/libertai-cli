@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
-use owo_colors::OwoColorize;
 use std::path::{Path, PathBuf};
 
 use crate::cli::SkillsAction;
+use crate::commands::output::Styler;
 
 struct BundledSkill {
     /// Directory name under `.claude/skills/`.
@@ -59,7 +59,11 @@ pub fn install(host: Host, project: bool, force: bool) -> Result<()> {
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         std::fs::write(&skill_path, s.body)
             .with_context(|| format!("writing {}", skill_path.display()))?;
-        eprintln!("  {} {}", "skill:".dimmed(), skill_path.display());
+        eprintln!(
+            "  {} {}",
+            Styler::stderr().dimmed("skill:"),
+            skill_path.display()
+        );
     }
     Ok(())
 }

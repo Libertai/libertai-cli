@@ -35,6 +35,7 @@ pub fn run(
     continue_recent: bool,
     list_sessions: bool,
     all: bool,
+    json: bool,
     sandbox: SandboxMode,
     print: bool,
     args: Vec<String>,
@@ -59,7 +60,7 @@ pub fn run(
 
     // --list-sessions short-circuits before any agent setup.
     if list_sessions {
-        return print_session_list(all);
+        return print_session_list(all, json);
     }
 
     // Resolve --resume / --continue into an explicit session path, if any.
@@ -258,13 +259,15 @@ fn render(event: AgentEvent) {
             let _ = std::io::stdout().flush();
         }
         AgentEvent::TurnStart { turn_index, .. } => {
-            eprintln!("\n  \x1b[2m[turn {turn_index}]\x1b[0m");
+            let (dim, reset) = crate::commands::output::stderr_dim_pair();
+            eprintln!("\n  {dim}[turn {turn_index}]{reset}");
         }
         AgentEvent::ToolExecutionStart {
             tool_name, args, ..
         } if tool_name != "todo" => {
             let preview = crate::commands::code_tool_preview::tool_preview(&tool_name, &args);
-            eprintln!("  \x1b[2m[tool] {preview}\x1b[0m");
+            let (dim, reset) = crate::commands::output::stderr_dim_pair();
+            eprintln!("  {dim}[tool] {preview}{reset}");
         }
         AgentEvent::AgentEnd { .. } => {
             // AgentEnd fires at the tail of the agent loop; a newline here
@@ -325,10 +328,11 @@ struct PrintModeApprovalUi;
 #[async_trait::async_trait]
 impl ApprovalUi for PrintModeApprovalUi {
     async fn decide(&self, tool_name: &str, _preview: &str, always_rule: &str) -> PromptChoice {
+        let (dim, reset) = crate::commands::output::stderr_dim_pair();
         eprintln!(
-            "  \x1b[2m[print] {tool_name} needs approval — auto-denied (non-interactive). \
+            "  {dim}[print] {tool_name} needs approval — auto-denied (non-interactive). \
              Pre-approve it by running interactively once and choosing \
-             \"always allow\" ({always_rule}).\x1b[0m"
+             \"always allow\" ({always_rule}).{reset}"
         );
         PromptChoice::Deny
     }
@@ -363,14 +367,39 @@ fn resolve_resume_path(resume: Option<PathBuf>, continue_recent: bool) -> Result
 /// Print recent session metadata sorted recency-desc, then exit.
 ///
 /// `all = false` filters to the current cwd; `all = true` lists every
-/// project pi has tracked.
-fn print_session_list(all: bool) -> Result<()> {
+/// project pi has tracked. With `json = true`, a JSON array (stable field
+/// names, possibly empty) is the only thing written to stdout.
+fn print_session_list(all: bool, json: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let metas = if all {
         list_past_sessions(None)?
     } else {
         list_past_sessions(Some(&cwd))?
     };
+
+    if json {
+        let rows: Vec<serde_json::Value> = metas
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "path": m.path,
+                    "id": m.id,
+                    "cwd": m.cwd,
+                    "name": m.name,
+                    "timestamp": m.timestamp,
+                    "message_count": m.message_count,
+                    "last_modified_ms": m.last_modified_ms,
+                    "size_bytes": m.size_bytes,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows)
+                .map_err(|e| anyhow::anyhow!("rendering session list: {e}"))?
+        );
+        return Ok(());
+    }
 
     if metas.is_empty() {
         if all {

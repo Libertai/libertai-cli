@@ -46,6 +46,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (status)
 _arguments "${_arguments_options[@]}" : \
+'--json[Emit JSON (auth state, base URLs, defaults) instead of the human summary]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '-V[Print version]' \
@@ -70,6 +71,7 @@ _arguments "${_arguments_options[@]}" : \
         case $line[1] in
             (list)
 _arguments "${_arguments_options[@]}" : \
+'--json[Emit the key rows as JSON (mirrors the \`/api-keys\` response) instead of the table]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '-V[Print version]' \
@@ -133,7 +135,8 @@ esac
 ;;
 (models)
 _arguments "${_arguments_options[@]}" : \
-'--refresh[Bypass cache (not yet used; placeholder for future caching)]' \
+'--refresh[Re-sync the persisted model catalog\: fetches \`/v1/models\` and merges any new models into pi'\''s \`models.json\` so they become selectable in \`libertai code\` (\`/model\`)]' \
+'--json[Emit the \`/v1/models\` listing as JSON instead of the table]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '-V[Print version]' \
@@ -273,6 +276,7 @@ _arguments "${_arguments_options[@]}" : \
 '(--resume --list-sessions)--continue[Resume the most recent session for the current working directory]' \
 '(--resume --continue)--list-sessions[Print recent sessions (most recent first) and exit, without starting the agent. Filters to the current cwd by default; pass \`--all\` to list every project]' \
 '--all[With \`--list-sessions\`, show sessions across every project]' \
+'--json[With \`--list-sessions\`, emit a JSON array (path, name, message_count, …) instead of the human list]' \
 '(--list-sessions)-p[Print mode (like \`claude -p\`)\: run a single agent turn headlessly and exit — no TUI, no interactive prompts. The assistant'\''s text streams to stdout; turn/tool noise goes to stderr. Tool calls not already covered by an allow rule are auto-denied instead of prompting, so scripts never hang. The prompt comes from the trailing args, piped stdin, or both (stdin becomes context above the args prompt). Composes with \`--resume\` / \`--continue\` to run one more headless turn against a saved session]' \
 '(--list-sessions)--print[Print mode (like \`claude -p\`)\: run a single agent turn headlessly and exit — no TUI, no interactive prompts. The assistant'\''s text streams to stdout; turn/tool noise goes to stderr. Tool calls not already covered by an allow rule are auto-denied instead of prompting, so scripts never hang. The prompt comes from the trailing args, piped stdin, or both (stdin becomes context above the args prompt). Composes with \`--resume\` / \`--continue\` to run one more headless turn against a saved session]' \
 '-h[Print help (see more with '\''--help'\'')]' \
