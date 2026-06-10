@@ -819,6 +819,13 @@ enum LineResult {
     Interrupted,
     /// User pressed Shift+Tab → toggle Normal ↔ Plan mode.
     ToggleMode,
+    /// Enter on an empty buffer while messages are queued → submit the
+    /// queued stack as the next prompt(s).
+    SubmitQueued,
+    /// Esc/Ctrl+C on an empty buffer discarded this many queued
+    /// messages (second-press semantics: the first Ctrl+C clears the
+    /// line, the next one clears the queue).
+    QueueCleared(usize),
 }
 
 // RawModeGuard lives in `code_term` so both this module and
@@ -936,6 +943,7 @@ fn welcome_lines(info: &WelcomeInfo, styled: bool) -> Vec<String> {
     let mode = format!("{} mode", mode_label(info.mode));
     let hint_keys = "/help commands · Shift+Tab plan mode · /model switch · /resume sessions";
     let hint_input = "/mention <file> attach · Alt+Enter newline · Ctrl+C interrupt · Ctrl+D quit";
+    let hint_queue = "type while the agent works — Enter queues for the next turn · ↑ edits queued";
     if styled {
         vec![
             format!("{CYAN}{BOLD}\u{258c}{RESET} {BOLD}LibertAI Code{RESET}"),
@@ -950,6 +958,7 @@ fn welcome_lines(info: &WelcomeInfo, styled: bool) -> Vec<String> {
             String::new(),
             format!("  {DIM}{hint_keys}{RESET}"),
             format!("  {DIM}{hint_input}{RESET}"),
+            format!("  {DIM}{hint_queue}{RESET}"),
         ]
     } else {
         vec![
@@ -959,6 +968,7 @@ fn welcome_lines(info: &WelcomeInfo, styled: bool) -> Vec<String> {
             String::new(),
             format!("  {hint_keys}"),
             format!("  {hint_input}"),
+            format!("  {hint_queue}"),
         ]
     }
 }
@@ -1151,9 +1161,32 @@ async fn repl_loop(
     let mut pr_comment_drafts: Vec<PrCommentDraft> = Vec::new();
     let mut last_shell_command: Option<String> = None;
     let mut pending_shell_context: Vec<String> = Vec::new();
+    // Message stacking: the queue is fed by the mid-turn input pump
+    // (Enter while the agent streams) and survives aborted turns so the
+    // idle bar can still submit/edit/discard it. `queued_submissions`
+    // holds the drained prompts awaiting auto-submission; `typed_carry`
+    // round-trips a half-typed line across the turn/idle boundary.
+    let message_queue: Arc<Mutex<MessageQueue>> = Arc::new(Mutex::new(MessageQueue::default()));
+    let mut queued_submissions: VecDeque<String> = VecDeque::new();
+    let mut typed_carry = String::new();
 
     loop {
-        let autonomous_turn = if let Some(prompt) = pop_due_scheduled_prompt(&mut scheduled_runs) {
+        // Drained queue first: these are real user prompts and beat
+        // scheduled/autonomous work.
+        let queued_turn = queued_submissions.pop_front();
+        if let Some(turn) = queued_turn.as_ref() {
+            let more = queued_submissions.len();
+            if more > 0 {
+                println!("{DIM}  → sending queued message ({more} still queued){RESET}");
+            } else if turn.contains("\n\n") {
+                println!("{DIM}  → sending queued messages as one prompt{RESET}");
+            } else {
+                println!("{DIM}  → sending queued message{RESET}");
+            }
+        }
+        let autonomous_turn = if queued_turn.is_some() {
+            None
+        } else if let Some(prompt) = pop_due_scheduled_prompt(&mut scheduled_runs) {
             if let Err(err) = persist_scheduled_runs_if_configured(
                 schedule_store_path.as_deref(),
                 &scheduled_runs,
@@ -1173,8 +1206,9 @@ async fn repl_loop(
             None
         };
         let is_autonomous = autonomous_turn.is_some();
-        let mut line = match autonomous_turn {
-            Some(prompt) => {
+        let mut line = match (queued_turn, autonomous_turn) {
+            (Some(queued), _) => queued,
+            (None, Some(prompt)) => {
                 if prompt.starts_with("Scheduled follow-up (") {
                     println!("{DIM}  /schedule: running due follow-up.{RESET}");
                 } else if let Some(run) = auto_run.as_ref() {
@@ -1191,8 +1225,27 @@ async fn repl_loop(
                 }
                 prompt
             }
-            None => match read_line(mode.get(), &history)? {
+            (None, None) => match read_line(
+                mode.get(),
+                &history,
+                &message_queue,
+                std::mem::take(&mut typed_carry),
+            )? {
                 LineResult::Submit(s) => s,
+                LineResult::SubmitQueued => {
+                    // Enter on an empty bar with stacked messages: drain
+                    // the queue into submissions; the loop top sends the
+                    // first one now and the rest in order.
+                    if let Ok(mut q) = message_queue.lock() {
+                        queued_submissions.extend(q.drain_submissions());
+                    }
+                    continue;
+                }
+                LineResult::QueueCleared(n) => {
+                    let plural = if n == 1 { "" } else { "s" };
+                    println!("{DIM}  ✗ {n} queued message{plural} discarded{RESET}");
+                    continue;
+                }
                 LineResult::Interrupted => {
                     // Ctrl+C in the input bar: discard this line, keep looping.
                     // We're now in cooked mode (read_line restored it); emit a
@@ -2469,6 +2522,16 @@ async fn repl_loop(
                 }
             }
         };
+        // Keep the keyboard alive while the agent works: Enter queues
+        // messages for the next turn (the footer under the spinner
+        // shows the stack), Up pops the last one back for editing.
+        // Stopped — and the terminal restored — before anything else
+        // reads input again.
+        let mut input_pump = TurnInputPump::start(
+            Arc::clone(&message_queue),
+            turn_renderer.lock().ok().and_then(|r| r.spinner_core()),
+            std::mem::take(&mut typed_carry),
+        );
         let result = if let Some(content) = content_override {
             handle
                 .prompt_with_content_with_abort(content, abort_signal, render)
@@ -2494,6 +2557,10 @@ async fn repl_loop(
             }
         };
         clear_current_abort();
+        // Take the keyboard back (join the pump thread, restore the
+        // terminal) before anything else prompts or reads. Half-typed
+        // text carries into the next pump / the idle bar.
+        typed_carry = input_pump.stop();
 
         // Stop the spinner and flush any buffered markdown before the
         // footer prints — on the error/abort paths AgentEnd never fired
@@ -2567,6 +2634,15 @@ async fn repl_loop(
                             run.completed, run.limit
                         );
                         auto_run = None;
+                    }
+                }
+                // Message stacking: a finished (non-aborted) turn drains
+                // the queue into the next submission(s) — consecutive
+                // plain messages join into one prompt, queued slash
+                // commands run individually. The loop top sends them.
+                if !matches!(msg.stop_reason, StopReason::Aborted) {
+                    if let Ok(mut q) = message_queue.lock() {
+                        queued_submissions.extend(q.drain_submissions());
                     }
                 }
             }
@@ -3488,6 +3564,7 @@ fn help_sections() -> Vec<HelpSection> {
             title: "input & keys",
             lines: vec![
                 "multi-line — paste keeps newlines; Alt+Enter or Ctrl+J inserts one; Enter submits".to_string(),
+                "queueing — type while the agent works; Enter stacks messages for the next turn (slash commands queue too and run on drain); ↑ on an empty input edits the last queued; Ctrl+C/Esc on an empty idle input drops the stack".to_string(),
                 "!<cmd> — run a local shell command in this cwd".to_string(),
                 format!("{} — show input bar keyboard controls", hotkeys_usage_text()),
                 format!("{} — show recent submitted prompts", history_usage_text()),
@@ -14973,6 +15050,15 @@ const SPINNER_TICK: Duration = Duration::from_millis(120);
 /// Fallback width when the terminal size probe fails (e.g. tests).
 const FALLBACK_RENDER_WIDTH: usize = 100;
 
+/// Current terminal width for footer/preview painting.
+fn term_cols() -> usize {
+    terminal::size()
+        .ok()
+        .map(|(cols, _)| cols as usize)
+        .filter(|cols| *cols > 0)
+        .unwrap_or(FALLBACK_RENDER_WIDTH)
+}
+
 /// Where a [`TurnRenderer`] writes its chrome (markers, previews,
 /// spinner). The REPL keeps everything on stdout — it owns the whole
 /// terminal. The one-shot path sends chrome to stderr so a piped
@@ -15008,7 +15094,8 @@ impl ChromeStream {
     }
 }
 
-/// State shared between the event thread and the spinner ticker.
+/// State shared between the event thread, the spinner ticker, and the
+/// mid-turn input pump (which feeds the queued-message footer).
 struct SpinnerCore {
     label: &'static str,
     started: Instant,
@@ -15016,29 +15103,76 @@ struct SpinnerCore {
     /// Ticker may draw. Cleared while content or a tool is printing so
     /// the spinner never interleaves with real output.
     visible: bool,
-    /// A spinner line is currently painted on screen.
-    drawn: bool,
+    /// Rows of the footer block currently painted on screen (spinner
+    /// line + queued previews + live typing row). The eraser must clear
+    /// exactly this many rows before content prints.
+    drawn_rows: u16,
     stopped: bool,
     stream: ChromeStream,
+    /// Messages queued for the next turn (full texts; previews are
+    /// recomputed per draw so a resize re-clips correctly).
+    queued_texts: Vec<String>,
+    /// The line being typed right now (mid-turn editor buffer).
+    typed: String,
 }
 
 impl SpinnerCore {
+    /// ANSI sequence clearing `rows` footer rows, assuming the cursor
+    /// sits at the end of the bottom row. Leaves the cursor on the top
+    /// row, column 0 — where content (or the next footer) paints.
+    fn erase_seq(rows: u16) -> String {
+        let mut seq = String::from("\r\x1b[2K");
+        for _ in 1..rows {
+            seq.push_str("\x1b[1A\x1b[2K");
+        }
+        seq
+    }
+
     fn erase(&mut self) {
-        if self.drawn {
-            self.stream.write_str("\r\x1b[2K");
-            self.drawn = false;
+        if self.drawn_rows > 0 {
+            self.stream.write_str(&Self::erase_seq(self.drawn_rows));
+            self.drawn_rows = 0;
         }
     }
 
+    /// Repaint the footer block in one terminal write: spinner line,
+    /// dim `› queued:` previews, and the live typing row when the user
+    /// is mid-keystroke. Single-row and identical to the old spinner
+    /// when nothing is queued or typed.
     fn draw(&mut self) {
-        let line = spinner_line_text(
-            self.label,
-            self.started.elapsed().as_secs(),
-            self.output_chars,
+        let width = term_cols();
+        let spinner = clip_chars(
+            &format!(
+                "{}{}",
+                spinner_line_text(
+                    self.label,
+                    self.started.elapsed().as_secs(),
+                    self.output_chars,
+                ),
+                queued_spinner_suffix(self.queued_texts.len()),
+            ),
+            width,
         );
-        self.stream
-            .write_str(&format!("\r\x1b[2K{DIM}{line}{RESET}"));
-        self.drawn = true;
+        let mut block = format!("{DIM}{spinner}{RESET}");
+        let mut rows: u16 = 1;
+        for line in queued_preview_lines(&self.queued_texts, width) {
+            block.push_str(&format!("\r\n\x1b[2K{DIM}{line}{RESET}"));
+            rows = rows.saturating_add(1);
+        }
+        if !self.typed.is_empty() {
+            let line = typed_preview_line(&self.typed, width);
+            block.push_str(&format!("\r\n\x1b[2K{BOLD}{line}{RESET}"));
+            rows = rows.saturating_add(1);
+        }
+        // Erase + repaint as one write so the ticker never shows a
+        // half-cleared footer between two writes.
+        let seq = if self.drawn_rows > 0 {
+            format!("{}{}", Self::erase_seq(self.drawn_rows), block)
+        } else {
+            format!("\r\x1b[2K{block}")
+        };
+        self.stream.write_str(&seq);
+        self.drawn_rows = rows;
     }
 }
 
@@ -15077,9 +15211,11 @@ impl Spinner {
             started: Instant::now(),
             output_chars: 0,
             visible: true,
-            drawn: false,
+            drawn_rows: 0,
             stopped: false,
             stream,
+            queued_texts: Vec::new(),
+            typed: String::new(),
         }));
         let ticker = {
             let core = Arc::clone(&core);
@@ -15134,6 +15270,14 @@ impl Spinner {
                 c.output_chars += n;
             }
         }
+    }
+
+    /// Handle to the shared core for the mid-turn input pump (footer
+    /// updates + immediate repaints). `None` when the spinner is inert
+    /// (non-TTY / unstyled), which also disables mid-turn queueing —
+    /// there is no live footer to make the affordance visible.
+    fn core_handle(&self) -> Option<Arc<Mutex<SpinnerCore>>> {
+        self.core.as_ref().map(Arc::clone)
     }
 
     /// Erase, stop the ticker, and join it. Idempotent.
@@ -15223,11 +15367,13 @@ impl TurnRenderer {
     }
 
     fn term_width(&self) -> usize {
-        terminal::size()
-            .ok()
-            .map(|(cols, _)| cols as usize)
-            .filter(|cols| *cols > 0)
-            .unwrap_or(FALLBACK_RENDER_WIDTH)
+        term_cols()
+    }
+
+    /// Spinner core handle for the mid-turn input pump. `None` when the
+    /// spinner is inert (unstyled / non-TTY), which keeps queueing off.
+    fn spinner_core(&self) -> Option<Arc<Mutex<SpinnerCore>>> {
+        self.spinner.core_handle()
     }
 
     fn chrome_line(&self, line: &str) {
@@ -15524,6 +15670,420 @@ pub(crate) fn stop_line_text(
 }
 
 // ---------------------------------------------------------------------------
+// Queued messages — "message stacking" while a turn is in flight
+// ---------------------------------------------------------------------------
+
+/// Messages typed while the agent works (or left over after an abort).
+/// Pure state: terminal I/O lives in [`TurnInputPump`] (mid-turn) and
+/// `read_line` (idle); both share one queue per REPL session, so an
+/// aborted turn keeps its stack for the now-idle prompt.
+#[derive(Default)]
+pub(crate) struct MessageQueue {
+    items: Vec<String>,
+}
+
+impl MessageQueue {
+    /// Queue one message. Whitespace-only entries are dropped — an
+    /// accidental bare Enter mid-turn must not produce an empty prompt.
+    fn push(&mut self, text: String) {
+        if !text.trim().is_empty() {
+            self.items.push(text);
+        }
+    }
+
+    /// Up-arrow editing: remove and return the most recent message (it
+    /// leaves the queue; Enter re-queues the edited text).
+    fn pop_last(&mut self) -> Option<String> {
+        self.items.pop()
+    }
+
+    fn texts(&self) -> &[String] {
+        &self.items
+    }
+
+    /// Esc/Ctrl+C at the idle prompt: drop everything, report how many.
+    fn discard(&mut self) -> usize {
+        let n = self.items.len();
+        self.items.clear();
+        n
+    }
+
+    /// Drain the stack into prompt submissions, Claude-Code style:
+    /// consecutive plain messages join with blank lines into ONE user
+    /// message (keeps session history clean); a message starting with
+    /// `/` stays its own submission so the normal slash routing in the
+    /// REPL loop applies to it on drain.
+    fn drain_submissions(&mut self) -> Vec<String> {
+        let mut submissions = Vec::new();
+        let mut plain: Vec<String> = Vec::new();
+        for item in self.items.drain(..) {
+            if item.trim_start().starts_with('/') {
+                if !plain.is_empty() {
+                    submissions.push(plain.join("\n\n"));
+                    plain.clear();
+                }
+                submissions.push(item);
+            } else {
+                plain.push(item);
+            }
+        }
+        if !plain.is_empty() {
+            submissions.push(plain.join("\n\n"));
+        }
+        submissions
+    }
+}
+
+/// How many queued messages get their own preview line before the rest
+/// collapse into a "… and N more" summary row.
+const MAX_QUEUED_PREVIEW_LINES: usize = 3;
+
+/// Dim affordance lines for the queued stack — one `› queued: …` row
+/// per message (first line only, cell-clipped to the terminal width),
+/// shared by the mid-turn footer and the idle input bar. Pure plain
+/// text: no ANSI here, so NO_COLOR terminals render it verbatim and
+/// the caller decides the dimming.
+fn queued_preview_lines(texts: &[String], width: usize) -> Vec<String> {
+    let mut out = Vec::with_capacity(texts.len().min(MAX_QUEUED_PREVIEW_LINES) + 1);
+    for text in texts.iter().take(MAX_QUEUED_PREVIEW_LINES) {
+        let first = text.lines().next().unwrap_or("").trim_end();
+        out.push(clip_chars(&format!("  › queued: {first}"), width.max(16)));
+    }
+    if texts.len() > MAX_QUEUED_PREVIEW_LINES {
+        out.push(format!(
+            "  › … and {} more queued",
+            texts.len() - MAX_QUEUED_PREVIEW_LINES
+        ));
+    }
+    out
+}
+
+/// The live mid-turn typing row: `❯ ` plus the tail of the buffer that
+/// fits the width (the cursor is always at the end mid-turn, so the
+/// tail window keeps it visible). Newlines (Alt+Enter) render as `⏎`.
+/// Plain text — the footer drawer adds the prompt styling.
+fn typed_preview_line(typed: &str, width: usize) -> String {
+    let flat: String = typed
+        .chars()
+        .map(|c| if c == '\n' { '⏎' } else { c })
+        .collect();
+    let budget = width.saturating_sub(2).max(8);
+    if rich_rust::cells::cell_len(&flat) <= budget {
+        return format!("\u{276f} {flat}");
+    }
+    // Keep the tail: walk back from the end until the budget (minus the
+    // leading ellipsis cell) is filled.
+    let mut tail = String::new();
+    let mut used = 1usize; // the '…'
+    for c in flat.chars().rev() {
+        let w = rich_rust::cells::get_character_cell_size(c);
+        if used + w > budget {
+            break;
+        }
+        tail.push(c);
+        used += w;
+    }
+    let tail: String = tail.chars().rev().collect();
+    format!("\u{276f} …{tail}")
+}
+
+/// `· N queued · ↑ edits` suffix for the spinner line while messages
+/// are stacked (the per-message previews sit on their own rows below).
+fn queued_spinner_suffix(queued: usize) -> String {
+    match queued {
+        0 => String::new(),
+        1 => " · 1 queued · ↑ edits".to_string(),
+        n => format!(" · {n} queued · ↑ edits"),
+    }
+}
+
+/// `⏎ send · ↑ edit` hint spliced into the idle input-bar rule when the
+/// queue is non-empty (mirrors Claude Code's "press up to edit queued
+/// messages" affordance).
+fn queue_rule_hint(queued: usize) -> String {
+    format!(" {queued} queued · ⏎ send · ↑ edit · ctrl+c drop ")
+}
+
+/// RAII guard putting the controlling terminal in cbreak/no-echo mode
+/// for the mid-turn input pump.
+///
+/// Deliberately NOT crossterm raw mode: `cfmakeraw` also clears OPOST
+/// (so the streamed markdown's `\n` would stop returning the carriage)
+/// and ISIG (so Ctrl+C would stop reaching the `ctrlc` handler that
+/// aborts the in-flight turn). Clearing only ICANON+ECHO gives the pump
+/// unbuffered, echo-free keystrokes while output translation and the
+/// signal-based abort keep today's behaviour. The approval prompt's
+/// `RawModeGuard` nests cleanly: crossterm saves *this* state as its
+/// "prior" termios on enable and restores it on drop.
+#[cfg(unix)]
+struct CbreakGuard {
+    original: libc::termios,
+}
+
+#[cfg(unix)]
+impl CbreakGuard {
+    fn enter() -> Option<Self> {
+        use std::io::IsTerminal;
+        if !io::stdin().is_terminal() {
+            return None;
+        }
+        // SAFETY: plain termios syscalls on fd 0; the struct is fully
+        // initialized by tcgetattr before any read.
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut t) != 0 {
+                return None;
+            }
+            let original = t;
+            t.c_lflag &= !(libc::ICANON | libc::ECHO);
+            t.c_cc[libc::VMIN] = 1;
+            t.c_cc[libc::VTIME] = 0;
+            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t) != 0 {
+                return None;
+            }
+            Some(Self { original })
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CbreakGuard {
+    fn drop(&mut self) {
+        // SAFETY: restoring the termios captured in `enter`.
+        unsafe {
+            let _ = libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original);
+        }
+    }
+}
+
+/// Reads the keyboard while a turn is in flight so Enter queues
+/// messages instead of dying in the kernel's typeahead buffer.
+///
+/// Before this pump existed, nothing read stdin during a turn: typed
+/// characters were kernel-echoed wherever the cursor happened to be and
+/// replayed into the next idle prompt. The pump runs on its own thread
+/// (started per turn, joined before `read_line` takes the keyboard
+/// back), polls crossterm events under [`terminal_event_gate`] so the
+/// approval micro-prompt can take exclusive ownership, and mirrors its
+/// editor state into [`SpinnerCore`]'s footer for live feedback.
+///
+/// Keys: printable chars/Backspace edit a one-line buffer; Enter queues
+/// it (slash commands queue too); Up with an empty buffer pops the most
+/// recent queued message back for editing; Esc clears the buffer;
+/// Alt+Enter/Ctrl+J insert a newline (shown as `⏎`). Ctrl+C never
+/// arrives here — ISIG stays on, so it aborts the turn exactly as
+/// before (and the queue survives the abort).
+struct TurnInputPump {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// Editor buffer, shared with the thread; leftover (typed but never
+    /// queued) text is handed back to the caller at [`Self::stop`] so
+    /// it can prefill the idle input bar.
+    typed: Arc<Mutex<String>>,
+    #[cfg(unix)]
+    termios: Option<CbreakGuard>,
+}
+
+impl TurnInputPump {
+    /// Poll granularity: also the upper bound on how long an approval
+    /// prompt waits to seize the keyboard gate.
+    const POLL: Duration = Duration::from_millis(40);
+
+    fn start(
+        queue: Arc<Mutex<MessageQueue>>,
+        spinner: Option<Arc<Mutex<SpinnerCore>>>,
+        prefill: String,
+    ) -> Self {
+        let inert = Self {
+            stop: Arc::new(AtomicBool::new(true)),
+            thread: None,
+            typed: Arc::new(Mutex::new(prefill.clone())),
+            #[cfg(unix)]
+            termios: None,
+        };
+        // No live footer (unstyled / non-TTY) → no affordance → keep
+        // today's behaviour rather than queueing invisibly.
+        let Some(spinner) = spinner else {
+            return inert;
+        };
+        #[cfg(unix)]
+        let termios = match CbreakGuard::enter() {
+            Some(guard) => guard,
+            None => return inert,
+        };
+        // Non-unix: no cbreak termios → keep today's behaviour (no
+        // mid-turn keyboard; typeahead lands in the next idle prompt).
+        #[cfg(not(unix))]
+        {
+            let _ = (queue, spinner);
+            return inert;
+        }
+
+        #[cfg(unix)]
+        {
+            let stop = Arc::new(AtomicBool::new(false));
+            let typed = Arc::new(Mutex::new(prefill));
+            let thread = {
+                let stop = Arc::clone(&stop);
+                let typed = Arc::clone(&typed);
+                std::thread::spawn(move || pump_loop(&stop, &queue, &typed, &spinner))
+            };
+            Self {
+                stop,
+                thread: Some(thread),
+                typed,
+                termios: Some(termios),
+            }
+        }
+    }
+
+    /// Stop the thread, restore the terminal, and hand back any text
+    /// the user typed but never queued (the caller prefills the idle
+    /// bar with it so no keystroke is ever lost). Idempotent.
+    fn stop(&mut self) -> String {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+        #[cfg(unix)]
+        {
+            self.termios = None; // restore termios via Drop
+        }
+        self.typed
+            .lock()
+            .map(|mut t| std::mem::take(&mut *t))
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for TurnInputPump {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+/// Pump thread body. Every iteration briefly holds the terminal event
+/// gate around `poll`+`read`; the approval prompt acquires the same
+/// gate for its whole menu, pausing the pump within one poll interval.
+#[cfg(unix)]
+fn pump_loop(
+    stop: &AtomicBool,
+    queue: &Mutex<MessageQueue>,
+    typed: &Mutex<String>,
+    spinner: &Mutex<SpinnerCore>,
+) {
+    while !stop.load(Ordering::SeqCst) {
+        let ev = {
+            let _gate = crate::commands::code_term::terminal_event_gate()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            match event::poll(TurnInputPump::POLL) {
+                Ok(true) => match event::read() {
+                    Ok(ev) => ev,
+                    Err(_) => return,
+                },
+                Ok(false) => continue,
+                Err(_) => return,
+            }
+        };
+        let mut dirty = false;
+        match ev {
+            Event::Key(KeyEvent {
+                code, modifiers, ..
+            }) => match (code, modifiers) {
+                (code, modifiers) if is_newline_key(code, modifiers) => {
+                    if let Ok(mut t) = typed.lock() {
+                        t.push('\n');
+                        dirty = true;
+                    }
+                }
+                (KeyCode::Enter, _) => {
+                    let taken = typed
+                        .lock()
+                        .map(|mut t| std::mem::take(&mut *t))
+                        .unwrap_or_default();
+                    if let Ok(mut q) = queue.lock() {
+                        q.push(taken);
+                    }
+                    dirty = true;
+                }
+                (KeyCode::Backspace, _) => {
+                    if let Ok(mut t) = typed.lock() {
+                        if t.pop().is_some() {
+                            dirty = true;
+                        }
+                    }
+                }
+                (KeyCode::Up, _) => {
+                    // Up on an empty buffer pops the most recent queued
+                    // message back into the editor (Enter re-queues).
+                    let empty = typed.lock().map(|t| t.is_empty()).unwrap_or(false);
+                    if empty {
+                        let popped = queue.lock().ok().and_then(|mut q| q.pop_last());
+                        if let Some(text) = popped {
+                            if let Ok(mut t) = typed.lock() {
+                                *t = text;
+                                dirty = true;
+                            }
+                        }
+                    }
+                }
+                (KeyCode::Esc, _) => {
+                    if let Ok(mut t) = typed.lock() {
+                        if !t.is_empty() {
+                            t.clear();
+                            dirty = true;
+                        }
+                    }
+                }
+                (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                    if let Ok(mut t) = typed.lock() {
+                        t.push(c);
+                        dirty = true;
+                    }
+                }
+                _ => {}
+            },
+            Event::Paste(data) => {
+                if let Ok(mut t) = typed.lock() {
+                    t.push_str(&data.replace("\r\n", "\n").replace('\r', "\n"));
+                    dirty = true;
+                }
+            }
+            _ => {}
+        }
+        if dirty {
+            refresh_footer(queue, typed, spinner);
+        }
+    }
+}
+
+/// Mirror queue + editor state into the spinner footer and repaint
+/// immediately for keystroke-latency feedback (the 120ms ticker would
+/// otherwise lag the echo). Lock order: snapshot queue/typed FIRST,
+/// then take the spinner lock — never nested, so the ticker (spinner
+/// only) can't deadlock against us.
+#[cfg(unix)]
+fn refresh_footer(
+    queue: &Mutex<MessageQueue>,
+    typed: &Mutex<String>,
+    spinner: &Mutex<SpinnerCore>,
+) {
+    let queued_texts = queue.lock().map(|q| q.texts().to_vec()).unwrap_or_default();
+    let typed_now = typed.lock().map(|t| t.clone()).unwrap_or_default();
+    if let Ok(mut core) = spinner.lock() {
+        core.queued_texts = queued_texts;
+        core.typed = typed_now;
+        if core.visible && !core.stopped {
+            core.draw();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Input bar — raw-mode line editor
 // ---------------------------------------------------------------------------
 
@@ -15540,7 +16100,20 @@ pub(crate) fn stop_line_text(
 /// grows one row per line up to `MAX_INPUT_ROWS`. Returns
 /// `LineResult::Submit` on Enter, `LineResult::Interrupted` on Ctrl+C,
 /// `LineResult::Eof` on Ctrl+D of an empty buffer.
-fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
+///
+/// `queue` is the session's message stack (populated mid-turn by the
+/// input pump, or left over after an abort): its previews paint above
+/// the rule, Enter on an empty buffer submits it, Up on an empty buffer
+/// pops the most recent entry back for editing, and Esc/Ctrl+C on an
+/// empty buffer discards it. `prefill` seeds the editor with text typed
+/// mid-turn but never queued, so no keystroke is lost across the
+/// turn/idle boundary.
+fn read_line(
+    mode: Mode,
+    history: &VecDeque<String>,
+    queue: &Mutex<MessageQueue>,
+    prefill: String,
+) -> Result<LineResult> {
     let _guard = RawModeGuard::enter()?;
     // Best-effort bracketed paste: supporting terminals deliver a paste
     // as one `Event::Paste` (newlines intact) instead of a burst of key
@@ -15552,12 +16125,13 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
     let mut stdout = io::stdout();
     execute!(stdout, cursor::Show)?;
 
-    let mut buffer: Vec<char> = Vec::new();
-    let mut cursor_pos: usize = 0; // index within `buffer`
-                                   // History cursor. `None` means "live buffer" (not walking history).
-                                   // A `Some(i)` points at `history[history.len() - 1 - i]` — Up
-                                   // increments, Down decrements, Enter/edit commits the recalled line
-                                   // back to the live buffer.
+    let mut buffer: Vec<char> = prefill.chars().collect();
+    let mut cursor_pos: usize = buffer.len(); // index within `buffer`
+    let mut queued: Vec<String> = queue_snapshot(queue);
+    // History cursor. `None` means "live buffer" (not walking history).
+    // A `Some(i)` points at `history[history.len() - 1 - i]` — Up
+    // increments, Down decrements, Enter/edit commits the recalled line
+    // back to the live buffer.
     let mut hist_idx: Option<usize> = None;
     let mut stashed_live: Option<Vec<char>> = None;
     let vim_enabled = VIM_INPUT_ENABLED.load(Ordering::SeqCst);
@@ -15580,6 +16154,7 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
         mode,
         vim_input_mode,
         rows_above,
+        &queued,
     )?);
 
     loop {
@@ -15590,6 +16165,16 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
             }) => match (code, modifiers) {
                 (KeyCode::Esc, _) if vim_enabled => {
                     vim_input_mode = Some(VimInputMode::Normal);
+                }
+                // Esc on an empty buffer with a queued stack: discard
+                // it (vim's Esc-to-normal wins above when enabled).
+                (KeyCode::Esc, _) if buffer.is_empty() && !queued.is_empty() => {
+                    let n = queue
+                        .lock()
+                        .map(|mut q| q.discard())
+                        .unwrap_or_else(|poisoned| poisoned.into_inner().discard());
+                    clear_bar(&mut stdout, rows_above)?;
+                    return Ok(LineResult::QueueCleared(n));
                 }
                 // Deliberate newline — Alt+Enter / Ctrl+J everywhere,
                 // Shift+Enter where the terminal reports it (kitty
@@ -15607,6 +16192,12 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
                     cursor_pos += 1;
                 }
                 (KeyCode::Enter, _) => {
+                    // Enter on an empty buffer with a queued stack →
+                    // submit the stack as the next prompt(s).
+                    if buffer.is_empty() && !queued.is_empty() {
+                        clear_bar(&mut stdout, rows_above)?;
+                        return Ok(LineResult::SubmitQueued);
+                    }
                     // Erase the bar so the caller's printlns flow
                     // naturally where it used to be — no stale rule,
                     // no doubled-up prompt text.
@@ -15615,6 +16206,17 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
                     return Ok(LineResult::Submit(line));
                 }
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                    // Second-press semantics: a Ctrl+C with text clears
+                    // the line (as always); on an already-empty buffer
+                    // it clears the queued stack instead.
+                    if buffer.is_empty() && !queued.is_empty() {
+                        let n = queue
+                            .lock()
+                            .map(|mut q| q.discard())
+                            .unwrap_or_else(|poisoned| poisoned.into_inner().discard());
+                        clear_bar(&mut stdout, rows_above)?;
+                        return Ok(LineResult::QueueCleared(n));
+                    }
                     clear_bar(&mut stdout, rows_above)?;
                     return Ok(LineResult::Interrupted);
                 }
@@ -15693,6 +16295,17 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
                     }
                     buffer.insert(cursor_pos, c);
                     cursor_pos += 1;
+                }
+                (KeyCode::Up, _) if buffer.is_empty() && !queued.is_empty() => {
+                    // Queue editing beats history when messages are
+                    // stacked and nothing is typed: pop the most recent
+                    // queued message back into the editor (it leaves
+                    // the queue; Enter re-queues it).
+                    if let Some(text) = queue.lock().ok().and_then(|mut q| q.pop_last()) {
+                        buffer = text.chars().collect();
+                        cursor_pos = buffer.len();
+                        queued = queue_snapshot(queue);
+                    }
                 }
                 (KeyCode::Up, _) => {
                     let (cur_line, cur_col) = cursor_line_col(&buffer, cursor_pos);
@@ -15786,8 +16399,18 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
             mode,
             vim_input_mode,
             rows_above,
+            &queued,
         )?);
     }
+}
+
+/// Cheap clone of the queued texts for paint decisions (the queue lock
+/// is never held across terminal I/O).
+fn queue_snapshot(queue: &Mutex<MessageQueue>) -> Vec<String> {
+    queue
+        .lock()
+        .map(|q| q.texts().to_vec())
+        .unwrap_or_else(|poisoned| poisoned.into_inner().texts().to_vec())
 }
 
 /// Hard ceiling on the number of buffer rows the input bar paints. The
@@ -15820,13 +16443,20 @@ fn repaint(
     mode: Mode,
     vim_input_mode: Option<VimInputMode>,
     prev_rows_above: Option<u16>,
+    queued_texts: &[String],
 ) -> Result<u16> {
     let (cols, rows) = terminal::size()
         .ok()
         .filter(|(c, r)| *c > 0 && *r > 0)
         .unwrap_or((80, 24));
     let cols = cols as usize;
-    let max_rows = (rows as usize).saturating_sub(2).clamp(1, MAX_INPUT_ROWS);
+    // Queued-message previews sit above the rule and count against the
+    // vertical budget so the whole block still fits the screen.
+    let queued_lines = queued_preview_lines(queued_texts, cols);
+    let queued_rows = queued_lines.len();
+    let max_rows = (rows as usize)
+        .saturating_sub(2 + queued_rows)
+        .clamp(1, MAX_INPUT_ROWS);
 
     // Logical lines. `split` on an empty buffer still yields one empty
     // line, so there is always at least one content row to paint.
@@ -15837,6 +16467,9 @@ fn repaint(
     let start = vertical_window(total, cur_line, shown);
 
     let mut rule: String = rule_chip(cols, mode);
+    if !queued_texts.is_empty() {
+        rule = splice_into_rule(&rule, &queue_rule_hint(queued_texts.len()));
+    }
     if total > shown {
         rule = splice_rule_hint(&rule, start, shown, total);
     }
@@ -15870,8 +16503,21 @@ fn repaint(
     let avail = cols.saturating_sub(prefix_cols_usize).max(1);
 
     if let Some(rows_above) = prev_rows_above.filter(|n| *n > 0) {
-        // Jump back to the rule line so we overwrite in place.
+        // Jump back to the first painted row (topmost queued preview,
+        // or the rule) so we overwrite in place.
         queue!(stdout, cursor::MoveToPreviousLine(rows_above))?;
+    }
+
+    for qline in &queued_lines {
+        queue!(
+            stdout,
+            Print("\r"),
+            Clear(ClearType::CurrentLine),
+            SetAttribute(Attribute::Dim),
+            Print(qline),
+            SetAttribute(Attribute::Reset),
+            Print("\r\n"),
+        )?;
     }
 
     queue!(
@@ -15943,7 +16589,22 @@ fn repaint(
     queue!(stdout, cursor::MoveToColumn(col))?;
 
     stdout.flush()?;
-    Ok(u16::try_from(cursor_row_in_window + 1).unwrap_or(u16::MAX))
+    // Rows above the final cursor up to the FIRST painted row: queued
+    // previews + the rule + any input rows above the cursor row.
+    Ok(u16::try_from(queued_rows + 1 + cursor_row_in_window).unwrap_or(u16::MAX))
+}
+
+/// Overlay `hint` near the right edge of the rule line (shared by the
+/// multi-line window marker and the queued-stack affordance).
+fn splice_into_rule(rule: &str, hint: &str) -> String {
+    let hint: Vec<char> = hint.chars().collect();
+    let mut out: Vec<char> = rule.chars().collect();
+    if out.len() < hint.len() + 2 {
+        return rule.to_string();
+    }
+    let at = out.len() - hint.len() - 1;
+    out[at..at + hint.len()].copy_from_slice(&hint);
+    out.into_iter().collect()
 }
 
 /// First visible line of the vertical window: keeps the cursor line
@@ -15958,16 +16619,10 @@ fn vertical_window(total: usize, cursor_line: usize, shown: usize) -> usize {
 /// Overlay a ` first–last/total ` marker near the right edge of the rule
 /// so a clipped multi-line draft advertises which slice is visible.
 fn splice_rule_hint(rule: &str, start: usize, shown: usize, total: usize) -> String {
-    let hint: Vec<char> = format!(" {}\u{2013}{}/{} ", start + 1, start + shown, total)
-        .chars()
-        .collect();
-    let mut out: Vec<char> = rule.chars().collect();
-    if out.len() < hint.len() + 2 {
-        return rule.to_string();
-    }
-    let at = out.len() - hint.len() - 1;
-    out[at..at + hint.len()].copy_from_slice(&hint);
-    out.into_iter().collect()
+    splice_into_rule(
+        rule,
+        &format!(" {}\u{2013}{}/{} ", start + 1, start + shown, total),
+    )
 }
 
 /// (line index, column) of `cursor_pos` within `buffer`, counting
@@ -17136,6 +17791,137 @@ mod tests {
         assert_eq!(err, vec!["  └ ✗ boom".to_string()]);
         let empty = tool_result_preview("   \n\n", false, 80, 4);
         assert_eq!(empty, vec!["  └ (no output)".to_string()]);
+    }
+
+    // -- message stacking ------------------------------------------------
+
+    fn queue_of(items: &[&str]) -> MessageQueue {
+        let mut q = MessageQueue::default();
+        for item in items {
+            q.push((*item).to_string());
+        }
+        q
+    }
+
+    #[test]
+    fn message_queue_push_drops_blank_entries() {
+        let q = queue_of(&["real message", "   ", "", "\n"]);
+        assert_eq!(q.texts(), &["real message".to_string()]);
+    }
+
+    #[test]
+    fn message_queue_pop_last_returns_most_recent_for_editing() {
+        let mut q = queue_of(&["first", "second"]);
+        assert_eq!(q.pop_last().as_deref(), Some("second"));
+        assert_eq!(q.texts(), &["first".to_string()]);
+        assert_eq!(q.pop_last().as_deref(), Some("first"));
+        assert_eq!(q.pop_last(), None);
+    }
+
+    #[test]
+    fn message_queue_drain_joins_plain_messages_with_blank_lines() {
+        let mut q = queue_of(&["look at joinRoom", "also check setRoom"]);
+        assert_eq!(
+            q.drain_submissions(),
+            vec!["look at joinRoom\n\nalso check setRoom".to_string()]
+        );
+        assert!(q.texts().is_empty(), "drain must empty the queue");
+    }
+
+    #[test]
+    fn message_queue_drain_keeps_slash_commands_as_own_submissions() {
+        let mut q = queue_of(&["fix the bug", "/model next", "then add tests", "and docs"]);
+        assert_eq!(
+            q.drain_submissions(),
+            vec![
+                "fix the bug".to_string(),
+                "/model next".to_string(),
+                "then add tests\n\nand docs".to_string(),
+            ]
+        );
+        // All-slash stacks drain to individual submissions.
+        let mut q = queue_of(&["/compact", "/model status"]);
+        assert_eq!(
+            q.drain_submissions(),
+            vec!["/compact".to_string(), "/model status".to_string()]
+        );
+    }
+
+    #[test]
+    fn message_queue_discard_reports_count() {
+        let mut q = queue_of(&["a", "b", "c"]);
+        assert_eq!(q.discard(), 3);
+        assert!(q.texts().is_empty());
+        assert_eq!(q.discard(), 0);
+    }
+
+    #[test]
+    fn queued_preview_lines_are_plain_clipped_and_capped() {
+        let texts = vec![
+            "short one".to_string(),
+            "a much longer queued message that overflows the preview budget entirely for sure"
+                .to_string(),
+            "multi\nline message".to_string(),
+            "fourth".to_string(),
+            "fifth".to_string(),
+        ];
+        let lines = queued_preview_lines(&texts, 40);
+        // 3 previews + the "and N more" summary.
+        assert_eq!(lines.len(), MAX_QUEUED_PREVIEW_LINES + 1);
+        assert_eq!(lines[0], "  › queued: short one");
+        // Cell-clipped to the width with an ellipsis; NO_COLOR-safe
+        // (pure text, no ANSI escapes anywhere).
+        for line in &lines {
+            assert!(
+                rich_rust::cells::cell_len(line) <= 40,
+                "preview exceeds width: {line:?}"
+            );
+            assert!(!line.contains('\x1b'), "preview must carry no ANSI");
+        }
+        assert!(lines[1].ends_with('…'));
+        // Multi-line messages preview their first line only.
+        assert_eq!(lines[2], "  › queued: multi");
+        assert_eq!(lines[3], "  › … and 2 more queued");
+    }
+
+    #[test]
+    fn typed_preview_line_keeps_the_tail_visible() {
+        assert_eq!(typed_preview_line("hello", 40), "\u{276f} hello");
+        // Long input: the end (where the cursor is) stays visible.
+        let long = "abcdefghijklmnopqrstuvwxyz";
+        let line = typed_preview_line(long, 20);
+        assert!(line.starts_with("\u{276f} …"));
+        assert!(line.ends_with("xyz"));
+        assert!(rich_rust::cells::cell_len(&line) <= 20);
+        // Newlines (Alt+Enter) render as the ⏎ glyph.
+        assert_eq!(typed_preview_line("a\nb", 40), "\u{276f} a⏎b");
+    }
+
+    #[test]
+    fn queued_spinner_suffix_counts_the_stack() {
+        assert_eq!(queued_spinner_suffix(0), "");
+        assert_eq!(queued_spinner_suffix(1), " · 1 queued · ↑ edits");
+        assert_eq!(queued_spinner_suffix(3), " · 3 queued · ↑ edits");
+    }
+
+    #[test]
+    fn queue_hint_splices_into_the_rule() {
+        let rule = "─".repeat(80);
+        let spliced = splice_into_rule(&rule, &queue_rule_hint(2));
+        assert_eq!(spliced.chars().count(), 80, "rule width must not change");
+        assert!(spliced.contains("2 queued · ⏎ send · ↑ edit"));
+        // Too-narrow rules pass through untouched rather than panic.
+        let narrow = "──";
+        assert_eq!(splice_into_rule(narrow, " long hint "), narrow);
+    }
+
+    #[test]
+    fn erase_seq_clears_exactly_the_drawn_rows() {
+        assert_eq!(SpinnerCore::erase_seq(1), "\r\x1b[2K");
+        assert_eq!(
+            SpinnerCore::erase_seq(3),
+            "\r\x1b[2K\x1b[1A\x1b[2K\x1b[1A\x1b[2K"
+        );
     }
 
     #[test]

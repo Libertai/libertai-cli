@@ -120,6 +120,20 @@ fn resolution_line(choice: &PromptChoice, always_rule: &str) -> String {
     }
 }
 
+/// Serializes interactive keyboard ownership between `code_ui`'s
+/// mid-turn input pump (which polls crossterm events so the user can
+/// queue messages while the agent streams) and this module's approval
+/// micro-prompt. crossterm's event queue is process-global: two threads
+/// reading it would steal each other's keys. The approval prompt holds
+/// this lock for its whole single-key read; the pump holds it only
+/// around each short `poll`+`read`, so an approval acquires ownership
+/// within one poll interval and every keystroke after the menu paints
+/// answers the menu — never the queue editor.
+pub(crate) fn terminal_event_gate() -> &'static std::sync::Mutex<()> {
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &GATE
+}
+
 /// Width budget when the terminal size is unknown (non-TTY stderr).
 const FALLBACK_PROMPT_WIDTH: usize = 100;
 
@@ -164,6 +178,12 @@ fn clipped_resolution_line(choice: &PromptChoice, always_rule: &str, width: usiz
 
 /// Block until the user picks allow/always/deny.
 fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
+    // Take keyboard ownership BEFORE the menu paints: any keystroke
+    // typed after the menu is visible must answer the menu, not leak
+    // into the mid-turn queue editor.
+    let _gate = terminal_event_gate()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut stderr = std::io::stderr();
     let width = prompt_width();
 

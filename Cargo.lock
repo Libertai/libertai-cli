@@ -3107,6 +3107,7 @@ dependencies = [
  "hex",
  "indicatif",
  "k256",
+ "libc",
  "owo-colors",
  "pi_agent_rust",
  "predicates",

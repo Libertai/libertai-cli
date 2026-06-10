@@ -119,6 +119,14 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # without depending on transitive feature flags.
 uuid = { version = "1", features = ["v4"] }
 
+# Mid-turn input pump (`libertai code` message queueing): needs a
+# cbreak/no-echo terminal mode that crossterm doesn't expose — its raw
+# mode also clears OPOST (breaking '\n' in streamed markdown output) and
+# ISIG (breaking Ctrl+C-aborts-the-turn). Direct termios via libc keeps
+# both flags intact while turning off echo and line buffering.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Black-box probes that spawn the `libertai` binary and assert on its
 # stdout/stderr — see `tests/probes_*.rs` and `docs/parity-roadmap.md`.
