@@ -157,6 +157,14 @@ The CLI is built to compose with pipes and scripts:
   `search`, `fetch`, `sandbox info`, and `import claude-code list|show`
   emit machine-readable JSON. JSON is the *only* thing written to stdout;
   progress notes and human extras go to stderr.
+- **`models --json`** — keeps the `/v1/models` wire fields (`id`,
+  `owned_by`) and, when LibertAI's public model catalog is reachable
+  (fetched from an Aleph aggregate, cached on disk for 24h), adds a
+  `catalog` object per text model: `name`, `hfId`, `contextWindow`,
+  `vision`, `reasoning`, `tee`, `functionCalling`, `inputUsdPerMtok`,
+  `outputUsdPerMtok`. For alias/deprecated/`-thinking` ids the metadata
+  comes from the base entry and `resolvedId` replaces `name`/`hfId`.
+  Offline, the `catalog` key is simply absent.
 - **Styling** — ANSI colors are emitted only when the destination stream
   is a terminal; piped output is plain text. `NO_COLOR` (per
   [no-color.org](https://no-color.org)) and `TERM=dumb` disable styling

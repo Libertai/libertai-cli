@@ -141,10 +141,11 @@ pub fn run(
         Arc::new(TerminalApprovalUi)
     };
     let cfg = Arc::new(cfg);
+    let mode_flag = ModeFlag::new(mode);
     let factory = Arc::new(
         LibertaiToolFactory::new_with_features(
-            ModeFlag::new(mode),
-            approvals,
+            mode_flag.clone(),
+            Arc::clone(&approvals),
             ui,
             FactoryFeatures::cli_defaults(),
             Some(Arc::clone(&cfg)),
@@ -164,11 +165,15 @@ pub fn run(
             bash_command_wrapper,
             mode,
             cfg,
+            print,
+            approvals,
+            mode_flag,
         )
         .await
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_async(
     provider: String,
     model: String,
@@ -178,6 +183,9 @@ async fn run_async(
     bash_command_wrapper: Option<Vec<String>>,
     mode: Mode,
     cfg: Arc<LibertaiConfig>,
+    print: bool,
+    approvals: Arc<ApprovalState>,
+    mode_flag: ModeFlag,
 ) -> Result<()> {
     // One-shots are typically piped — print only the agent's response,
     // never replay prior history (it would corrupt downstream output).
@@ -220,22 +228,69 @@ async fn run_async(
     let _session_hooks = crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(&cfg));
     let hook_cfg = Arc::clone(&cfg);
     let prompt = crate::commands::code_hooks::run_user_prompt_submit_hooks(cfg.as_ref(), &prompt)?;
-    let msg = handle
-        .prompt(prompt, move |event| {
-            crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
-            render(event);
-        })
-        .await
-        .map_err(anyhow::Error::new)?;
+
+    if print {
+        // --print contract: raw deltas on stdout (scripts parse it),
+        // minimal dim notices on stderr, no spinner, no markdown.
+        let msg = handle
+            .prompt(prompt, move |event| {
+                crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
+                render(event);
+            })
+            .await
+            .map_err(anyhow::Error::new)?;
+        crate::commands::code_hooks::run_stop_hooks(cfg.as_ref());
+
+        // Make sure we end on a newline regardless of whether the last
+        // event was a TextDelta (which never emits one) or AgentEnd
+        // (which does).
+        println!();
+        eprintln!(
+            "model: {}/{} stop: {:?} in={} out={}",
+            msg.provider, msg.model, msg.stop_reason, msg.usage.input, msg.usage.output
+        );
+        return Ok(());
+    }
+
+    // One-shot interactive run: same renderer as the REPL — markdown
+    // when stdout is a TTY, ● tool markers + result previews and the
+    // spinner on stderr (so `libertai code "x" > file` still captures
+    // assistant text only).
+    let renderer = Arc::new(std::sync::Mutex::new(code_ui::TurnRenderer::new(
+        code_ui::ChromeStream::Stderr,
+        Some(approvals),
+        Some(mode_flag),
+    )));
+    let result = {
+        let renderer = Arc::clone(&renderer);
+        handle
+            .prompt(prompt, move |event| {
+                crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
+                if let Ok(mut renderer) = renderer.lock() {
+                    renderer.on_event(&event);
+                }
+            })
+            .await
+    };
+    let elapsed_secs = match renderer.lock() {
+        Ok(mut renderer) => {
+            renderer.finish_stream();
+            renderer.elapsed_secs()
+        }
+        Err(_) => 0,
+    };
+    let msg = result.map_err(anyhow::Error::new)?;
     crate::commands::code_hooks::run_stop_hooks(cfg.as_ref());
 
-    // Make sure we end on a newline regardless of whether the last event
-    // was a TextDelta (which never emits one) or AgentEnd (which does).
-    println!();
-
+    let (dim, reset) = crate::commands::output::stderr_dim_pair();
     eprintln!(
-        "model: {}/{} stop: {:?} in={} out={}",
-        msg.provider, msg.model, msg.stop_reason, msg.usage.input, msg.usage.output
+        "{dim}{}{reset}",
+        code_ui::stop_line_text(
+            &msg.stop_reason,
+            code_ui::context_tokens(&msg.usage),
+            msg.usage.output,
+            elapsed_secs,
+        )
     );
 
     Ok(())

@@ -42,7 +42,8 @@ use crossterm::{
 };
 
 use pi::model::{
-    AssistantMessageEvent, ContentBlock, ImageContent, Message, TextContent, UserContent,
+    AssistantMessageEvent, ContentBlock, ImageContent, Message, StopReason, TextContent, Usage,
+    UserContent,
 };
 use pi::sdk::{
     create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle, Error as PiError,
@@ -51,8 +52,11 @@ use pi::sdk::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::commands::chat_render::MarkdownStream;
 use crate::commands::code_approvals::ApprovalState;
-use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
+use crate::commands::code_factory::{
+    is_path_edit_tool, FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag,
+};
 use crate::commands::code_sandbox::{
     binary_on_path, detect_strict_profile, format_profile_text, BindKind, StrictProfile,
 };
@@ -685,6 +689,17 @@ fn default_rule_text(status: &BarStatus, mode: Mode) -> String {
         text.push_str(&format!(" · ~{}", dollar(cost)));
     }
     text
+}
+
+/// Context-window occupancy for a turn: prompt tokens plus cache
+/// reads/writes. Providers that report cached tokens separately (the
+/// Anthropic-style usage shape) exclude them from `usage.input`, so
+/// `input` alone undercounts what actually sits in the window — that
+/// skew is exactly how the status bar once showed a percentage that
+/// didn't match its own parenthetical. Every ctx surface (status bar
+/// pct, status bar tokens, stop line "in") must use this one number.
+pub(crate) fn context_tokens(usage: &Usage) -> u64 {
+    usage.input + usage.cache_read + usage.cache_write
 }
 
 fn context_percent(input_tokens: u64, context_window: u32) -> u32 {
@@ -2349,15 +2364,26 @@ async fn repl_loop(
         // interrupt an in-flight turn without tearing the REPL down.
         let (abort_handle, abort_signal) = AbortHandle::new();
         set_current_abort(abort_handle);
+        // Per-prompt renderer: markdown blocks, ● tool markers with
+        // result previews, spinner, auto-allow notices. Elapsed time on
+        // the stop line is measured from this construction.
+        let turn_renderer = Arc::new(Mutex::new(TurnRenderer::new(
+            ChromeStream::Stdout,
+            Some(Arc::clone(&approvals)),
+            Some(mode.clone()),
+        )));
         let render = {
             let tool_activity = Arc::clone(&tool_activity);
             let hook_cfg = Arc::clone(&cfg);
+            let turn_renderer = Arc::clone(&turn_renderer);
             move |event: AgentEvent| {
                 if let Ok(mut tracker) = tool_activity.lock() {
                     tracker.observe(&event);
                 }
                 crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
-                render_event(event);
+                if let Ok(mut renderer) = turn_renderer.lock() {
+                    renderer.on_event(&event);
+                }
             }
         };
         let result = if let Some(content) = content_override {
@@ -2386,9 +2412,16 @@ async fn repl_loop(
         };
         clear_current_abort();
 
-        // `render_event` already emits a trailing newline on AgentEnd,
-        // so we don't need a second one here — emitting one would
-        // leave a gap between the response and the usage/status line.
+        // Stop the spinner and flush any buffered markdown before the
+        // footer prints — on the error/abort paths AgentEnd never fired
+        // so the renderer hasn't had a chance to clean up after itself.
+        let turn_elapsed_secs = match turn_renderer.lock() {
+            Ok(mut renderer) => {
+                renderer.finish_stream();
+                renderer.elapsed_secs()
+            }
+            Err(_) => 0,
+        };
         match result {
             Ok(msg) => {
                 crate::commands::code_hooks::run_stop_hooks(cfg.as_ref());
@@ -2403,11 +2436,14 @@ async fn repl_loop(
                     output: msg.usage.output,
                     context_window,
                 });
-                // Update the status bar with this turn's input-token count
-                // so the next repaint reflects real context usage.
+                // Update the status bar with this turn's context
+                // occupancy. Same counter as the stop line below: pct
+                // and the (used / cap) parenthetical both derive from
+                // `context_tokens`, so they can never disagree again.
+                let ctx_in = context_tokens(&msg.usage);
                 set_bar_status(BarStatus {
                     model_label: format!("{}/{}", msg.provider, msg.model),
-                    input_tokens: msg.usage.input,
+                    input_tokens: ctx_in,
                     context_window,
                     output_style: output_style.clone(),
                     status_line_template: cfg.status_line_template.clone(),
@@ -2416,8 +2452,13 @@ async fn repl_loop(
                         .and_then(|summary| summary.model_token_cost()),
                 });
                 eprintln!(
-                    "{DIM}  {}/{}  stop: {:?}  in={} out={}{RESET}",
-                    msg.provider, msg.model, msg.stop_reason, msg.usage.input, msg.usage.output,
+                    "{DIM}  {}{RESET}",
+                    stop_line_text(
+                        &msg.stop_reason,
+                        ctx_in,
+                        msg.usage.output,
+                        turn_elapsed_secs
+                    ),
                 );
                 if cfg.code_turn_notifications && !is_autonomous {
                     crate::commands::code_term::notify_terminal(
@@ -2450,13 +2491,16 @@ async fn repl_loop(
                 autonomous_queue.clear();
                 auto_run = None;
                 println!();
-                eprintln!("{DIM}  (interrupted){RESET}");
+                eprintln!(
+                    "{DIM}  ● aborted · {}{RESET}",
+                    human_elapsed(turn_elapsed_secs)
+                );
             }
             Err(e) => {
                 autonomous_queue.clear();
                 auto_run = None;
                 println!();
-                eprintln!("{DIM}  error: {e}{RESET}");
+                eprintln!("{DIM}  ● error · {e}{RESET}");
             }
         }
         // One blank line between the stats/error footer and the next
@@ -13006,10 +13050,39 @@ fn model_token_cost(model: &str, input_tokens: u64, output_tokens: u64) -> Optio
 }
 
 fn model_token_rates(model: &str) -> Option<(f64, f64)> {
-    model_token_rate_match(model).map(|(_, input, output)| (input, output))
+    catalog_token_rates(model)
+        .or_else(|| model_token_rate_match(model).map(|(_, input, output)| (input, output)))
+}
+
+/// Live rates from the LibertAI model catalog (Aleph aggregate), loaded
+/// once per process. The on-disk cache has a 24h TTL; a REPL session
+/// outliving that keeps its snapshot, which is fine for an estimate.
+/// Falls back to the static table below when the catalog is unavailable
+/// or doesn't know the model (e.g. third-party providers).
+fn catalog_token_rates(model: &str) -> Option<(f64, f64)> {
+    // Unit tests pin the static-table fallback (catalog behavior is
+    // covered hermetically in model_catalog's own tests); the disk
+    // cache on a dev machine would otherwise leak into assertions.
+    if cfg!(test) {
+        return None;
+    }
+    static CATALOG: std::sync::OnceLock<Option<super::model_catalog::Catalog>> =
+        std::sync::OnceLock::new();
+    CATALOG
+        .get_or_init(super::model_catalog::load)
+        .as_ref()?
+        .token_rates(model)
 }
 
 fn model_token_rate_details(model: &str) -> Option<serde_json::Value> {
+    if let Some((input, output)) = catalog_token_rates(model) {
+        return Some(json!({
+            "matched": model,
+            "inputUsdPerMillion": input,
+            "outputUsdPerMillion": output,
+            "source": "LibertAI model catalog (Aleph aggregate)",
+        }));
+    }
     model_token_rate_match(model).map(|(matched, input, output)| {
         json!({
             "matched": matched,
@@ -14752,8 +14825,9 @@ fn mode_label(mode: Mode) -> &'static str {
     }
 }
 
-/// Event callback handed to `handle.prompt`. Must be `Fn + Send + Sync +
-/// 'static`, so it can't borrow local state — we just write to stdout.
+/// Event callback for the `/compact` summarizer pass. Must be `Fn +
+/// Send + Sync + 'static`, so it can't borrow local state — we just
+/// write to stdout. Regular turns use [`TurnRenderer`] instead.
 fn render_event(event: AgentEvent) {
     match event {
         AgentEvent::MessageUpdate {
@@ -14763,34 +14837,18 @@ fn render_event(event: AgentEvent) {
             print!("{delta}");
             let _ = io::stdout().flush();
         }
-        // Only mark turns past the first; turn 0 is the initial user
-        // prompt and would just add noise above the first response.
-        AgentEvent::TurnStart { turn_index, .. } if turn_index > 0 => {
-            println!("\n{DIM}  [turn {turn_index}]{RESET}");
-        }
-        // The todo tool renders its own nicely-formatted output;
-        // adding "[tool] todo" above it is just noise.
-        AgentEvent::ToolExecutionStart {
-            tool_name, args, ..
-        } if tool_name != "todo" => {
-            let preview = crate::commands::code_tool_preview::tool_preview(&tool_name, &args);
-            println!("\n{DIM}  [tool] {preview}{RESET}");
-        }
         AgentEvent::AutoCompactionStart { reason } => {
-            println!("{DIM}  [compact] {reason}{RESET}");
+            println!("{DIM}  ● compacting · {reason}{RESET}");
         }
         AgentEvent::AutoCompactionEnd {
             aborted,
             error_message,
             ..
         } => {
-            if aborted {
-                println!("{DIM}  [compact] aborted{RESET}");
-            } else if let Some(message) = error_message {
-                println!("{DIM}  [compact] failed: {message}{RESET}");
-            } else {
-                println!("{DIM}  [compact] finished{RESET}");
-            }
+            println!(
+                "{DIM}  ● {}{RESET}",
+                compaction_end_text(aborted, error_message.as_deref())
+            );
         }
         AgentEvent::AgentEnd { .. } => {
             // Pi doesn't emit a trailing newline after the last text delta;
@@ -14799,6 +14857,528 @@ fn render_event(event: AgentEvent) {
         }
         _ => {}
     }
+}
+
+fn compaction_end_text(aborted: bool, error_message: Option<&str>) -> String {
+    if aborted {
+        "compaction aborted".to_string()
+    } else if let Some(message) = error_message {
+        format!("compaction failed: {message}")
+    } else {
+        "compaction finished".to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Turn renderer — markdown output, tool chrome, spinner
+// ---------------------------------------------------------------------------
+
+/// Max result lines previewed under a tool marker before "… +N lines".
+const TOOL_RESULT_PREVIEW_LINES: usize = 4;
+/// Spinner repaint cadence. Fast enough that the elapsed-seconds field
+/// never looks stuck, slow enough to stay invisible in `top`.
+const SPINNER_TICK: Duration = Duration::from_millis(120);
+/// Fallback width when the terminal size probe fails (e.g. tests).
+const FALLBACK_RENDER_WIDTH: usize = 100;
+
+/// Where a [`TurnRenderer`] writes its chrome (markers, previews,
+/// spinner). The REPL keeps everything on stdout — it owns the whole
+/// terminal. The one-shot path sends chrome to stderr so a piped
+/// stdout carries assistant text only.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChromeStream {
+    Stdout,
+    Stderr,
+}
+
+impl ChromeStream {
+    fn is_tty(self) -> bool {
+        use std::io::IsTerminal;
+        match self {
+            Self::Stdout => io::stdout().is_terminal(),
+            Self::Stderr => io::stderr().is_terminal(),
+        }
+    }
+
+    fn write_str(self, s: &str) {
+        match self {
+            Self::Stdout => {
+                let mut out = io::stdout();
+                let _ = out.write_all(s.as_bytes());
+                let _ = out.flush();
+            }
+            Self::Stderr => {
+                let mut err = io::stderr();
+                let _ = err.write_all(s.as_bytes());
+                let _ = err.flush();
+            }
+        }
+    }
+}
+
+/// State shared between the event thread and the spinner ticker.
+struct SpinnerCore {
+    label: &'static str,
+    started: Instant,
+    output_chars: u64,
+    /// Ticker may draw. Cleared while content or a tool is printing so
+    /// the spinner never interleaves with real output.
+    visible: bool,
+    /// A spinner line is currently painted on screen.
+    drawn: bool,
+    stopped: bool,
+    stream: ChromeStream,
+}
+
+impl SpinnerCore {
+    fn erase(&mut self) {
+        if self.drawn {
+            self.stream.write_str("\r\x1b[2K");
+            self.drawn = false;
+        }
+    }
+
+    fn draw(&mut self) {
+        let line = spinner_line_text(
+            self.label,
+            self.started.elapsed().as_secs(),
+            self.output_chars,
+        );
+        self.stream
+            .write_str(&format!("\r\x1b[2K{DIM}{line}{RESET}"));
+        self.drawn = true;
+    }
+}
+
+/// `✳ thinking… 12s` → `✳ writing… 23s · 1.2k tokens`. The token count
+/// is the streamed output estimated at ~4 chars/token — pi only reports
+/// exact usage at end of turn.
+fn spinner_line_text(label: &str, elapsed_secs: u64, output_chars: u64) -> String {
+    let mut line = format!("✳ {label} {}", human_elapsed(elapsed_secs));
+    let tokens = output_chars / 4;
+    if tokens > 0 {
+        line.push_str(&format!(" · {} tokens", human_tokens(tokens)));
+    }
+    line
+}
+
+/// Bottom-line activity spinner. Lives on its own ticker thread so the
+/// elapsed counter advances while the runtime thread is blocked on the
+/// model stream; every write is serialized through [`SpinnerCore`]'s
+/// mutex against the renderer's hide/show calls. Inert (no thread, no
+/// output) when the chrome stream is not a TTY or styling is off.
+struct Spinner {
+    core: Option<Arc<Mutex<SpinnerCore>>>,
+    ticker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Spinner {
+    fn start(enabled: bool, stream: ChromeStream) -> Self {
+        if !enabled {
+            return Self {
+                core: None,
+                ticker: None,
+            };
+        }
+        let core = Arc::new(Mutex::new(SpinnerCore {
+            label: "thinking…",
+            started: Instant::now(),
+            output_chars: 0,
+            visible: true,
+            drawn: false,
+            stopped: false,
+            stream,
+        }));
+        let ticker = {
+            let core = Arc::clone(&core);
+            std::thread::spawn(move || loop {
+                std::thread::sleep(SPINNER_TICK);
+                let Ok(mut c) = core.lock() else { break };
+                if c.stopped {
+                    break;
+                }
+                if c.visible {
+                    c.draw();
+                }
+            })
+        };
+        Self {
+            core: Some(core),
+            ticker: Some(ticker),
+        }
+    }
+
+    /// Erase the spinner line and keep it hidden until [`Self::show`].
+    /// Call before printing any real output on the same stream.
+    fn hide(&self) {
+        if let Some(core) = &self.core {
+            if let Ok(mut c) = core.lock() {
+                c.visible = false;
+                c.erase();
+            }
+        }
+    }
+
+    /// Let the ticker paint again (next tick, ≤ one `SPINNER_TICK` away).
+    fn show(&self) {
+        if let Some(core) = &self.core {
+            if let Ok(mut c) = core.lock() {
+                c.visible = true;
+            }
+        }
+    }
+
+    fn set_label(&self, label: &'static str) {
+        if let Some(core) = &self.core {
+            if let Ok(mut c) = core.lock() {
+                c.label = label;
+            }
+        }
+    }
+
+    fn note_output_chars(&self, n: u64) {
+        if let Some(core) = &self.core {
+            if let Ok(mut c) = core.lock() {
+                c.output_chars += n;
+            }
+        }
+    }
+
+    /// Erase, stop the ticker, and join it. Idempotent.
+    fn stop(&mut self) {
+        if let Some(core) = &self.core {
+            if let Ok(mut c) = core.lock() {
+                c.stopped = true;
+                c.erase();
+            }
+        }
+        if let Some(t) = self.ticker.take() {
+            let _ = t.join();
+        }
+        self.core = None;
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Per-prompt stream renderer: markdown-renders assistant text
+/// block-by-block (via [`MarkdownStream`], same as `libertai chat`),
+/// draws `●`-marker tool lines with dimmed result previews, shows a
+/// spinner while waiting, and announces saved-rule auto-approvals.
+///
+/// Shared by the interactive REPL (chrome on stdout) and the one-shot
+/// path (chrome on stderr). `--print` mode never constructs one — its
+/// raw-stdout contract is handled in `code.rs`.
+pub(crate) struct TurnRenderer {
+    md: MarkdownStream,
+    spinner: Spinner,
+    styled: bool,
+    chrome: ChromeStream,
+    started: Instant,
+    /// `●` already printed for the current turn's text block.
+    turn_text_open: bool,
+    /// `finish_stream` already ran (it's called from both the AgentEnd
+    /// event and the post-await cleanup, whichever comes first).
+    finished: bool,
+    approvals: Option<Arc<ApprovalState>>,
+    mode: Option<ModeFlag>,
+}
+
+impl TurnRenderer {
+    pub(crate) fn new(
+        chrome: ChromeStream,
+        approvals: Option<Arc<ApprovalState>>,
+        mode: Option<ModeFlag>,
+    ) -> Self {
+        let chrome_tty = chrome.is_tty();
+        let styled = crate::commands::chat_render::styling_enabled(chrome_tty);
+        Self {
+            md: MarkdownStream::new(crate::commands::chat_render::markdown_enabled_stdout()),
+            spinner: Spinner::start(styled, chrome),
+            styled,
+            chrome,
+            started: Instant::now(),
+            turn_text_open: false,
+            finished: false,
+            approvals,
+            mode,
+        }
+    }
+
+    /// Seconds since the prompt was submitted (renderer construction).
+    pub(crate) fn elapsed_secs(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+
+    fn term_width(&self) -> usize {
+        terminal::size()
+            .ok()
+            .map(|(cols, _)| cols as usize)
+            .filter(|cols| *cols > 0)
+            .unwrap_or(FALLBACK_RENDER_WIDTH)
+    }
+
+    fn chrome_line(&self, line: &str) {
+        self.chrome.write_str(&format!("{line}\n"));
+    }
+
+    fn dim_chrome_line(&self, line: &str) {
+        if self.styled {
+            self.chrome_line(&format!("{DIM}{line}{RESET}"));
+        } else {
+            self.chrome_line(line);
+        }
+    }
+
+    pub(crate) fn on_event(&mut self, event: &AgentEvent) {
+        match event {
+            AgentEvent::MessageUpdate {
+                assistant_message_event: AssistantMessageEvent::TextDelta { delta, .. },
+                ..
+            } => {
+                if delta.is_empty() {
+                    return;
+                }
+                self.spinner.note_output_chars(delta.chars().count() as u64);
+                self.spinner.set_label("writing…");
+                self.spinner.hide();
+                if !self.turn_text_open {
+                    self.turn_text_open = true;
+                    // Subtle turn marker (replaces the old "[turn N]" line).
+                    if self.styled {
+                        self.chrome_line(&format!("{CYAN}●{RESET}"));
+                    } else {
+                        self.chrome_line("●");
+                    }
+                }
+                self.md.push(delta);
+                self.spinner.show();
+            }
+            AgentEvent::TurnStart { .. } => {
+                self.turn_text_open = false;
+            }
+            AgentEvent::ToolExecutionStart {
+                tool_name, args, ..
+            } => {
+                // Keep the spinner away while a tool owns the terminal —
+                // its approval prompt or own output must not race a
+                // repaint. Re-shown on ToolExecutionEnd.
+                self.spinner.hide();
+                self.turn_text_open = false;
+                if tool_name == "todo" {
+                    // The todo tool renders its own formatted output.
+                    return;
+                }
+                self.md.flush_pending();
+                self.chrome_line(&self.tool_marker_line(tool_name, args));
+                if let Some(label) = self.auto_allowed_rule_label(tool_name, args) {
+                    self.dim_chrome_line(&format!(
+                        "  {}",
+                        crate::commands::code_term::auto_allowed_line(&label)
+                    ));
+                }
+            }
+            AgentEvent::ToolExecutionEnd {
+                tool_name,
+                result,
+                is_error,
+                ..
+            } => {
+                if tool_name != "todo" {
+                    let text = tool_output_text(result);
+                    for line in tool_result_preview(
+                        &text,
+                        *is_error,
+                        self.term_width(),
+                        TOOL_RESULT_PREVIEW_LINES,
+                    ) {
+                        self.dim_chrome_line(&line);
+                    }
+                }
+                self.spinner.set_label("thinking…");
+                self.spinner.show();
+            }
+            AgentEvent::AutoCompactionStart { reason } => {
+                self.spinner.hide();
+                self.dim_chrome_line(&format!("● compacting · {reason}"));
+                self.spinner.show();
+            }
+            AgentEvent::AutoCompactionEnd {
+                aborted,
+                error_message,
+                ..
+            } => {
+                self.spinner.hide();
+                self.dim_chrome_line(&format!(
+                    "● {}",
+                    compaction_end_text(*aborted, error_message.as_deref())
+                ));
+                self.spinner.show();
+            }
+            AgentEvent::AgentEnd { .. } => {
+                self.finish_stream();
+            }
+            _ => {}
+        }
+    }
+
+    /// Stop the spinner and flush buffered markdown. Idempotent; also
+    /// invoked from the error/abort paths where AgentEnd never fired.
+    pub(crate) fn finish_stream(&mut self) {
+        self.spinner.stop();
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        if self.md.saw_output() {
+            self.md.finish();
+        }
+    }
+
+    fn tool_marker_line(&self, tool_name: &str, args: &serde_json::Value) -> String {
+        let preview = crate::commands::code_tool_preview::tool_preview(tool_name, args);
+        let detail = preview
+            .strip_prefix(tool_name)
+            .map(str::trim_start)
+            .unwrap_or("");
+        let detail = clip_chars(
+            detail,
+            self.term_width().saturating_sub(tool_name.len() + 6),
+        );
+        if self.styled {
+            if detail.is_empty() {
+                format!("{CYAN}●{RESET} {BOLD}{tool_name}{RESET}")
+            } else {
+                format!("{CYAN}●{RESET} {BOLD}{tool_name}{RESET}{DIM}({detail}){RESET}")
+            }
+        } else if detail.is_empty() {
+            format!("● {tool_name}")
+        } else {
+            format!("● {tool_name}({detail})")
+        }
+    }
+
+    /// `Some(rule_label)` when a persisted "always allow" rule resolves
+    /// this call without a prompt — mirrors the gate order inside
+    /// `ApprovalTool::execute` so we only announce what actually
+    /// happened: plan mode denies first, accept-edits auto-allows path
+    /// edits before rules are consulted, and the hardcoded read-only
+    /// tools never prompt (so a line for them would be noise).
+    fn auto_allowed_rule_label(&self, tool_name: &str, args: &serde_json::Value) -> Option<String> {
+        let approvals = self.approvals.as_ref()?;
+        if READ_ONLY_AUTO_ALLOW_TOOLS.contains(&tool_name) {
+            return None;
+        }
+        match self.mode.as_ref().map(ModeFlag::get) {
+            Some(Mode::Plan) => return None,
+            Some(Mode::AcceptEdits) if is_path_edit_tool(tool_name) => return None,
+            _ => {}
+        }
+        let subject = crate::commands::code_approvals::approval_subject(tool_name, args);
+        approvals
+            .always_rules()
+            .iter()
+            .any(|rule| rule.matches(tool_name, &subject.value))
+            .then_some(subject.suggested_label)
+    }
+}
+
+/// Tools `ApprovalState` auto-allows by name (read-only built-ins).
+/// Mirrors the `auto_allow` set in `code_approvals.rs`.
+const READ_ONLY_AUTO_ALLOW_TOOLS: &[&str] = &["read", "grep", "find", "ls", "bash_output"];
+
+/// Concatenated text blocks of a tool result.
+fn tool_output_text(result: &pi::sdk::ToolOutput) -> String {
+    let mut out = String::new();
+    for block in &result.content {
+        if let ContentBlock::Text(text) = block {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&text.text);
+        }
+    }
+    out
+}
+
+/// Dimmed, indented preview of a tool result: first `max_lines`
+/// non-empty lines, each truncated to the terminal width, then a
+/// "… +N lines" tail when more follow. Empty output previews as
+/// `(no output)` so a silent tool still visibly completed.
+fn tool_result_preview(text: &str, is_error: bool, width: usize, max_lines: usize) -> Vec<String> {
+    let head = if is_error { "  └ ✗ " } else { "  └ " };
+    let cont = "    ";
+    let budget = width.saturating_sub(head.chars().count() + 1).max(8);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return vec![format!("{head}(no output)")];
+    }
+    let mut out = Vec::with_capacity(max_lines + 1);
+    for (i, line) in lines.iter().take(max_lines).enumerate() {
+        let prefix = if i == 0 { head } else { cont };
+        out.push(format!("{prefix}{}", clip_chars(line, budget)));
+    }
+    if lines.len() > max_lines {
+        out.push(format!("{cont}… +{} lines", lines.len() - max_lines));
+    }
+    out
+}
+
+/// Char-safe clipping with a single `…` marker that fits the budget
+/// (unlike the older `truncate_chars`, which appends "..." beyond it).
+fn clip_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// `41s`, `2m08s` — elapsed-time fragment for spinner and stop line.
+fn human_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
+}
+
+/// Honest end-of-turn verb for each stop reason.
+fn stop_reason_verb(reason: &StopReason) -> &'static str {
+    match reason {
+        StopReason::Stop => "done",
+        StopReason::Length => "max tokens",
+        StopReason::ToolUse => "tool-use",
+        StopReason::Error => "error",
+        StopReason::Aborted => "aborted",
+    }
+}
+
+/// Dim end-of-turn line: `● done · 18.3k in · 272 out · 41s`. The "in"
+/// figure is the same context-occupancy count the status bar shows
+/// ([`context_tokens`]), so the two never disagree.
+pub(crate) fn stop_line_text(
+    reason: &StopReason,
+    ctx_in: u64,
+    out: u64,
+    elapsed_secs: u64,
+) -> String {
+    format!(
+        "● {} · {} in · {} out · {}",
+        stop_reason_verb(reason),
+        human_tokens(ctx_in),
+        human_tokens(out),
+        human_elapsed(elapsed_secs),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -16233,6 +16813,136 @@ mod tests {
             default_rule_text(&status, Mode::Normal),
             "libertai/qwen · normal · 50% ctx (512 / 1.0k)"
         );
+    }
+
+    #[test]
+    fn context_tokens_counts_cache_reads_and_writes() {
+        let usage = Usage {
+            input: 10_300,
+            output: 272,
+            cache_read: 7_800,
+            cache_write: 224,
+            ..Default::default()
+        };
+        assert_eq!(context_tokens(&usage), 18_324);
+        // No cache → plain input.
+        let plain = Usage {
+            input: 512,
+            output: 8,
+            ..Default::default()
+        };
+        assert_eq!(context_tokens(&plain), 512);
+    }
+
+    #[test]
+    fn ctx_chip_pct_and_parenthetical_share_one_counter() {
+        // Regression: the bar once showed a pct from one counter and a
+        // (used / cap) pair from another. Both must derive from the
+        // exact same `input_tokens` value.
+        let status = BarStatus {
+            model_label: "libertai/qwen".to_string(),
+            input_tokens: 18_324,
+            context_window: 32_768,
+            output_style: None,
+            status_line_template: String::new(),
+            status_line_command: String::new(),
+            estimated_cost: None,
+        };
+        let text = default_rule_text(&status, Mode::Normal);
+        assert_eq!(text, "libertai/qwen · normal · 56% ctx (18.3k / 32.8k)");
+        // And the displayed pct really is used/cap of the displayed pair.
+        assert_eq!(context_percent(18_324, 32_768), 56);
+    }
+
+    #[test]
+    fn stop_line_formats_humanized_tokens_and_elapsed() {
+        assert_eq!(
+            stop_line_text(&StopReason::Stop, 18_324, 272, 41),
+            "● done · 18.3k in · 272 out · 41s"
+        );
+        assert_eq!(
+            stop_line_text(&StopReason::Length, 900, 1_200, 128),
+            "● max tokens · 900 in · 1.2k out · 2m08s"
+        );
+        assert_eq!(
+            stop_line_text(&StopReason::Aborted, 0, 0, 3),
+            "● aborted · 0 in · 0 out · 3s"
+        );
+        assert_eq!(stop_reason_verb(&StopReason::Error), "error");
+        assert_eq!(stop_reason_verb(&StopReason::ToolUse), "tool-use");
+    }
+
+    #[test]
+    fn human_elapsed_switches_to_minutes_at_sixty() {
+        assert_eq!(human_elapsed(0), "0s");
+        assert_eq!(human_elapsed(59), "59s");
+        assert_eq!(human_elapsed(60), "1m00s");
+        assert_eq!(human_elapsed(754), "12m34s");
+    }
+
+    #[test]
+    fn spinner_line_shows_tokens_only_once_output_streams() {
+        assert_eq!(spinner_line_text("thinking…", 12, 0), "✳ thinking… 12s");
+        assert_eq!(
+            spinner_line_text("writing…", 23, 4_800),
+            "✳ writing… 23s · 1.2k tokens"
+        );
+    }
+
+    #[test]
+    fn tool_result_preview_truncates_lines_and_counts_overflow() {
+        let text = "one\ntwo\n\nthree\nfour\nfive\nsix";
+        let lines = tool_result_preview(text, false, 80, 4);
+        assert_eq!(
+            lines,
+            vec![
+                "  └ one".to_string(),
+                "    two".to_string(),
+                "    three".to_string(),
+                "    four".to_string(),
+                "    … +2 lines".to_string(),
+            ]
+        );
+        // Wide line is clipped to the width budget with an ellipsis.
+        let wide = tool_result_preview(&"x".repeat(300), false, 40, 4);
+        assert_eq!(wide.len(), 1);
+        assert!(wide[0].ends_with('…'));
+        assert!(wide[0].chars().count() <= 40);
+        // Errors get a ✗ in the gutter; empty output stays visible.
+        let err = tool_result_preview("boom", true, 80, 4);
+        assert_eq!(err, vec!["  └ ✗ boom".to_string()]);
+        let empty = tool_result_preview("   \n\n", false, 80, 4);
+        assert_eq!(empty, vec!["  └ (no output)".to_string()]);
+    }
+
+    #[test]
+    fn clip_chars_is_char_safe() {
+        assert_eq!(clip_chars("héllo wörld", 20), "héllo wörld");
+        assert_eq!(clip_chars("héllo wörld", 6), "héllo…");
+    }
+
+    #[test]
+    fn tool_output_text_joins_text_blocks() {
+        let result = pi::sdk::ToolOutput {
+            content: vec![
+                ContentBlock::Text(TextContent::new("first")),
+                ContentBlock::Text(TextContent::new("second")),
+            ],
+            details: None,
+            is_error: false,
+        };
+        assert_eq!(tool_output_text(&result), "first\nsecond");
+        assert_eq!(tool_output_text(&empty_tool_output()), "");
+    }
+
+    #[test]
+    fn compaction_end_text_reports_outcomes() {
+        assert_eq!(compaction_end_text(true, None), "compaction aborted");
+        assert_eq!(
+            compaction_end_text(false, Some("disk full")),
+            "compaction failed: disk full"
+        );
+        assert_eq!(compaction_end_text(false, None), "compaction finished");
     }
 
     #[test]

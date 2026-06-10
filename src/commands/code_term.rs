@@ -98,6 +98,27 @@ pub(crate) fn notify_terminal(title: &str, body: &str) -> NotifyOutcome {
     NotifyOutcome::Sent
 }
 
+/// One-line summary printed *instead of* an interactive prompt when a
+/// persisted allow-rule (chosen via "always allow" in a past session)
+/// resolves an approval without user input. Rendered dim by the caller.
+pub(crate) fn auto_allowed_line(rule_label: &str) -> String {
+    format!("✓ auto-allowed · {rule_label} matches saved rule")
+}
+
+/// One-line summary of an interactive approval decision. Replaces the
+/// option row after the user answers, so the transcript reads as a
+/// clean resolution instead of a menu with the answer glued on.
+fn resolution_line(choice: &PromptChoice, always_rule: &str) -> String {
+    match choice {
+        PromptChoice::Allow => "✓ allowed once".to_string(),
+        PromptChoice::AlwaysAllow => format!("✓ always allowed · saved rule {always_rule}"),
+        PromptChoice::Deny => "✗ denied".to_string(),
+        // Terminal UI never returns Paused (it blocks until the user
+        // answers); guard the match for completeness.
+        PromptChoice::Paused { .. } => "⏸ paused".to_string(),
+    }
+}
+
 /// Block until the user picks allow/always/deny.
 fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
     let mut stderr = std::io::stderr();
@@ -108,7 +129,7 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
     for line in preview.lines() {
         eprintln!("  \x1b[2m│\x1b[0m {}", style_preview_line(line));
     }
-    eprint!("  \x1b[2m[a]\x1b[0m allow once  \x1b[2m[A]\x1b[0m always allow ({always_rule})  \x1b[2m[d]\x1b[0m deny: ");
+    eprint!("  \x1b[2m[a]\x1b[0m allow once  \x1b[2m[A]\x1b[0m always allow ({always_rule})  \x1b[2m[d]\x1b[0m deny ");
     let _ = stderr.flush();
 
     // Brief raw-mode single-key read via the shared RAII guard so a
@@ -119,8 +140,10 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
         Err(_) => {
             let mut line = String::new();
             let _ = std::io::stdin().read_line(&mut line);
+            let choice = parse_cooked_choice(&line);
             eprintln!();
-            return parse_cooked_choice(&line);
+            eprintln!("  \x1b[2m{}\x1b[0m", resolution_line(&choice, always_rule));
+            return choice;
         }
     };
     let choice = loop {
@@ -143,15 +166,10 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
         }
     };
     drop(_guard);
-    let label = match &choice {
-        PromptChoice::Allow => "allowed",
-        PromptChoice::AlwaysAllow => "always allowed",
-        PromptChoice::Deny => "denied",
-        // Terminal UI never returns Paused (it blocks until the user
-        // answers); guard the match for completeness.
-        PromptChoice::Paused { .. } => "paused",
-    };
-    eprintln!("\x1b[2m{label}\x1b[0m");
+    // Erase the option row and replace it with the resolution, so the
+    // scrollback shows what happened rather than the menu.
+    eprint!("\r\x1b[2K");
+    eprintln!("  \x1b[2m{}\x1b[0m", resolution_line(&choice, always_rule));
     choice
 }
 
@@ -200,6 +218,30 @@ mod tests {
             "\x1b[2m... 12 lines omitted\x1b[0m"
         );
         assert_eq!(style_preview_line(" context"), " context");
+    }
+
+    #[test]
+    fn resolution_lines_replace_the_option_row() {
+        assert_eq!(
+            resolution_line(&PromptChoice::Allow, "bash(ls -R)"),
+            "✓ allowed once"
+        );
+        assert_eq!(
+            resolution_line(&PromptChoice::AlwaysAllow, "bash(ls -R)"),
+            "✓ always allowed · saved rule bash(ls -R)"
+        );
+        assert_eq!(
+            resolution_line(&PromptChoice::Deny, "bash(ls -R)"),
+            "✗ denied"
+        );
+    }
+
+    #[test]
+    fn auto_allowed_line_names_the_saved_rule() {
+        assert_eq!(
+            auto_allowed_line("bash(ls -R)"),
+            "✓ auto-allowed · bash(ls -R) matches saved rule"
+        );
     }
 
     #[test]

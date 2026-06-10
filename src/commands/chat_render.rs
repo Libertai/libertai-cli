@@ -51,6 +51,13 @@ pub fn markdown_enabled_stdout() -> bool {
 /// buffered and flushed block-by-block: a block is complete at a blank
 /// line outside a fenced code block, so fences render whole, with
 /// syntax highlighting, exactly once.
+///
+/// GFM pipe tables render through the same path: rich_rust's markdown
+/// renderer (pulldown-cmark with `ENABLE_TABLES`) draws them as
+/// box-drawn tables, and a table is a contiguous run of `|` lines with
+/// no internal blank line, so the block-boundary rule below already
+/// guarantees the whole table reaches `render_markdown` in one piece
+/// (verified against the pinned pi_agent_rust rev under a PTY).
 pub struct MarkdownStream {
     render: bool,
     console: Option<PiConsole>,
@@ -98,6 +105,21 @@ impl MarkdownStream {
     pub fn finish(&mut self) {
         if !self.render {
             println!();
+            return;
+        }
+        let rest = std::mem::take(&mut self.pending);
+        if !rest.trim().is_empty() {
+            self.render_block(&rest);
+        }
+    }
+
+    /// Render any buffered partial block *now*, without ending the
+    /// stream. Used by `libertai code` to flush assistant prose before
+    /// out-of-band chrome (tool markers, approval prompts) prints, so
+    /// the text always appears above the event that interrupted it.
+    /// Raw mode is a no-op — deltas were already printed verbatim.
+    pub fn flush_pending(&mut self) {
+        if !self.render {
             return;
         }
         let rest = std::mem::take(&mut self.pending);
@@ -211,6 +233,48 @@ mod tests {
     fn trailing_partial_line_does_not_count() {
         // The final "\n\n" boundary needs both newlines received.
         assert_eq!(complete_block_end("para\n"), None);
+    }
+
+    #[test]
+    fn pipe_table_stays_one_block() {
+        // A GFM table has no internal blank line, so the block boundary
+        // lands *after* the whole table — render_markdown sees header,
+        // separator, and every row together and can draw the box.
+        let buf = "intro\n\n| a | b |\n|---|--:|\n| 1 | 2 |\n| 3 | 4 |\n\ntail";
+        let cut = complete_block_end(buf).expect("boundary");
+        assert_eq!(
+            &buf[..cut],
+            "intro\n\n| a | b |\n|---|--:|\n| 1 | 2 |\n| 3 | 4 |\n\n"
+        );
+    }
+
+    #[test]
+    fn partially_streamed_table_is_not_flushed_early() {
+        // Mid-table (rows still arriving, no blank line yet) the only
+        // complete block is the prose before it.
+        let buf = "intro\n\n| a | b |\n|---|---|\n| 1 |";
+        let cut = complete_block_end(buf).expect("boundary");
+        assert_eq!(&buf[..cut], "intro\n\n");
+    }
+
+    #[test]
+    fn flush_pending_is_noop_in_raw_mode() {
+        let mut s = MarkdownStream::new(false);
+        s.push("partial paragraph without newline");
+        s.flush_pending();
+        assert!(s.pending.is_empty());
+    }
+
+    #[test]
+    fn flush_pending_drains_buffered_markdown() {
+        let mut s = MarkdownStream::new(true);
+        s.push("a paragraph still streaming");
+        assert!(!s.pending.is_empty());
+        s.flush_pending();
+        assert!(s.pending.is_empty());
+        // After a flush the stream keeps accepting deltas.
+        s.push("more\n\n");
+        assert!(s.pending.is_empty()); // complete block rendered immediately
     }
 
     #[test]

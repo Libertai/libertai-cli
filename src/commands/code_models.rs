@@ -37,9 +37,10 @@
 //! it is group/world-accessible — pi historically created it `0o755`.
 
 use anyhow::{Context, Result};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 use crate::client::require_api_key;
+use crate::commands::model_catalog;
 use crate::config::{self, Config};
 
 /// Env var pi's registry resolves the libertai `apiKey` from. Matches the
@@ -152,11 +153,12 @@ pub fn ensure_libertai_registered(cfg: &Config) -> Result<()> {
         .entry("authHeader".to_string())
         .or_insert_with(|| Value::Bool(true));
 
-    // `contextWindow` defaults to a generous 32k. The libertai endpoint
-    // doesn't surface real per-model context windows in /v1/models
-    // today, so the placeholder libertai-cli has used since v0.1 is
-    // good enough; if the array already has richer entries (e.g. from
-    // a future server-side catalog ingest), we leave them untouched.
+    // Real context windows and per-MTok cost come from the public
+    // LTAI_PRICING catalog (24h-cached, offline-tolerant). Without it we
+    // fall back to the 32k placeholder libertai-cli has used since v0.1;
+    // existing entries are enriched in place, but a user's richer
+    // hand-set values are never clobbered (see `enrich_pi_model_entry`).
+    let catalog = model_catalog::load();
     let existing = entry
         .get("models")
         .and_then(|v| v.as_array())
@@ -167,12 +169,17 @@ pub fn ensure_libertai_registered(cfg: &Config) -> Result<()> {
         .any(|m| m.get("id").and_then(|id| id.as_str()) == Some(default_model.as_str()));
     let mut models_array = existing;
     if models_array.is_empty() || !already_present {
-        models_array.push(json!({
-            "id": default_model,
-            "name": default_model,
-            "api": "openai-completions",
-            "contextWindow": 32768u32,
-        }));
+        models_array.push(model_catalog::new_pi_model_entry(
+            &default_model,
+            catalog.as_ref(),
+        ));
+    }
+    if let Some(cat) = catalog.as_ref() {
+        for model in models_array.iter_mut() {
+            if let Some(obj) = model.as_object_mut() {
+                model_catalog::enrich_pi_model_entry(obj, cat);
+            }
+        }
     }
     entry.insert("models".to_string(), Value::Array(models_array));
 
@@ -220,6 +227,9 @@ mod tests {
         const KEY: &str = "LTAI_sk_unit_probe_inmemory_0000000000";
         let pi_dir = tempfile::tempdir().expect("pi tempdir");
         std::env::set_var("PI_CODING_AGENT_DIR", pi_dir.path());
+        // Hermetic: no catalog fetch (and no touching the real on-disk
+        // catalog cache) from inside a unit test.
+        std::env::set_var(model_catalog::CATALOG_URL_ENV, "off");
 
         let mut cfg = Config::default();
         cfg.auth.api_key = Some(KEY.to_string());
@@ -250,5 +260,6 @@ mod tests {
 
         std::env::remove_var("PI_CODING_AGENT_DIR");
         std::env::remove_var(LIBERTAI_API_KEY_ENV);
+        std::env::remove_var(model_catalog::CATALOG_URL_ENV);
     }
 }

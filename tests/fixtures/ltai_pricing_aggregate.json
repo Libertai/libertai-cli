@@ -1,0 +1,259 @@
+{
+  "address": "0xe1F7220D201C64871Cefb25320a8a588393eE508",
+  "data": {
+    "LTAI_PRICING": {
+      "models": [
+        {
+          "id": "hermes-3-8b-tee",
+          "name": "Hermes 3 8B (TEE)",
+          "hf_id": "NousResearch/Hermes-3-Llama-3.1-8B",
+          "pricing": {
+            "text": {
+              "price_per_million_input_tokens": 0.15,
+              "price_per_million_output_tokens": 0.6
+            }
+          },
+          "capabilities": {
+            "text": {
+              "tee": true,
+              "vision": false,
+              "reasoning": false,
+              "context_window": 16000,
+              "function_calling": true
+            }
+          }
+        },
+        {
+          "id": "gemma-4-31b-it",
+          "name": "Gemma 4 31B",
+          "hf_id": "google/gemma-4-31b-it",
+          "pricing": {
+            "text": {
+              "price_per_million_input_tokens": 0.15,
+              "price_per_million_output_tokens": 0.4
+            }
+          },
+          "capabilities": {
+            "text": {
+              "tee": false,
+              "vision": true,
+              "reasoning": true,
+              "context_window": 262144,
+              "function_calling": true
+            }
+          }
+        },
+        {
+          "id": "qwen3.6-35b-a3b",
+          "name": "Qwen3.6-35B-A3B",
+          "hf_id": "Qwen/Qwen3.6-35B-A3B",
+          "pricing": {
+            "text": {
+              "price_per_million_input_tokens": 0.15,
+              "price_per_million_output_tokens": 0.5
+            }
+          },
+          "capabilities": {
+            "text": {
+              "tee": false,
+              "vision": true,
+              "reasoning": true,
+              "context_window": 262144,
+              "function_calling": true
+            }
+          }
+        },
+        {
+          "id": "qwen3.6-27b",
+          "name": "Qwen3.6-27B",
+          "hf_id": "Qwen/Qwen3.6-27B",
+          "pricing": {
+            "text": {
+              "price_per_million_input_tokens": 0.15,
+              "price_per_million_output_tokens": 0.5
+            }
+          },
+          "capabilities": {
+            "text": {
+              "tee": false,
+              "vision": true,
+              "reasoning": true,
+              "context_window": 262144,
+              "function_calling": true
+            }
+          }
+        },
+        {
+          "id": "qwen3.5-122b-a10b",
+          "name": "Qwen3.5-122B-A10B",
+          "hf_id": "Qwen/Qwen3.5-122B-A10B",
+          "pricing": {
+            "text": {
+              "price_per_million_input_tokens": 0.25,
+              "price_per_million_output_tokens": 1.75
+            }
+          },
+          "capabilities": {
+            "text": {
+              "tee": false,
+              "vision": true,
+              "reasoning": true,
+              "context_window": 262144,
+              "function_calling": true
+            }
+          }
+        },
+        {
+          "id": "deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash",
+          "hf_id": "deepseek-ai/DeepSeek-V4-Flash",
+          "pricing": {
+            "text": {
+              "price_per_million_input_tokens": 0.25,
+              "price_per_million_output_tokens": 1.75
+            }
+          },
+          "capabilities": {
+            "text": {
+              "tee": false,
+              "vision": false,
+              "reasoning": true,
+              "context_window": 200000,
+              "function_calling": true
+            }
+          }
+        },
+        {
+          "id": "z-image-turbo",
+          "name": "Z-Image Turbo",
+          "hf_id": "Tongyi-MAI/Z-Image-Turbo",
+          "pricing": {
+            "image": 0.005
+          },
+          "capabilities": {
+            "image": true
+          }
+        },
+        {
+          "id": "search/duckduckgo",
+          "name": "Search: DuckDuckGo",
+          "pricing": {
+            "search": 0.002
+          },
+          "capabilities": {
+            "search": true
+          }
+        },
+        {
+          "id": "search/bing",
+          "name": "Search: Bing",
+          "pricing": {
+            "search": 0.003
+          },
+          "capabilities": {
+            "search": true
+          }
+        },
+        {
+          "id": "search/google",
+          "name": "Search: Google",
+          "pricing": {
+            "search": 0.003
+          },
+          "capabilities": {
+            "search": true
+          }
+        },
+        {
+          "id": "bge-m3",
+          "name": "BGE-M3",
+          "hf_id": "BAAI/bge-m3",
+          "pricing": {
+            "embedding": {
+              "price_per_million_input_tokens": 0.01
+            }
+          },
+          "capabilities": {
+            "embedding": {
+              "dimensions": 1024,
+              "context_window": 8192
+            }
+          }
+        }
+      ],
+      "redirections": [
+        {
+          "to": "qwen3.6-35b-a3b",
+          "from": "claw-flash",
+          "type": "INTERNAL",
+          "category": "text",
+          "description": "LiberClaw internal redirection"
+        },
+        {
+          "to": "qwen3.6-27b",
+          "from": "claw-core",
+          "type": "INTERNAL",
+          "category": "text",
+          "description": "LiberClaw internal redirection"
+        },
+        {
+          "to": "qwen3.5-122b-a10b",
+          "from": "deep-claw",
+          "type": "INTERNAL",
+          "category": "text",
+          "description": "LiberClaw internal redirection"
+        },
+        {
+          "to": "qwen3.6-35b-a3b",
+          "from": "ltai-fast",
+          "type": "INTERNAL",
+          "category": "text",
+          "description": "Fast model"
+        },
+        {
+          "to": "qwen3.6-27b",
+          "from": "ltai-core",
+          "type": "INTERNAL",
+          "category": "text",
+          "description": "Middle ground model"
+        },
+        {
+          "to": "qwen3.6-35b-a3b",
+          "from": "qwen3-coder-next",
+          "type": "DEPRECATED",
+          "category": "text",
+          "description": "Qwen3 Coder Next is deprecated, please move to a supported model"
+        },
+        {
+          "to": "qwen3.5-122b-a10b",
+          "from": "glm-4.7",
+          "type": "DEPRECATED",
+          "category": "text",
+          "description": "GLM 4.7 is deprecated, please move to a supported model"
+        },
+        {
+          "to": "gemma-4-31b-it",
+          "from": "gemma-3-27b",
+          "type": "DEPRECATED",
+          "category": "text",
+          "description": "Gemma 3 27B is deprecated, please move to a supported model"
+        },
+        {
+          "to": "qwen3.6-35b-a3b",
+          "from": "qwen3.5-35b-a3b",
+          "type": "DEPRECATED",
+          "category": "text",
+          "description": "Qwen3.5-35B-A3B is deprecated, please move to a supported model"
+        },
+        {
+          "to": "qwen3.6-27b",
+          "from": "qwen3.5-27b",
+          "type": "DEPRECATED",
+          "category": "text",
+          "description": "Qwen 3.5 27B is deprecated, please move to a supported model"
+        }
+      ]
+    }
+  },
+  "info": {}
+}

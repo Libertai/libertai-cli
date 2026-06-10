@@ -8,6 +8,13 @@ pub const DEFAULT_API_BASE: &str = "https://api.libertai.io";
 // inference gateway (DEFAULT_API_BASE, which serves /v1/*).
 pub const DEFAULT_ACCOUNT_BASE: &str = "https://inference.api.libertai.io";
 pub const DEFAULT_SEARCH_BASE: &str = "https://search.libertai.io";
+// Public, unauthenticated Aleph aggregate carrying LibertAI's authoritative
+// model metadata (context windows + per-MTok pricing) — the same source the
+// website reads. The address is the LibertAI pricing wallet; override the
+// whole URL with `LIBERTAI_MODEL_CATALOG_URL` (see `commands::model_catalog`).
+pub const MODEL_CATALOG_AGGREGATE_ADDRESS: &str = "0xe1F7220D201C64871Cefb25320a8a588393eE508";
+pub const DEFAULT_MODEL_CATALOG_URL: &str =
+    "https://api2.aleph.im/api/v0/aggregates/0xe1F7220D201C64871Cefb25320a8a588393eE508.json?keys=LTAI_PRICING";
 pub const DEFAULT_CHAT_MODEL: &str = "qwen3.5-122b-a10b";
 pub const DEFAULT_CODE_MODEL: &str = "qwen3.6-35b-a3b";
 pub const DEFAULT_CODE_PROVIDER: &str = "libertai";
