@@ -102,12 +102,17 @@ impl Tool for TodoTool {
                 return Ok(err_output(&format!("invalid `todo` payload: {e}")));
             }
         };
-        render_todo_list(&parsed.items);
+        // Collapse duplicate items before anything renders or counts:
+        // models occasionally send the same item twice in one call
+        // (e.g. two quick consecutive updates merged into one), which
+        // used to draw the same line twice inside a single task list.
+        let items = display_items(&parsed.items);
+        render_todo_list(&items);
 
         // Give the model a cheap confirmation it can see in the tool
         // result message (models sometimes spin if a tool returns an
         // empty string).
-        let summary = summarize(&parsed.items);
+        let summary = summarize(&items);
         Ok(ToolOutput {
             content: vec![ContentBlock::Text(TextContent::new(summary))],
             details: None,
@@ -145,8 +150,52 @@ fn summarize(items: &[TodoItem]) -> String {
     format!("todo: {done}/{total} complete, {active} active")
 }
 
+/// Items as displayed: duplicates (same whitespace-trimmed text)
+/// collapse to one entry in first-appearance order, carrying the *last*
+/// status seen for that text — when two consecutive updates get merged
+/// into one `items` array, the later status is the current one.
+fn display_items(items: &[TodoItem]) -> Vec<TodoItem> {
+    let mut out: Vec<TodoItem> = Vec::with_capacity(items.len());
+    for item in items {
+        let key = item.text.trim();
+        if let Some(existing) = out.iter_mut().find(|seen| seen.text.trim() == key) {
+            existing.status = item.status;
+        } else {
+            out.push(item.clone());
+        }
+    }
+    out
+}
+
+/// One pre-styled stderr line per item. Pure so the duplicate-collapse
+/// and glyph/style mapping are unit-testable without capturing stderr.
+fn todo_lines(items: &[TodoItem]) -> Vec<String> {
+    items
+        .iter()
+        .map(|item| {
+            let (glyph, colour) = match item.status {
+                TodoStatus::Completed => ("\u{2611}", "\x1b[32m"), // ☑ green
+                TodoStatus::Active => ("\u{25a0}", "\x1b[33;1m"),  // ■ bold amber
+                TodoStatus::Pending => ("\u{2610}", "\x1b[2m"),    // ☐ dim
+            };
+            format!(
+                "  {colour}{glyph}\x1b[0m {}{}\x1b[0m",
+                match item.status {
+                    TodoStatus::Active => "\x1b[1m",
+                    TodoStatus::Completed => "\x1b[2m",
+                    TodoStatus::Pending => "",
+                },
+                item.text
+            )
+        })
+        .collect()
+}
+
 /// Render the task list to stderr. Called from inside `execute`, which
 /// pi awaits, so this happens synchronously between streaming deltas.
+/// Each call prints a complete fresh copy (callers pass already-deduped
+/// items via [`display_items`]); the most recent copy is the
+/// bottom-most one, right above the input bar.
 ///
 /// Output shape (glyphs chosen to match the Claude Code screenshot):
 ///
@@ -163,20 +212,117 @@ fn render_todo_list(items: &[TodoItem]) {
     }
     eprintln!();
     eprintln!("  \x1b[2m⎯ task list ⎯\x1b[0m");
-    for item in items {
-        let (glyph, colour) = match item.status {
-            TodoStatus::Completed => ("\u{2611}", "\x1b[32m"), // ☑ green
-            TodoStatus::Active => ("\u{25a0}", "\x1b[33;1m"),  // ■ bold amber
-            TodoStatus::Pending => ("\u{2610}", "\x1b[2m"),    // ☐ dim
-        };
-        eprintln!(
-            "  {colour}{glyph}\x1b[0m {}{}\x1b[0m",
-            match item.status {
-                TodoStatus::Active => "\x1b[1m",
-                TodoStatus::Completed => "\x1b[2m",
-                TodoStatus::Pending => "",
-            },
-            item.text
+    for line in todo_lines(items) {
+        eprintln!("{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(text: &str, status: TodoStatus) -> TodoItem {
+        TodoItem {
+            text: text.to_string(),
+            status,
+        }
+    }
+
+    #[test]
+    fn duplicate_item_text_renders_once_with_latest_status() {
+        // Two consecutive updates merged into one items array: the same
+        // task appears twice — once active, once completed. The display
+        // must show one line carrying the most recent status.
+        let merged = [
+            item(
+                "Fix peer discovery: add room-scoped broadcast so peers find each other",
+                TodoStatus::Active,
+            ),
+            item(
+                "Fix peer discovery: add room-scoped broadcast so peers find each other",
+                TodoStatus::Completed,
+            ),
+            item("Verify fix works in two tabs", TodoStatus::Pending),
+        ];
+        let display = display_items(&merged);
+        assert_eq!(display.len(), 2);
+        assert_eq!(display[0].status, TodoStatus::Completed);
+        assert_eq!(display[1].status, TodoStatus::Pending);
+
+        let lines = todo_lines(&display);
+        assert_eq!(lines.len(), 2);
+        let dup_count = lines
+            .iter()
+            .filter(|l| l.contains("Fix peer discovery"))
+            .count();
+        assert_eq!(dup_count, 1, "duplicate task rendered twice: {lines:?}");
+    }
+
+    #[test]
+    fn verbatim_duplicates_with_same_status_collapse() {
+        // The exact session symptom: the same active line twice.
+        let items = [
+            item("Fix peer discovery", TodoStatus::Active),
+            item("Fix peer discovery", TodoStatus::Active),
+            item("Verify fix works in two tabs", TodoStatus::Pending),
+        ];
+        let lines = todo_lines(&display_items(&items));
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn two_sequential_states_each_render_complete_and_deduped() {
+        // Two separate todo calls (state A then state B) are two
+        // independent renders; neither leaks into or dedupes against
+        // the other, and each is internally duplicate-free.
+        let state_a = [
+            item("Fix peer discovery", TodoStatus::Active),
+            item("Verify fix works in two tabs", TodoStatus::Pending),
+        ];
+        let state_b = [
+            item("Fix peer discovery", TodoStatus::Completed),
+            item("Verify fix works in two tabs", TodoStatus::Active),
+        ];
+        let lines_a = todo_lines(&display_items(&state_a));
+        let lines_b = todo_lines(&display_items(&state_b));
+        assert_eq!(lines_a.len(), 2);
+        assert_eq!(lines_b.len(), 2);
+        // Status progression is visible across the two renders.
+        assert!(lines_a[0].contains("\u{25a0}"), "A: item 1 active");
+        assert!(lines_b[0].contains("\u{2611}"), "B: item 1 completed");
+        assert!(lines_b[1].contains("\u{25a0}"), "B: item 2 active");
+    }
+
+    #[test]
+    fn distinct_items_pass_through_untouched() {
+        let items = [
+            item("one", TodoStatus::Completed),
+            item("two", TodoStatus::Active),
+            item("three", TodoStatus::Pending),
+        ];
+        let display = display_items(&items);
+        assert_eq!(display.len(), 3);
+        assert_eq!(todo_lines(&display).len(), 3);
+        // Whitespace-only variations of the same text still collapse.
+        let padded = [
+            item("one", TodoStatus::Active),
+            item("  one  ", TodoStatus::Completed),
+        ];
+        let display = display_items(&padded);
+        assert_eq!(display.len(), 1);
+        assert_eq!(display[0].status, TodoStatus::Completed);
+    }
+
+    #[test]
+    fn summary_counts_the_deduped_list() {
+        let merged = [
+            item("a", TodoStatus::Active),
+            item("a", TodoStatus::Completed),
+            item("b", TodoStatus::Pending),
+        ];
+        assert_eq!(
+            summarize(&display_items(&merged)),
+            "todo: 1/2 complete, 0 active"
         );
     }
 }

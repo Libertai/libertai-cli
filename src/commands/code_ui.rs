@@ -15277,6 +15277,10 @@ impl TurnRenderer {
             }
             AgentEvent::TurnStart { .. } => {
                 self.turn_text_open = false;
+                // Belt-and-braces: a turn boundary must never arm the
+                // next marker while older prose is still buffered (the
+                // marker would attach to the previous turn's text).
+                self.md.flush_pending();
             }
             AgentEvent::ToolExecutionStart {
                 tool_name, args, ..
@@ -15286,11 +15290,16 @@ impl TurnRenderer {
                 // repaint. Re-shown on ToolExecutionEnd.
                 self.spinner.hide();
                 self.turn_text_open = false;
+                // Flush buffered prose before ANY tool output reaches
+                // the terminal — including todo's self-rendered task
+                // list, which used to print above assistant text that
+                // preceded it in the stream (the early-return below
+                // skipped this flush).
+                self.md.flush_pending();
                 if tool_name == "todo" {
                     // The todo tool renders its own formatted output.
                     return;
                 }
-                self.md.flush_pending();
                 self.chrome_line(&self.tool_marker_line(tool_name, args));
                 if let Some(label) = self.auto_allowed_rule_label(tool_name, args) {
                     self.dim_chrome_line(&format!(
@@ -15449,15 +15458,29 @@ fn tool_result_preview(text: &str, is_error: bool, width: usize, max_lines: usiz
     out
 }
 
-/// Char-safe clipping with a single `…` marker that fits the budget
-/// (unlike the older `truncate_chars`, which appends "..." beyond it).
-/// Shared with `code_term`'s approval row, which must fit one terminal
-/// line for its `\r ESC[2K` eraser to work.
+/// Clip to `max` **display cells** with a single `…` marker that fits
+/// the budget (unlike the older `truncate_chars`, which appends "..."
+/// beyond it). Counts terminal cells via rich's calculus
+/// (`rich_rust::cells`: wide CJK/emoji = 2, combining marks = 0) — a
+/// char- or byte-counted clip can still overflow a terminal row when
+/// the text carries wide glyphs. Shared with `code_term`'s approval
+/// row, which must fit one terminal line for its `\r ESC[2K` eraser to
+/// work, and with the tool-result gutter (incl. guardrail warnings).
 pub(crate) fn clip_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
+    if rich_rust::cells::cell_len(s) <= max {
         return s.to_string();
     }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    let budget = max.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let w = rich_rust::cells::get_character_cell_size(c);
+        if used + w > budget {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
     out.push('…');
     out
 }
@@ -17119,6 +17142,35 @@ mod tests {
     fn clip_chars_is_char_safe() {
         assert_eq!(clip_chars("héllo wörld", 20), "héllo wörld");
         assert_eq!(clip_chars("héllo wörld", 6), "héllo…");
+    }
+
+    #[test]
+    fn clip_chars_counts_display_cells_not_chars_or_bytes() {
+        // Wide CJK glyphs are 2 cells each: "你你你" = 6 cells. A
+        // char-counted clip would call it 3 and overflow the row the
+        // approval-prompt eraser assumes is a single line.
+        assert_eq!(clip_chars("你你你", 6), "你你你");
+        assert_eq!(clip_chars("你你你", 5), "你你…");
+        assert_eq!(clip_chars("你你你", 4), "你…");
+        // A wide glyph never straddles the budget edge.
+        assert_eq!(clip_chars("a你b", 3), "a…");
+    }
+
+    #[test]
+    fn guardrail_warning_preview_is_clipped_to_width_in_cells() {
+        // The guardrail warning is prepended to the tool result text
+        // and flows through the same dim gutter as any preview line —
+        // it must clip to the terminal width by display cells.
+        let warning = "tool-call guardrail warning: `read` has been called 6 consecutive \
+                       times; consider summarizing progress or switching tactics";
+        let lines = tool_result_preview(warning, false, 60, 4);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].ends_with('…'), "long warning not elided");
+        assert!(
+            rich_rust::cells::cell_len(&lines[0]) <= 60,
+            "clipped gutter line exceeds the terminal width: {:?}",
+            lines[0]
+        );
     }
 
     #[test]

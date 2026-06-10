@@ -18,6 +18,7 @@
 use std::io::{IsTerminal, Write};
 
 use pi::tui::PiConsole;
+use rich_rust::cells::{cell_len, get_character_cell_size};
 use rich_rust::renderables::Markdown;
 use rich_rust::Console;
 
@@ -239,8 +240,8 @@ fn render_markdown_ansi(block: &str, width: usize) -> String {
 /// `content_width` is the column budget per line *excluding* the
 /// indent. rich_rust wraps tables and code at the render width but
 /// leaves prose/bullet lines unwrapped (the bare terminal used to
-/// soft-wrap those at column 0); [`wrap_ansi_hard`] breaks them here so
-/// every continuation row keeps the hanging indent.
+/// soft-wrap those at column 0); [`wrap_ansi_cells`] breaks them here
+/// so every continuation row keeps the hanging indent.
 fn decorate_block(
     rendered: &str,
     marker: &str,
@@ -258,8 +259,13 @@ fn decorate_block(
         // plain trailing spaces so re-emitted lines don't carry
         // copy-paste junk (styled padding that ends in an escape is
         // left alone — trim_end only sees literal trailing whitespace).
-        let line = line.trim_end();
-        for chunk in wrap_ansi_hard(line, content_width) {
+        // Tabs are expanded up front: `print_segments_to` passes them
+        // through raw, unicode-width counts them as zero cells, and the
+        // terminal would jump up to 8 columns — the exact kind of
+        // counted-narrower-than-rendered drift that pushed chip-heavy
+        // lines past the terminal edge and broke the hanging indent.
+        let line = line.trim_end().replace('\t', "    ");
+        for chunk in wrap_ansi_cells(&line, content_width) {
             if *marker_pending {
                 *marker_pending = false;
                 out.push_str(marker);
@@ -273,21 +279,28 @@ fn decorate_block(
     out
 }
 
-/// Hard-wrap one rendered line at `max` visible columns, ANSI-aware:
-/// CSI escape sequences are copied through without counting and never
-/// split. This mirrors what the terminal itself did to over-long lines
-/// before the hanging indent existed (a hard break at the edge), except
-/// the break lands where the indent keeps every row aligned. A style
-/// span split across the break loses its color on the continuation row
-/// — same as Claude Code's renderer, and rich rarely emits spans that
-/// long outside code blocks (which it wraps itself).
-fn wrap_ansi_hard(line: &str, max: usize) -> Vec<String> {
+/// Wrap one rendered line at `max` **display cells**, ANSI-aware:
+/// CSI escape sequences are copied through without counting, and glyph
+/// widths come from rich's own cell calculus (`rich_rust::cells`) so
+/// wide CJK/emoji count 2 and combining marks 0 — char-counted wrapping
+/// let wide glyphs push lines past the terminal edge, where the
+/// terminal soft-wrapped them at column 0 with no hanging indent.
+/// Breaks prefer the last space in the chunk (no more mid-word "pee/r"
+/// splits); a single word wider than the budget still hard-breaks at
+/// the edge. A style span split across the break loses its color on
+/// the continuation row — same trade-off Claude Code's renderer makes.
+fn wrap_ansi_cells(line: &str, max: usize) -> Vec<String> {
     if max == 0 {
         return vec![line.to_string()];
     }
-    let mut chunks = Vec::new();
+    let mut chunks: Vec<String> = Vec::new();
     let mut cur = String::new();
-    let mut visible = 0usize;
+    let mut cells = 0usize;
+    // `cur` contains at least one visible non-space glyph.
+    let mut has_word = false;
+    // Byte offset in `cur` just past the most recent space that
+    // follows a word — the preferred break point.
+    let mut last_space: Option<usize> = None;
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
@@ -305,12 +318,52 @@ fn wrap_ansi_hard(line: &str, max: usize) -> Vec<String> {
             }
             continue;
         }
-        if visible == max {
+        let w = get_character_cell_size(c);
+        if c == ' ' && cells + w > max && cells > 0 {
+            // The overflowing char is itself a space: the chunk ends
+            // exactly here — emit it whole and drop the separator.
+            while cur.ends_with(' ') {
+                cur.pop();
+            }
             chunks.push(std::mem::take(&mut cur));
-            visible = 0;
+            cells = 0;
+            has_word = false;
+            last_space = None;
+            continue;
+        }
+        while cells + w > max && cells > 0 {
+            if let Some(bp) = last_space {
+                // Word wrap: emit up to the last space, continue with
+                // the partial word (its cells re-measured ANSI-free).
+                let rest = cur.split_off(bp);
+                while cur.ends_with(' ') {
+                    cur.pop();
+                }
+                chunks.push(std::mem::take(&mut cur));
+                cur = rest.trim_start_matches(' ').to_string();
+            } else {
+                // One unbroken over-wide word: hard break at the edge.
+                chunks.push(std::mem::take(&mut cur));
+            }
+            let visible = strip_ansi(&cur);
+            cells = cell_len(&visible);
+            has_word = !visible.trim().is_empty();
+            last_space = None;
+        }
+        if c == ' ' && !has_word && !chunks.is_empty() {
+            // Drop leading spaces on continuation rows — the hanging
+            // indent already provides the alignment.
+            continue;
         }
         cur.push(c);
-        visible += 1;
+        cells += w;
+        if c == ' ' {
+            if has_word {
+                last_space = Some(cur.len());
+            }
+        } else if w > 0 {
+            has_word = true;
+        }
     }
     if !cur.is_empty() || chunks.is_empty() {
         chunks.push(cur);
@@ -545,23 +598,157 @@ mod tests {
     }
 
     #[test]
-    fn decorate_block_hard_wraps_overlong_lines_under_the_indent() {
+    fn decorate_block_hard_wraps_overlong_words_under_the_indent() {
         // rich leaves prose unwrapped; the decorator must break it so
-        // every continuation row carries the hanging indent.
+        // every continuation row carries the hanging indent. A single
+        // unbroken word still hard-breaks at the edge.
         let mut pending = true;
         let out = decorate_block("abcdefghij\n", MARKER, &mut pending, 4);
         assert_eq!(out, "\x1b[1m●\x1b[0m abcd\n  efgh\n  ij\n");
     }
 
     #[test]
-    fn wrap_ansi_hard_ignores_escape_sequences_when_counting() {
-        let chunks = wrap_ansi_hard("\x1b[1mabc\x1b[0mdef", 3);
+    fn wrap_ansi_cells_ignores_escape_sequences_when_counting() {
+        let chunks = wrap_ansi_cells("\x1b[1mabc\x1b[0mdef", 3);
         assert_eq!(chunks, vec!["\x1b[1mabc\x1b[0m", "def"]);
         // Short lines come back whole, escapes intact.
         assert_eq!(
-            wrap_ansi_hard("\x1b[36mok\x1b[0m", 10),
+            wrap_ansi_cells("\x1b[36mok\x1b[0m", 10),
             vec!["\x1b[36mok\x1b[0m"]
         );
+    }
+
+    #[test]
+    fn wrap_ansi_cells_breaks_at_word_boundaries() {
+        assert_eq!(
+            wrap_ansi_cells("hello world foo", 11),
+            vec!["hello world", "foo"]
+        );
+        // The break drops the separating space; the partial word
+        // continues on the next row with no leading gap.
+        assert_eq!(
+            wrap_ansi_cells("hello world foo", 10),
+            vec!["hello", "world foo"]
+        );
+        // Leading indentation of the original line is preserved on the
+        // first row only.
+        assert_eq!(wrap_ansi_cells("  ab cd", 5), vec!["  ab", "cd"]);
+    }
+
+    #[test]
+    fn wrap_ansi_cells_counts_display_cells_for_wide_glyphs() {
+        // CJK glyphs are 2 cells each: four of them must split 2+2 at
+        // a 4-cell budget (a char-counted wrap would emit all four and
+        // overflow the terminal, breaking the hanging indent at col 0).
+        assert_eq!(wrap_ansi_cells("你好世界", 4), vec!["你好", "世界"]);
+        // A wide glyph never straddles the boundary.
+        assert_eq!(wrap_ansi_cells("a你b", 2), vec!["a", "你", "b"]);
+    }
+
+    #[test]
+    fn chip_heavy_paragraph_never_exceeds_terminal_width() {
+        // Regression for the live-session overflow: a paragraph dense
+        // with inline-code chips must come out of the full pipeline
+        // (markdown render → decorate) with every line within the
+        // terminal width in *display cells* — overflow makes the
+        // terminal soft-wrap at column 0, killing the hanging indent.
+        let width = 80usize;
+        let md = "Found the issue. Look at `joinRoom` in `discovery.ts` — the `roomId` is \
+                  never forwarded to the `BrokerClient` constructor, so every `peer` \
+                  registers under the broker's `lobby` namespace and a random `suffix` \
+                  gets appended to the `peerId` each reconnect via `setRoom`.\n";
+        let rendered = render_markdown_ansi(md, width - TURN_INDENT);
+        let mut pending = true;
+        let out = decorate_block(&rendered, MARKER, &mut pending, width - TURN_INDENT);
+        let mut content = 0;
+        for line in out.lines() {
+            let visible = strip_ansi(line);
+            assert!(
+                cell_len(&visible) <= width,
+                "line exceeds {width} cells ({}): {visible:?}",
+                cell_len(&visible)
+            );
+            if !visible.trim().is_empty() {
+                content += 1;
+            }
+        }
+        assert!(content >= 3, "expected a wrapped multi-line paragraph");
+        // Word wrap: no break splits an ASCII word in two (every
+        // continuation row starts at a word boundary).
+        for line in out.lines().skip(1) {
+            let visible = strip_ansi(line);
+            let body = visible.trim_start();
+            assert!(
+                !body.starts_with(|c: char| c == ',' || c == '.'),
+                "break landed mid-token: {visible:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_glyph_paragraph_never_exceeds_terminal_width() {
+        let width = 40usize;
+        let md = "部署完成 🚀 之后请在两个标签页中验证 `joinRoom` 的同步行为，确认 `peerId` 列表一致。\n";
+        let rendered = render_markdown_ansi(md, width - TURN_INDENT);
+        let mut pending = true;
+        let out = decorate_block(&rendered, MARKER, &mut pending, width - TURN_INDENT);
+        for line in out.lines() {
+            let visible = strip_ansi(line);
+            assert!(
+                cell_len(&visible) <= width,
+                "wide-glyph line exceeds {width} cells ({}): {visible:?}",
+                cell_len(&visible)
+            );
+        }
+    }
+
+    #[test]
+    fn tabs_in_rendered_output_are_expanded_before_wrapping() {
+        // unicode-width counts '\t' as zero cells but terminals jump up
+        // to 8 columns — expansion keeps the count honest.
+        let mut pending = false;
+        let out = decorate_block("a\tb\n", MARKER, &mut pending, 80);
+        assert_eq!(out, "  a    b\n");
+        assert!(!out.contains('\t'));
+    }
+
+    #[test]
+    fn every_block_of_a_turn_keeps_the_hanging_indent() {
+        // Regression: in a multi-paragraph turn the marker is spent on
+        // block 1; blocks 2..n must still get the indent on every
+        // content line (sequential decorate calls share one decor
+        // state, exactly like MarkdownStream's block-by-block flushes).
+        let width = 78usize;
+        let blocks = [
+            "Found the issue. Look at `joinRoom` for the bug.\n",
+            "The problem: `roomId` is stale before `setRoom` runs.\n",
+            "Let me check the browser console output next.\n",
+        ];
+        let mut pending = true;
+        let mut outputs = Vec::new();
+        for block in blocks {
+            let rendered = render_markdown_ansi(block, width);
+            outputs.push(decorate_block(&rendered, MARKER, &mut pending, width));
+        }
+        // Block 1: first content line carries the marker.
+        assert!(
+            outputs[0].starts_with(MARKER),
+            "missing marker: {:?}",
+            outputs[0]
+        );
+        // Blocks 2 and 3: every content line starts with the indent.
+        for out in &outputs[1..] {
+            for line in out.lines() {
+                let visible = strip_ansi(line);
+                if visible.trim().is_empty() {
+                    continue;
+                }
+                assert!(
+                    visible.starts_with("  ") && !visible.starts_with("   "),
+                    "content line lost the 2-space hanging indent: {visible:?}"
+                );
+            }
+        }
     }
 
     #[test]
