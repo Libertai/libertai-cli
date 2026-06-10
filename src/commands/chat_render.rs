@@ -18,6 +18,8 @@
 use std::io::{IsTerminal, Write};
 
 use pi::tui::PiConsole;
+use rich_rust::renderables::Markdown;
+use rich_rust::Console;
 
 /// True when `NO_COLOR` is set to a non-empty value (https://no-color.org).
 fn no_color() -> bool {
@@ -65,6 +67,24 @@ pub struct MarkdownStream {
     pending: String,
     /// Total characters pushed (used by callers to detect empty replies).
     received: bool,
+    /// Claude-Code-style turn decoration (`libertai code` only): the
+    /// first rendered line of a turn carries an inline marker ("● "),
+    /// every later line a two-space hanging indent. `None` for
+    /// `libertai chat`/`ask` — their visuals are deliberately unchanged
+    /// (no marker, no indent). Never set in raw mode, so piped output
+    /// stays plain assistant text.
+    decor: Option<TurnDecor>,
+}
+
+/// Columns reserved by the turn marker / hanging indent.
+const TURN_INDENT: usize = 2;
+
+struct TurnDecor {
+    /// Pre-styled marker, exactly [`TURN_INDENT`] columns wide once the
+    /// ANSI is stripped (e.g. `"\x1b[1m●\x1b[0m "`).
+    marker: String,
+    /// The marker has not been emitted for the current text segment yet.
+    marker_pending: bool,
 }
 
 impl MarkdownStream {
@@ -74,6 +94,39 @@ impl MarkdownStream {
             console: if render { Some(PiConsole::new()) } else { None },
             pending: String::new(),
             received: false,
+            decor: None,
+        }
+    }
+
+    /// Markdown stream whose rendered output gets the Claude-Code turn
+    /// treatment: `marker` inline with the first rendered line, a
+    /// two-space hanging indent under it for every later line. The
+    /// marker must occupy [`TURN_INDENT`] columns once ANSI is
+    /// stripped. In raw mode (`render == false`) this is identical to
+    /// [`MarkdownStream::new`] — no marker/indent games on piped output.
+    pub fn with_turn_marker(render: bool, marker: String) -> Self {
+        let mut stream = Self::new(render);
+        if render {
+            stream.decor = Some(TurnDecor {
+                marker,
+                marker_pending: false,
+            });
+        }
+        stream
+    }
+
+    /// True when output goes through the markdown renderer (TTY mode).
+    pub fn renders_markdown(&self) -> bool {
+        self.render
+    }
+
+    /// Arm the turn marker: the next rendered non-blank line gets the
+    /// inline marker. Called by `libertai code` at the start of each
+    /// assistant text segment (a turn can have several, split by tool
+    /// calls). No-op unless built via [`Self::with_turn_marker`].
+    pub fn begin_marked_block(&mut self) {
+        if let Some(decor) = &mut self.decor {
+            decor.marker_pending = true;
         }
     }
 
@@ -128,8 +181,22 @@ impl MarkdownStream {
         }
     }
 
-    fn render_block(&self, block: &str) {
+    fn render_block(&mut self, block: &str) {
         if block.trim().is_empty() {
+            return;
+        }
+        if let Some(decor) = &mut self.decor {
+            // Decorated path (`libertai code`): render to a string at a
+            // width reduced by the indent, then re-emit each line with
+            // the marker / hanging indent so wrapped lines still fit.
+            let width = stdout_render_width().saturating_sub(TURN_INDENT).max(20);
+            let rendered = render_markdown_ansi(block, width);
+            let out = decorate_block(&rendered, &decor.marker, &mut decor.marker_pending, width);
+            print!("{out}");
+            // Trailing blank line: same block separator the plain path
+            // gets from its `println!()` below.
+            println!();
+            std::io::stdout().flush().ok();
             return;
         }
         if let Some(console) = &self.console {
@@ -141,6 +208,149 @@ impl MarkdownStream {
             std::io::stdout().flush().ok();
         }
     }
+}
+
+/// Render one markdown block to an ANSI string, wrapped at `width`
+/// columns. The console is buffer-backed but forced into terminal mode
+/// so styling matches what PiConsole would print to a real TTY; rich's
+/// detection still honours NO_COLOR (layout kept, colors dropped).
+/// Code fences render through rich_rust's `Syntax` (the `full` feature
+/// set), tables as box-drawn grids — both width-aware, so the hanging
+/// indent applied afterwards never pushes them past the terminal edge.
+fn render_markdown_ansi(block: &str, width: usize) -> String {
+    let console = Console::builder()
+        .force_terminal(true)
+        .width(width)
+        .file(Box::new(std::io::sink()))
+        .build();
+    let markdown = Markdown::new(block);
+    let segments = markdown.render(width);
+    let mut buf: Vec<u8> = Vec::new();
+    let _ = console.print_segments_to(&mut buf, &segments);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Re-emit rendered ANSI lines with the turn treatment: while
+/// `marker_pending`, the first line with visible content gets `marker`
+/// inline; every other content line gets a [`TURN_INDENT`]-space
+/// hanging indent. Blank lines stay bare (no trailing spaces). ANSI
+/// styling is preserved — prefixes go before the line's first escape.
+///
+/// `content_width` is the column budget per line *excluding* the
+/// indent. rich_rust wraps tables and code at the render width but
+/// leaves prose/bullet lines unwrapped (the bare terminal used to
+/// soft-wrap those at column 0); [`wrap_ansi_hard`] breaks them here so
+/// every continuation row keeps the hanging indent.
+fn decorate_block(
+    rendered: &str,
+    marker: &str,
+    marker_pending: &mut bool,
+    content_width: usize,
+) -> String {
+    let mut out = String::with_capacity(rendered.len() + 64);
+    let indent = " ".repeat(TURN_INDENT);
+    for line in rendered.lines() {
+        if strip_ansi(line).trim().is_empty() {
+            out.push('\n');
+            continue;
+        }
+        // rich pads rendered lines to the full render width; drop the
+        // plain trailing spaces so re-emitted lines don't carry
+        // copy-paste junk (styled padding that ends in an escape is
+        // left alone — trim_end only sees literal trailing whitespace).
+        let line = line.trim_end();
+        for chunk in wrap_ansi_hard(line, content_width) {
+            if *marker_pending {
+                *marker_pending = false;
+                out.push_str(marker);
+            } else {
+                out.push_str(&indent);
+            }
+            out.push_str(&chunk);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Hard-wrap one rendered line at `max` visible columns, ANSI-aware:
+/// CSI escape sequences are copied through without counting and never
+/// split. This mirrors what the terminal itself did to over-long lines
+/// before the hanging indent existed (a hard break at the edge), except
+/// the break lands where the indent keeps every row aligned. A style
+/// span split across the break loses its color on the continuation row
+/// — same as Claude Code's renderer, and rich rarely emits spans that
+/// long outside code blocks (which it wraps itself).
+fn wrap_ansi_hard(line: &str, max: usize) -> Vec<String> {
+    if max == 0 {
+        return vec![line.to_string()];
+    }
+    let mut chunks = Vec::new();
+    let mut cur = String::new();
+    let mut visible = 0usize;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            cur.push(c);
+            if chars.peek() == Some(&'[') {
+                cur.push('[');
+                chars.next();
+                while let Some(&n) = chars.peek() {
+                    cur.push(n);
+                    chars.next();
+                    if ('\x40'..='\x7e').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if visible == max {
+            chunks.push(std::mem::take(&mut cur));
+            visible = 0;
+        }
+        cur.push(c);
+        visible += 1;
+    }
+    if !cur.is_empty() || chunks.is_empty() {
+        chunks.push(cur);
+    }
+    chunks
+}
+
+/// Remove ANSI CSI sequences (`ESC [ … <final>`) so layout decisions
+/// (blank-line detection, width assertions in tests) see only the
+/// visible text.
+pub(crate) fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for n in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Terminal width for the decorated render path; falls back to 100
+/// columns when the probe fails (mirrors code_ui's
+/// `FALLBACK_RENDER_WIDTH`). Probed per block so a resize mid-stream
+/// affects the next block.
+fn stdout_render_width() -> usize {
+    crossterm::terminal::size()
+        .ok()
+        .map(|(cols, _)| cols as usize)
+        .filter(|cols| *cols > 0)
+        .unwrap_or(100)
 }
 
 /// Byte offset just past the last *complete* markdown block in `buf`, or
@@ -275,6 +485,153 @@ mod tests {
         // After a flush the stream keeps accepting deltas.
         s.push("more\n\n");
         assert!(s.pending.is_empty()); // complete block rendered immediately
+    }
+
+    // -- turn marker / hanging indent (the captured render path) --------
+
+    const MARKER: &str = "\x1b[1m●\x1b[0m ";
+
+    #[test]
+    fn decorate_block_puts_marker_inline_with_first_line() {
+        let mut pending = true;
+        let out = decorate_block(
+            "Two active experiments:\nsecond line\n",
+            MARKER,
+            &mut pending,
+            80,
+        );
+        assert_eq!(
+            out,
+            "\x1b[1m●\x1b[0m Two active experiments:\n  second line\n"
+        );
+        assert!(!pending, "marker consumed by the first content line");
+    }
+
+    #[test]
+    fn decorate_block_skips_ansi_only_blank_lines_for_the_marker() {
+        // A styled-but-blank first line must not eat the marker; blank
+        // lines stay bare (no trailing indent spaces).
+        let mut pending = true;
+        let out = decorate_block(
+            "\x1b[2m   \x1b[0m\nreal content\n",
+            MARKER,
+            &mut pending,
+            80,
+        );
+        assert_eq!(out, "\n\x1b[1m●\x1b[0m real content\n");
+    }
+
+    #[test]
+    fn decorate_block_indents_everything_once_marker_is_spent() {
+        // Second and later blocks of the same turn: hanging indent only.
+        let mut pending = false;
+        let out = decorate_block("a\n\nb\n", MARKER, &mut pending, 80);
+        assert_eq!(out, "  a\n\n  b\n");
+    }
+
+    #[test]
+    fn decorate_block_preserves_ansi_on_indented_lines() {
+        let mut pending = true;
+        let out = decorate_block(
+            "\x1b[1mTitle\x1b[0m\n\x1b[36mcyan body\x1b[0m\n",
+            MARKER,
+            &mut pending,
+            80,
+        );
+        assert_eq!(
+            out,
+            "\x1b[1m●\x1b[0m \x1b[1mTitle\x1b[0m\n  \x1b[36mcyan body\x1b[0m\n"
+        );
+    }
+
+    #[test]
+    fn decorate_block_hard_wraps_overlong_lines_under_the_indent() {
+        // rich leaves prose unwrapped; the decorator must break it so
+        // every continuation row carries the hanging indent.
+        let mut pending = true;
+        let out = decorate_block("abcdefghij\n", MARKER, &mut pending, 4);
+        assert_eq!(out, "\x1b[1m●\x1b[0m abcd\n  efgh\n  ij\n");
+    }
+
+    #[test]
+    fn wrap_ansi_hard_ignores_escape_sequences_when_counting() {
+        let chunks = wrap_ansi_hard("\x1b[1mabc\x1b[0mdef", 3);
+        assert_eq!(chunks, vec!["\x1b[1mabc\x1b[0m", "def"]);
+        // Short lines come back whole, escapes intact.
+        assert_eq!(
+            wrap_ansi_hard("\x1b[36mok\x1b[0m", 10),
+            vec!["\x1b[36mok\x1b[0m"]
+        );
+    }
+
+    #[test]
+    fn rendered_bullet_list_fits_width_with_hanging_indent() {
+        // Render at (width - indent) and re-emit with the 2-space pad:
+        // every visible line must fit the original width.
+        let width = 40usize;
+        let rendered = render_markdown_ansi(
+            "- first bullet with some longer text that wraps\n- second bullet\n",
+            width - TURN_INDENT,
+        );
+        let mut pending = true;
+        let out = decorate_block(&rendered, MARKER, &mut pending, width - TURN_INDENT);
+        assert!(out.contains("first bullet"));
+        for line in out.lines() {
+            let visible = strip_ansi(line);
+            assert!(
+                visible.chars().count() <= width,
+                "line exceeds {width} cols: {visible:?}"
+            );
+        }
+        // First content line carries the marker, the rest the indent.
+        let first = out.lines().find(|l| !strip_ansi(l).trim().is_empty());
+        assert!(first.unwrap().starts_with(MARKER));
+    }
+
+    #[test]
+    fn rendered_table_lines_all_get_the_indent() {
+        let rendered = render_markdown_ansi("| a | b |\n|---|---|\n| 1 | 2 |\n", 60 - TURN_INDENT);
+        let mut pending = false;
+        let out = decorate_block(&rendered, MARKER, &mut pending, 60 - TURN_INDENT);
+        let content_lines: Vec<&str> = out
+            .lines()
+            .filter(|l| !strip_ansi(l).trim().is_empty())
+            .collect();
+        assert!(!content_lines.is_empty(), "table rendered no lines");
+        for line in content_lines {
+            assert!(
+                strip_ansi(line).starts_with("  "),
+                "table line missing hanging indent: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn with_turn_marker_in_raw_mode_keeps_piped_output_undecorated() {
+        // Raw mode (piped stdout): no decor is installed at all, so the
+        // print/piped contracts stay byte-identical plain text.
+        let s = MarkdownStream::with_turn_marker(false, MARKER.to_string());
+        assert!(s.decor.is_none());
+        assert!(!s.renders_markdown());
+    }
+
+    #[test]
+    fn begin_marked_block_arms_the_marker_only_when_decorated() {
+        let mut plain = MarkdownStream::new(true);
+        plain.begin_marked_block(); // chat: no marker state, must not panic
+        assert!(plain.decor.is_none());
+
+        let mut decorated = MarkdownStream::with_turn_marker(true, MARKER.to_string());
+        assert!(!decorated.decor.as_ref().unwrap().marker_pending);
+        decorated.begin_marked_block();
+        assert!(decorated.decor.as_ref().unwrap().marker_pending);
+    }
+
+    #[test]
+    fn strip_ansi_removes_csi_sequences_only() {
+        assert_eq!(strip_ansi("\x1b[1mbold\x1b[0m plain"), "bold plain");
+        assert_eq!(strip_ansi("no ansi"), "no ansi");
+        assert_eq!(strip_ansi("\x1b[38;5;208mwide\x1b[0m"), "wide");
     }
 
     #[test]

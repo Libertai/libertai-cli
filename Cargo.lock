@@ -3113,6 +3113,7 @@ dependencies = [
  "rand 0.8.6",
  "regex",
  "reqwest",
+ "rich_rust",
  "rustyline",
  "serde",
  "serde_json",

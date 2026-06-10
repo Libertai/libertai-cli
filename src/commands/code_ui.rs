@@ -718,12 +718,95 @@ fn human_tokens(n: u64) -> String {
     }
 }
 
-/// Default context-window used by the status chip. LibertAI's
-/// `/v1/models` doesn't expose this today, so every model we ship
-/// defaults for shares the same cap. Kept as a function rather than a
-/// constant so we can spec per-model once the endpoint grows a field.
-fn context_window_for(_model: &str) -> u32 {
-    32_768
+/// Last-resort context-window for the status chip when neither pi's
+/// models.json nor the model catalog knows the model.
+const FALLBACK_CONTEXT_WINDOW: u32 = 32_768;
+
+/// Context-window used by the status chip, resolved in order:
+///
+/// 1. `contextWindow` from pi's `<global_dir>/models.json` — this is
+///    what pi actually runs with, respects user overrides, and is
+///    enriched with real catalog values at startup by
+///    `ensure_libertai_registered`. The session's `provider` entry is
+///    consulted first (many setups carry the same model id under
+///    several providers with stale per-backend values), then every
+///    other provider's `models[]`;
+/// 2. the LibertAI model catalog (`model_catalog::context_window_for`);
+/// 3. the legacy 32k fallback.
+///
+/// Memoized per provider/model — call sites fire on session start,
+/// model swaps, and every turn end, and the memo key makes `/model`
+/// switches pick up the new model's window. Unit tests always get the
+/// fallback (same hermeticity argument as `catalog_token_rates`: the
+/// dev machine's models.json / catalog cache must not leak into
+/// assertions).
+fn context_window_for(provider: &str, model: &str) -> u32 {
+    if cfg!(test) {
+        return FALLBACK_CONTEXT_WINDOW;
+    }
+    static MEMO: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = format!("{provider}/{model}");
+    if let Ok(map) = memo.lock() {
+        if let Some(window) = map.get(&key) {
+            return *window;
+        }
+    }
+    let resolved = pi_models_json_context_window(provider, model)
+        .or_else(|| crate::commands::model_catalog::context_window_for(model))
+        .unwrap_or(FALLBACK_CONTEXT_WINDOW);
+    if let Ok(mut map) = memo.lock() {
+        map.insert(key, resolved);
+    }
+    resolved
+}
+
+/// `contextWindow` for `provider/model` from pi's models.json, read via
+/// pi's own path resolution (honors `$PI_CODING_AGENT_DIR`, defaults to
+/// `~/.pi/agent`) — the same file `ensure_libertai_registered` writes.
+fn pi_models_json_context_window(provider: &str, model: &str) -> Option<u32> {
+    let global_dir = pi::config::Config::global_dir();
+    let path = pi::models::default_models_path(&global_dir);
+    let raw = std::fs::read_to_string(path).ok()?;
+    let root: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    models_json_context_window(&root, provider, model)
+}
+
+/// Pure lookup over a parsed models.json: find `model`'s positive
+/// numeric `contextWindow`, preferring `provider`'s entry, then any
+/// other provider carrying the id. Pure so tests can pin the resolution
+/// behavior on a fixture without touching `$PI_CODING_AGENT_DIR`.
+fn models_json_context_window(
+    root: &serde_json::Value,
+    provider: &str,
+    model: &str,
+) -> Option<u32> {
+    let providers = root.get("providers")?.as_object()?;
+    if let Some(window) = providers
+        .get(provider)
+        .and_then(|entry| provider_model_context_window(entry, model))
+    {
+        return Some(window);
+    }
+    providers
+        .iter()
+        .filter(|(name, _)| name.as_str() != provider)
+        .find_map(|(_, entry)| provider_model_context_window(entry, model))
+}
+
+/// Positive `contextWindow` of `model` inside one provider's `models[]`.
+fn provider_model_context_window(provider_entry: &serde_json::Value, model: &str) -> Option<u32> {
+    let models = provider_entry.get("models")?.as_array()?;
+    models
+        .iter()
+        .filter(|entry| entry.get("id").and_then(|v| v.as_str()) == Some(model))
+        .find_map(|entry| {
+            entry
+                .get("contextWindow")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|w| *w > 0)
+                .map(|w| w.min(u64::from(u32::MAX)) as u32)
+        })
 }
 
 /// Outcome of reading one input line in raw mode.
@@ -790,7 +873,7 @@ pub fn run_interactive(
     set_bar_status(BarStatus {
         model_label: format!("{provider}/{model}"),
         input_tokens: 0,
-        context_window: context_window_for(&model),
+        context_window: context_window_for(&provider, &model),
         output_style: None,
         status_line_template: cfg.status_line_template.clone(),
         status_line_command: cfg.status_line_command.clone(),
@@ -1998,7 +2081,7 @@ async fn repl_loop(
                                     set_bar_status(BarStatus {
                                         model_label: format!("{provider}/{model}"),
                                         input_tokens: 0,
-                                        context_window: context_window_for(&model),
+                                        context_window: context_window_for(&provider, &model),
                                         output_style: output_style.clone(),
                                         status_line_template: cfg.status_line_template.clone(),
                                         status_line_command: cfg.status_line_command.clone(),
@@ -2024,7 +2107,7 @@ async fn repl_loop(
                                 set_bar_status(BarStatus {
                                     model_label: format!("{provider}/{model}"),
                                     input_tokens: 0,
-                                    context_window: context_window_for(&model),
+                                    context_window: context_window_for(&provider, &model),
                                     output_style: output_style.clone(),
                                     status_line_template: cfg.status_line_template.clone(),
                                     status_line_command: cfg.status_line_command.clone(),
@@ -2428,7 +2511,7 @@ async fn repl_loop(
                 if let Some(run) = auto_run.as_mut() {
                     run.completed += 1;
                 }
-                let context_window = context_window_for(&msg.model);
+                let context_window = context_window_for(&msg.provider, &msg.model);
                 usage_history.push(UsageRecord {
                     provider: msg.provider.clone(),
                     model: msg.model.clone(),
@@ -2837,7 +2920,7 @@ async fn reload_repl_session(
     set_bar_status(BarStatus {
         model_label: format!("{provider}/{model}"),
         input_tokens: 0,
-        context_window: context_window_for(model),
+        context_window: context_window_for(provider, model),
         output_style: None,
         status_line_template: cfg.status_line_template.clone(),
         status_line_command: cfg.status_line_command.clone(),
@@ -15096,8 +15179,24 @@ impl TurnRenderer {
     ) -> Self {
         let chrome_tty = chrome.is_tty();
         let styled = crate::commands::chat_render::styling_enabled(chrome_tty);
+        // Assistant turn marker (Claude Code convention): bold,
+        // default-foreground `●` inline with the first line of the
+        // answer — visually distinct from the cyan tool markers. Styled
+        // per *stdout* (where the markdown lands), not the chrome
+        // stream: NO_COLOR keeps the dot but drops the bold.
+        let marker = if crate::commands::chat_render::styling_enabled({
+            use std::io::IsTerminal;
+            io::stdout().is_terminal()
+        }) {
+            format!("{BOLD}●{RESET} ")
+        } else {
+            "● ".to_string()
+        };
         Self {
-            md: MarkdownStream::new(crate::commands::chat_render::markdown_enabled_stdout()),
+            md: MarkdownStream::with_turn_marker(
+                crate::commands::chat_render::markdown_enabled_stdout(),
+                marker,
+            ),
             spinner: Spinner::start(styled, chrome),
             styled,
             chrome,
@@ -15148,8 +15247,17 @@ impl TurnRenderer {
                 self.spinner.hide();
                 if !self.turn_text_open {
                     self.turn_text_open = true;
-                    // Subtle turn marker (replaces the old "[turn N]" line).
-                    if self.styled {
+                    if self.md.renders_markdown() {
+                        // Markdown mode: the marker rides inline with
+                        // the first rendered line ("● Two active…"),
+                        // with a 2-column hanging indent under it —
+                        // handled inside MarkdownStream.
+                        self.md.begin_marked_block();
+                    } else if self.styled {
+                        // Raw fallback (piped stdout / dumb terminal):
+                        // keep the legacy standalone marker on the
+                        // chrome stream so piped assistant text stays
+                        // byte-identical plain text.
                         self.chrome_line(&format!("{CYAN}●{RESET}"));
                     } else {
                         self.chrome_line("●");
@@ -15334,7 +15442,9 @@ fn tool_result_preview(text: &str, is_error: bool, width: usize, max_lines: usiz
 
 /// Char-safe clipping with a single `…` marker that fits the budget
 /// (unlike the older `truncate_chars`, which appends "..." beyond it).
-fn clip_chars(s: &str, max: usize) -> String {
+/// Shared with `code_term`'s approval row, which must fit one terminal
+/// line for its `\r ESC[2K` eraser to work.
+pub(crate) fn clip_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -16852,6 +16962,87 @@ mod tests {
         assert_eq!(text, "libertai/qwen · normal · 56% ctx (18.3k / 32.8k)");
         // And the displayed pct really is used/cap of the displayed pair.
         assert_eq!(context_percent(18_324, 32_768), 56);
+    }
+
+    #[test]
+    fn context_window_for_is_hermetic_under_test() {
+        // Unit tests must never read the dev machine's models.json or
+        // catalog cache — the cfg!(test) gate pins the fallback.
+        assert_eq!(
+            context_window_for("libertai", "qwen3.6-35b-a3b"),
+            FALLBACK_CONTEXT_WINDOW
+        );
+        assert_eq!(context_window_for("libertai", "unknown-model"), 32_768);
+    }
+
+    #[test]
+    fn models_json_lookup_prefers_the_sessions_provider() {
+        // The fixture mirrors what `ensure_libertai_registered` +
+        // catalog enrichment write to pi's models.json (camelCase, real
+        // window for qwen3.6-35b-a3b under `libertai`), plus desktop
+        // backend entries that carry the same id with stale windows —
+        // the session's provider must win, with the global scan only as
+        // a fallback for ids the named provider doesn't carry.
+        let root = json!({
+            "providers": {
+                "backend-glm-a392cad6": {
+                    "models": [
+                        {"id": "qwen3.6-35b-a3b", "contextWindow": 128000},
+                        {"id": "third-party", "contextWindow": 131072}
+                    ]
+                },
+                "libertai": {
+                    "baseUrl": "https://api.libertai.io/v1",
+                    "models": [
+                        {"id": "qwen3.6-35b-a3b", "contextWindow": 262144},
+                        {"id": "legacy-model", "contextWindow": 32768}
+                    ]
+                }
+            }
+        });
+        assert_eq!(
+            models_json_context_window(&root, "libertai", "qwen3.6-35b-a3b"),
+            Some(262_144)
+        );
+        assert_eq!(
+            models_json_context_window(&root, "backend-glm-a392cad6", "qwen3.6-35b-a3b"),
+            Some(128_000)
+        );
+        // Model missing from the named provider → any other provider.
+        assert_eq!(
+            models_json_context_window(&root, "libertai", "third-party"),
+            Some(131_072)
+        );
+        assert_eq!(
+            models_json_context_window(&root, "libertai", "legacy-model"),
+            Some(32_768)
+        );
+        // Unknown model → None, so resolution falls through to the
+        // catalog and then the 32k fallback.
+        assert_eq!(models_json_context_window(&root, "libertai", "nope"), None);
+    }
+
+    #[test]
+    fn models_json_lookup_ignores_malformed_entries() {
+        let root = json!({
+            "providers": {
+                "libertai": {
+                    "models": [
+                        {"id": "no-window"},
+                        {"id": "zero-window", "contextWindow": 0},
+                        {"id": "string-window", "contextWindow": "big"},
+                        "not-an-object"
+                    ]
+                },
+                "broken": {"models": "not-an-array"}
+            }
+        });
+        for model in ["no-window", "zero-window", "string-window"] {
+            assert_eq!(models_json_context_window(&root, "libertai", model), None);
+        }
+        // Entirely malformed roots resolve to None rather than panicking.
+        assert_eq!(models_json_context_window(&json!([]), "p", "x"), None);
+        assert_eq!(models_json_context_window(&json!({}), "p", "x"), None);
     }
 
     #[test]

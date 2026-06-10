@@ -18,6 +18,7 @@ use crossterm::{
 };
 
 use crate::commands::code_approvals::{ApprovalUi, NotifyOutcome, PromptChoice};
+use crate::commands::code_ui::clip_chars;
 
 /// RAII guard that enables raw mode on construction and disables it
 /// on drop (including the panic-unwind path).
@@ -119,9 +120,52 @@ fn resolution_line(choice: &PromptChoice, always_rule: &str) -> String {
     }
 }
 
+/// Width budget when the terminal size is unknown (non-TTY stderr).
+const FALLBACK_PROMPT_WIDTH: usize = 100;
+
+/// Current terminal width for the single-line option row / resolution
+/// line. Both are erased with `\r ESC[2K`, which only clears one
+/// terminal line — anything that wraps would leave stale text behind.
+fn prompt_width() -> usize {
+    terminal::size()
+        .ok()
+        .map(|(cols, _)| cols as usize)
+        .filter(|cols| *cols > 0)
+        .unwrap_or(FALLBACK_PROMPT_WIDTH)
+}
+
+/// The `[a]/[A]/[d]` option row with the saved-rule preview clipped so
+/// the whole row fits `width` columns and never wraps (the eraser
+/// assumes one line). Display-only: the full rule is still what gets
+/// persisted on an "always allow" answer.
+fn option_row(always_rule: &str, width: usize) -> String {
+    // Plain-text glyphs around the rule preview; must match the format
+    // string below with the ANSI stripped.
+    const PREFIX_PLAIN: &str = "  [a] allow once  [A] always allow (";
+    const SUFFIX_PLAIN: &str = ")  [d] deny ";
+    let budget = width
+        .saturating_sub(PREFIX_PLAIN.chars().count() + SUFFIX_PLAIN.chars().count())
+        .max(8);
+    let rule = clip_chars(always_rule, budget);
+    format!(
+        "  \x1b[2m[a]\x1b[0m allow once  \x1b[2m[A]\x1b[0m always allow ({rule})  \x1b[2m[d]\x1b[0m deny "
+    )
+}
+
+/// [`resolution_line`] clipped to one terminal line (it embeds the same
+/// rule label as the option row, so a long rule would wrap it too). The
+/// two columns are the caller's leading indent.
+fn clipped_resolution_line(choice: &PromptChoice, always_rule: &str, width: usize) -> String {
+    clip_chars(
+        &resolution_line(choice, always_rule),
+        width.saturating_sub(2).max(8),
+    )
+}
+
 /// Block until the user picks allow/always/deny.
 fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
     let mut stderr = std::io::stderr();
+    let width = prompt_width();
 
     eprintln!();
     eprintln!("  \x1b[33;1m⎯ tool approval ⎯\x1b[0m");
@@ -129,7 +173,7 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
     for line in preview.lines() {
         eprintln!("  \x1b[2m│\x1b[0m {}", style_preview_line(line));
     }
-    eprint!("  \x1b[2m[a]\x1b[0m allow once  \x1b[2m[A]\x1b[0m always allow ({always_rule})  \x1b[2m[d]\x1b[0m deny ");
+    eprint!("{}", option_row(always_rule, width));
     let _ = stderr.flush();
 
     // Brief raw-mode single-key read via the shared RAII guard so a
@@ -142,7 +186,10 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
             let _ = std::io::stdin().read_line(&mut line);
             let choice = parse_cooked_choice(&line);
             eprintln!();
-            eprintln!("  \x1b[2m{}\x1b[0m", resolution_line(&choice, always_rule));
+            eprintln!(
+                "  \x1b[2m{}\x1b[0m",
+                clipped_resolution_line(&choice, always_rule, width)
+            );
             return choice;
         }
     };
@@ -167,9 +214,14 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
     };
     drop(_guard);
     // Erase the option row and replace it with the resolution, so the
-    // scrollback shows what happened rather than the menu.
+    // scrollback shows what happened rather than the menu. The row was
+    // clipped to one terminal line above, so the one-line eraser is
+    // guaranteed to remove all of it.
     eprint!("\r\x1b[2K");
-    eprintln!("  \x1b[2m{}\x1b[0m", resolution_line(&choice, always_rule));
+    eprintln!(
+        "  \x1b[2m{}\x1b[0m",
+        clipped_resolution_line(&choice, always_rule, width)
+    );
     choice
 }
 
@@ -218,6 +270,62 @@ mod tests {
             "\x1b[2m... 12 lines omitted\x1b[0m"
         );
         assert_eq!(style_preview_line(" context"), " context");
+    }
+
+    use crate::commands::chat_render::strip_ansi;
+
+    #[test]
+    fn option_row_fits_width_and_elides_long_rules() {
+        let long_rule = "bash(find . -maxdepth 3 -not -path './target/*' -not -path './.git/*' -name '*.rs' -print)";
+        let width = 80;
+        let row = option_row(long_rule, width);
+        let visible = strip_ansi(&row);
+        assert!(
+            visible.chars().count() <= width,
+            "row wraps at {width} cols ({} chars): {visible:?}",
+            visible.chars().count()
+        );
+        assert!(visible.contains('…'), "long rule not elided: {visible:?}");
+        // The menu chrome survives the clipping.
+        assert!(visible.starts_with("  [a] allow once  [A] always allow ("));
+        assert!(visible.ends_with(")  [d] deny "));
+    }
+
+    #[test]
+    fn option_row_keeps_short_rules_verbatim() {
+        let row = option_row("bash(ls -R)", 100);
+        assert_eq!(
+            strip_ansi(&row),
+            "  [a] allow once  [A] always allow (bash(ls -R))  [d] deny "
+        );
+    }
+
+    #[test]
+    fn option_row_survives_tiny_widths() {
+        // Degenerate terminal: the rule budget floors at 8 chars so the
+        // row stays parseable even if it can't fit.
+        let row = option_row("bash(very long rule here)", 10);
+        let visible = strip_ansi(&row);
+        assert!(visible.contains("allow once"));
+        assert!(visible.contains('…'));
+    }
+
+    #[test]
+    fn resolution_line_is_clipped_to_one_terminal_line() {
+        let long_rule = "bash(find . -maxdepth 3 -not -path './target/*' -not -path './.git/*' -name '*.rs' -print)";
+        let width = 60;
+        let line = clipped_resolution_line(&PromptChoice::AlwaysAllow, long_rule, width);
+        // Printed as "  {line}" → total must fit the terminal width.
+        assert!(
+            line.chars().count() + 2 <= width,
+            "resolution line wraps: {line:?}"
+        );
+        assert!(line.ends_with('…'));
+        // Short resolutions pass through untouched.
+        assert_eq!(
+            clipped_resolution_line(&PromptChoice::Deny, long_rule, width),
+            "✗ denied"
+        );
     }
 
     #[test]

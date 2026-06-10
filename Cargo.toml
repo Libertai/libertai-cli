@@ -96,6 +96,12 @@ futures = "0.3"
 # terminal-size queries. pi_agent_rust already pulls this in transitively,
 # but we declare it explicitly so `use crossterm::...` resolves cleanly.
 crossterm = "0.29"
+# Markdown → ANSI capture for the inline assistant turn marker + hanging
+# indent in `libertai code`. pi pulls rich_rust transitively but does not
+# re-export it (PiConsole's inner Console is private), so we render the
+# decorated path through our own buffer-backed Console. Same version +
+# features as pi's own dependency, so the lockfile stays unified.
+rich_rust = { version = "0.2", features = ["full"] }
 # Catch Ctrl-C during an in-flight agent stream and forward it to pi's
 # AbortHandle so the REPL survives the interrupt.
 ctrlc = "3"
