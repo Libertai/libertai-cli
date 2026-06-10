@@ -8,7 +8,16 @@
 //!
 //! v0 non-goals: typing during a running prompt (pi callback fires on the
 //! runtime thread; mixing that with a parallel stdin reader is out of
-//! scope); multi-line paste; syntax highlighting.
+//! scope); syntax highlighting.
+//!
+//! Multi-line input: bracketed paste (`ESC[?2004h`) is enabled while the
+//! bar is active, so a pasted stack trace arrives as one `Event::Paste`
+//! — newlines included — and lands in the buffer as a single edit
+//! instead of submitting line by line. Alt+Enter / Ctrl+J (and
+//! Shift+Enter on terminals that report it, e.g. the kitty keyboard
+//! protocol) insert a deliberate newline. The bar grows one row per
+//! buffer line up to `MAX_INPUT_ROWS`, then scrolls a window that keeps
+//! the cursor visible.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -48,7 +57,7 @@ use crate::commands::code_sandbox::{
     binary_on_path, detect_strict_profile, format_profile_text, BindKind, StrictProfile,
 };
 use crate::commands::code_session::{
-    build_session_options, list_past_sessions, CodeSessionConfig, SessionPersistence,
+    build_session_options, list_past_sessions, CodeSessionConfig, SessionMeta, SessionPersistence,
 };
 use crate::commands::code_skills::{self, SkillPillar};
 use crate::commands::code_term::TerminalApprovalUi;
@@ -58,6 +67,9 @@ use crate::config::{mask_key, Config as LibertaiConfig};
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
+/// Brand accent for the welcome header — matches the cyan `❯` prompt
+/// chevron the input bar paints via crossterm.
+const CYAN: &str = "\x1b[36m";
 
 const SHELL_ESCAPE_MAX_DISPLAY_BYTES: usize = 256 * 1024;
 const SHELL_ESCAPE_CONTEXT_LIMIT: usize = 5;
@@ -80,7 +92,8 @@ const STATUS_LINE_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
 const STATUS_LINE_COMMAND_CACHE_TTL: Duration = Duration::from_secs(5);
 const BACKGROUND_AGENT_LOG_TAIL_BYTES: usize = 64 * 1024;
 const STATUS_LINE_TOKENS: &[&str] = &[
-    "project", "path", "session", "backend", "model", "mode", "style", "tokens", "ctx", "live",
+    "project", "path", "session", "backend", "model", "mode", "style", "tokens", "ctx", "cost",
+    "live",
 ];
 
 /// Snapshot of the last completed turn's token usage. Written in
@@ -94,6 +107,10 @@ struct BarStatus {
     output_style: Option<String>,
     status_line_template: String,
     status_line_command: String,
+    /// Estimated session cost so far (pricing-table lookup over this
+    /// session's usage records). `None` before the first turn or when
+    /// the model has no pricing entry.
+    estimated_cost: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -477,8 +494,7 @@ enum ConfigSettingsTarget {
 /// ever need that, add a per-invocation reset step and document the
 /// invariant more loudly.
 static BAR_STATUS: Mutex<Option<BarStatus>> = Mutex::new(None);
-static STATUS_LINE_COMMAND_CACHE: OnceLock<Mutex<Option<StatusLineCommandCache>>> =
-    OnceLock::new();
+static STATUS_LINE_COMMAND_CACHE: OnceLock<Mutex<Option<StatusLineCommandCache>>> = OnceLock::new();
 static VIM_INPUT_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Current in-flight abort handle, populated for the duration of each
@@ -533,7 +549,7 @@ fn rule_chip(cols: usize, mode: Mode) -> String {
         Some(s) => {
             let text = status_line_command_text(&s.status_line_command)
                 .or_else(|| expand_status_line_template(&s.status_line_template, &s, mode))
-                .unwrap_or_else(|| default_rule_text(&s));
+                .unwrap_or_else(|| default_rule_text(&s, mode));
             format!(" {text} ")
         }
         None => String::new(),
@@ -651,18 +667,24 @@ fn first_status_line(text: &str) -> String {
         .collect()
 }
 
-fn default_rule_text(status: &BarStatus) -> String {
+/// Default status-line text when no template/command is configured:
+/// `model · mode · context-used% (used/cap)` plus an estimated session
+/// cost when the pricing table knows the model. Mode is included so a
+/// Shift+Tab toggle is visible in the bar, not just in the prompt chip.
+fn default_rule_text(status: &BarStatus, mode: Mode) -> String {
+    let mut text = format!("{} · {}", status.model_label, mode_label(mode));
     if status.context_window > 0 {
         let pct = context_percent(status.input_tokens, status.context_window);
-        format!(
-            "{pct}% · {} / {} · {}",
+        text.push_str(&format!(
+            " · {pct}% ctx ({} / {})",
             human_tokens(status.input_tokens),
             human_tokens(u64::from(status.context_window)),
-            status.model_label
-        )
-    } else {
-        status.model_label.clone()
+        ));
     }
+    if let Some(cost) = status.estimated_cost.filter(|cost| *cost > 0.0) {
+        text.push_str(&format!(" · ~{}", dollar(cost)));
+    }
+    text
 }
 
 fn context_percent(input_tokens: u64, context_window: u32) -> u32 {
@@ -703,7 +725,8 @@ enum LineResult {
 
 // RawModeGuard lives in `code_term` so both this module and
 // code_approvals can share the same panic-safe raw-mode wrapper.
-use crate::commands::code_term::RawModeGuard;
+// BracketedPasteGuard sits beside it for the same panic-safety reason.
+use crate::commands::code_term::{BracketedPasteGuard, RawModeGuard};
 
 /// Entry point from `code::run` when the command line has no prompt.
 ///
@@ -717,7 +740,35 @@ pub fn run_interactive(
     bash_command_wrapper: Option<Vec<String>>,
     cfg: Arc<LibertaiConfig>,
 ) -> Result<()> {
-    print_banner(&provider, &model, mode);
+    let styled = welcome_styling_enabled();
+    // `--continue`/`--resume`: one-line summary of what came back,
+    // printed above the welcome header.
+    let resumed = resume_path
+        .as_ref()
+        .and_then(|path| resume_session_meta(path));
+    if let Some(meta) = resumed.as_ref() {
+        let summary = resume_summary_text(meta, unix_now_ms());
+        if styled {
+            println!("{DIM}  {summary}{RESET}");
+        } else {
+            println!("  {summary}");
+        }
+    }
+    let cwd_label = std::env::current_dir()
+        .map(|cwd| abbreviate_home(&cwd))
+        .unwrap_or_else(|_| "?".to_string());
+    let welcome = WelcomeInfo {
+        provider: provider.clone(),
+        model: model.clone(),
+        mode,
+        cwd: cwd_label,
+        session: session_state_label(resumed.as_ref()),
+        sandbox: sandbox_welcome_label(bash_command_wrapper.as_deref()),
+    };
+    for line in welcome_lines(&welcome, styled) {
+        println!("{line}");
+    }
+    println!();
 
     // Prime the status bar so the rule renders a useful label even
     // before the first turn completes.
@@ -728,6 +779,7 @@ pub fn run_interactive(
         output_style: None,
         status_line_template: cfg.status_line_template.clone(),
         status_line_command: cfg.status_line_command.clone(),
+        estimated_cost: None,
     });
 
     // Forward Ctrl-C during streaming to pi's AbortHandle.
@@ -762,17 +814,174 @@ pub fn run_interactive(
     })
 }
 
-fn print_banner(provider: &str, model: &str, mode: Mode) {
-    let mode_tag = match mode {
-        Mode::Normal => String::new(),
-        Mode::AcceptEdits => format!(" {DIM}[accept-edits]{RESET}"),
-        Mode::Plan => format!(" {DIM}[plan]{RESET}"),
+/// Inputs for the session-start welcome header. Plain data so
+/// [`welcome_lines`] stays pure and unit-testable without a TTY.
+struct WelcomeInfo {
+    provider: String,
+    model: String,
+    mode: Mode,
+    /// Working directory, already `~`-abbreviated.
+    cwd: String,
+    /// `new session` or `resumed "name"` / `resumed session <id8>`.
+    session: String,
+    /// `sandbox off` or `sandbox <wrapper>` (e.g. `sandbox bwrap`).
+    sandbox: String,
+}
+
+/// Assemble the welcome header printed once at session start.
+///
+/// `styled == false` (NO_COLOR, `TERM=dumb`, piped stdout) emits the
+/// same content as plain text — no ANSI, no accent mark. Kept at six
+/// lines so the whole header plus its trailing blank stays under eight.
+fn welcome_lines(info: &WelcomeInfo, styled: bool) -> Vec<String> {
+    let identity = format!("{}/{}", info.provider, info.model);
+    let mode = format!("{} mode", mode_label(info.mode));
+    let hint_keys = "/help commands · Shift+Tab plan mode · /model switch · /resume sessions";
+    let hint_input = "/mention <file> attach · Alt+Enter newline · Ctrl+C interrupt · Ctrl+D quit";
+    if styled {
+        vec![
+            format!("{CYAN}{BOLD}\u{258c}{RESET} {BOLD}LibertAI Code{RESET}"),
+            format!(
+                "{CYAN}\u{258c}{RESET} {BOLD}{identity}{RESET}{DIM} · {mode} · {}{RESET}",
+                info.sandbox
+            ),
+            format!(
+                "{CYAN}\u{258c}{RESET} {DIM}{} · {}{RESET}",
+                info.cwd, info.session
+            ),
+            String::new(),
+            format!("  {DIM}{hint_keys}{RESET}"),
+            format!("  {DIM}{hint_input}{RESET}"),
+        ]
+    } else {
+        vec![
+            "LibertAI Code".to_string(),
+            format!("{identity} · {mode} · {}", info.sandbox),
+            format!("{} · {}", info.cwd, info.session),
+            String::new(),
+            format!("  {hint_keys}"),
+            format!("  {hint_input}"),
+        ]
+    }
+}
+
+/// Whether the welcome header (and resume summary) should carry ANSI
+/// styling: stdout is a TTY, NO_COLOR is unset, and TERM isn't dumb.
+/// The raw-mode input bar below only runs on a TTY anyway; this gate
+/// keeps the one-shot cooked-mode header honest when output is piped
+/// or the user opted out of color.
+fn welcome_styling_enabled() -> bool {
+    use std::io::IsTerminal;
+    crate::commands::chat_render::styling_enabled(io::stdout().is_terminal())
+}
+
+/// `~`-abbreviate a path when it sits under the user's home directory.
+fn abbreviate_home(path: &Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rest) = path.strip_prefix(&home) {
+            return if rest.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", rest.display())
+            };
+        }
+    }
+    path.display().to_string()
+}
+
+/// `new session`, `resumed "name"`, or `resumed session <id8>`.
+fn session_state_label(resumed: Option<&SessionMeta>) -> String {
+    match resumed {
+        Some(meta) => match meta
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            Some(name) => format!("resumed \"{name}\""),
+            None => format!("resumed {}", short_session_id(&meta.id)),
+        },
+        None => "new session".to_string(),
+    }
+}
+
+fn short_session_id(id: &str) -> String {
+    let short: String = id.chars().take(8).collect();
+    if short.is_empty() {
+        "session".to_string()
+    } else {
+        format!("session {short}")
+    }
+}
+
+/// `sandbox off` when bash runs unwrapped, otherwise the wrapper's
+/// binary name (e.g. `sandbox bwrap` for `--sandbox=strict`).
+fn sandbox_welcome_label(wrapper: Option<&[String]>) -> String {
+    match wrapper.and_then(|argv| argv.first()) {
+        Some(first) => {
+            let name = Path::new(first)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(first.as_str());
+            format!("sandbox {name}")
+        }
+        None => "sandbox off".to_string(),
+    }
+}
+
+/// Locate the on-disk index entry for the session being resumed so the
+/// welcome header can show its name/age/message count. Best-effort:
+/// a session file that pi never indexed just yields `None`.
+fn resume_session_meta(path: &Path) -> Option<SessionMeta> {
+    let sessions = list_past_sessions(None).ok()?;
+    let canonical = path.canonicalize().ok();
+    sessions.into_iter().find(|meta| {
+        let meta_path = Path::new(&meta.path);
+        meta_path == path
+            || canonical
+                .as_deref()
+                .is_some_and(|target| meta_path.canonicalize().is_ok_and(|p| p == target))
+    })
+}
+
+/// One-line `--continue`/`--resume` summary: which session came back,
+/// how old it is, and how many messages it carries.
+fn resume_summary_text(meta: &SessionMeta, now_ms: i64) -> String {
+    let label = match meta
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        Some(name) => format!("\"{name}\""),
+        None => short_session_id(&meta.id),
     };
-    println!(
-        "{BOLD}libertai code{RESET} {DIM}— interactive ({provider}/{model}){RESET}{mode_tag}"
-    );
-    println!("{DIM}  type /help for commands, /exit or Ctrl+D to quit{RESET}");
-    println!();
+    let age = human_age_ms(now_ms.saturating_sub(meta.last_modified_ms));
+    let messages = match meta.message_count {
+        1 => "1 message".to_string(),
+        n => format!("{n} messages"),
+    };
+    format!("\u{21ba} resumed {label} · {age} · {messages}")
+}
+
+fn human_age_ms(delta_ms: i64) -> String {
+    let secs = (delta_ms / 1000).max(0);
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+fn unix_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 async fn repl_loop(
@@ -800,8 +1009,7 @@ async fn repl_loop(
         Arc::clone(&cfg),
     )
     .await?;
-    let mut session_hooks =
-        crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(&cfg));
+    let mut session_hooks = crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(&cfg));
 
     // If we resumed, print the rehydrated transcript so the user has
     // visual context before the input bar takes over. Skipped for fresh
@@ -848,12 +1056,11 @@ async fn repl_loop(
 
     loop {
         let autonomous_turn = if let Some(prompt) = pop_due_scheduled_prompt(&mut scheduled_runs) {
-            if let Err(err) =
-                persist_scheduled_runs_if_configured(schedule_store_path.as_deref(), &scheduled_runs)
-            {
-                eprintln!(
-                    "{DIM}  /schedule: could not save scheduled prompts: {err}.{RESET}"
-                );
+            if let Err(err) = persist_scheduled_runs_if_configured(
+                schedule_store_path.as_deref(),
+                &scheduled_runs,
+            ) {
+                eprintln!("{DIM}  /schedule: could not save scheduled prompts: {err}.{RESET}");
             }
             Some(prompt)
         } else if let Some(prompt) = autonomous_queue.pop_front() {
@@ -905,7 +1112,7 @@ async fn repl_loop(
                     announce_mode_change(new_mode);
                     continue;
                 }
-            }
+            },
         };
 
         let trimmed_owned = line.trim().to_string();
@@ -986,10 +1193,7 @@ async fn repl_loop(
                 HotkeysCommand::Show => print_hotkeys(),
                 HotkeysCommand::Json => print_hotkeys_json(rest),
                 HotkeysCommand::Usage => {
-                    println!(
-                        "{DIM}  usage:{RESET} {}",
-                        hotkeys_usage_text()
-                    );
+                    println!("{DIM}  usage:{RESET} {}", hotkeys_usage_text());
                 }
             }
             continue;
@@ -1011,14 +1215,11 @@ async fn repl_loop(
                         Ok(next) => {
                             drop(session_hooks);
                             handle = next;
-                            session_hooks =
-                                crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(
-                                    &cfg,
-                                ));
+                            session_hooks = crate::commands::code_hooks::SessionHookGuard::start(
+                                Arc::clone(&cfg),
+                            );
                             usage_history.clear();
-                            update_bar_status(|status| {
-                                status.output_style = output_style.clone()
-                            });
+                            update_bar_status(|status| status.output_style = output_style.clone());
                         }
                         Err(e) => eprintln!("{DIM}  /reload: {e:#}{RESET}"),
                     }
@@ -1521,10 +1722,9 @@ async fn repl_loop(
                         Ok(next) => {
                             drop(session_hooks);
                             handle = next;
-                            session_hooks =
-                                crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(
-                                    &cfg,
-                                ));
+                            session_hooks = crate::commands::code_hooks::SessionHookGuard::start(
+                                Arc::clone(&cfg),
+                            );
                             usage_history.clear();
                             update_bar_status(|status| status.output_style = output_style.clone());
                         }
@@ -1560,7 +1760,11 @@ async fn repl_loop(
             println!(
                 "{DIM}  /loop: queued {} autonomous turn(s){}.{RESET}",
                 request.turns,
-                if request.goal.is_empty() { "" } else { " with a goal" }
+                if request.goal.is_empty() {
+                    ""
+                } else {
+                    " with a goal"
+                }
             );
             continue;
         }
@@ -1595,7 +1799,9 @@ async fn repl_loop(
                 ScheduleCommand::Status => print_schedule_status(&scheduled_runs),
                 ScheduleCommand::Json => print_schedule_json(&scheduled_runs, rest, None),
                 ScheduleCommand::Show(id) => print_schedule_details(&scheduled_runs, &id),
-                ScheduleCommand::ShowJson(id) => print_schedule_json(&scheduled_runs, rest, Some(&id)),
+                ScheduleCommand::ShowJson(id) => {
+                    print_schedule_json(&scheduled_runs, rest, Some(&id))
+                }
                 ScheduleCommand::Run(id) => {
                     let now = Instant::now();
                     if let Some(run) = scheduled_runs.iter_mut().find(|run| run.id == id) {
@@ -1781,6 +1987,7 @@ async fn repl_loop(
                                         output_style: output_style.clone(),
                                         status_line_template: cfg.status_line_template.clone(),
                                         status_line_command: cfg.status_line_command.clone(),
+                                        estimated_cost: None,
                                     });
                                     println!("{DIM}  → model set to {provider}/{model}{RESET}");
                                 }
@@ -1806,6 +2013,7 @@ async fn repl_loop(
                                     output_style: output_style.clone(),
                                     status_line_template: cfg.status_line_template.clone(),
                                     status_line_command: cfg.status_line_command.clone(),
+                                    estimated_cost: None,
                                 });
                                 println!("{DIM}  → model set to {provider}/{model}{RESET}");
                             }
@@ -1977,10 +2185,7 @@ async fn repl_loop(
                                         "{DIM}  /agent: started background agent `{}` pid {}.{RESET}",
                                         launch.name, started.pid
                                     );
-                                    println!(
-                                        "{DIM}  log: {}{RESET}",
-                                        started.log_path.display()
-                                    );
+                                    println!("{DIM}  log: {}{RESET}", started.log_path.display());
                                 }
                                 Err(e) => {
                                     eprintln!("{DIM}  /agent: {e:#}{RESET}");
@@ -2168,7 +2373,9 @@ async fn repl_loop(
             ) {
                 Ok(agent_line) => {
                     pending_shell_context.clear();
-                    handle.prompt_with_abort(agent_line, abort_signal, render).await
+                    handle
+                        .prompt_with_abort(agent_line, abort_signal, render)
+                        .await
                 }
                 Err(e) => {
                     clear_current_abort();
@@ -2205,14 +2412,12 @@ async fn repl_loop(
                     output_style: output_style.clone(),
                     status_line_template: cfg.status_line_template.clone(),
                     status_line_command: cfg.status_line_command.clone(),
+                    estimated_cost: usage_summary(&usage_history)
+                        .and_then(|summary| summary.model_token_cost()),
                 });
                 eprintln!(
                     "{DIM}  {}/{}  stop: {:?}  in={} out={}{RESET}",
-                    msg.provider,
-                    msg.model,
-                    msg.stop_reason,
-                    msg.usage.input,
-                    msg.usage.output,
+                    msg.provider, msg.model, msg.stop_reason, msg.usage.input, msg.usage.output,
                 );
                 if cfg.code_turn_notifications && !is_autonomous {
                     crate::commands::code_term::notify_terminal(
@@ -2346,9 +2551,10 @@ fn parse_init_from_agent_action(input: &str) -> Option<InitFromAgentAction> {
             "preview" => Some(InitFromAgentAction::PreviewSections(indexes)),
             "preview-append" => Some(InitFromAgentAction::PreviewApplySections("append", indexes)),
             "preview-merge" => Some(InitFromAgentAction::PreviewApplySections("merge", indexes)),
-            "preview-merge-lines" => {
-                Some(InitFromAgentAction::PreviewApplySections("merge-lines", indexes))
-            }
+            "preview-merge-lines" => Some(InitFromAgentAction::PreviewApplySections(
+                "merge-lines",
+                indexes,
+            )),
             "append" => Some(InitFromAgentAction::AppendSections(indexes)),
             "merge" => Some(InitFromAgentAction::MergeSections(indexes)),
             "merge-lines" => Some(InitFromAgentAction::MergeLineSections(indexes)),
@@ -2485,7 +2691,11 @@ fn prompt_plan_exit_handoff() -> Result<bool> {
     drop(_guard);
     eprintln!(
         "\x1b[2m{}\x1b[0m",
-        if approved { "approved" } else { "kept in plan mode" }
+        if approved {
+            "approved"
+        } else {
+            "kept in plan mode"
+        }
     );
     Ok(approved)
 }
@@ -2509,16 +2719,18 @@ async fn build_handle(
     // tracks runtime toggles via Shift+Tab.
     let initial_mode = mode.get();
     let ui = Arc::new(TerminalApprovalUi);
-    let factory = Arc::new(LibertaiToolFactory::new_with_features(
-        mode,
-        approvals,
-        ui,
-        FactoryFeatures::cli_defaults(),
-        Some(Arc::clone(&cfg)),
-    )
-    .with_tool_policy(crate::commands::code_hooks::tool_policy_from_config(
-        Arc::clone(&cfg),
-    )));
+    let factory = Arc::new(
+        LibertaiToolFactory::new_with_features(
+            mode,
+            approvals,
+            ui,
+            FactoryFeatures::cli_defaults(),
+            Some(Arc::clone(&cfg)),
+        )
+        .with_tool_policy(crate::commands::code_hooks::tool_policy_from_config(
+            Arc::clone(&cfg),
+        )),
+    );
     let persistence = match resume_path {
         Some(p) => SessionPersistence::Resume(p),
         None => SessionPersistence::Fresh,
@@ -2585,6 +2797,7 @@ async fn reload_repl_session(
         output_style: None,
         status_line_template: cfg.status_line_template.clone(),
         status_line_command: cfg.status_line_command.clone(),
+        estimated_cost: None,
     });
     println!("{DIM}  → {label}; fresh session using {provider}/{model}.{RESET}");
     Ok(handle)
@@ -2687,8 +2900,8 @@ fn resume_preview_arg(trimmed: &str) -> Option<&str> {
     let rest = trimmed.strip_prefix("/resume ")?.trim();
     match normalize_help_command_arg(rest).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" | "json" | "--json"
-        | "status --json" | "state --json" | "show --json" | "info --json"
-        | "preview --json" | "help" | "usage" => Some(rest),
+        | "status --json" | "state --json" | "show --json" | "info --json" | "preview --json"
+        | "help" | "usage" => Some(rest),
         _ => None,
     }
 }
@@ -2696,8 +2909,8 @@ fn resume_preview_arg(trimmed: &str) -> Option<&str> {
 fn parse_resume_preview_command(input: &str) -> ResumePreviewCommand {
     match normalize_help_command_arg(input).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" => ResumePreviewCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" | "preview --json" => ResumePreviewCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
+        | "preview --json" => ResumePreviewCommand::Json,
         _ => ResumePreviewCommand::Usage,
     }
 }
@@ -2754,7 +2967,9 @@ fn resume_json_payload(query: &str) -> Result<serde_json::Value> {
 fn print_resume_status() -> Result<()> {
     let payload = resume_json_payload("status")?;
     let count = payload["candidate_count"].as_u64().unwrap_or(0);
-    let default_path = payload["default_target"]["path"].as_str().unwrap_or("(none)");
+    let default_path = payload["default_target"]["path"]
+        .as_str()
+        .unwrap_or("(none)");
     println!(
         "{DIM}  /resume: {count} saved session(s) for this cwd. Running `/resume` resumes the most recent target: {default_path}.{RESET}"
     );
@@ -2889,8 +3104,7 @@ fn is_thinking_status_arg(input: &str) -> bool {
 fn is_thinking_json_arg(input: &str) -> bool {
     matches!(
         normalize_help_command_arg(input).as_str(),
-        "json" | "--json" | "status --json" | "show --json" | "current --json"
-            | "info --json"
+        "json" | "--json" | "status --json" | "show --json" | "current --json" | "info --json"
     )
 }
 
@@ -2916,8 +3130,8 @@ enum NameCommand {
 fn parse_name_command(input: &str) -> NameCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "status" | "state" | "show" | "current" | "info" => NameCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "current --json" | "info --json" => NameCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "current --json"
+        | "info --json" => NameCommand::Json,
         _ => NameCommand::Set,
     }
 }
@@ -3020,105 +3234,143 @@ fn print_rehydrated_transcript(messages: &[Message]) {
     println!();
 }
 
+/// One `/help` category: a scannable header plus its command lines.
+struct HelpSection {
+    title: &'static str,
+    lines: Vec<String>,
+}
+
+/// `/help` content grouped by category. Pure (no printing) so tests can
+/// assert section structure and that key commands stay documented.
+fn help_sections() -> Vec<HelpSection> {
+    vec![
+        HelpSection {
+            title: "session",
+            lines: vec![
+                "/help — show this message".to_string(),
+                "/exit — quit the REPL (also /quit, Ctrl+D)".to_string(),
+                "/clear — wipe the screen and start a fresh session (also /new)".to_string(),
+                "/resume [session|path] — resume the latest or specified saved session".to_string(),
+                "/fork [list|index|id] — fork from a previous user message".to_string(),
+                "/reload [config|session|now|fresh] — reload config and start a fresh agent session".to_string(),
+                format!("{} — set/show this session's display name (also /rename)", name_usage_text()),
+                format!("{} — show current REPL session status", status_usage_text()),
+                "/export [path] — write this session transcript as Markdown".to_string(),
+                "/share [path] — write this session transcript as shareable HTML".to_string(),
+                "/share gist [public|secret] [filename.html] — publish the HTML transcript with gh".to_string(),
+            ],
+        },
+        HelpSection {
+            title: "modes & permissions",
+            lines: vec![
+                "/plan — toggle plan mode (also Shift+Tab)".to_string(),
+                permissions_usage_text().to_string(),
+                format!("{} — alias for /permissions", mode_usage_text()),
+                "/forget — clear saved allow rules".to_string(),
+                format!("{} — inspect the bash sandbox profile", sandbox_usage_text()),
+            ],
+        },
+        HelpSection {
+            title: "model & output",
+            lines: vec![
+                model_usage_text().to_string(),
+                "/thinking [off|minimal|low|medium|high|xhigh] — show or set thinking".to_string(),
+                scoped_models_usage_text().to_string(),
+                output_style_usage_text().to_string(),
+                "/theme [status|show|current|system|dark|light|high-contrast] — show terminal theme status".to_string(),
+                "/compact — compact older conversation history now".to_string(),
+                format!("{} — show token usage for this REPL session", usage_slash_usage_text()),
+                format!("{} — customize the input-bar status line", status_line_usage_text()),
+            ],
+        },
+        HelpSection {
+            title: "context & files",
+            lines: vec![
+                "/image <path> [prompt] — attach a local image to the next prompt".to_string(),
+                "/attach <path> [prompt] — alias for /image".to_string(),
+                "/mention <path> [prompt] — attach a local text file to the next prompt".to_string(),
+                format!("{} — show a bounded project tree", tree_usage_text()),
+                format!("{} — show recent git commits", changelog_usage_text()),
+                "/memory — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path)".to_string(),
+                "/remember [kind:] <text> — append typed project memory (user, feedback, project, reference)".to_string(),
+                "/init [--agent|from-agent json|from-agent preview append|preview merge|preview merge-lines|preview replace|preview [append|merge|merge-lines] sections N[,M]|N-M|all|append sections N[,M]|N-M|all|merge sections N[,M]|N-M|all|merge-lines sections N[,M]|N-M|all|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance".to_string(),
+                "/onboarding|/onboard [show|preview|save|path|gist|json|--json|status --json|show --json|preview --json] — preview or write a local project onboarding guide".to_string(),
+                "/onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh".to_string(),
+            ],
+        },
+        HelpSection {
+            title: "automation & agents",
+            lines: vec![
+                "/loop [turns] [goal]|json [turns] [goal]|--json [turns] [goal]|status --json — run bounded autonomous follow-up turns".to_string(),
+                "/auto on [turns] [goal] — bounded continuous execution (/auto off|stop|cancel|status|state|json|--json|status --json|state --json; also /autorun, /continuous)".to_string(),
+                "/schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|status|state|json|--json|list --json|show|inspect|show-json|run|now|trigger|cancel|delete|rm|clear|stop; also /cron)".to_string(),
+                "/agents [list|status|show <name>|json|--json|list --json|status --json|show --json|show <name> --json|open|settings|edit|background|bg|create [--worktree|--same-cwd] <name>|delete|remove <name>] — list or inspect named sub-agents".to_string(),
+                "/agents create [--worktree|--same-cwd] <name> [description] — create a project sub-agent".to_string(),
+                "/agents delete <name> — delete the active named sub-agent definition".to_string(),
+                "/agent [--worktree|--same-cwd|--background|--detached] <name> <task> — run a named sub-agent task".to_string(),
+                "/agent --background|--detached <name> <task> — start a detached terminal agent and write a log under ~/.config/libertai/code-background-agents".to_string(),
+                "/agents background [list|show|log|kill|prune|clear] — inspect, stop, or prune terminal background agents".to_string(),
+                "/template <name> [args] — expand a prompt template".to_string(),
+                "/skills [list|status|show|json|--json|status --json|list --json|show --json|show <name>|show <name> --json|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions".to_string(),
+                "/send [target message] — show terminal inter-session send status".to_string(),
+            ],
+        },
+        HelpSection {
+            title: "review & integrations",
+            lines: vec![
+                "/review [scope] — ask the agent to review current code changes".to_string(),
+                "/security-review [scope] — ask for a focused security review".to_string(),
+                "/pr_comments [scope] — ask the agent to inspect PR review comments".to_string(),
+                "/pr_comments reply <thread_id> <body> — reply to a GitHub PR review thread".to_string(),
+                "/pr_comments resolve <thread_id> — resolve a GitHub PR review thread".to_string(),
+                "/pr_comments unresolve <thread_id> — reopen a GitHub PR review thread".to_string(),
+                "/pr_comments viewed <path> — mark a pull request file as viewed".to_string(),
+                "/pr_comments unviewed <path> — mark a pull request file as unviewed".to_string(),
+                "/pr_comments thread <path>:<line> <body> — add a GitHub PR line review thread".to_string(),
+                "/pr_comments edit <comment_id> <body> — edit a GitHub PR review comment".to_string(),
+                "/pr_comments review <approve|comment|request_changes> <body> — submit a GitHub PR summary review".to_string(),
+                "/pr_comments drafts submit [approve|comment|request_changes] [body] — publish queued draft threads, optionally with a review event".to_string(),
+                "/hooks — show configured command hooks (/hook is accepted too)".to_string(),
+                "/mcp — show terminal MCP support status".to_string(),
+                "/ide — show IDE integration status".to_string(),
+            ],
+        },
+        HelpSection {
+            title: "config & diagnostics",
+            lines: vec![
+                "/config [status|show|current|info|path|open|backends|defaults|agents|skills|hooks|mcp|approvals|appearance|sandbox|advanced|set <key> <value>|unset <key>] — show or update active config".to_string(),
+                format!("{} — inspect auth or run libertai login", login_usage_text()),
+                format!("{} — run libertai logout or explain provider logout", logout_usage_text()),
+                format!("{} — run a local session/config diagnostic report", doctor_usage_text()),
+                "/notify on|enable|enabled|off|disable|disabled|clear|status|state|show|test|ping — turn-complete terminal notifications".to_string(),
+                "/abort [status|cancel|stop|interrupt] — show how to interrupt the active CLI turn".to_string(),
+                "/vim — show Vim-input status".to_string(),
+                "/bug — print a bug report template".to_string(),
+            ],
+        },
+        HelpSection {
+            title: "input & keys",
+            lines: vec![
+                "multi-line — paste keeps newlines; Alt+Enter or Ctrl+J inserts one; Enter submits".to_string(),
+                "!<cmd> — run a local shell command in this cwd".to_string(),
+                format!("{} — show input bar keyboard controls", hotkeys_usage_text()),
+                format!("{} — show recent submitted prompts", history_usage_text()),
+                format!("{} — copy the last assistant response to the terminal clipboard", copy_usage_text()),
+                "↑ / ↓ — walk through previously submitted prompts".to_string(),
+                "← / → — move cursor in the current line".to_string(),
+                "Ctrl+C — cancel the line / interrupt streaming".to_string(),
+            ],
+        },
+    ]
+}
+
 fn print_help() {
-    println!("{DIM}  /help     — show this message{RESET}");
-    println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
-    println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
-    println!("{DIM}  {}{RESET}", permissions_usage_text());
-    println!("{DIM}  {} — alias for /permissions{RESET}", mode_usage_text());
-    println!("{DIM}  {}{RESET}", model_usage_text());
-    println!("{DIM}  {} — set/show this session's display name (also /rename){RESET}", name_usage_text());
-    println!("{DIM}  {} — show current REPL session status{RESET}", status_usage_text());
-    println!("{DIM}  {} — run a local session/config diagnostic report{RESET}", doctor_usage_text());
-    println!("{DIM}  /abort [status|cancel|stop|interrupt] — show how to interrupt the active CLI turn{RESET}");
-    println!("{DIM}  /review [scope] — ask the agent to review current code changes{RESET}");
-    println!("{DIM}  /security-review [scope] — ask for a focused security review{RESET}");
-    println!("{DIM}  /pr_comments [scope] — ask the agent to inspect PR review comments{RESET}");
-    println!(
-        "{DIM}  /pr_comments reply <thread_id> <body> — reply to a GitHub PR review thread{RESET}"
-    );
-    println!(
-        "{DIM}  /pr_comments resolve <thread_id> — resolve a GitHub PR review thread{RESET}"
-    );
-    println!(
-        "{DIM}  /pr_comments unresolve <thread_id> — reopen a GitHub PR review thread{RESET}"
-    );
-    println!(
-        "{DIM}  /pr_comments viewed <path> — mark a pull request file as viewed{RESET}"
-    );
-    println!(
-        "{DIM}  /pr_comments unviewed <path> — mark a pull request file as unviewed{RESET}"
-    );
-    println!(
-        "{DIM}  /pr_comments thread <path>:<line> <body> — add a GitHub PR line review thread{RESET}"
-    );
-    println!(
-        "{DIM}  /pr_comments edit <comment_id> <body> — edit a GitHub PR review comment{RESET}"
-    );
-    println!(
-        "{DIM}  /pr_comments review <approve|comment|request_changes> <body> — submit a GitHub PR summary review{RESET}"
-    );
-    println!(
-        "{DIM}  /pr_comments drafts submit [approve|comment|request_changes] [body] — publish queued draft threads, optionally with a review event{RESET}"
-    );
-    println!("{DIM}  {} — inspect the bash sandbox profile{RESET}", sandbox_usage_text());
-    println!("{DIM}  {} — show token usage for this REPL session{RESET}", usage_slash_usage_text());
-    println!("{DIM}  {} — show recent submitted prompts{RESET}", history_usage_text());
-    println!("{DIM}  {} — copy the last assistant response to the terminal clipboard{RESET}", copy_usage_text());
-    println!("{DIM}  /config [status|show|current|info|path|open|backends|defaults|agents|skills|hooks|mcp|approvals|appearance|sandbox|advanced|set <key> <value>|unset <key>] — show or update active config{RESET}");
-    println!("{DIM}  /hooks    — show configured command hooks (/hook is accepted too){RESET}");
-    println!("{DIM}  /mcp      — show terminal MCP support status{RESET}");
-    println!("{DIM}  {} — customize the input-bar status line{RESET}", status_line_usage_text());
-    println!("{DIM}  {} — show input bar keyboard controls{RESET}", hotkeys_usage_text());
-    println!("{DIM}  {} — show a bounded project tree{RESET}", tree_usage_text());
-    println!("{DIM}  {} — show recent git commits{RESET}", changelog_usage_text());
-    println!("{DIM}  /reload [config|session|now|fresh] — reload config and start a fresh agent session{RESET}");
-    println!("{DIM}  /resume [session|path] — resume the latest or specified saved session{RESET}");
-    println!("{DIM}  /fork [list|index|id] — fork from a previous user message{RESET}");
-    println!("{DIM}  /thinking [off|minimal|low|medium|high|xhigh] — show or set thinking{RESET}");
-    println!("{DIM}  {}{RESET}", scoped_models_usage_text());
-    println!("{DIM}  /compact — compact older conversation history now{RESET}");
-    println!("{DIM}  /loop [turns] [goal]|json [turns] [goal]|--json [turns] [goal]|status --json — run bounded autonomous follow-up turns{RESET}");
-    println!("{DIM}  /auto on [turns] [goal] — bounded continuous execution (/auto off|stop|cancel|status|state|json|--json|status --json|state --json; also /autorun, /continuous){RESET}");
-    println!("{DIM}  /schedule in <delay> <prompt> — queue a due follow-up prompt (/schedule list|status|state|json|--json|list --json|show|inspect|show-json|run|now|trigger|cancel|delete|rm|clear|stop; also /cron){RESET}");
-    println!("{DIM}  /send [target message] — show terminal inter-session send status{RESET}");
-    println!("{DIM}  /notify on|enable|enabled|off|disable|disabled|clear|status|state|show|test|ping — turn-complete terminal notifications{RESET}");
-    println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
-    println!("{DIM}  /attach <path> [prompt] — alias for /image{RESET}");
-    println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
-    println!("{DIM}  {} — inspect auth or run libertai login{RESET}", login_usage_text());
-    println!("{DIM}  {} — run libertai logout or explain provider logout{RESET}", logout_usage_text());
-    println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
-    println!("{DIM}  /skills [list|status|show|json|--json|status --json|list --json|show --json|show <name>|show <name> --json|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions{RESET}");
-    println!(
-        "{DIM}  /init [--agent|from-agent json|from-agent preview append|preview merge|preview merge-lines|preview replace|preview [append|merge|merge-lines] sections N[,M]|N-M|all|append sections N[,M]|N-M|all|merge sections N[,M]|N-M|all|merge-lines sections N[,M]|N-M|all|append|merge-lines|merge|replace] [notes] — create or merge AGENTS.md guidance{RESET}"
-    );
-    println!("{DIM}  /onboarding|/onboard [show|preview|save|path|gist|json|--json|status --json|show --json|preview --json] — preview or write a local project onboarding guide{RESET}");
-    println!("{DIM}  /onboarding gist [public|secret] [filename.md] — publish the onboarding guide with gh{RESET}");
-    println!("{DIM}  /agents [list|status|show <name>|json|--json|list --json|status --json|show --json|show <name> --json|open|settings|edit|background|bg|create [--worktree|--same-cwd] <name>|delete|remove <name>] — list or inspect named sub-agents{RESET}");
-    println!("{DIM}  /agents create [--worktree|--same-cwd] <name> [description] — create a project sub-agent{RESET}");
-    println!("{DIM}  /agents delete <name> — delete the active named sub-agent definition{RESET}");
-    println!(
-        "{DIM}  /agent [--worktree|--same-cwd|--background|--detached] <name> <task> — run a named sub-agent task{RESET}"
-    );
-    println!("{DIM}  /agent --background|--detached <name> <task> — start a detached terminal agent and write a log under ~/.config/libertai/code-background-agents{RESET}");
-    println!("{DIM}  /agents background [list|show|log|kill|prune|clear] — inspect, stop, or prune terminal background agents{RESET}");
-    println!("{DIM}  /template <name> [args] — expand a prompt template{RESET}");
-    println!("{DIM}  /theme [status|show|current|system|dark|light|high-contrast] — show terminal theme status{RESET}");
-    println!("{DIM}  /export [path] — write this session transcript as Markdown{RESET}");
-    println!("{DIM}  /share [path] — write this session transcript as shareable HTML{RESET}");
-    println!("{DIM}  /share gist [public|secret] [filename.html] — publish the HTML transcript with gh{RESET}");
-    println!("{DIM}  {}{RESET}", output_style_usage_text());
-    println!("{DIM}  /vim      — show Vim-input status{RESET}");
-    println!("{DIM}  /ide      — show IDE integration status{RESET}");
-    println!("{DIM}  /bug      — print a bug report template{RESET}");
-    println!("{DIM}  /clear    — wipe the screen and start a fresh session (also /new){RESET}");
-    println!("{DIM}  /forget   — clear saved allow rules{RESET}");
-    println!("{DIM}  /remember [kind:] <text> — append typed project memory (user, feedback, project, reference){RESET}");
-    println!("{DIM}  !<cmd>    — run a local shell command in this cwd{RESET}");
-    println!("{DIM}  ↑ / ↓     — walk through previously submitted prompts{RESET}");
-    println!("{DIM}  ← / →     — move cursor in the current line{RESET}");
-    println!("{DIM}  Ctrl+C    — cancel the line / interrupt streaming{RESET}");
+    for section in help_sections() {
+        println!("{BOLD}  {}{RESET}", section.title);
+        for line in &section.lines {
+            println!("{DIM}    {line}{RESET}");
+        }
+    }
     println!();
 }
 
@@ -3164,10 +3416,18 @@ fn help_command_rows() -> &'static [(&'static str, &'static [&'static str], &'st
         ("agent", &[], "run a named sub-agent task"),
         ("agents", &[], "manage named and background sub-agents"),
         ("attach", &[], "attach a local file to the next prompt"),
-        ("auto", &["autorun", "continuous"], "run bounded continuous execution"),
+        (
+            "auto",
+            &["autorun", "continuous"],
+            "run bounded continuous execution",
+        ),
         ("bug", &[], "print a bug report diagnostic template"),
         ("changelog", &[], "show recent git commits"),
-        ("clear", &["new"], "wipe the screen and start a fresh session"),
+        (
+            "clear",
+            &["new"],
+            "wipe the screen and start a fresh session",
+        ),
         ("compact", &[], "compact older conversation history"),
         ("config", &["settings"], "show or update active config"),
         ("copy", &[], "copy the last assistant response"),
@@ -3184,16 +3444,40 @@ fn help_command_rows() -> &'static [(&'static str, &'static [&'static str], &'st
         ("image", &[], "attach a local image to the next prompt"),
         ("init", &[], "create or merge AGENTS.md guidance"),
         ("login", &[], "inspect auth or run libertai login"),
-        ("logout", &[], "run libertai logout or explain provider logout"),
-        ("loop", &["autoloop"], "run bounded autonomous follow-up turns"),
+        (
+            "logout",
+            &[],
+            "run libertai logout or explain provider logout",
+        ),
+        (
+            "loop",
+            &["autoloop"],
+            "run bounded autonomous follow-up turns",
+        ),
         ("mcp", &[], "show terminal MCP support status"),
         ("memory", &[], "show or update project memory"),
-        ("mention", &[], "attach a local text file to the next prompt"),
+        (
+            "mention",
+            &[],
+            "attach a local text file to the next prompt",
+        ),
         ("mode", &[], "show or change permission mode"),
         ("model", &[], "show or change the active model"),
-        ("name", &["rename"], "show or set this session's display name"),
-        ("notify", &["notifications"], "configure turn-complete notifications"),
-        ("onboarding", &["onboard"], "write or publish a project onboarding guide"),
+        (
+            "name",
+            &["rename"],
+            "show or set this session's display name",
+        ),
+        (
+            "notify",
+            &["notifications"],
+            "configure turn-complete notifications",
+        ),
+        (
+            "onboarding",
+            &["onboard"],
+            "write or publish a project onboarding guide",
+        ),
         ("output-style", &[], "show or change output style"),
         ("permissions", &[], "show or change permission mode"),
         ("plan", &[], "toggle plan mode"),
@@ -3202,19 +3486,39 @@ fn help_command_rows() -> &'static [(&'static str, &'static [&'static str], &'st
             &["pr-comments"],
             "inspect or update GitHub PR review comments",
         ),
-        ("reload", &[], "reload config and start a fresh agent session"),
+        (
+            "reload",
+            &[],
+            "reload config and start a fresh agent session",
+        ),
         ("remember", &[], "append typed project memory"),
         ("resume", &[], "resume a saved session"),
-        ("review", &[], "ask the agent to review current code changes"),
+        (
+            "review",
+            &[],
+            "ask the agent to review current code changes",
+        ),
         ("sandbox", &[], "inspect the bash sandbox profile"),
         ("schedule", &["cron"], "queue a due follow-up prompt"),
-        ("scoped-models", &["scoped"], "filter model list and cycling"),
+        (
+            "scoped-models",
+            &["scoped"],
+            "filter model list and cycling",
+        ),
         ("security-review", &[], "ask for a focused security review"),
-        ("send", &["send-message"], "show terminal inter-session send status"),
+        (
+            "send",
+            &["send-message"],
+            "show terminal inter-session send status",
+        ),
         ("share", &[], "write or publish shareable HTML transcript"),
         ("skills", &[], "manage code-agent skills"),
         ("status", &[], "show current REPL session status"),
-        ("statusline", &["status-line"], "customize the input-bar status line"),
+        (
+            "statusline",
+            &["status-line"],
+            "customize the input-bar status line",
+        ),
         ("template", &[], "expand a prompt template"),
         ("theme", &[], "show terminal theme status"),
         ("thinking", &["think", "t"], "show or set thinking budget"),
@@ -3340,8 +3644,8 @@ fn clear_command_arg(trimmed: &str) -> Option<(&'static str, &str)> {
 fn parse_clear_command(input: &str) -> ClearCommand {
     match normalize_help_command_arg(input).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" => ClearCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" | "preview --json" => ClearCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
+        | "preview --json" => ClearCommand::Json,
         _ => ClearCommand::Usage,
     }
 }
@@ -3378,9 +3682,7 @@ fn print_clear_status(command: &str, provider: &str, model: &str, mode: Mode) {
 }
 
 fn print_clear_json(command: &str, provider: &str, model: &str, mode: Mode, query: &str) {
-    match serde_json::to_string_pretty(&clear_json_payload(
-        command, provider, model, mode, query,
-    )) {
+    match serde_json::to_string_pretty(&clear_json_payload(command, provider, model, mode, query)) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  {command} json failed: {e}{RESET}"),
     }
@@ -3407,8 +3709,8 @@ fn forget_command_arg(trimmed: &str) -> Option<&str> {
 fn parse_forget_command(input: &str) -> ForgetCommand {
     match normalize_help_command_arg(input).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" => ForgetCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" | "preview --json" => ForgetCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
+        | "preview --json" => ForgetCommand::Json,
         _ => ForgetCommand::Usage,
     }
 }
@@ -3476,8 +3778,8 @@ fn exit_command_arg(trimmed: &str) -> Option<(&'static str, &str)> {
 fn parse_exit_command(input: &str) -> ExitCommand {
     match normalize_help_command_arg(input).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" => ExitCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" | "preview --json" => ExitCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
+        | "preview --json" => ExitCommand::Json,
         _ => ExitCommand::Usage,
     }
 }
@@ -3522,11 +3824,13 @@ fn scoped_models_usage_text() -> &'static str {
 fn hotkey_lines() -> &'static [&'static str] {
     &[
         "Shift+Tab — cycle default / acceptEdits / plan modes",
-        "Up / Down — walk submitted prompt history",
+        "Up / Down — move between draft lines, then walk submitted prompt history",
         "Left / Right — move cursor in the current line",
         "Backspace / Delete — edit the current line",
-        "Home / End — jump to start or end of the line",
-        "Enter — submit the current line",
+        "Home / End — jump to start or end of the current line",
+        "Enter — submit the current prompt",
+        "Alt+Enter / Ctrl+J — insert a newline (Shift+Enter on terminals that report it)",
+        "Paste — bracketed paste inserts text, newlines included, without submitting",
         "Ctrl+C — clear the current line or interrupt streaming",
         "Ctrl+D — exit when the line is empty",
     ]
@@ -3585,9 +3889,7 @@ fn tree_json_request_arg(input: &str) -> Option<String> {
     let raw = input.trim();
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
-        "json" | "--json" | "status --json" | "state --json" | "show --json" => {
-            Some(String::new())
-        }
+        "json" | "--json" | "status --json" | "state --json" | "show --json" => Some(String::new()),
         _ if lower.starts_with("json ") => Some(raw[5..].trim().to_string()),
         _ if lower.starts_with("--json ") => Some(raw[7..].trim().to_string()),
         _ if lower.ends_with(" --json") => Some(raw[..raw.len() - 7].trim().to_string()),
@@ -3638,7 +3940,9 @@ fn render_project_tree(root: &Path, max_entries: usize) -> Result<String> {
     let mut remaining = max_entries;
     render_tree_children(root, "", &mut remaining, &mut out)?;
     if remaining == 0 {
-        out.push_str(&format!("{DIM}... truncated after {max_entries} entries{RESET}\n"));
+        out.push_str(&format!(
+            "{DIM}... truncated after {max_entries} entries{RESET}\n"
+        ));
     }
     Ok(out)
 }
@@ -3679,7 +3983,8 @@ fn collect_tree_json_entries(
     if *remaining == 0 {
         return Ok(());
     }
-    let meta = std::fs::symlink_metadata(path).with_context(|| format!("read {}", path.display()))?;
+    let meta =
+        std::fs::symlink_metadata(path).with_context(|| format!("read {}", path.display()))?;
     let file_type = meta.file_type();
     let name = if depth == 0 {
         path.file_name()
@@ -3696,7 +4001,13 @@ fn collect_tree_json_entries(
     let relative = path
         .strip_prefix(root)
         .ok()
-        .and_then(|p| if p.as_os_str().is_empty() { Some(".") } else { p.to_str() })
+        .and_then(|p| {
+            if p.as_os_str().is_empty() {
+                Some(".")
+            } else {
+                p.to_str()
+            }
+        })
         .unwrap_or(".");
     rows.push(json!({
         "name": name,
@@ -3711,7 +4022,11 @@ fn collect_tree_json_entries(
         entries.sort_by(|a, b| {
             b.is_dir
                 .cmp(&a.is_dir)
-                .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+                .then_with(|| {
+                    a.name
+                        .to_ascii_lowercase()
+                        .cmp(&b.name.to_ascii_lowercase())
+                })
                 .then_with(|| a.name.cmp(&b.name))
         });
         for entry in entries {
@@ -3737,7 +4052,11 @@ fn render_tree_children(
     entries.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
-            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+            .then_with(|| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            })
             .then_with(|| a.name.cmp(&b.name))
     });
     let len = entries.len();
@@ -3843,8 +4162,8 @@ fn changelog_json_request_arg(input: &str) -> Option<String> {
     let raw = input.trim();
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "list --json" | "recent --json" | "latest --json" => Some(String::new()),
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "list --json"
+        | "recent --json" | "latest --json" => Some(String::new()),
         _ => lower
             .strip_prefix("json ")
             .or_else(|| lower.strip_prefix("--json "))
@@ -3881,12 +4200,12 @@ fn changelog_json_payload(limit: usize, query: &str, lines: Vec<String>) -> serd
 
 fn print_changelog_json(limit: usize, query: &str) {
     match recent_git_commits(limit) {
-        Ok(lines) => match serde_json::to_string_pretty(&changelog_json_payload(
-            limit, query, lines,
-        )) {
-            Ok(raw) => println!("{raw}"),
-            Err(e) => eprintln!("{DIM}  /changelog json: {e:#}{RESET}"),
-        },
+        Ok(lines) => {
+            match serde_json::to_string_pretty(&changelog_json_payload(limit, query, lines)) {
+                Ok(raw) => println!("{raw}"),
+                Err(e) => eprintln!("{DIM}  /changelog json: {e:#}{RESET}"),
+            }
+        }
         Err(e) => eprintln!("{DIM}  /changelog: {e:#}{RESET}"),
     }
 }
@@ -3931,7 +4250,13 @@ fn sandbox_usage_text() -> &'static str {
 }
 
 fn sandbox_json_payload(profile: &StrictProfile, query: &str) -> serde_json::Value {
-    let count_kind = |kind| profile.binds.iter().filter(|bind| bind.kind == kind).count();
+    let count_kind = |kind| {
+        profile
+            .binds
+            .iter()
+            .filter(|bind| bind.kind == kind)
+            .count()
+    };
     json!({
         "command": "sandbox",
         "surface": "terminal",
@@ -4289,8 +4614,8 @@ fn history_json_request_arg(input: &str) -> Option<String> {
     let raw = input.trim();
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "list --json" | "recent --json" | "latest --json" => Some(String::new()),
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "list --json"
+        | "recent --json" | "latest --json" => Some(String::new()),
         _ => lower
             .strip_prefix("json ")
             .or_else(|| lower.strip_prefix("--json "))
@@ -4490,8 +4815,9 @@ fn detect_supported_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
 fn parse_permissions_command(input: &str) -> PermissionsCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "show" | "status" | "current" | "info" => PermissionsCommand::Show,
-        "json" | "--json" | "status --json" | "show --json" | "current --json"
-        | "info --json" => PermissionsCommand::Json,
+        "json" | "--json" | "status --json" | "show --json" | "current --json" | "info --json" => {
+            PermissionsCommand::Json
+        }
         "open" | "settings" | "edit" | "approvals" => PermissionsCommand::Open,
         "default" | "normal" => PermissionsCommand::Set(Mode::Normal),
         "acceptedits" | "accept-edits" | "accept_edits" => {
@@ -4517,9 +4843,7 @@ enum PlanCommand {
 fn parse_plan_command(input: &str) -> PlanCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "show" | "current" | "info" => PlanCommand::Status,
-        "on" | "enable" | "enabled" | "true" | "plan" | "readonly" | "read-only" => {
-            PlanCommand::On
-        }
+        "on" | "enable" | "enabled" | "true" | "plan" | "readonly" | "read-only" => PlanCommand::On,
         "off" | "disable" | "disabled" | "false" | "normal" | "default" => PlanCommand::Off,
         _ => PlanCommand::Usage,
     }
@@ -4579,11 +4903,7 @@ fn status_line_help() -> String {
     )
 }
 
-fn expand_status_line_template(
-    template: &str,
-    status: &BarStatus,
-    mode: Mode,
-) -> Option<String> {
+fn expand_status_line_template(template: &str, status: &BarStatus, mode: Mode) -> Option<String> {
     let template = normalize_status_line_template(template);
     if template.is_empty() {
         return None;
@@ -4610,11 +4930,19 @@ fn expand_status_line_template(
         .map(|(_, model)| model)
         .unwrap_or(status.model_label.as_str());
     let ctx = if status.context_window > 0 {
-        format!("{}%", context_percent(status.input_tokens, status.context_window))
+        format!(
+            "{}%",
+            context_percent(status.input_tokens, status.context_window)
+        )
     } else {
         "-".to_string()
     };
     let output_style = status.output_style.as_deref().unwrap_or("default");
+    let cost = status
+        .estimated_cost
+        .filter(|cost| *cost > 0.0)
+        .map(|cost| format!("~{}", dollar(cost)))
+        .unwrap_or_else(|| "-".to_string());
 
     Some(replace_status_line_tokens(&template, |name| match name {
         "project" => Some(project.to_string()),
@@ -4626,6 +4954,7 @@ fn expand_status_line_template(
         "style" => Some(output_style.to_string()),
         "tokens" => Some(human_tokens(status.input_tokens)),
         "ctx" => Some(ctx.clone()),
+        "cost" => Some(cost.clone()),
         "live" => Some("idle".to_string()),
         _ => None,
     }))
@@ -4690,8 +5019,12 @@ fn print_permissions_status(mode: Mode, approvals: &ApprovalState) {
     );
     println!("{DIM}  native bypassPermissions is intentionally unavailable.{RESET}");
     println!("{DIM}  use /permissions forget to clear saved allow rules.{RESET}");
-    println!("{DIM}  use /permissions open to show the approvals settings target and rule path.{RESET}");
-    println!("{DIM}  use /permissions bypassPermissions to explain the native safety stance.{RESET}");
+    println!(
+        "{DIM}  use /permissions open to show the approvals settings target and rule path.{RESET}"
+    );
+    println!(
+        "{DIM}  use /permissions bypassPermissions to explain the native safety stance.{RESET}"
+    );
 }
 
 fn permissions_json_payload(
@@ -5000,13 +5333,14 @@ fn login_key_state(cfg: &LibertaiConfig) -> String {
 
 fn print_provider_login_note(provider: &str, cfg: &LibertaiConfig) {
     println!("{BOLD}login{RESET}");
-    println!(
-        "{DIM}  provider `{provider}` is not stored in the terminal CLI config.{RESET}"
-    );
+    println!("{DIM}  provider `{provider}` is not stored in the terminal CLI config.{RESET}");
     println!(
         "{DIM}  use the desktop `/login {provider}` flow or Settings > Backends for provider-specific credentials.{RESET}"
     );
-    println!("{DIM}  terminal LibertAI API key:{RESET} {}", login_key_state(cfg));
+    println!(
+        "{DIM}  terminal LibertAI API key:{RESET} {}",
+        login_key_state(cfg)
+    );
 }
 
 fn provider_login_payload(
@@ -5072,7 +5406,10 @@ fn print_provider_login_details(provider: &str, cfg: &LibertaiConfig) {
     println!(
         "{DIM}  desktop state:{RESET} use desktop /login show {provider} or Settings > Backends for key/base URL/model-cache details."
     );
-    println!("{DIM}  terminal LibertAI API key:{RESET} {}", login_key_state(cfg));
+    println!(
+        "{DIM}  terminal LibertAI API key:{RESET} {}",
+        login_key_state(cfg)
+    );
 }
 
 fn print_provider_logout_details(provider: &str, cfg: &LibertaiConfig) {
@@ -5089,7 +5426,10 @@ fn print_provider_logout_details(provider: &str, cfg: &LibertaiConfig) {
     println!(
         "{DIM}  desktop action:{RESET} use desktop /logout {provider} to clear a desktop-stored provider API key."
     );
-    println!("{DIM}  terminal LibertAI API key:{RESET} {}", login_key_state(cfg));
+    println!(
+        "{DIM}  terminal LibertAI API key:{RESET} {}",
+        login_key_state(cfg)
+    );
 }
 
 fn parse_model_spec(current_provider: &str, input: &str) -> Result<(String, String)> {
@@ -5169,7 +5509,9 @@ fn handle_scoped_models_command(raw: &str, scoped_model_patterns: &mut Vec<Strin
         ScopedModelsCommand::Json => print_scoped_model_json(scoped_model_patterns, raw),
         ScopedModelsCommand::Clear => {
             scoped_model_patterns.clear();
-            println!("{DIM}  scoped models cleared; /model list shows all discovered models.{RESET}");
+            println!(
+                "{DIM}  scoped models cleared; /model list shows all discovered models.{RESET}"
+            );
         }
         ScopedModelsCommand::Set(patterns) => {
             *scoped_model_patterns = patterns;
@@ -5233,7 +5575,10 @@ fn print_model_status(
     if scoped_model_patterns.is_empty() {
         println!("{DIM}  scoped models:{RESET} (all models)");
     } else {
-        println!("{DIM}  scoped models:{RESET} {}", scoped_model_patterns.join(", "));
+        println!(
+            "{DIM}  scoped models:{RESET} {}",
+            scoped_model_patterns.join(", ")
+        );
     }
     println!("{DIM}  usage:{RESET} {}", model_usage_text());
 }
@@ -5355,7 +5700,9 @@ fn cycle_scoped_model(
     if scoped.len() < 2 {
         return None;
     }
-    let current_idx = scoped.iter().position(|candidate| candidate == current_model);
+    let current_idx = scoped
+        .iter()
+        .position(|candidate| candidate == current_model);
     let base = current_idx.unwrap_or_else(|| if direction < 0 { 0 } else { scoped.len() - 1 });
     let len = scoped.len() as isize;
     let next = (base as isize + direction).rem_euclid(len) as usize;
@@ -5485,13 +5832,19 @@ async fn export_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
     let markdown = render_markdown_transcript(&messages);
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("{DIM}  /export: could not create {}: {e}{RESET}", parent.display());
+            eprintln!(
+                "{DIM}  /export: could not create {}: {e}{RESET}",
+                parent.display()
+            );
             return;
         }
     }
     match std::fs::write(&path, markdown) {
         Ok(()) => println!("{DIM}  exported transcript: {}{RESET}", path.display()),
-        Err(e) => eprintln!("{DIM}  /export: could not write {}: {e}{RESET}", path.display()),
+        Err(e) => eprintln!(
+            "{DIM}  /export: could not write {}: {e}{RESET}",
+            path.display()
+        ),
     }
 }
 
@@ -5504,10 +5857,12 @@ fn is_export_json_arg(input: &str) -> bool {
 
 async fn print_export_json(handle: &AgentSessionHandle, query: &str) {
     match handle.messages().await {
-        Ok(messages) => match serde_json::to_string_pretty(&export_json_payload(query, &messages)) {
-            Ok(body) => println!("{body}"),
-            Err(e) => eprintln!("{DIM}  /export json failed: {e}{RESET}"),
-        },
+        Ok(messages) => {
+            match serde_json::to_string_pretty(&export_json_payload(query, &messages)) {
+                Ok(body) => println!("{body}"),
+                Err(e) => eprintln!("{DIM}  /export json failed: {e}{RESET}"),
+            }
+        }
         Err(e) => eprintln!("{DIM}  /export json: could not read transcript: {e:#}{RESET}"),
     }
 }
@@ -5562,16 +5917,14 @@ async fn share_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
             }
             match std::fs::write(&path, html) {
                 Ok(()) => println!("{DIM}  share HTML written: {}{RESET}", path.display()),
-                Err(e) => eprintln!("{DIM}  /share: could not write {}: {e}{RESET}", path.display()),
+                Err(e) => eprintln!(
+                    "{DIM}  /share: could not write {}: {e}{RESET}",
+                    path.display()
+                ),
             }
         }
         ShareTarget::Gist { public, filename } => {
-            match publish_gist(
-                &html,
-                public,
-                &filename,
-                "LibertAI Code shared transcript",
-            ) {
+            match publish_gist(&html, public, &filename, "LibertAI Code shared transcript") {
                 Ok(url) => println!("{DIM}  share gist created: {url}{RESET}"),
                 Err(e) => eprintln!("{DIM}  /share gist: {e:#}{RESET}"),
             }
@@ -5653,8 +6006,8 @@ fn compact_preview_arg(trimmed: &str) -> Option<&str> {
     let rest = trimmed.strip_prefix("/compact ")?.trim();
     match normalize_help_command_arg(rest).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" | "json" | "--json"
-        | "status --json" | "state --json" | "show --json" | "info --json"
-        | "preview --json" | "help" | "usage" => Some(rest),
+        | "status --json" | "state --json" | "show --json" | "info --json" | "preview --json"
+        | "help" | "usage" => Some(rest),
         _ => None,
     }
 }
@@ -5662,8 +6015,8 @@ fn compact_preview_arg(trimmed: &str) -> Option<&str> {
 fn parse_compact_preview_command(input: &str) -> CompactPreviewCommand {
     match normalize_help_command_arg(input).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" => CompactPreviewCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" | "preview --json" => CompactPreviewCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
+        | "preview --json" => CompactPreviewCommand::Json,
         _ => CompactPreviewCommand::Usage,
     }
 }
@@ -5742,7 +6095,9 @@ fn parse_share_target(path: Option<&str>) -> Result<ShareTarget> {
             "public" | "--public" => public = true,
             "secret" | "private" | "--secret" | "--private" => public = false,
             other if other.starts_with('-') => {
-                anyhow::bail!("unknown gist option `{part}`; use /share gist [public|secret] [filename.html]");
+                anyhow::bail!(
+                    "unknown gist option `{part}`; use /share gist [public|secret] [filename.html]"
+                );
             }
             _ => filename_parts.push(part),
         }
@@ -5945,8 +6300,9 @@ fn parse_theme_command(rest: &str) -> ThemeCommand {
     let requested = rest.trim();
     match requested.to_ascii_lowercase().as_str() {
         "" | "status" | "show" | "current" | "info" => ThemeCommand::Status,
-        "json" | "--json" | "status --json" | "show --json" | "current --json"
-        | "info --json" => ThemeCommand::Json,
+        "json" | "--json" | "status --json" | "show --json" | "current --json" | "info --json" => {
+            ThemeCommand::Json
+        }
         _ => ThemeCommand::Requested(requested.to_string()),
     }
 }
@@ -6087,9 +6443,7 @@ fn parse_mcp_command(input: &str) -> McpCommand {
         }
     }
     match normalized.as_str() {
-        "" | "status" | "list" | "state" | "diagnostics" | "diag" | "show" => {
-            McpCommand::Status
-        }
+        "" | "status" | "list" | "state" | "diagnostics" | "diag" | "show" => McpCommand::Status,
         "probe" | "probes" => McpCommand::Probe,
         "refresh" | "probe --save" | "probe save" | "probe --write" | "probe write" => {
             McpCommand::ProbeSave
@@ -6103,8 +6457,8 @@ fn parse_mcp_command(input: &str) -> McpCommand {
 fn parse_vim_command(input: &str) -> VimCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "state" | "show" | "current" | "info" => VimCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "current --json" | "info --json" => VimCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "current --json"
+        | "info --json" => VimCommand::Json,
         "on" | "enable" | "enabled" | "true" => VimCommand::Enable,
         "off" | "disable" | "disabled" | "false" => VimCommand::Disable,
         _ => VimCommand::Usage,
@@ -6114,9 +6468,7 @@ fn parse_vim_command(input: &str) -> VimCommand {
 fn parse_ide_command(input: &str) -> IdeCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "state" | "show" => IdeCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json" => {
-            IdeCommand::Json
-        }
+        "json" | "--json" | "status --json" | "state --json" | "show --json" => IdeCommand::Json,
         "open" | "settings" | "edit" => IdeCommand::Open,
         _ => IdeCommand::Usage,
     }
@@ -6137,9 +6489,7 @@ fn parse_copy_command(input: &str) -> CopyCommand {
             CopyCommand::LastAssistant
         }
         "status" | "show" | "info" => CopyCommand::Status,
-        "json" | "--json" | "status --json" | "show --json" | "info --json" => {
-            CopyCommand::Json
-        }
+        "json" | "--json" | "status --json" | "show --json" | "info --json" => CopyCommand::Json,
         _ => CopyCommand::Usage,
     }
 }
@@ -6163,19 +6513,18 @@ fn hotkeys_usage_text() -> &'static str {
 fn parse_reload_command(input: &str) -> ReloadCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "config" | "session" | "now" | "fresh" => ReloadCommand::Session,
-        "json" | "--json" | "config --json" | "session --json" | "now --json"
-        | "fresh --json" => ReloadCommand::Json,
+        "json" | "--json" | "config --json" | "session --json" | "now --json" | "fresh --json" => {
+            ReloadCommand::Json
+        }
         _ => ReloadCommand::Usage,
     }
 }
 
 fn parse_status_command(input: &str) -> StatusCommand {
     match input.trim().to_ascii_lowercase().as_str() {
-        "" | "status" | "state" | "show" | "info" | "current" | "session" => {
-            StatusCommand::Session
-        }
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" | "current --json" | "session --json" => StatusCommand::Json,
+        "" | "status" | "state" | "show" | "info" | "current" | "session" => StatusCommand::Session,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
+        | "current --json" | "session --json" => StatusCommand::Json,
         _ => StatusCommand::Usage,
     }
 }
@@ -6189,10 +6538,8 @@ fn parse_doctor_command(input: &str) -> DoctorCommand {
         "" | "status" | "state" | "show" | "info" | "health" | "diagnostics" | "diag" => {
             DoctorCommand::Run
         }
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" | "health --json" | "diagnostics --json" | "diag --json" => {
-            DoctorCommand::Json
-        }
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
+        | "health --json" | "diagnostics --json" | "diag --json" => DoctorCommand::Json,
         _ => DoctorCommand::Usage,
     }
 }
@@ -6206,8 +6553,9 @@ fn parse_abort_command(input: &str) -> AbortCommand {
         "" | "status" | "state" | "show" | "info" | "cancel" | "stop" | "interrupt" => {
             AbortCommand::Status
         }
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" => AbortCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json" => {
+            AbortCommand::Json
+        }
         _ => AbortCommand::Usage,
     }
 }
@@ -6219,9 +6567,7 @@ fn abort_usage_text() -> &'static str {
 fn parse_notify_command(input: &str) -> NotifyCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "state" | "show" => NotifyCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json" => {
-            NotifyCommand::Json
-        }
+        "json" | "--json" | "status --json" | "state --json" | "show --json" => NotifyCommand::Json,
         "on" | "enable" | "enabled" => NotifyCommand::On,
         "off" | "disable" | "disabled" | "clear" => NotifyCommand::Off,
         "test" | "ping" => NotifyCommand::Test,
@@ -6268,9 +6614,7 @@ fn print_notify_status(cfg: &LibertaiConfig) {
             "off"
         }
     );
-    println!(
-        "{DIM}  agent push notifications:{RESET} terminal bell + visible notification block"
-    );
+    println!("{DIM}  agent push notifications:{RESET} terminal bell + visible notification block");
     println!("{DIM}  usage:{RESET} {}", notify_usage_text());
 }
 
@@ -6517,9 +6861,7 @@ fn print_vim_status(command: VimCommand, query: &str) {
         VimCommand::Json => print_vim_json(query),
         VimCommand::Enable => {
             VIM_INPUT_ENABLED.store(true, Ordering::SeqCst);
-            println!(
-                "{DIM}  /vim on:{RESET} enabled for this terminal session."
-            );
+            println!("{DIM}  /vim on:{RESET} enabled for this terminal session.");
             println!(
                 "{DIM}  terminal:{RESET} input starts in insert mode; press Esc for normal mode."
             );
@@ -6558,22 +6900,23 @@ fn print_vim_json(query: &str) {
 fn vim_normal_key_action(code: KeyCode, modifiers: KeyModifiers) -> VimNormalAction {
     match (code, modifiers) {
         (KeyCode::Enter, _) => VimNormalAction::Submit,
-        (KeyCode::Char('h'), KeyModifiers::NONE)
-        | (KeyCode::Left, _) => VimNormalAction::MoveLeft,
-        (KeyCode::Char('l'), KeyModifiers::NONE)
-        | (KeyCode::Right, _) => VimNormalAction::MoveRight,
-        (KeyCode::Char('0'), KeyModifiers::NONE)
-        | (KeyCode::Home, _) => VimNormalAction::Home,
-        (KeyCode::Char('$'), KeyModifiers::NONE | KeyModifiers::SHIFT)
-        | (KeyCode::End, _) => VimNormalAction::End,
-        (KeyCode::Char('x'), KeyModifiers::NONE)
-        | (KeyCode::Delete, _) => VimNormalAction::Delete,
+        (KeyCode::Char('h'), KeyModifiers::NONE) | (KeyCode::Left, _) => VimNormalAction::MoveLeft,
+        (KeyCode::Char('l'), KeyModifiers::NONE) | (KeyCode::Right, _) => {
+            VimNormalAction::MoveRight
+        }
+        (KeyCode::Char('0'), KeyModifiers::NONE) | (KeyCode::Home, _) => VimNormalAction::Home,
+        (KeyCode::Char('$'), KeyModifiers::NONE | KeyModifiers::SHIFT) | (KeyCode::End, _) => {
+            VimNormalAction::End
+        }
+        (KeyCode::Char('x'), KeyModifiers::NONE) | (KeyCode::Delete, _) => VimNormalAction::Delete,
         (KeyCode::Char('i'), KeyModifiers::NONE) => VimNormalAction::InsertBefore,
         (KeyCode::Char('a'), KeyModifiers::NONE) => VimNormalAction::InsertAfter,
-        (KeyCode::Char('I'), KeyModifiers::SHIFT)
-        | (KeyCode::Char('I'), KeyModifiers::NONE) => VimNormalAction::InsertHome,
-        (KeyCode::Char('A'), KeyModifiers::SHIFT)
-        | (KeyCode::Char('A'), KeyModifiers::NONE) => VimNormalAction::InsertEnd,
+        (KeyCode::Char('I'), KeyModifiers::SHIFT) | (KeyCode::Char('I'), KeyModifiers::NONE) => {
+            VimNormalAction::InsertHome
+        }
+        (KeyCode::Char('A'), KeyModifiers::SHIFT) | (KeyCode::Char('A'), KeyModifiers::NONE) => {
+            VimNormalAction::InsertEnd
+        }
         _ => VimNormalAction::None,
     }
 }
@@ -6906,10 +7249,7 @@ fn print_schedule_details(scheduled_runs: &[ScheduledRun], id: &str) {
     let remaining = run.due_at.saturating_duration_since(now);
     let state = if run.due_at <= now { "due" } else { "pending" };
     println!("{DIM}  state:{RESET} {state}");
-    println!(
-        "{DIM}  due in:{RESET} {}",
-        format_schedule_delay(remaining)
-    );
+    println!("{DIM}  due in:{RESET} {}", format_schedule_delay(remaining));
     println!("{DIM}  due epoch ms:{RESET} {}", run.due_epoch_ms);
     println!("{DIM}  prompt:{RESET} {}", run.prompt.replace('\n', " "));
 }
@@ -6986,7 +7326,11 @@ fn print_schedule_json(scheduled_runs: &[ScheduledRun], query: &str, id: Option<
         payload.runs.retain(|run| run.id == id);
         payload.total = payload.runs.len();
         payload.due = payload.runs.iter().filter(|run| run.state == "due").count();
-        payload.pending = payload.runs.iter().filter(|run| run.state == "pending").count();
+        payload.pending = payload
+            .runs
+            .iter()
+            .filter(|run| run.state == "pending")
+            .count();
     }
     match serde_json::to_string_pretty(&payload) {
         Ok(raw) => println!("{raw}"),
@@ -7022,7 +7366,10 @@ fn pop_due_scheduled_prompt(scheduled_runs: &mut Vec<ScheduledRun>) -> Option<St
         .min_by_key(|(_, run)| run.due_at)
         .map(|(idx, _)| idx)?;
     let run = scheduled_runs.remove(idx);
-    Some(format!("Scheduled follow-up ({}).\n\n{}", run.id, run.prompt))
+    Some(format!(
+        "Scheduled follow-up ({}).\n\n{}",
+        run.id, run.prompt
+    ))
 }
 
 #[cfg(test)]
@@ -7161,7 +7508,11 @@ fn print_auto_status(auto_run: Option<&AutoRun>) {
             run.completed,
             run.limit,
             run.limit.saturating_sub(run.completed),
-            if run.goal.is_empty() { "" } else { ", goal set" }
+            if run.goal.is_empty() {
+                ""
+            } else {
+                ", goal set"
+            }
         ),
         None => println!("{DIM}  /auto: continuous execution is off.{RESET}"),
     }
@@ -7322,7 +7673,9 @@ pre{background:#111827;color:#f9fafb;border-radius:6px;overflow:auto;padding:.75
                 out.push_str("</section>\n");
             }
             Message::Assistant(assistant) => {
-                out.push_str("<section class=\"turn assistant\"><div class=\"role\">Assistant</div>");
+                out.push_str(
+                    "<section class=\"turn assistant\"><div class=\"role\">Assistant</div>",
+                );
                 render_blocks_html(&mut out, &assistant.content);
                 out.push_str("</section>\n");
             }
@@ -7463,7 +7816,10 @@ fn print_init_project(notes: Option<&str>) {
         }
         Ok(result) => {
             println!("{BOLD}init{RESET}");
-            println!("{DIM}  AGENTS.md already exists: {}{RESET}", result.path.display());
+            println!(
+                "{DIM}  AGENTS.md already exists: {}{RESET}",
+                result.path.display()
+            );
             println!("{DIM}  left existing content unchanged.{RESET}");
             match crate::commands::code_init::agents_md_candidate(&cwd, notes) {
                 Ok(candidate) => {
@@ -7599,7 +7955,12 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
         Ok(messages) => messages,
         Err(e) => {
             if json_output {
-                print_init_from_agent_json(None, None, None, Some(&format!("could not read transcript: {e:#}")));
+                print_init_from_agent_json(
+                    None,
+                    None,
+                    None,
+                    Some(&format!("could not read transcript: {e:#}")),
+                );
             } else {
                 eprintln!("{DIM}  /init from-agent: could not read transcript: {e:#}{RESET}");
             }
@@ -7633,7 +7994,12 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
         Ok(cwd) => cwd,
         Err(e) => {
             if json_output {
-                print_init_from_agent_json(None, None, Some(&candidate), Some(&format!("could not resolve cwd: {e}")));
+                print_init_from_agent_json(
+                    None,
+                    None,
+                    Some(&candidate),
+                    Some(&format!("could not resolve cwd: {e}")),
+                );
             } else {
                 eprintln!("{DIM}  /init from-agent: could not resolve cwd: {e}{RESET}");
             }
@@ -7826,7 +8192,9 @@ fn selected_init_candidate_sections(candidate: &str, indexes: &[usize]) -> Resul
         return Err("assistant candidate has no selectable markdown sections".to_string());
     }
     if indexes.len() == 1 && indexes[0] == 0 {
-        return Ok(ensure_trailing_newline(&join_init_markdown_sections(&sections)));
+        return Ok(ensure_trailing_newline(&join_init_markdown_sections(
+            &sections,
+        )));
     }
     let mut selected = Vec::new();
     for index in indexes {
@@ -7839,7 +8207,9 @@ fn selected_init_candidate_sections(candidate: &str, indexes: &[usize]) -> Resul
         };
         selected.push(section.clone());
     }
-    Ok(ensure_trailing_newline(&join_init_markdown_sections(&selected)))
+    Ok(ensure_trailing_newline(&join_init_markdown_sections(
+        &selected,
+    )))
 }
 
 fn ensure_trailing_newline(value: &str) -> String {
@@ -8029,7 +8399,10 @@ fn write_onboarding_guide(path: Option<&str>) {
     };
     match target {
         OnboardingTarget::File(path) => {
-            if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
                 if let Err(e) = std::fs::create_dir_all(parent) {
                     eprintln!(
                         "{DIM}  /onboarding: could not create {}: {e}{RESET}",
@@ -8122,7 +8495,9 @@ fn parse_onboarding_target(path: Option<&str>) -> Result<OnboardingTarget> {
     let raw = path.unwrap_or("").trim();
     let raw = strip_save_action(raw);
     if raw.is_empty() {
-        return Ok(OnboardingTarget::File(PathBuf::from("libertai-onboarding.md")));
+        return Ok(OnboardingTarget::File(PathBuf::from(
+            "libertai-onboarding.md",
+        )));
     }
     let Some(rest) = raw.strip_prefix("gist") else {
         return Ok(OnboardingTarget::File(PathBuf::from(raw)));
@@ -8167,7 +8542,12 @@ fn init_candidate_preview(path: &str, existing: &str, candidate: &str) -> String
     if !sections.is_empty() {
         out.push_str("\n  candidate sections:\n");
         for (idx, section) in sections.iter().enumerate() {
-            out.push_str(&format!("  {}. {} — {}\n", idx + 1, section.title, section.status));
+            out.push_str(&format!(
+                "  {}. {} — {}\n",
+                idx + 1,
+                section.title,
+                section.status
+            ));
         }
     }
     out.push_str("\n  Review the candidate against the existing AGENTS.md and merge only verified repo facts.\n");
@@ -8297,7 +8677,10 @@ fn init_candidate_section_status(
         .filter(|line| !existing_lines.contains(&normalize_init_line(line)))
         .count();
     if additions > 0 {
-        return format!("adds {additions} line{}", if additions == 1 { "" } else { "s" });
+        return format!(
+            "adds {additions} line{}",
+            if additions == 1 { "" } else { "s" }
+        );
     }
     if normalize_init_line(&existing.content) == normalize_init_line(&candidate.content) {
         "unchanged".to_string()
@@ -8369,7 +8752,10 @@ fn print_memory(action: &str) {
                     result.imported_files, result.imported_bytes
                 );
                 if result.skipped_projects > 0 {
-                    println!("{DIM}  skipped projects:{RESET} {}", result.skipped_projects);
+                    println!(
+                        "{DIM}  skipped projects:{RESET} {}",
+                        result.skipped_projects
+                    );
                 }
                 if result.skipped_files > 0 {
                     println!("{DIM}  skipped files:{RESET} {}", result.skipped_files);
@@ -8400,7 +8786,10 @@ fn print_memory(action: &str) {
         }
         return;
     }
-    if matches!(action.to_ascii_lowercase().as_str(), "references" | "refs" | "verify") {
+    if matches!(
+        action.to_ascii_lowercase().as_str(),
+        "references" | "refs" | "verify"
+    ) {
         match crate::commands::code_memory::verify_memory_references(&cwd) {
             Ok(refs) => print_memory_references(&refs),
             Err(e) => eprintln!("{DIM}  /memory references: failed: {e:#}{RESET}"),
@@ -8468,17 +8857,26 @@ fn memory_import_source(action: &str) -> Option<&str> {
     if !command.eq_ignore_ascii_case("import") {
         return None;
     }
-    parts.next().map(str::trim).filter(|source| !source.is_empty())
+    parts
+        .next()
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
 }
 
 fn memory_file_selector(action: &str) -> Option<&str> {
     let trimmed = action.trim();
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let command = parts.next()?;
-    if !matches!(command.to_ascii_lowercase().as_str(), "file" | "read" | "show-file") {
+    if !matches!(
+        command.to_ascii_lowercase().as_str(),
+        "file" | "read" | "show-file"
+    ) {
         return None;
     }
-    parts.next().map(str::trim).filter(|source| !source.is_empty())
+    parts
+        .next()
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
 }
 
 fn is_memory_json_action(action: &str) -> bool {
@@ -8753,7 +9151,9 @@ fn print_agents() {
         }
         println!("{DIM}  run /agent <name> <task> to dispatch a focused task.{RESET}");
     }
-    println!("{DIM}  run /agents create <name> [description] to scaffold a project sub-agent.{RESET}");
+    println!(
+        "{DIM}  run /agents create <name> [description] to scaffold a project sub-agent.{RESET}"
+    );
     println!();
 }
 
@@ -9150,7 +9550,9 @@ fn print_agents_open_hint() {
             cwd.join(".claude/agents").display()
         );
     } else {
-        println!("{DIM}  terminal: edit .libertai/agents or .claude/agents in this project.{RESET}");
+        println!(
+            "{DIM}  terminal: edit .libertai/agents or .claude/agents in this project.{RESET}"
+        );
     }
     println!("{DIM}  user agents live under ~/.libertai/agents or ~/.claude/agents.{RESET}");
 }
@@ -9177,8 +9579,14 @@ fn create_agent_from_slash(input: &str) {
         parsed.worktree,
     ) {
         Ok(path) => {
-            println!("{DIM}  created project sub-agent: {}{RESET}", path.display());
-            println!("{DIM}  edit the prompt, then run /agent {} <task>{RESET}", parsed.name);
+            println!(
+                "{DIM}  created project sub-agent: {}{RESET}",
+                path.display()
+            );
+            println!(
+                "{DIM}  edit the prompt, then run /agent {} <task>{RESET}",
+                parsed.name
+            );
         }
         Err(e) => eprintln!("{DIM}  /agents: create failed: {e:#}{RESET}"),
     }
@@ -9247,7 +9655,9 @@ fn print_background_agents() {
             );
             println!("{DIM}  /agents background json prints machine-readable status.{RESET}");
             println!("{DIM}  /agents background kill [pid|run-id|latest] stops a running background agent.{RESET}");
-            println!("{DIM}  /agents background prune removes exited records from the list.{RESET}");
+            println!(
+                "{DIM}  /agents background prune removes exited records from the list.{RESET}"
+            );
         }
         Err(e) => eprintln!("{DIM}  /agents: could not read background agents: {e:#}{RESET}"),
     }
@@ -9275,9 +9685,9 @@ fn print_background_agents_json(query: &str) {
             };
             match serde_json::to_string_pretty(&payload) {
                 Ok(raw) => println!("{raw}"),
-                Err(e) => eprintln!(
-                    "{DIM}  /agents: could not serialize background agents: {e:#}{RESET}"
-                ),
+                Err(e) => {
+                    eprintln!("{DIM}  /agents: could not serialize background agents: {e:#}{RESET}")
+                }
             }
         }
         Err(e) => eprintln!("{DIM}  /agents: could not read background agents: {e:#}{RESET}"),
@@ -9318,9 +9728,9 @@ fn print_background_agent_details_json(input: &str) {
             };
             match serde_json::to_string_pretty(&payload) {
                 Ok(raw) => println!("{raw}"),
-                Err(e) => eprintln!(
-                    "{DIM}  /agents: could not serialize background agent: {e:#}{RESET}"
-                ),
+                Err(e) => {
+                    eprintln!("{DIM}  /agents: could not serialize background agent: {e:#}{RESET}")
+                }
             }
         }
         Ok(None) => {
@@ -9350,10 +9760,16 @@ fn format_background_agent_details(
 ) -> String {
     [
         format!("{BOLD}background agent: pid {}{RESET}", record.pid),
-        format!("{DIM}  run id:{RESET} {}", background_agent_record_id(record)),
+        format!(
+            "{DIM}  run id:{RESET} {}",
+            background_agent_record_id(record)
+        ),
         format!("{DIM}  status:{RESET} {}", status.label()),
         format!("{DIM}  name:{RESET} {}", record.name),
-        format!("{DIM}  provider:{RESET} {}", display_or_dash(&record.provider)),
+        format!(
+            "{DIM}  provider:{RESET} {}",
+            display_or_dash(&record.provider)
+        ),
         format!("{DIM}  model:{RESET} {}", display_or_dash(&record.model)),
         format!("{DIM}  mode:{RESET} {}", display_or_dash(&record.mode)),
         format!(
@@ -9503,7 +9919,9 @@ fn kill_background_agent(input: &str) {
 fn prune_background_agents() {
     match load_background_agent_records() {
         Ok(records) if records.is_empty() => {
-            println!("{DIM}  /agents background prune: no terminal background agents recorded.{RESET}");
+            println!(
+                "{DIM}  /agents background prune: no terminal background agents recorded.{RESET}"
+            );
         }
         Ok(records) => {
             let original = records.len();
@@ -9537,7 +9955,9 @@ fn print_templates() {
     println!("{BOLD}templates{RESET}");
     if templates.is_empty() {
         println!("{DIM}  no prompt templates found.{RESET}");
-        println!("{DIM}  create .claude/commands/<name>.md or .claude/skills/<name>/SKILL.md.{RESET}");
+        println!(
+            "{DIM}  create .claude/commands/<name>.md or .claude/skills/<name>/SKILL.md.{RESET}"
+        );
     } else {
         for t in templates {
             let base_desc = t.description.as_deref().unwrap_or(match t.source {
@@ -9983,9 +10403,7 @@ fn review_command_parts(trimmed: &str) -> Option<(&str, &str)> {
         .split_once(char::is_whitespace)
         .map_or((trimmed, ""), |(command, scope)| (command, scope.trim()));
     match command {
-        "/review" | "/security-review" | "/pr_comments" | "/pr-comments" => {
-            Some((command, scope))
-        }
+        "/review" | "/security-review" | "/pr_comments" | "/pr-comments" => Some((command, scope)),
         _ => None,
     }
 }
@@ -10383,9 +10801,8 @@ fn submit_pr_review(input: &str) {
             return;
         }
     };
-    let capture = crate::commands::code_pr_comments::submit_pull_request_review(
-        &cwd, "", event, body,
-    );
+    let capture =
+        crate::commands::code_pr_comments::submit_pull_request_review(&cwd, "", event, body);
     if capture.error.is_none() && capture.status == Some(0) {
         println!("{DIM}  submitted PR review: {event}{RESET}");
         return;
@@ -10442,7 +10859,11 @@ fn mark_pr_comment_file(input: &str, viewed: bool) {
             (!stdout.is_empty()).then_some(stdout)
         })
         .unwrap_or("unknown error");
-    let action = if viewed { "mark viewed" } else { "mark unviewed" };
+    let action = if viewed {
+        "mark viewed"
+    } else {
+        "mark unviewed"
+    };
     eprintln!("{DIM}  /pr_comments: {action} failed: {detail}{RESET}");
 }
 
@@ -10522,7 +10943,10 @@ fn print_pr_comment_drafts(drafts: &[PrCommentDraft]) {
         println!("{DIM}  /pr_comments drafts: no queued draft review threads.{RESET}");
         return;
     }
-    println!("{DIM}  /pr_comments drafts: {} queued thread(s):{RESET}", drafts.len());
+    println!(
+        "{DIM}  /pr_comments drafts: {} queued thread(s):{RESET}",
+        drafts.len()
+    );
     for (idx, draft) in drafts.iter().enumerate() {
         println!(
             "{DIM}    {}. {}:{} - {}{RESET}",
@@ -10581,9 +11005,7 @@ fn parse_pr_comments_draft_submit_review(input: &str) -> Result<Option<(&str, &s
             "approve" | "approved" | "approval"
         )
     {
-        anyhow::bail!(
-            "usage: /pr_comments drafts submit <approve|comment|request_changes> [body]"
-        );
+        anyhow::bail!("usage: /pr_comments drafts submit <approve|comment|request_changes> [body]");
     }
     Ok(Some((event, body)))
 }
@@ -10645,9 +11067,8 @@ fn submit_pr_comment_drafts(drafts: &mut Vec<PrCommentDraft>, review: Option<(&s
         );
         return;
     }
-    let capture = crate::commands::code_pr_comments::submit_pull_request_review(
-        &cwd, "", event, body,
-    );
+    let capture =
+        crate::commands::code_pr_comments::submit_pull_request_review(&cwd, "", event, body);
     if capture.error.is_none() && capture.status == Some(0) {
         println!("{DIM}  /pr_comments drafts: submitted PR review: {event}{RESET}");
         return;
@@ -10682,9 +11103,8 @@ fn create_pr_comment_thread(input: &str) {
             return;
         }
     };
-    let capture = crate::commands::code_pr_comments::create_review_thread(
-        &cwd, "", path, line, body,
-    );
+    let capture =
+        crate::commands::code_pr_comments::create_review_thread(&cwd, "", path, line, body);
     if capture.error.is_none() && capture.status == Some(0) {
         println!("{DIM}  created review thread: {path}:{line}{RESET}");
         return;
@@ -10719,7 +11139,9 @@ fn parse_direct_custom_slash(trimmed: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn custom_slash_invocation_name(cmd: &crate::commands::code_slash_registry::CustomCommand) -> String {
+fn custom_slash_invocation_name(
+    cmd: &crate::commands::code_slash_registry::CustomCommand,
+) -> String {
     cmd.namespace
         .as_deref()
         .filter(|namespace| !namespace.trim().is_empty())
@@ -10755,14 +11177,18 @@ async fn build_custom_slash_prompt(
     let Some(hit) = templates
         .iter()
         .find(|cmd| custom_slash_matches(cmd, &needle))
-        .or_else(|| templates.iter().find(|cmd| custom_slash_starts_with(cmd, &needle)))
+        .or_else(|| {
+            templates
+                .iter()
+                .find(|cmd| custom_slash_starts_with(cmd, &needle))
+        })
     else {
         return Ok(None);
     };
     let context = slash_expansion_context(handle).await;
-    Ok(Some(crate::commands::code_slash_registry::expand_with_context(
-        hit, args, &context,
-    )))
+    Ok(Some(
+        crate::commands::code_slash_registry::expand_with_context(hit, args, &context),
+    ))
 }
 
 async fn slash_expansion_context(
@@ -10889,8 +11315,7 @@ fn start_background_agent(launch: &BackgroundAgentLaunch) -> Result<StartedBackg
     let exe = std::env::current_exe().context("resolving current executable")?;
     let log_path = background_agent_log_path(&launch.name)?;
     if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     let log = fs::OpenOptions::new()
         .create(true)
@@ -11040,8 +11465,7 @@ fn background_agent_records_path() -> Result<PathBuf> {
 fn persist_background_agent_record(record: &BackgroundAgentRecord) -> Result<()> {
     let path = background_agent_records_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     let mut file = fs::OpenOptions::new()
         .create(true)
@@ -11057,8 +11481,7 @@ fn persist_background_agent_record(record: &BackgroundAgentRecord) -> Result<()>
 fn rewrite_background_agent_records(records: &[BackgroundAgentRecord]) -> Result<()> {
     let path = background_agent_records_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     if records.is_empty() {
         if path.exists() {
@@ -11219,11 +11642,9 @@ fn format_epoch_ms(epoch_ms: u64) -> String {
     if epoch_ms == 0 {
         return "unknown".to_string();
     }
-    chrono::DateTime::<chrono::Local>::from(
-        UNIX_EPOCH + Duration::from_millis(epoch_ms),
-    )
-    .format("%Y-%m-%d %H:%M:%S")
-    .to_string()
+    chrono::DateTime::<chrono::Local>::from(UNIX_EPOCH + Duration::from_millis(epoch_ms))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11284,7 +11705,9 @@ fn parse_agent_slash_query(query: &str) -> Result<AgentSlashQuery<'_>> {
     let mut rest = raw;
     loop {
         let Some((head, tail)) = split_first_word(rest) else {
-            anyhow::bail!("usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>");
+            anyhow::bail!(
+                "usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>"
+            );
         };
         match head {
             "--worktree" | "--isolation=worktree" => {
@@ -11303,12 +11726,16 @@ fn parse_agent_slash_query(query: &str) -> Result<AgentSlashQuery<'_>> {
         }
     }
     let Some((name, task)) = rest.split_once(char::is_whitespace) else {
-        anyhow::bail!("usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>");
+        anyhow::bail!(
+            "usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>"
+        );
     };
     let name = name.trim();
     let task = task.trim();
     if name.is_empty() || task.is_empty() {
-        anyhow::bail!("usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>");
+        anyhow::bail!(
+            "usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>"
+        );
     }
     Ok(AgentSlashQuery {
         name,
@@ -11586,10 +12013,19 @@ fn print_session_status(
     println!("{DIM}  provider:{RESET} {provider}");
     println!("{DIM}  model:{RESET} {model}");
     println!("{DIM}  mode:{RESET} {}", mode_label(mode));
-    println!("{DIM}  output-style:{RESET} {}", output_style.unwrap_or("default"));
+    println!(
+        "{DIM}  output-style:{RESET} {}",
+        output_style.unwrap_or("default")
+    );
     println!("{DIM}  cwd:{RESET} {cwd}");
-    println!("{DIM}  default provider:{RESET} {}", cfg.default_code_provider);
-    println!("{DIM}  default code model:{RESET} {}", cfg.default_code_model);
+    println!(
+        "{DIM}  default provider:{RESET} {}",
+        cfg.default_code_provider
+    );
+    println!(
+        "{DIM}  default code model:{RESET} {}",
+        cfg.default_code_model
+    );
     if let Some(summary) = usage {
         println!(
             "{DIM}  usage:{RESET} {} turn(s), {} ctx high-water, {} output total",
@@ -11612,7 +12048,8 @@ fn print_session_status_json(
     cfg: &LibertaiConfig,
     usage: Option<UsageSummary>,
 ) {
-    let payload = session_status_json_payload(input, provider, model, mode, output_style, cfg, usage);
+    let payload =
+        session_status_json_payload(input, provider, model, mode, output_style, cfg, usage);
     match serde_json::to_string_pretty(&payload) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("{DIM}  /status json: {e:#}{RESET}"),
@@ -11737,7 +12174,10 @@ async fn print_doctor(
     println!("{DIM}  cwd:{RESET} {cwd_label}");
     println!("{DIM}  provider/model:{RESET} {provider}/{model}");
     println!("{DIM}  mode:{RESET} {}", mode_label(mode));
-    println!("{DIM}  output-style:{RESET} {}", output_style.unwrap_or("default"));
+    println!(
+        "{DIM}  output-style:{RESET} {}",
+        output_style.unwrap_or("default")
+    );
 
     match handle.state().await {
         Ok(state) => {
@@ -11754,12 +12194,20 @@ async fn print_doctor(
                 doctor_line(
                     state.save_enabled,
                     "session persistence",
-                    if state.save_enabled { "enabled" } else { "disabled" }
+                    if state.save_enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
                 )
             );
             println!(
                 "{}",
-                doctor_line(true, "transcript", format!("{} message(s)", state.message_count))
+                doctor_line(
+                    true,
+                    "transcript",
+                    format!("{} message(s)", state.message_count)
+                )
             );
             if let Some(level) = state.thinking_level {
                 println!("{}", doctor_line(true, "thinking", level.to_string()));
@@ -11810,11 +12258,7 @@ async fn print_doctor(
     );
     println!(
         "{}",
-        doctor_line(
-            true,
-            "hooks",
-            format_hook_event_breakdown(cfg)
-        )
+        doctor_line(true, "hooks", format_hook_event_breakdown(cfg))
     );
     println!(
         "{}",
@@ -11825,7 +12269,10 @@ async fn print_doctor(
         )
     );
     match crate::config::config_path() {
-        Ok(path) => println!("{}", doctor_line(true, "config path", path.display().to_string())),
+        Ok(path) => println!(
+            "{}",
+            doctor_line(true, "config path", path.display().to_string())
+        ),
         Err(e) => println!("{}", doctor_line(false, "config path", e.to_string())),
     }
 
@@ -11851,7 +12298,11 @@ async fn print_doctor(
         match crate::commands::code_memory::verify_memory_references(cwd) {
             Ok(refs) => println!(
                 "{}",
-                doctor_line(true, "memory references", format_memory_reference_summary(&refs))
+                doctor_line(
+                    true,
+                    "memory references",
+                    format_memory_reference_summary(&refs)
+                )
             ),
             Err(e) => println!("{}", doctor_line(false, "memory references", e.to_string())),
         }
@@ -11890,13 +12341,18 @@ async fn print_doctor(
             Err(e) => println!("{}", doctor_line(false, "skills", e.to_string())),
         }
         match git_status_short_in(cwd) {
-            Ok(lines) if lines.len() <= 1 => println!("{}", doctor_line(true, "git status", "clean")),
+            Ok(lines) if lines.len() <= 1 => {
+                println!("{}", doctor_line(true, "git status", "clean"))
+            }
             Ok(lines) => println!(
                 "{}",
                 doctor_line(
                     true,
                     "git status",
-                    format!("{} changed/untracked line(s)", lines.len().saturating_sub(1))
+                    format!(
+                        "{} changed/untracked line(s)",
+                        lines.len().saturating_sub(1)
+                    )
                 )
             ),
             Err(e) => println!("{}", doctor_line(false, "git status", e.to_string())),
@@ -12068,14 +12524,29 @@ fn doctor_line(ok: bool, label: &str, detail: impl AsRef<str>) -> String {
 
 fn format_hook_event_breakdown(cfg: &LibertaiConfig) -> String {
     let rows = [
-        ("UserPromptSubmit", count_runnable_hooks(&cfg.hooks.user_prompt_submit)),
+        (
+            "UserPromptSubmit",
+            count_runnable_hooks(&cfg.hooks.user_prompt_submit),
+        ),
         ("PreToolUse", count_runnable_hooks(&cfg.hooks.pre_tool_use)),
-        ("PostToolUse", count_runnable_hooks(&cfg.hooks.post_tool_use)),
-        ("SubagentStop", count_runnable_hooks(&cfg.hooks.subagent_stop)),
-        ("SessionStart", count_runnable_hooks(&cfg.hooks.session_start)),
+        (
+            "PostToolUse",
+            count_runnable_hooks(&cfg.hooks.post_tool_use),
+        ),
+        (
+            "SubagentStop",
+            count_runnable_hooks(&cfg.hooks.subagent_stop),
+        ),
+        (
+            "SessionStart",
+            count_runnable_hooks(&cfg.hooks.session_start),
+        ),
         ("Stop", count_runnable_hooks(&cfg.hooks.stop)),
         ("SessionEnd", count_runnable_hooks(&cfg.hooks.session_end)),
-        ("Notification", count_runnable_hooks(&cfg.hooks.notification)),
+        (
+            "Notification",
+            count_runnable_hooks(&cfg.hooks.notification),
+        ),
     ];
     let total: usize = rows.iter().map(|(_, count)| *count).sum();
     let events = rows
@@ -12086,9 +12557,7 @@ fn format_hook_event_breakdown(cfg: &LibertaiConfig) -> String {
     format!("{total} runnable hook(s); {events}")
 }
 
-fn format_agent_doctor_summary(
-    agents: &[crate::commands::code_agents::AgentDefinition],
-) -> String {
+fn format_agent_doctor_summary(agents: &[crate::commands::code_agents::AgentDefinition]) -> String {
     let worktree = agents.iter().filter(|agent| agent.worktree).count();
     format!("{} loaded ({worktree} worktree default)", agents.len())
 }
@@ -12187,7 +12656,10 @@ fn print_usage_summary(summary: Option<UsageSummary>, tool_activity: &[ToolActiv
     println!("{BOLD}usage{RESET}");
     match summary.as_ref() {
         Some(summary) => {
-            println!("{DIM}  provider/model:{RESET} {}/{}", summary.provider, summary.model);
+            println!(
+                "{DIM}  provider/model:{RESET} {}/{}",
+                summary.provider, summary.model
+            );
             println!("{DIM}  turns:{RESET} {}", summary.turns);
             println!(
                 "{DIM}  last turn:{RESET} {} in · {} out",
@@ -12199,8 +12671,7 @@ fn print_usage_summary(summary: Option<UsageSummary>, tool_activity: &[ToolActiv
                 human_tokens(summary.output_total)
             );
             if summary.context_window > 0 {
-                let pct = ((summary.context_high_water as f64
-                    / f64::from(summary.context_window))
+                let pct = ((summary.context_high_water as f64 / f64::from(summary.context_window))
                     * 100.0)
                     .round()
                     .min(100.0) as u32;
@@ -12237,8 +12708,8 @@ fn parse_usage_export_command(input: &str) -> Option<UsageExportFormat> {
         return None;
     }
     match rest.trim().to_ascii_lowercase().as_str() {
-        "json" | "--json" | "status --json" | "show --json" | "summary --json"
-        | "tools --json" | "export" | "export json" => Some(UsageExportFormat::Json),
+        "json" | "--json" | "status --json" | "show --json" | "summary --json" | "tools --json"
+        | "export" | "export json" => Some(UsageExportFormat::Json),
         "csv" | "export csv" => Some(UsageExportFormat::Csv),
         _ => None,
     }
@@ -12449,7 +12920,11 @@ fn print_tool_activity(tool_activity: &[ToolActivitySummary], usage: Option<&Usa
         for row in rows {
             let estimate = match row.estimated_cost {
                 Some(cost) if cost > 0.0 => {
-                    format!("{} est · ~{}", dollar(cost), human_tokens(row.estimated_tokens))
+                    format!(
+                        "{} est · ~{}",
+                        dollar(cost),
+                        human_tokens(row.estimated_tokens)
+                    )
                 }
                 _ => format!("~{}", human_tokens(row.estimated_tokens)),
             };
@@ -12480,7 +12955,9 @@ fn estimate_tool_attribution(
     summary: &UsageSummary,
     tool_activity: &[ToolActivitySummary],
 ) -> Vec<ToolAttribution> {
-    let estimated_tokens = summary.context_high_water.saturating_add(summary.output_total);
+    let estimated_tokens = summary
+        .context_high_water
+        .saturating_add(summary.output_total);
     if estimated_tokens == 0 || tool_activity.is_empty() {
         return Vec::new();
     }
@@ -12488,7 +12965,11 @@ fn estimate_tool_attribution(
         .iter()
         .map(|tool| {
             let millis = tool.total_duration.as_millis() as f64;
-            if millis > 0.0 { millis } else { tool.count.max(1) as f64 }
+            if millis > 0.0 {
+                millis
+            } else {
+                tool.count.max(1) as f64
+            }
         })
         .collect();
     let total_weight: f64 = weights.iter().sum();
@@ -12519,8 +13000,7 @@ fn estimate_tool_attribution(
 fn model_token_cost(model: &str, input_tokens: u64, output_tokens: u64) -> Option<f64> {
     let (input_per_million, output_per_million) = model_token_rates(model)?;
     Some(
-        ((input_tokens as f64) * input_per_million
-            + (output_tokens as f64) * output_per_million)
+        ((input_tokens as f64) * input_per_million + (output_tokens as f64) * output_per_million)
             / 1_000_000.0,
     )
 }
@@ -12614,10 +13094,22 @@ fn print_config_status(cfg: &LibertaiConfig) {
     if cfg.account_base != cfg.api_base {
         println!("{DIM}  account base:{RESET} {}", cfg.account_base);
     }
-    println!("{DIM}  default chat model:{RESET} {}", cfg.default_chat_model);
-    println!("{DIM}  default code provider:{RESET} {}", cfg.default_code_provider);
-    println!("{DIM}  default code model:{RESET} {}", cfg.default_code_model);
-    println!("{DIM}  default image model:{RESET} {}", cfg.default_image_model);
+    println!(
+        "{DIM}  default chat model:{RESET} {}",
+        cfg.default_chat_model
+    );
+    println!(
+        "{DIM}  default code provider:{RESET} {}",
+        cfg.default_code_provider
+    );
+    println!(
+        "{DIM}  default code model:{RESET} {}",
+        cfg.default_code_model
+    );
+    println!(
+        "{DIM}  default image model:{RESET} {}",
+        cfg.default_image_model
+    );
     if cfg.smart_approval_enabled {
         println!(
             "{DIM}  smart approvals:{RESET} enabled ({})",
@@ -12986,9 +13478,7 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     println!(
         "{DIM}  UserPromptSubmit hooks run before the prompt reaches the agent and may block it.{RESET}"
     );
-    println!(
-        "{DIM}  PreToolUse hooks may return permissionDecision allow|ask|defer|deny.{RESET}"
-    );
+    println!("{DIM}  PreToolUse hooks may return permissionDecision allow|ask|defer|deny.{RESET}");
     println!(
         "{DIM}  PostToolUse hooks run after tool execution and cannot alter the result.{RESET}"
     );
@@ -13028,7 +13518,11 @@ fn is_configured_hook(hook: &crate::config::HookCommandConfig) -> bool {
     }
 }
 
-fn hook_json_row(event: &str, index: usize, hook: &crate::config::HookCommandConfig) -> serde_json::Value {
+fn hook_json_row(
+    event: &str,
+    index: usize,
+    hook: &crate::config::HookCommandConfig,
+) -> serde_json::Value {
     let hook_type_key = normalized_hook_type(&hook.hook_type);
     let hook_type = if hook.hook_type.trim().is_empty() {
         "command"
@@ -13154,7 +13648,9 @@ fn normalize_hook_event(event: &str) -> Option<String> {
 
 fn print_hooks_open_hint() {
     println!("{BOLD}hooks{RESET}");
-    println!("{DIM}  /hooks open:{RESET} open Desktop Settings > Hooks for graphical hook management.");
+    println!(
+        "{DIM}  /hooks open:{RESET} open Desktop Settings > Hooks for graphical hook management."
+    );
     println!(
         "{DIM}  terminal:{RESET} edit hook rows in the LibertAI config file; /hooks status shows the active rows."
     );
@@ -13173,7 +13669,10 @@ fn print_mcp_status(query: &str, command: McpCommand) {
                 }
                 Ok(cfg) => {
                     let exposure = mcp_exposure_summary(&cfg);
-                    println!("{DIM}  configured servers:{RESET} {}", cfg.mcp_servers.len());
+                    println!(
+                        "{DIM}  configured servers:{RESET} {}",
+                        cfg.mcp_servers.len()
+                    );
                     println!(
                         "{DIM}  native exposure:{RESET} mcp_call {}, {} named MCP tool(s), mcp_read_resource {}, mcp_get_prompt {}, {} resource subscription candidate(s)",
                         if exposure.mcp_call { "on" } else { "off" },
@@ -13219,10 +13718,7 @@ fn print_mcp_status(query: &str, command: McpCommand) {
     println!();
 }
 
-fn mcp_server_json_row(
-    name: &str,
-    server: &crate::config::McpServerConfig,
-) -> serde_json::Value {
+fn mcp_server_json_row(name: &str, server: &crate::config::McpServerConfig) -> serde_json::Value {
     let transport = if server.transport.trim().is_empty() {
         "stdio"
     } else {
@@ -13418,10 +13914,16 @@ fn append_mcp_resource_details(out: &mut String, resources: &[crate::config::Mcp
         } else {
             format!(" ({})", resource.mime_type.trim())
         };
-        out.push_str(&format!("  - [{}] {}{} - {}\n", marker, label, mime, resource.uri));
+        out.push_str(&format!(
+            "  - [{}] {}{} - {}\n",
+            marker, label, mime, resource.uri
+        ));
     }
     if resources.len() > 12 {
-        out.push_str(&format!("  - ... {} more resource(s)\n", resources.len() - 12));
+        out.push_str(&format!(
+            "  - ... {} more resource(s)\n",
+            resources.len() - 12
+        ));
     }
     out.push('\n');
 }
@@ -13456,7 +13958,10 @@ fn append_mcp_prompt_details(out: &mut String, prompts: &[crate::config::McpProm
         } else {
             format!(" - {}", truncate_chars(prompt.description.trim(), 100))
         };
-        out.push_str(&format!("  - [{}] {}{}{}\n", marker, prompt.name, desc, args));
+        out.push_str(&format!(
+            "  - [{}] {}{}{}\n",
+            marker, prompt.name, desc, args
+        ));
     }
     if prompts.len() > 12 {
         out.push_str(&format!("  - ... {} more prompt(s)\n", prompts.len() - 12));
@@ -13863,10 +14368,16 @@ fn format_hook_event_details(event: &str, hooks: &[crate::config::HookCommandCon
             out.push_str(&format!("     flags: {}\n", flags.join(", ")));
         }
         if !hook.status_message.trim().is_empty() {
-            out.push_str(&format!("     statusMessage: {}\n", hook.status_message.trim()));
+            out.push_str(&format!(
+                "     statusMessage: {}\n",
+                hook.status_message.trim()
+            ));
         }
         if !hook.review_policy.trim().is_empty() {
-            out.push_str(&format!("     reviewPolicy: {}\n", hook.review_policy.trim()));
+            out.push_str(&format!(
+                "     reviewPolicy: {}\n",
+                hook.review_policy.trim()
+            ));
         }
         if hook_type_key == "http" {
             out.push_str(&format!(
@@ -13976,12 +14487,7 @@ fn status_line_usage_text() -> &'static str {
 fn is_status_line_json_action(action: &str) -> bool {
     matches!(
         action.trim().to_ascii_lowercase().as_str(),
-        "json"
-            | "--json"
-            | "status --json"
-            | "show --json"
-            | "template --json"
-            | "info --json"
+        "json" | "--json" | "status --json" | "show --json" | "template --json" | "info --json"
     )
 }
 
@@ -14067,11 +14573,7 @@ fn handle_status_line_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Resul
 
 fn handle_output_style(raw: &str, output_style: &mut Option<String>) {
     let value = raw.trim();
-    let key = if value.is_empty() {
-        "status"
-    } else {
-        value
-    };
+    let key = if value.is_empty() { "status" } else { value };
     if is_output_style_json_request(key) {
         print_output_style_status_json(output_style.as_deref(), key);
         return;
@@ -14103,8 +14605,13 @@ fn is_output_style_status_alias(value: &str) -> bool {
 fn is_output_style_json_request(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
-        "json" | "--json" | "status --json" | "show --json" | "current --json"
-            | "info --json" | "list --json"
+        "json"
+            | "--json"
+            | "status --json"
+            | "show --json"
+            | "current --json"
+            | "info --json"
+            | "list --json"
     )
 }
 
@@ -14116,7 +14623,10 @@ fn print_output_style_status(output_style: Option<&str>, unknown: Option<&str>) 
     let cwd = std::env::current_dir().ok();
     let styles = crate::commands::code_output_style::load_styles(cwd.as_deref());
     println!("{BOLD}output-style{RESET}");
-    println!("{DIM}  current:{RESET} {}", output_style.unwrap_or("default"));
+    println!(
+        "{DIM}  current:{RESET} {}",
+        output_style.unwrap_or("default")
+    );
     println!("{DIM}  available:{RESET}");
     for style in styles {
         println!("{DIM}    {:<12}{RESET} {}", style.name, style.description);
@@ -14295,29 +14805,37 @@ fn render_event(event: AgentEvent) {
 // Input bar — raw-mode line editor
 // ---------------------------------------------------------------------------
 
-/// Read a single line with a Claude-Code-style input bar:
+/// Read one prompt with a Claude-Code-style input bar:
 ///
 /// ```text
 /// ────────────────────
 /// ❯ hello wor_
 /// ```
 ///
-/// Stays in raw mode for the duration, redrawing on every keystroke and
-/// on `Resize`. Returns `LineResult::Submit` on Enter,
-/// `LineResult::Interrupted` on Ctrl+C, `LineResult::Eof` on Ctrl+D of an
-/// empty buffer.
+/// Stays in raw mode (with bracketed paste enabled) for the duration,
+/// redrawing on every keystroke and on `Resize`. The buffer may contain
+/// newlines — from a bracketed paste or Alt+Enter / Ctrl+J — and the bar
+/// grows one row per line up to `MAX_INPUT_ROWS`. Returns
+/// `LineResult::Submit` on Enter, `LineResult::Interrupted` on Ctrl+C,
+/// `LineResult::Eof` on Ctrl+D of an empty buffer.
 fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
     let _guard = RawModeGuard::enter()?;
+    // Best-effort bracketed paste: supporting terminals deliver a paste
+    // as one `Event::Paste` (newlines intact) instead of a burst of key
+    // events, so pasting a stack trace can't submit line by line. The
+    // guard drops on every exit path — including panics and before the
+    // agent (or any child process) runs with the cooked terminal.
+    let _paste_guard = BracketedPasteGuard::enter().ok();
 
     let mut stdout = io::stdout();
     execute!(stdout, cursor::Show)?;
 
     let mut buffer: Vec<char> = Vec::new();
     let mut cursor_pos: usize = 0; // index within `buffer`
-    // History cursor. `None` means "live buffer" (not walking history).
-    // A `Some(i)` points at `history[history.len() - 1 - i]` — Up
-    // increments, Down decrements, Enter/edit commits the recalled line
-    // back to the live buffer.
+                                   // History cursor. `None` means "live buffer" (not walking history).
+                                   // A `Some(i)` points at `history[history.len() - 1 - i]` — Up
+                                   // increments, Down decrements, Enter/edit commits the recalled line
+                                   // back to the live buffer.
     let mut hist_idx: Option<usize> = None;
     let mut stashed_live: Option<Vec<char>> = None;
     let vim_enabled = VIM_INPUT_ENABLED.load(Ordering::SeqCst);
@@ -14327,19 +14845,20 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
         None
     };
 
-    // First paint lays down two fresh lines; every subsequent paint moves
-    // back up to the rule line and overwrites in place so the bar stays
-    // anchored to its starting position instead of marching down.
-    let mut painted = false;
-    repaint(
+    // Bar geometry from the previous paint: `Some(n)` means the rule row
+    // sits `n` lines above the cursor, so the next paint steps back up
+    // and overwrites the bar in place instead of marching down. `None`
+    // paints fresh where the cursor already is (first paint and after a
+    // resize).
+    let mut rows_above: Option<u16> = None;
+    rows_above = Some(repaint(
         &mut stdout,
         &buffer,
         cursor_pos,
         mode,
         vim_input_mode,
-        painted,
-    )?;
-    painted = true;
+        rows_above,
+    )?);
 
     loop {
         let ev = event::read().map_err(|e| anyhow::anyhow!("event::read: {e}"))?;
@@ -14349,51 +14868,58 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
             }) => match (code, modifiers) {
                 (KeyCode::Esc, _) if vim_enabled => {
                     vim_input_mode = Some(VimInputMode::Normal);
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
+                }
+                // Deliberate newline — Alt+Enter / Ctrl+J everywhere,
+                // Shift+Enter where the terminal reports it (kitty
+                // keyboard protocol). Insert flavour only: vim-normal
+                // keeps Enter-family keys as submit.
+                (code, modifiers)
+                    if is_newline_key(code, modifiers)
+                        && vim_input_mode != Some(VimInputMode::Normal) =>
+                {
+                    if hist_idx.is_some() {
+                        hist_idx = None;
+                        stashed_live = None;
+                    }
+                    buffer.insert(cursor_pos, '\n');
+                    cursor_pos += 1;
                 }
                 (KeyCode::Enter, _) => {
-                    // Erase both bar lines so the caller's printlns flow
-                    // naturally where the bar used to be — no stale rule,
+                    // Erase the bar so the caller's printlns flow
+                    // naturally where it used to be — no stale rule,
                     // no doubled-up prompt text.
-                    clear_bar(&mut stdout)?;
+                    clear_bar(&mut stdout, rows_above)?;
                     let line: String = buffer.into_iter().collect();
                     return Ok(LineResult::Submit(line));
                 }
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                    clear_bar(&mut stdout)?;
+                    clear_bar(&mut stdout, rows_above)?;
                     return Ok(LineResult::Interrupted);
                 }
                 // Ctrl+D on an empty buffer → EOF. In the middle of a line
                 // it's a no-op (matches most readline implementations).
                 (KeyCode::Char('d'), KeyModifiers::CONTROL) if buffer.is_empty() => {
-                    clear_bar(&mut stdout)?;
+                    clear_bar(&mut stdout, rows_above)?;
                     return Ok(LineResult::Eof);
                 }
                 // Shift+Tab → toggle Normal ↔ Plan. crossterm surfaces it
                 // as BackTab regardless of whether Shift is in modifiers
                 // (terminfo handling varies by terminal).
                 (KeyCode::BackTab, _) => {
-                    clear_bar(&mut stdout)?;
+                    clear_bar(&mut stdout, rows_above)?;
                     return Ok(LineResult::ToggleMode);
                 }
                 (code, modifiers) if vim_input_mode == Some(VimInputMode::Normal) => {
                     match vim_normal_key_action(code, modifiers) {
                         VimNormalAction::Submit => {
-                            clear_bar(&mut stdout)?;
+                            clear_bar(&mut stdout, rows_above)?;
                             let line: String = buffer.into_iter().collect();
                             return Ok(LineResult::Submit(line));
                         }
                         VimNormalAction::MoveLeft if cursor_pos > 0 => cursor_pos -= 1,
                         VimNormalAction::MoveRight if cursor_pos < buffer.len() => cursor_pos += 1,
-                        VimNormalAction::Home => cursor_pos = 0,
-                        VimNormalAction::End => cursor_pos = buffer.len(),
+                        VimNormalAction::Home => cursor_pos = line_bounds(&buffer, cursor_pos).0,
+                        VimNormalAction::End => cursor_pos = line_bounds(&buffer, cursor_pos).1,
                         VimNormalAction::Delete if cursor_pos < buffer.len() => {
                             buffer.remove(cursor_pos);
                         }
@@ -14407,90 +14933,34 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
                             vim_input_mode = Some(VimInputMode::Insert);
                         }
                         VimNormalAction::InsertHome => {
-                            cursor_pos = 0;
+                            cursor_pos = line_bounds(&buffer, cursor_pos).0;
                             vim_input_mode = Some(VimInputMode::Insert);
                         }
                         VimNormalAction::InsertEnd => {
-                            cursor_pos = buffer.len();
+                            cursor_pos = line_bounds(&buffer, cursor_pos).1;
                             vim_input_mode = Some(VimInputMode::Insert);
                         }
                         _ => {}
                     }
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
                 }
                 (KeyCode::Backspace, _) if cursor_pos > 0 => {
                     buffer.remove(cursor_pos - 1);
                     cursor_pos -= 1;
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
                 }
                 (KeyCode::Delete, _) if cursor_pos < buffer.len() => {
                     buffer.remove(cursor_pos);
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
                 }
                 (KeyCode::Left, _) if cursor_pos > 0 => {
                     cursor_pos -= 1;
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
                 }
                 (KeyCode::Right, _) if cursor_pos < buffer.len() => {
                     cursor_pos += 1;
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
                 }
                 (KeyCode::Home, _) => {
-                    cursor_pos = 0;
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
+                    cursor_pos = line_bounds(&buffer, cursor_pos).0;
                 }
                 (KeyCode::End, _) => {
-                    cursor_pos = buffer.len();
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
+                    cursor_pos = line_bounds(&buffer, cursor_pos).1;
                 }
                 (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                     // Any edit to the buffer ends history navigation —
@@ -14501,129 +14971,153 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
                     }
                     buffer.insert(cursor_pos, c);
                     cursor_pos += 1;
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
                 }
                 (KeyCode::Up, _) => {
-                    if history.is_empty() {
-                        continue;
-                    }
-                    let next = hist_idx.map_or(0, |i| (i + 1).min(history.len() - 1));
-                    if hist_idx.is_none() {
-                        stashed_live = Some(std::mem::take(&mut buffer));
-                    }
-                    hist_idx = Some(next);
-                    let recalled = history
-                        .get(history.len() - 1 - next)
-                        .cloned()
-                        .unwrap_or_default();
-                    buffer = recalled.chars().collect();
-                    cursor_pos = buffer.len();
-                    vim_input_mode = if vim_enabled {
-                        Some(VimInputMode::Insert)
+                    let (cur_line, cur_col) = cursor_line_col(&buffer, cursor_pos);
+                    if cur_line > 0 {
+                        // Multi-line draft: Up walks lines first; history
+                        // only engages from the top line.
+                        cursor_pos = pos_at_line_col(&buffer, cur_line - 1, cur_col);
                     } else {
-                        None
-                    };
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
+                        if history.is_empty() {
+                            continue;
+                        }
+                        let next = hist_idx.map_or(0, |i| (i + 1).min(history.len() - 1));
+                        if hist_idx.is_none() {
+                            stashed_live = Some(std::mem::take(&mut buffer));
+                        }
+                        hist_idx = Some(next);
+                        let recalled = history
+                            .get(history.len() - 1 - next)
+                            .cloned()
+                            .unwrap_or_default();
+                        buffer = recalled.chars().collect();
+                        cursor_pos = buffer.len();
+                        vim_input_mode = if vim_enabled {
+                            Some(VimInputMode::Insert)
+                        } else {
+                            None
+                        };
+                    }
                 }
                 (KeyCode::Down, _) => {
-                    match hist_idx {
-                        None => continue,
-                        Some(0) => {
-                            // Back to live buffer.
-                            buffer = stashed_live.take().unwrap_or_default();
-                            cursor_pos = buffer.len();
-                            hist_idx = None;
-                        }
-                        Some(i) => {
-                            let next = i - 1;
-                            hist_idx = Some(next);
-                            let recalled = history
-                                .get(history.len() - 1 - next)
-                                .cloned()
-                                .unwrap_or_default();
-                            buffer = recalled.chars().collect();
-                            cursor_pos = buffer.len();
-                        }
-                    }
-                    vim_input_mode = if vim_enabled {
-                        Some(VimInputMode::Insert)
+                    let (cur_line, cur_col) = cursor_line_col(&buffer, cursor_pos);
+                    let last_line = buffer.iter().filter(|c| **c == '\n').count();
+                    if cur_line < last_line {
+                        // Mirror of Up: walk down the draft's lines;
+                        // history only engages from the bottom line.
+                        cursor_pos = pos_at_line_col(&buffer, cur_line + 1, cur_col);
                     } else {
-                        None
-                    };
-                    repaint(
-                        &mut stdout,
-                        &buffer,
-                        cursor_pos,
-                        mode,
-                        vim_input_mode,
-                        painted,
-                    )?;
+                        match hist_idx {
+                            None => continue,
+                            Some(0) => {
+                                // Back to live buffer.
+                                buffer = stashed_live.take().unwrap_or_default();
+                                cursor_pos = buffer.len();
+                                hist_idx = None;
+                            }
+                            Some(i) => {
+                                let next = i - 1;
+                                hist_idx = Some(next);
+                                let recalled = history
+                                    .get(history.len() - 1 - next)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                buffer = recalled.chars().collect();
+                                cursor_pos = buffer.len();
+                            }
+                        }
+                        vim_input_mode = if vim_enabled {
+                            Some(VimInputMode::Insert)
+                        } else {
+                            None
+                        };
+                    }
                 }
                 // Old TODO retired: history nav is wired above.
-                _ => {}
+                _ => continue,
             },
+            // Bracketed paste: the whole payload — newlines included —
+            // lands as one edit. Enter is never synthesized, so a pasted
+            // stack trace sits in the buffer for review instead of
+            // submitting mid-paste.
+            Event::Paste(data) => {
+                if hist_idx.is_some() {
+                    hist_idx = None;
+                    stashed_live = None;
+                }
+                cursor_pos = insert_paste(&mut buffer, cursor_pos, &data);
+            }
             Event::Resize(_, _) => {
                 // Don't try to MoveToPreviousLine onto a row that may
                 // no longer exist after a shrink — treat as a fresh
                 // paint. The previous bar position is left as-is in
                 // scrollback rather than risk drifting into row 0.
-                painted = false;
-                repaint(
-                    &mut stdout,
-                    &buffer,
-                    cursor_pos,
-                    mode,
-                    vim_input_mode,
-                    painted,
-                )?;
-                painted = true;
+                rows_above = None;
             }
-            _ => {}
+            _ => continue,
         }
+        rows_above = Some(repaint(
+            &mut stdout,
+            &buffer,
+            cursor_pos,
+            mode,
+            vim_input_mode,
+            rows_above,
+        )?);
     }
 }
 
-/// Paint the two-line input bar (separator + prompt) in place.
+/// Hard ceiling on the number of buffer rows the input bar paints. The
+/// bar is additionally capped at `terminal_rows - 2` so the rule plus at
+/// least one row of prior output stay on screen.
+const MAX_INPUT_ROWS: usize = 10;
+
+/// Paint the input bar (separator + one row per visible buffer line) in
+/// place.
 ///
 /// Layout:
 /// ```text
 /// ──────────── (dim, terminal-width)
-/// ❯ <buffer>
+/// ❯ first line of the buffer
+///   continuation lines, aligned under the prompt
 /// ```
 ///
-/// On the first paint of a `read_line` call we paint where the cursor
-/// already is (typically column 0 of a fresh line after the banner or
-/// prior agent output). On every later paint we step up one line so the
-/// rule lands back on its original row — otherwise each keystroke would
-/// shove the bar one line further down.
+/// On the first paint of a `read_line` call (`prev_rows_above == None`)
+/// we paint where the cursor already is (typically column 0 of a fresh
+/// line after the banner or prior agent output). On every later paint we
+/// step back up to the rule row and overwrite in place — otherwise each
+/// keystroke would shove the bar further down. When the buffer has more
+/// lines than fit, a window centred on the cursor is shown and the rule
+/// gains a `first–last/total` marker. Returns the new "rows above the
+/// cursor" count the caller must hand to the next repaint/clear.
 fn repaint(
     stdout: &mut io::Stdout,
     buffer: &[char],
     cursor_pos: usize,
     mode: Mode,
     vim_input_mode: Option<VimInputMode>,
-    painted_before: bool,
-) -> Result<()> {
-    let cols = terminal::size()
+    prev_rows_above: Option<u16>,
+) -> Result<u16> {
+    let (cols, rows) = terminal::size()
         .ok()
-        .map(|(c, _)| c as usize)
-        .filter(|c| *c > 0)
-        .unwrap_or(80);
-    let rule: String = rule_chip(cols, mode);
+        .filter(|(c, r)| *c > 0 && *r > 0)
+        .unwrap_or((80, 24));
+    let cols = cols as usize;
+    let max_rows = (rows as usize).saturating_sub(2).clamp(1, MAX_INPUT_ROWS);
+
+    // Logical lines. `split` on an empty buffer still yields one empty
+    // line, so there is always at least one content row to paint.
+    let lines: Vec<&[char]> = buffer.split(|c| *c == '\n').collect();
+    let (cur_line, cur_col) = cursor_line_col(buffer, cursor_pos);
+    let total = lines.len();
+    let shown = total.min(max_rows);
+    let start = vertical_window(total, cur_line, shown);
+
+    let mut rule: String = rule_chip(cols, mode);
+    if total > shown {
+        rule = splice_rule_hint(&rule, start, shown, total);
+    }
 
     // Mode chip printed in-line with the prompt, left of ❯. Dimmed so
     // it's a status cue, not a shout.
@@ -14646,17 +15140,16 @@ fn repaint(
     };
 
     // Prefix width: mode chip + `❯ ` (2 cells). Anything past
-    // `cols - prefix_cols - 1` characters of the buffer would wrap the
-    // terminal onto a third row — which breaks `clear_bar`'s two-line
-    // erase assumption. Slide a window over the buffer so the cursor is
-    // always visible and the line never wraps.
+    // `cols - prefix_cols - 1` characters of a line would wrap the
+    // terminal onto an extra row — which breaks the row arithmetic the
+    // in-place overwrite relies on. Slide a window over each line so the
+    // cursor is always visible and no row ever wraps.
     let prefix_cols_usize = chip_text.chars().count() + 2;
     let avail = cols.saturating_sub(prefix_cols_usize).max(1);
-    let (display_text, display_cursor) = slide_window(buffer, cursor_pos, avail);
 
-    if painted_before {
+    if let Some(rows_above) = prev_rows_above.filter(|n| *n > 0) {
         // Jump back to the rule line so we overwrite in place.
-        queue!(stdout, cursor::MoveToPreviousLine(1))?;
+        queue!(stdout, cursor::MoveToPreviousLine(rows_above))?;
     }
 
     queue!(
@@ -14668,28 +15161,171 @@ fn repaint(
         Print(&rule),
         ResetColor,
         SetAttribute(Attribute::Reset),
-        Print("\r\n"),
-        Clear(ClearType::CurrentLine),
-        SetForegroundColor(chip_colour),
-        SetAttribute(Attribute::Dim),
-        Print(&chip_text),
-        ResetColor,
-        SetAttribute(Attribute::Reset),
-        SetForegroundColor(Color::Cyan),
-        SetAttribute(Attribute::Bold),
-        Print("\u{276f} "),
-        ResetColor,
-        SetAttribute(Attribute::Reset),
-        Print(&display_text),
     )?;
 
-    let prefix_cols = u16::try_from(prefix_cols_usize).unwrap_or(u16::MAX);
-    let cursor_cell = u16::try_from(display_cursor).unwrap_or(u16::MAX);
-    let col = prefix_cols.saturating_add(cursor_cell);
+    let mut cursor_row_in_window = shown.saturating_sub(1);
+    let mut cursor_col_cell = prefix_cols_usize;
+    for (i, line) in lines[start..start + shown].iter().enumerate() {
+        let is_cursor_row = start + i == cur_line;
+        let (display_text, display_cursor) = if is_cursor_row {
+            slide_window(line, cur_col, avail)
+        } else {
+            // Cursor pinned to 0 ⇒ plain left-anchored clip with a
+            // trailing `…` when the line overflows.
+            slide_window(line, 0, avail)
+        };
+        // Tabs would desync the one-cell-per-char cursor arithmetic;
+        // render them as single spaces (the submitted text keeps the
+        // real tab).
+        let display_text = display_text.replace('\t', " ");
+        queue!(stdout, Print("\r\n"), Clear(ClearType::CurrentLine))?;
+        if i == 0 {
+            queue!(
+                stdout,
+                SetForegroundColor(chip_colour),
+                SetAttribute(Attribute::Dim),
+                Print(&chip_text),
+                ResetColor,
+                SetAttribute(Attribute::Reset),
+                SetForegroundColor(Color::Cyan),
+                SetAttribute(Attribute::Bold),
+                Print("\u{276f} "),
+                ResetColor,
+                SetAttribute(Attribute::Reset),
+            )?;
+        } else {
+            // Continuation rows: blank prefix so text columns align
+            // under the first row's content.
+            queue!(stdout, Print(" ".repeat(prefix_cols_usize)))?;
+        }
+        queue!(stdout, Print(&display_text))?;
+        if is_cursor_row {
+            cursor_row_in_window = i;
+            cursor_col_cell = prefix_cols_usize + display_cursor;
+        }
+    }
+
+    // Erase leftovers from a previously taller paint (e.g. after a
+    // Backspace joined two lines).
+    queue!(stdout, Clear(ClearType::FromCursorDown))?;
+
+    // Park the terminal cursor on the buffer cursor's row/column.
+    let up = shown - 1 - cursor_row_in_window;
+    if up > 0 {
+        queue!(
+            stdout,
+            cursor::MoveToPreviousLine(u16::try_from(up).unwrap_or(u16::MAX))
+        )?;
+    }
+    let col = u16::try_from(cursor_col_cell).unwrap_or(u16::MAX);
     queue!(stdout, cursor::MoveToColumn(col))?;
 
     stdout.flush()?;
-    Ok(())
+    Ok(u16::try_from(cursor_row_in_window + 1).unwrap_or(u16::MAX))
+}
+
+/// First visible line of the vertical window: keeps the cursor line
+/// roughly centred and never scrolls past the last page.
+fn vertical_window(total: usize, cursor_line: usize, shown: usize) -> usize {
+    if total <= shown {
+        return 0;
+    }
+    cursor_line.saturating_sub(shown / 2).min(total - shown)
+}
+
+/// Overlay a ` first–last/total ` marker near the right edge of the rule
+/// so a clipped multi-line draft advertises which slice is visible.
+fn splice_rule_hint(rule: &str, start: usize, shown: usize, total: usize) -> String {
+    let hint: Vec<char> = format!(" {}\u{2013}{}/{} ", start + 1, start + shown, total)
+        .chars()
+        .collect();
+    let mut out: Vec<char> = rule.chars().collect();
+    if out.len() < hint.len() + 2 {
+        return rule.to_string();
+    }
+    let at = out.len() - hint.len() - 1;
+    out[at..at + hint.len()].copy_from_slice(&hint);
+    out.into_iter().collect()
+}
+
+/// (line index, column) of `cursor_pos` within `buffer`, counting
+/// logical lines separated by `\n`.
+fn cursor_line_col(buffer: &[char], cursor_pos: usize) -> (usize, usize) {
+    let upto = &buffer[..cursor_pos.min(buffer.len())];
+    let line = upto.iter().filter(|c| **c == '\n').count();
+    let col = upto.iter().rev().take_while(|c| **c != '\n').count();
+    (line, col)
+}
+
+/// Char index of `(line, col)` in `buffer`, clamping `col` to the line's
+/// length and `line` past the end to `buffer.len()`.
+fn pos_at_line_col(buffer: &[char], line: usize, col: usize) -> usize {
+    let mut idx = 0usize;
+    for _ in 0..line {
+        match buffer[idx..].iter().position(|c| *c == '\n') {
+            Some(off) => idx += off + 1,
+            None => return buffer.len(),
+        }
+    }
+    let line_len = buffer[idx..]
+        .iter()
+        .position(|c| *c == '\n')
+        .unwrap_or(buffer.len() - idx);
+    idx + col.min(line_len)
+}
+
+/// Char-index bounds `[start, end)` of the logical line containing
+/// `cursor_pos` (`end` excludes the trailing `\n`, if any). Drives the
+/// line-scoped Home / End / vim `0` / `$` motions.
+fn line_bounds(buffer: &[char], cursor_pos: usize) -> (usize, usize) {
+    let pos = cursor_pos.min(buffer.len());
+    let start = buffer[..pos]
+        .iter()
+        .rposition(|c| *c == '\n')
+        .map_or(0, |i| i + 1);
+    let end = buffer[pos..]
+        .iter()
+        .position(|c| *c == '\n')
+        .map_or(buffer.len(), |i| pos + i);
+    (start, end)
+}
+
+/// True when the key event should insert a newline instead of
+/// submitting: Alt+Enter, Shift+Enter (only terminals speaking an
+/// enhanced keyboard protocol such as kitty's report the modifier — on
+/// the rest Shift+Enter arrives as plain Enter), and Ctrl+J — which in
+/// raw mode is how crossterm surfaces a literal `\n` — as the portable
+/// fallback.
+fn is_newline_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    match code {
+        KeyCode::Enter => modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT),
+        KeyCode::Char('j') | KeyCode::Char('J') => modifiers.contains(KeyModifiers::CONTROL),
+        _ => false,
+    }
+}
+
+/// Normalize a bracketed-paste payload: CRLF / lone CR become `\n`, and
+/// other control characters (stray ESC sequences, BEL, DEL, …) are
+/// dropped so they can't corrupt the bar's cell arithmetic. Tabs are
+/// kept — the submitted text should stay faithful — and rendered as
+/// spaces by `repaint`.
+fn sanitize_paste(data: &str) -> String {
+    data.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .filter(|c| *c == '\n' || *c == '\t' || !c.is_control())
+        .collect()
+}
+
+/// Insert a paste into the buffer at `cursor_pos` as one edit — newlines
+/// included, never submitting. Returns the new cursor position (just
+/// past the pasted text).
+fn insert_paste(buffer: &mut Vec<char>, cursor_pos: usize, data: &str) -> usize {
+    let inserted: Vec<char> = sanitize_paste(data).chars().collect();
+    let at = cursor_pos.min(buffer.len());
+    let count = inserted.len();
+    buffer.splice(at..at, inserted);
+    at + count
 }
 
 /// Slide a visible window of `avail` cells over `buffer`. When the
@@ -14720,16 +15356,17 @@ fn slide_window(buffer: &[char], cursor_pos: usize, avail: usize) -> (String, us
     (out, cursor_pos - start)
 }
 
-/// Wipe the two-line bar and leave the cursor at column 0 of where the
-/// rule used to be, so the caller's subsequent `println!`s flow naturally
-/// from that point.
-fn clear_bar(stdout: &mut io::Stdout) -> Result<()> {
+/// Wipe the whole bar (rule + every buffer row) and leave the cursor at
+/// column 0 of where the rule used to be, so the caller's subsequent
+/// `println!`s flow naturally from that point. `rows_above` is the
+/// geometry returned by the last `repaint`; `None` (possible only before
+/// the first paint) conservatively assumes the original two-row bar.
+fn clear_bar(stdout: &mut io::Stdout, rows_above: Option<u16>) -> Result<()> {
+    let up = rows_above.unwrap_or(1).max(1);
     queue!(
         stdout,
-        Print("\r"),
-        Clear(ClearType::CurrentLine),
-        cursor::MoveToPreviousLine(1),
-        Clear(ClearType::CurrentLine),
+        cursor::MoveToPreviousLine(up),
+        Clear(ClearType::FromCursorDown),
     )?;
     stdout.flush()?;
     Ok(())
@@ -14773,18 +15410,14 @@ mod tests {
         assert_eq!(payload["query"], "current --json");
         assert_eq!(payload["aliases"][0], "output-style");
         assert_eq!(payload["current"], "review");
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("show --json"))
-        );
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("info --json"))
-        );
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("info --json")));
     }
 
     #[test]
@@ -14869,7 +15502,10 @@ mod tests {
         );
         assert_eq!(
             parse_init_from_agent_action("from-agent preview append sections 1,3"),
-            Some(InitFromAgentAction::PreviewApplySections("append", vec![1, 3]))
+            Some(InitFromAgentAction::PreviewApplySections(
+                "append",
+                vec![1, 3]
+            ))
         );
         assert_eq!(
             parse_init_from_agent_action("from-agent preview merge sections 1"),
@@ -14877,7 +15513,10 @@ mod tests {
         );
         assert_eq!(
             parse_init_from_agent_action("from-agent preview merge-lines sections 2"),
-            Some(InitFromAgentAction::PreviewApplySections("merge-lines", vec![2]))
+            Some(InitFromAgentAction::PreviewApplySections(
+                "merge-lines",
+                vec![2]
+            ))
         );
         assert_eq!(
             parse_init_from_agent_action("from-agent sections 2"),
@@ -14900,15 +15539,26 @@ mod tests {
             Some(InitFromAgentAction::Replace)
         );
         assert_eq!(parse_init_from_agent_action("from-agent sections 0"), None);
-        assert_eq!(parse_init_from_agent_action("from-agent sections 3-1"), None);
-        assert_eq!(parse_init_from_agent_action("from-agent sections all,1"), None);
-        assert_eq!(parse_init_from_agent_action("from-agent sections 1 1"), None);
+        assert_eq!(
+            parse_init_from_agent_action("from-agent sections 3-1"),
+            None
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent sections all,1"),
+            None
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent sections 1 1"),
+            None
+        );
         assert_eq!(parse_init_from_agent_action("from-agent nope"), None);
 
         let hint = help_command_arg_hint("init");
         assert!(hint.contains("show --json|preview --json"));
         assert!(hint.contains("from-agent preview append|from-agent preview merge|from-agent preview merge-lines|from-agent preview replace"));
-        assert!(hint.contains("from-agent append|from-agent merge|from-agent merge-lines|from-agent replace"));
+        assert!(hint.contains(
+            "from-agent append|from-agent merge|from-agent merge-lines|from-agent replace"
+        ));
         assert!(hint.contains("from-agent preview sections N[,M]|N-M|all"));
         assert!(hint.contains("from-agent preview append sections N[,M]"));
         assert!(hint.contains("from-agent merge-lines sections N[,M]"));
@@ -14957,7 +15607,8 @@ mod tests {
 
     #[test]
     fn build_init_apply_content_merges_matching_sections() {
-        let existing = "# Demo\n\n## Build & test\n- test: cargo test\n\n## Conventions\n- keep scoped\n";
+        let existing =
+            "# Demo\n\n## Build & test\n- test: cargo test\n\n## Conventions\n- keep scoped\n";
         let candidate = "# Candidate\n\n## Build & test\n- test: cargo nextest run\n\n## Structure\n- src/ - code\n";
         let merged = build_init_apply_content(existing, candidate, "merge").unwrap();
         assert!(merged.starts_with("# Demo\n\n## Build & test\n- test: cargo nextest run"));
@@ -14968,20 +15619,21 @@ mod tests {
 
     #[test]
     fn build_init_apply_content_line_merges_matching_sections() {
-        let existing = "# Demo\n\n## Build & test\n- test: cargo test\n\n## Conventions\n- keep scoped\n";
+        let existing =
+            "# Demo\n\n## Build & test\n- test: cargo test\n\n## Conventions\n- keep scoped\n";
         let candidate =
             "# Candidate\n\n## Build & test\n- test: cargo test\n- lint: cargo clippy\n\n## Conventions\n- keep scoped\n- prefer small diffs\n";
         let merged = build_init_apply_content(existing, candidate, "merge-lines").unwrap();
-        assert!(
-            merged.starts_with("# Demo\n\n## Build & test\n- test: cargo test\n- lint: cargo clippy")
-        );
+        assert!(merged
+            .starts_with("# Demo\n\n## Build & test\n- test: cargo test\n- lint: cargo clippy"));
         assert!(merged.contains("## Conventions\n- keep scoped\n- prefer small diffs"));
         assert!(!merged.contains("# Candidate"));
     }
 
     #[test]
     fn selected_init_candidate_sections_returns_numbered_sections_only() {
-        let candidate = "# Candidate\n\n## Build & test\n- test: cargo test\n\n## Structure\n- src/ - code\n";
+        let candidate =
+            "# Candidate\n\n## Build & test\n- test: cargo test\n\n## Structure\n- src/ - code\n";
         let selected = selected_init_candidate_sections(candidate, &[3]).unwrap();
         assert!(!selected.contains("# Candidate"));
         assert!(!selected.contains("## Build & test"));
@@ -15172,7 +15824,10 @@ mod tests {
     #[test]
     fn memory_file_selector_parses_read_aliases() {
         assert_eq!(memory_file_selector("file 1"), Some("1"));
-        assert_eq!(memory_file_selector("read memory/project/foo.md"), Some("memory/project/foo.md"));
+        assert_eq!(
+            memory_file_selector("read memory/project/foo.md"),
+            Some("memory/project/foo.md")
+        );
         assert_eq!(memory_file_selector("show-file entry.md"), Some("entry.md"));
         assert_eq!(memory_file_selector("files"), None);
         assert_eq!(memory_file_selector("file"), None);
@@ -15256,10 +15911,26 @@ mod tests {
             path: PathBuf::from("/tmp/memory/project/entry.md"),
             title: "Important note".to_string(),
         }];
-        assert_eq!(select_memory_sidecar(&files, "1").unwrap().title, "Important note");
-        assert_eq!(select_memory_sidecar(&files, "/tmp/memory/project/entry.md").unwrap().title, "Important note");
-        assert_eq!(select_memory_sidecar(&files, "entry.md").unwrap().title, "Important note");
-        assert_eq!(select_memory_sidecar(&files, "important note").unwrap().title, "Important note");
+        assert_eq!(
+            select_memory_sidecar(&files, "1").unwrap().title,
+            "Important note"
+        );
+        assert_eq!(
+            select_memory_sidecar(&files, "/tmp/memory/project/entry.md")
+                .unwrap()
+                .title,
+            "Important note"
+        );
+        assert_eq!(
+            select_memory_sidecar(&files, "entry.md").unwrap().title,
+            "Important note"
+        );
+        assert_eq!(
+            select_memory_sidecar(&files, "important note")
+                .unwrap()
+                .title,
+            "Important note"
+        );
         assert!(select_memory_sidecar(&files, "2").is_none());
     }
 
@@ -15474,7 +16145,8 @@ mod tests {
             }],
         );
         assert!(report.starts_with("category,name,count"));
-        assert!(report.contains("pricing_match,input_usd_per_million,output_usd_per_million,pricing_source"));
+        assert!(report
+            .contains("pricing_match,input_usd_per_million,output_usd_per_million,pricing_source"));
         assert!(report.contains("\"local,dev/unknown\""));
         assert!(report.contains("estimated duration-weighted attribution"));
         let priced = usage_export_csv(
@@ -15507,14 +16179,34 @@ mod tests {
             input_tokens: 2048,
             context_window: 4096,
             output_style: Some("review".to_string()),
-            status_line_template: "{backend}/{model} {mode} {style} {tokens} {ctx} {unknown}"
-                .to_string(),
+            status_line_template:
+                "{backend}/{model} {mode} {style} {tokens} {ctx} {cost} {unknown}".to_string(),
             status_line_command: String::new(),
+            estimated_cost: Some(0.1234),
         };
         let expanded =
-            expand_status_line_template(&status.status_line_template, &status, Mode::Plan)
+            expand_status_line_template(&status.status_line_template, &status, Mode::Plan).unwrap();
+        assert_eq!(
+            expanded,
+            "libertai/qwen plan review 2.0k 50% ~$0.12 {unknown}"
+        );
+    }
+
+    #[test]
+    fn status_line_cost_token_dashes_when_unpriced() {
+        let status = BarStatus {
+            model_label: "libertai/qwen".to_string(),
+            input_tokens: 0,
+            context_window: 4096,
+            output_style: None,
+            status_line_template: "{cost}".to_string(),
+            status_line_command: String::new(),
+            estimated_cost: None,
+        };
+        let expanded =
+            expand_status_line_template(&status.status_line_template, &status, Mode::Normal)
                 .unwrap();
-        assert_eq!(expanded, "libertai/qwen plan review 2.0k 50% {unknown}");
+        assert_eq!(expanded, "-");
     }
 
     fn empty_tool_output() -> pi::sdk::ToolOutput {
@@ -15534,9 +16226,209 @@ mod tests {
             output_style: None,
             status_line_template: String::new(),
             status_line_command: String::new(),
+            estimated_cost: None,
         };
         assert!(expand_status_line_template("", &status, Mode::Normal).is_none());
-        assert_eq!(default_rule_text(&status), "50% · 512 / 1.0k · libertai/qwen");
+        assert_eq!(
+            default_rule_text(&status, Mode::Normal),
+            "libertai/qwen · normal · 50% ctx (512 / 1.0k)"
+        );
+    }
+
+    #[test]
+    fn default_rule_text_tracks_mode_and_cost() {
+        let mut status = BarStatus {
+            model_label: "libertai/qwen".to_string(),
+            input_tokens: 512,
+            context_window: 1024,
+            output_style: None,
+            status_line_template: String::new(),
+            status_line_command: String::new(),
+            estimated_cost: Some(0.4567),
+        };
+        assert_eq!(
+            default_rule_text(&status, Mode::Plan),
+            "libertai/qwen · plan · 50% ctx (512 / 1.0k) · ~$0.46"
+        );
+        // Shift+Tab back to normal is visible in the same snapshot.
+        assert_eq!(
+            default_rule_text(&status, Mode::AcceptEdits),
+            "libertai/qwen · accept-edits · 50% ctx (512 / 1.0k) · ~$0.46"
+        );
+        // No context window (unknown model) degrades to model · mode.
+        status.context_window = 0;
+        status.estimated_cost = None;
+        assert_eq!(
+            default_rule_text(&status, Mode::Normal),
+            "libertai/qwen · normal"
+        );
+    }
+
+    fn sample_welcome_info() -> WelcomeInfo {
+        WelcomeInfo {
+            provider: "libertai".to_string(),
+            model: "qwen3-coder-480b".to_string(),
+            mode: Mode::Plan,
+            cwd: "~/repos/demo".to_string(),
+            session: "new session".to_string(),
+            sandbox: "sandbox bwrap".to_string(),
+        }
+    }
+
+    #[test]
+    fn welcome_lines_styled_carry_identity_state_and_hints() {
+        let lines = welcome_lines(&sample_welcome_info(), true);
+        // Header + trailing blank printed by the caller stays ≤ 8 rows.
+        assert!(lines.len() <= 7, "welcome header too tall: {}", lines.len());
+        let joined = lines.join("\n");
+        assert!(joined.contains("LibertAI Code"));
+        assert!(joined.contains("libertai/qwen3-coder-480b"));
+        assert!(joined.contains("plan mode"));
+        assert!(joined.contains("sandbox bwrap"));
+        assert!(joined.contains("~/repos/demo"));
+        assert!(joined.contains("new session"));
+        assert!(joined.contains("/help commands"));
+        assert!(joined.contains("Shift+Tab plan mode"));
+        assert!(joined.contains("Alt+Enter newline"));
+        assert!(joined.contains("\u{1b}["), "styled header should use ANSI");
+    }
+
+    #[test]
+    fn welcome_lines_plain_fallback_has_no_ansi() {
+        let lines = welcome_lines(&sample_welcome_info(), false);
+        let joined = lines.join("\n");
+        assert!(!joined.contains('\u{1b}'), "plain header must be ANSI-free");
+        assert!(!joined.contains('\u{258c}'), "plain header drops the mark");
+        assert!(joined.contains("LibertAI Code"));
+        assert!(joined.contains("libertai/qwen3-coder-480b · plan mode · sandbox bwrap"));
+        assert!(joined.contains("~/repos/demo · new session"));
+        assert!(joined.contains("/help commands"));
+    }
+
+    fn sample_session_meta(name: Option<&str>) -> SessionMeta {
+        SessionMeta {
+            path: "/tmp/sessions/abc.jsonl".to_string(),
+            id: "abcdef1234567890".to_string(),
+            cwd: "/tmp/demo".to_string(),
+            timestamp: "2026-06-10T00:00:00Z".to_string(),
+            message_count: 14,
+            last_modified_ms: 1_000_000,
+            size_bytes: 2048,
+            name: name.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn resume_summary_text_reports_name_age_and_message_count() {
+        let meta = sample_session_meta(Some("refactor-bar"));
+        // Two hours after last_modified_ms.
+        let now = meta.last_modified_ms + 2 * 3600 * 1000;
+        assert_eq!(
+            resume_summary_text(&meta, now),
+            "\u{21ba} resumed \"refactor-bar\" · 2h ago · 14 messages"
+        );
+    }
+
+    #[test]
+    fn resume_summary_text_falls_back_to_short_id_and_singular_message() {
+        let mut meta = sample_session_meta(None);
+        meta.message_count = 1;
+        assert_eq!(
+            resume_summary_text(&meta, meta.last_modified_ms + 5_000),
+            "\u{21ba} resumed session abcdef12 · just now · 1 message"
+        );
+    }
+
+    #[test]
+    fn session_state_label_distinguishes_new_and_resumed() {
+        assert_eq!(session_state_label(None), "new session");
+        let named = sample_session_meta(Some("polish"));
+        assert_eq!(session_state_label(Some(&named)), "resumed \"polish\"");
+        let unnamed = sample_session_meta(Some("   "));
+        assert_eq!(
+            session_state_label(Some(&unnamed)),
+            "resumed session abcdef12"
+        );
+    }
+
+    #[test]
+    fn human_age_ms_scales_units_and_clamps_negative() {
+        assert_eq!(human_age_ms(-5), "just now");
+        assert_eq!(human_age_ms(59_999), "just now");
+        assert_eq!(human_age_ms(5 * 60 * 1000), "5m ago");
+        assert_eq!(human_age_ms(3 * 3600 * 1000), "3h ago");
+        assert_eq!(human_age_ms(2 * 86_400 * 1000), "2d ago");
+    }
+
+    #[test]
+    fn sandbox_welcome_label_names_wrapper_binary() {
+        assert_eq!(sandbox_welcome_label(None), "sandbox off");
+        let wrapper = vec!["/usr/bin/bwrap".to_string(), "--ro-bind".to_string()];
+        assert_eq!(sandbox_welcome_label(Some(&wrapper)), "sandbox bwrap");
+    }
+
+    #[test]
+    fn abbreviate_home_tilde_compresses_home_paths() {
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(abbreviate_home(&home), "~");
+            assert_eq!(
+                abbreviate_home(&home.join("repos/demo")),
+                "~/repos/demo".to_string()
+            );
+        }
+        assert_eq!(
+            abbreviate_home(Path::new("/opt/elsewhere")),
+            "/opt/elsewhere"
+        );
+    }
+
+    #[test]
+    fn help_sections_group_commands_under_scannable_headers() {
+        let sections = help_sections();
+        let titles: Vec<&str> = sections.iter().map(|s| s.title).collect();
+        assert_eq!(
+            titles,
+            vec![
+                "session",
+                "modes & permissions",
+                "model & output",
+                "context & files",
+                "automation & agents",
+                "review & integrations",
+                "config & diagnostics",
+                "input & keys",
+            ]
+        );
+        for section in &sections {
+            assert!(
+                !section.lines.is_empty(),
+                "section {} has no entries",
+                section.title
+            );
+        }
+        let all: String = sections
+            .iter()
+            .flat_map(|s| s.lines.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in [
+            "/help",
+            "/exit",
+            "/plan",
+            "/model",
+            "/resume",
+            "/compact",
+            "/loop",
+            "/agents",
+            "/pr_comments",
+            "/config",
+            "/mention",
+            "multi-line",
+            "!<cmd>",
+        ] {
+            assert!(all.contains(needle), "help no longer documents {needle}");
+        }
     }
 
     #[test]
@@ -15603,27 +16495,32 @@ mod tests {
         assert_eq!(payload["will_write"], false);
         assert_eq!(payload["will_run_command"], false);
         assert_eq!(payload["tokens"][0], "project");
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("template --json"))
-        );
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("info --json"))
-        );
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("template --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("info --json")));
     }
 
     #[test]
     fn parse_history_limit_defaults_and_clamps() {
         assert_eq!(parse_history_limit("").unwrap(), HISTORY_DEFAULT_LIMIT);
         assert_eq!(parse_history_limit("list").unwrap(), HISTORY_DEFAULT_LIMIT);
-        assert_eq!(parse_history_limit("recent").unwrap(), HISTORY_DEFAULT_LIMIT);
-        assert_eq!(parse_history_limit("latest").unwrap(), HISTORY_DEFAULT_LIMIT);
-        assert_eq!(parse_history_limit("status").unwrap(), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(
+            parse_history_limit("recent").unwrap(),
+            HISTORY_DEFAULT_LIMIT
+        );
+        assert_eq!(
+            parse_history_limit("latest").unwrap(),
+            HISTORY_DEFAULT_LIMIT
+        );
+        assert_eq!(
+            parse_history_limit("status").unwrap(),
+            HISTORY_DEFAULT_LIMIT
+        );
         assert_eq!(parse_history_limit("state").unwrap(), HISTORY_DEFAULT_LIMIT);
         assert_eq!(parse_history_limit("show").unwrap(), HISTORY_DEFAULT_LIMIT);
         assert_eq!(parse_history_limit("3").unwrap(), 3);
@@ -15690,6 +16587,112 @@ mod tests {
         assert!(joined.contains("Up / Down"));
         assert!(joined.contains("Ctrl+C"));
         assert!(joined.contains("Ctrl+D"));
+        assert!(joined.contains("Alt+Enter / Ctrl+J"));
+        assert!(joined.contains("bracketed paste"));
+    }
+
+    #[test]
+    fn newline_keys_insert_instead_of_submitting() {
+        // Alt+Enter and the portable Ctrl+J fallback insert a newline…
+        assert!(is_newline_key(KeyCode::Enter, KeyModifiers::ALT));
+        assert!(is_newline_key(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        // …and so does Shift+Enter where the terminal reports it.
+        assert!(is_newline_key(KeyCode::Enter, KeyModifiers::SHIFT));
+        // Plain Enter (and unrelated keys) still submit / type.
+        assert!(!is_newline_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!is_newline_key(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(!is_newline_key(KeyCode::Char('a'), KeyModifiers::ALT));
+    }
+
+    #[test]
+    fn paste_sanitizer_normalizes_newlines_and_strips_control_chars() {
+        assert_eq!(sanitize_paste("a\r\nb\rc"), "a\nb\nc");
+        // Tabs survive (rendered as spaces, submitted verbatim); other
+        // control bytes — stray ESC, BEL, DEL — are dropped.
+        assert_eq!(sanitize_paste("x\ty\x1b[31mz\x07\x7f"), "x\ty[31mz");
+        assert_eq!(sanitize_paste("plain"), "plain");
+    }
+
+    #[test]
+    fn paste_inserts_multiline_text_as_single_edit_without_submitting() {
+        let mut buffer: Vec<char> = "fix: ".chars().collect();
+        let end = buffer.len();
+        let cursor = insert_paste(&mut buffer, end, "Error\r\n  at main.rs:3\n");
+        let text: String = buffer.iter().collect();
+        // Newlines land in the buffer — nothing was split off or
+        // submitted line by line — and the cursor trails the paste.
+        assert_eq!(text, "fix: Error\n  at main.rs:3\n");
+        assert_eq!(cursor, text.chars().count());
+
+        // Mid-buffer paste splices at the cursor.
+        let mut buffer: Vec<char> = "ab".chars().collect();
+        let cursor = insert_paste(&mut buffer, 1, "1\n2");
+        assert_eq!(buffer.iter().collect::<String>(), "a1\n2b");
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
+    fn cursor_line_col_and_pos_round_trip_across_lines() {
+        let buffer: Vec<char> = "ab\ncdef\n\ngh".chars().collect();
+        assert_eq!(cursor_line_col(&buffer, 0), (0, 0));
+        assert_eq!(cursor_line_col(&buffer, 2), (0, 2));
+        assert_eq!(cursor_line_col(&buffer, 3), (1, 0));
+        assert_eq!(cursor_line_col(&buffer, 8), (2, 0));
+        assert_eq!(cursor_line_col(&buffer, buffer.len()), (3, 2));
+
+        assert_eq!(pos_at_line_col(&buffer, 1, 2), 5);
+        // Column clamps to the line length; line past the end clamps to
+        // the buffer end.
+        assert_eq!(pos_at_line_col(&buffer, 0, 99), 2);
+        assert_eq!(pos_at_line_col(&buffer, 2, 5), 8);
+        assert_eq!(pos_at_line_col(&buffer, 42, 0), buffer.len());
+    }
+
+    #[test]
+    fn line_bounds_scope_home_and_end_to_the_current_line() {
+        let buffer: Vec<char> = "ab\ncdef\ngh".chars().collect();
+        assert_eq!(line_bounds(&buffer, 0), (0, 2));
+        assert_eq!(line_bounds(&buffer, 5), (3, 7));
+        assert_eq!(line_bounds(&buffer, buffer.len()), (8, 10));
+        let empty: Vec<char> = Vec::new();
+        assert_eq!(line_bounds(&empty, 0), (0, 0));
+    }
+
+    #[test]
+    fn vertical_window_keeps_cursor_visible_and_clamps_to_last_page() {
+        // Everything fits: window pinned to the top.
+        assert_eq!(vertical_window(3, 2, 3), 0);
+        // Tall buffer: roughly centred on the cursor…
+        assert_eq!(vertical_window(100, 50, 10), 45);
+        // …clamped at both ends.
+        assert_eq!(vertical_window(100, 1, 10), 0);
+        assert_eq!(vertical_window(100, 99, 10), 90);
+    }
+
+    #[test]
+    fn rule_hint_splices_visible_slice_near_right_edge() {
+        let rule = "\u{2500}".repeat(40);
+        let spliced = splice_rule_hint(&rule, 4, 10, 30);
+        assert_eq!(spliced.chars().count(), 40);
+        assert!(spliced.contains(" 5\u{2013}14/30 "));
+        assert!(spliced.ends_with('\u{2500}'));
+        // Too narrow to fit: rule returned untouched.
+        let narrow = "\u{2500}".repeat(6);
+        assert_eq!(splice_rule_hint(&narrow, 0, 10, 30), narrow);
+    }
+
+    #[test]
+    fn slide_window_clips_lines_without_wrapping() {
+        let line: Vec<char> = "abcdefgh".chars().collect();
+        // Fits: unchanged.
+        assert_eq!(slide_window(&line, 3, 10), ("abcdefgh".to_string(), 3));
+        // Cursor at 0 (non-cursor rows): left-anchored with trailing …
+        let (text, cur) = slide_window(&line, 0, 5);
+        assert_eq!((text.as_str(), cur), ("abcd\u{2026}", 0));
+        // Cursor at the end of the line: window slides so it stays
+        // visible, with a leading … marking the clipped prefix.
+        let (text, cur) = slide_window(&line, 8, 5);
+        assert_eq!((text.as_str(), cur), ("\u{2026}fgh", 4));
     }
 
     #[test]
@@ -15724,7 +16727,10 @@ mod tests {
         assert_eq!(tree_json_request_arg("show --json"), Some(String::new()));
         assert_eq!(tree_json_request_arg("json src"), Some("src".to_string()));
         assert_eq!(tree_json_request_arg("src --json"), Some("src".to_string()));
-        assert_eq!(tree_json_request_arg("MyDir --json"), Some("MyDir".to_string()));
+        assert_eq!(
+            tree_json_request_arg("MyDir --json"),
+            Some("MyDir".to_string())
+        );
         assert_eq!(tree_json_request_arg("src"), None);
         assert!(tree_usage_text().contains("json|--json|status --json"));
         assert!(tree_usage_text().contains("state --json|show --json|path --json"));
@@ -15737,19 +16743,20 @@ mod tests {
         assert_eq!(payload["supported_actions"][2], "status --json");
         assert_eq!(payload["supported_actions"][5], "path --json");
         assert_eq!(payload["entries"][0]["kind"], "dir");
-        assert!(
-            payload["entries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["name"] == "main.rs")
-        );
+        assert!(payload["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "main.rs"));
     }
 
     #[test]
     fn parse_changelog_limit_defaults_and_clamps() {
         assert_eq!(parse_changelog_limit("").unwrap(), CHANGELOG_DEFAULT_LIMIT);
-        assert_eq!(parse_changelog_limit("list").unwrap(), CHANGELOG_DEFAULT_LIMIT);
+        assert_eq!(
+            parse_changelog_limit("list").unwrap(),
+            CHANGELOG_DEFAULT_LIMIT
+        );
         assert_eq!(
             parse_changelog_limit("recent").unwrap(),
             CHANGELOG_DEFAULT_LIMIT
@@ -15781,9 +16788,18 @@ mod tests {
         assert!(changelog_usage_text().contains("list --json|recent --json|latest --json"));
         assert_eq!(changelog_json_request_arg("json"), Some(String::new()));
         assert_eq!(changelog_json_request_arg("--json"), Some(String::new()));
-        assert_eq!(changelog_json_request_arg("state --json"), Some(String::new()));
-        assert_eq!(changelog_json_request_arg("show --json"), Some(String::new()));
-        assert_eq!(changelog_json_request_arg("list --json"), Some(String::new()));
+        assert_eq!(
+            changelog_json_request_arg("state --json"),
+            Some(String::new())
+        );
+        assert_eq!(
+            changelog_json_request_arg("show --json"),
+            Some(String::new())
+        );
+        assert_eq!(
+            changelog_json_request_arg("list --json"),
+            Some(String::new())
+        );
         assert_eq!(changelog_json_request_arg("json 3"), Some("3".to_string()));
         assert_eq!(changelog_json_request_arg("status"), None);
         let payload = changelog_json_payload(
@@ -15803,7 +16819,10 @@ mod tests {
         assert_eq!(payload["supported_actions"][11], "show --json");
         assert_eq!(payload["supported_actions"][14], "latest --json");
         assert_eq!(payload["commits"][0]["hash"], "abc1234");
-        assert_eq!(payload["commits"][1]["summary"], "(HEAD -> main) second commit");
+        assert_eq!(
+            payload["commits"][1]["summary"],
+            "(HEAD -> main) second commit"
+        );
     }
 
     #[test]
@@ -15827,7 +16846,10 @@ mod tests {
         );
         assert_eq!(parse_sandbox_action("diag --json"), SandboxAction::Json);
         assert_eq!(parse_sandbox_action("reload"), SandboxAction::Reload);
-        assert_eq!(parse_sandbox_action("reset"), SandboxAction::Unknown("reset"));
+        assert_eq!(
+            parse_sandbox_action("reset"),
+            SandboxAction::Unknown("reset")
+        );
         assert!(sandbox_usage_text().contains("status|state|show"));
         assert!(sandbox_usage_text().contains("diagnostics|diag"));
         assert!(sandbox_usage_text().contains("json|--json|status --json|state --json"));
@@ -15837,9 +16859,9 @@ mod tests {
 
     #[test]
     fn sandbox_json_payload_reports_profile_counts() {
-        let profile = crate::commands::code_sandbox::detect_strict_profile(Path::new(
-            env!("CARGO_MANIFEST_DIR"),
-        ));
+        let profile = crate::commands::code_sandbox::detect_strict_profile(Path::new(env!(
+            "CARGO_MANIFEST_DIR"
+        )));
         let payload = sandbox_json_payload(&profile, "diagnostics --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "sandbox");
@@ -15868,12 +16890,10 @@ mod tests {
     fn recent_git_commits_reads_repo_history() {
         let lines = recent_git_commits_in(Path::new(env!("CARGO_MANIFEST_DIR")), 1).unwrap();
         assert_eq!(lines.len(), 1);
-        assert!(
-            lines[0]
-                .split_whitespace()
-                .next()
-                .is_some_and(|hash| hash.len() >= 7)
-        );
+        assert!(lines[0]
+            .split_whitespace()
+            .next()
+            .is_some_and(|hash| hash.len() >= 7));
     }
 
     #[test]
@@ -15895,37 +16915,49 @@ mod tests {
     #[test]
     fn doctor_hook_breakdown_counts_runnable_events() {
         let mut cfg = LibertaiConfig::default();
-        cfg.hooks.user_prompt_submit.push(crate::config::HookCommandConfig {
-            command: "scripts/prompt.sh".to_string(),
-            ..Default::default()
-        });
-        cfg.hooks.pre_tool_use.push(crate::config::HookCommandConfig {
-            command: "scripts/pre.sh".to_string(),
-            ..Default::default()
-        });
-        cfg.hooks.pre_tool_use.push(crate::config::HookCommandConfig {
-            hook_type: "http".to_string(),
-            url: "http://127.0.0.1/hook".to_string(),
-            ..Default::default()
-        });
-        cfg.hooks.post_tool_use.push(crate::config::HookCommandConfig {
-            hook_type: "prompt".to_string(),
-            prompt: "Summarize this hook.".to_string(),
-            ..Default::default()
-        });
-        cfg.hooks.pre_tool_use.push(crate::config::HookCommandConfig {
-            enabled: false,
-            command: "scripts/pre-disabled.sh".to_string(),
-            ..Default::default()
-        });
+        cfg.hooks
+            .user_prompt_submit
+            .push(crate::config::HookCommandConfig {
+                command: "scripts/prompt.sh".to_string(),
+                ..Default::default()
+            });
+        cfg.hooks
+            .pre_tool_use
+            .push(crate::config::HookCommandConfig {
+                command: "scripts/pre.sh".to_string(),
+                ..Default::default()
+            });
+        cfg.hooks
+            .pre_tool_use
+            .push(crate::config::HookCommandConfig {
+                hook_type: "http".to_string(),
+                url: "http://127.0.0.1/hook".to_string(),
+                ..Default::default()
+            });
+        cfg.hooks
+            .post_tool_use
+            .push(crate::config::HookCommandConfig {
+                hook_type: "prompt".to_string(),
+                prompt: "Summarize this hook.".to_string(),
+                ..Default::default()
+            });
+        cfg.hooks
+            .pre_tool_use
+            .push(crate::config::HookCommandConfig {
+                enabled: false,
+                command: "scripts/pre-disabled.sh".to_string(),
+                ..Default::default()
+            });
         cfg.hooks.stop.push(crate::config::HookCommandConfig {
             command: "   ".to_string(),
             ..Default::default()
         });
-        cfg.hooks.notification.push(crate::config::HookCommandConfig {
-            command: "scripts/notify.sh".to_string(),
-            ..Default::default()
-        });
+        cfg.hooks
+            .notification
+            .push(crate::config::HookCommandConfig {
+                command: "scripts/notify.sh".to_string(),
+                ..Default::default()
+            });
 
         let breakdown = format_hook_event_breakdown(&cfg);
         assert!(breakdown.contains("5 runnable hook(s)"));
@@ -16172,7 +17204,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("session.jsonl");
         std::fs::write(&path, "{}\n").unwrap();
-        assert_eq!(resolve_repl_resume_path(path.to_str().unwrap()).unwrap(), path);
+        assert_eq!(
+            resolve_repl_resume_path(path.to_str().unwrap()).unwrap(),
+            path
+        );
     }
 
     #[test]
@@ -16285,24 +17320,18 @@ mod tests {
         assert_eq!(payload["will_replace_current_repl_session"], true);
         assert_eq!(payload["accepts_path"], true);
         assert_eq!(payload["query_argument"], "/resume SESSION");
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("state --json"))
-        );
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("preview --json"))
-        );
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("session"))
-        );
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("state --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("preview --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("session")));
     }
 
     fn fork_messages_for_tests() -> Vec<RpcForkMessage> {
@@ -16386,7 +17415,10 @@ mod tests {
         assert!(is_thinking_json_arg("current --json"));
         assert!(is_thinking_json_arg("info --json"));
         assert!(!is_thinking_json_arg("high"));
-        assert!(parse_thinking_level("").unwrap_err().to_string().contains("--json"));
+        assert!(parse_thinking_level("")
+            .unwrap_err()
+            .to_string()
+            .contains("--json"));
         let payload = thinking_json_payload(ThinkingLevel::High, "current --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "thinking");
@@ -16420,7 +17452,10 @@ mod tests {
 
     #[test]
     fn name_command_arg_accepts_name_and_rename_alias() {
-        assert_eq!(name_command_arg("/name release work"), Some(("/name", "release work")));
+        assert_eq!(
+            name_command_arg("/name release work"),
+            Some(("/name", "release work"))
+        );
         assert_eq!(
             name_command_arg("/rename bug bash"),
             Some(("/rename", "bug bash"))
@@ -16463,7 +17498,10 @@ mod tests {
 
     #[test]
     fn compact_command_notes_accepts_only_compact_prefix() {
-        assert_eq!(compact_command_notes("/compact keep setup"), Some("keep setup"));
+        assert_eq!(
+            compact_command_notes("/compact keep setup"),
+            Some("keep setup")
+        );
         assert_eq!(compact_command_notes("/compact   "), Some(""));
         assert_eq!(compact_command_notes("/compact"), None);
         assert_eq!(compact_command_notes("/compactly keep"), None);
@@ -16631,7 +17669,10 @@ mod tests {
         assert_eq!(notify_command_arg("/notify"), Some(""));
         assert_eq!(notify_command_arg("/notify on"), Some("on"));
         assert_eq!(notify_command_arg("/notifications status"), Some("status"));
-        assert_eq!(notify_command_arg("/notifications status --json"), Some("status --json"));
+        assert_eq!(
+            notify_command_arg("/notifications status --json"),
+            Some("status --json")
+        );
         assert_eq!(notify_command_arg("/notifications clear"), Some("clear"));
         assert_eq!(notify_command_arg("/notifier"), None);
         assert_eq!(parse_notify_command(""), NotifyCommand::Status);
@@ -16789,7 +17830,10 @@ mod tests {
             Some(ConfigSettingsTarget::Advanced)
         );
         assert_eq!(parse_config_settings_target("path"), None);
-        assert_eq!(parse_config_settings_target("set code_turn_notifications true"), None);
+        assert_eq!(
+            parse_config_settings_target("set code_turn_notifications true"),
+            None
+        );
     }
 
     #[test]
@@ -16895,18 +17939,14 @@ mod tests {
         assert_eq!(payload["will_write"], false);
         assert_eq!(payload["aliases"][0], "hooks");
         assert_eq!(payload["aliases"][1], "hook");
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("show --json"))
-        );
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("inspect <event>"))
-        );
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("inspect <event>")));
         let raw = serde_json::to_string(&payload).unwrap();
         assert!(!raw.contains("secret-token"));
         assert!(!raw.contains("Authorization"));
@@ -16973,10 +18013,7 @@ mod tests {
         assert_eq!(parse_mcp_command("status --json"), McpCommand::Json);
         assert_eq!(parse_mcp_command("list --json"), McpCommand::Json);
         assert_eq!(parse_mcp_command("state --json"), McpCommand::Json);
-        assert_eq!(
-            parse_mcp_command("diagnostics --json"),
-            McpCommand::Json
-        );
+        assert_eq!(parse_mcp_command("diagnostics --json"), McpCommand::Json);
         assert_eq!(parse_mcp_command("show --json"), McpCommand::Json);
         assert_eq!(
             parse_mcp_command("show docs"),
@@ -17016,7 +18053,10 @@ mod tests {
                 crate::config::McpServerConfig {
                     transport: "stdio".to_string(),
                     command: "npx".to_string(),
-                    args: vec!["-y".to_string(), "@modelcontextprotocol/server-docs".to_string()],
+                    args: vec![
+                        "-y".to_string(),
+                        "@modelcontextprotocol/server-docs".to_string(),
+                    ],
                     env: std::collections::HashMap::from([(
                         "DOCS_TOKEN".to_string(),
                         "secret".to_string(),
@@ -17066,7 +18106,10 @@ mod tests {
         assert_eq!(payload["exposure"]["named_tools"], 1);
         assert_eq!(payload["exposure"]["resource_reader"], true);
         assert_eq!(payload["servers"][0]["name"], "docs");
-        assert_eq!(payload["servers"][0]["target"], "npx '-y' '@modelcontextprotocol/server-docs'");
+        assert_eq!(
+            payload["servers"][0]["target"],
+            "npx '-y' '@modelcontextprotocol/server-docs'"
+        );
         assert_eq!(payload["servers"][0]["env_vars"], 1);
         assert_eq!(payload["servers"][0]["headers"], 1);
         assert_eq!(payload["servers"][0]["enabled_tools"], 1);
@@ -17074,18 +18117,14 @@ mod tests {
         assert_eq!(payload["servers"][0]["enabled_prompts"], 1);
         assert_eq!(payload["will_write"], false);
         assert_eq!(payload["aliases"][0], "mcp");
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("probe write"))
-        );
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("settings"))
-        );
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("probe write")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("settings")));
     }
 
     #[test]
@@ -17093,7 +18132,10 @@ mod tests {
         let server = crate::config::McpServerConfig {
             transport: "stdio".to_string(),
             command: "npx".to_string(),
-            args: vec!["-y".to_string(), "@modelcontextprotocol/server-docs".to_string()],
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-docs".to_string(),
+            ],
             env: std::collections::HashMap::from([(
                 "DOCS_TOKEN".to_string(),
                 "secret".to_string(),
@@ -17363,10 +18405,7 @@ mod tests {
         assert_eq!(empty_payload["copy_mechanism"], "osc52");
         assert_eq!(empty_payload["supported_actions"][5], "status --json");
         assert_eq!(empty_payload["supported_actions"][7], "info --json");
-        assert_eq!(
-            empty_payload["supported_actions"][12],
-            "assistant-response"
-        );
+        assert_eq!(empty_payload["supported_actions"][12], "assistant-response");
 
         assert_eq!(hotkeys_command_arg("/hotkeys"), Some(""));
         assert_eq!(hotkeys_command_arg("/hotkeys status"), Some("status"));
@@ -17390,13 +18429,11 @@ mod tests {
         assert_eq!(payload["aliases"][0], "hotkeys");
         assert_eq!(payload["supported_actions"][6], "status --json");
         assert_eq!(payload["supported_actions"][8], "list --json");
-        assert!(
-            payload["shortcuts"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["key"] == "Shift+Tab")
-        );
+        assert!(payload["shortcuts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["key"] == "Shift+Tab"));
 
         assert_eq!(reload_command_arg("/reload"), Some(""));
         assert_eq!(reload_command_arg("/reload config"), Some("config"));
@@ -17496,7 +18533,10 @@ mod tests {
     fn doctor_command_arg_and_parser_capture_diagnostic_aliases() {
         assert_eq!(doctor_command_arg("/doctor"), Some(""));
         assert_eq!(doctor_command_arg("/doctor status"), Some("status"));
-        assert_eq!(doctor_command_arg("/doctor diagnostics"), Some("diagnostics"));
+        assert_eq!(
+            doctor_command_arg("/doctor diagnostics"),
+            Some("diagnostics")
+        );
         assert_eq!(doctor_command_arg("/doctors"), None);
         assert_eq!(parse_doctor_command(""), DoctorCommand::Run);
         assert_eq!(parse_doctor_command("status"), DoctorCommand::Run);
@@ -17512,7 +18552,10 @@ mod tests {
         assert_eq!(parse_doctor_command("show --json"), DoctorCommand::Json);
         assert_eq!(parse_doctor_command("info --json"), DoctorCommand::Json);
         assert_eq!(parse_doctor_command("health --json"), DoctorCommand::Json);
-        assert_eq!(parse_doctor_command("diagnostics --json"), DoctorCommand::Json);
+        assert_eq!(
+            parse_doctor_command("diagnostics --json"),
+            DoctorCommand::Json
+        );
         assert_eq!(parse_doctor_command("diag --json"), DoctorCommand::Json);
         assert_eq!(parse_doctor_command("open"), DoctorCommand::Usage);
         assert!(doctor_usage_text().contains("status|state|show|info"));
@@ -17562,7 +18605,10 @@ mod tests {
         assert_eq!(help_command_arg("/help"), Some(""));
         assert_eq!(help_command_arg("/help status"), Some("status"));
         assert_eq!(help_command_arg("/help json"), Some("json"));
-        assert_eq!(help_command_arg("/help status --json"), Some("status --json"));
+        assert_eq!(
+            help_command_arg("/help status --json"),
+            Some("status --json")
+        );
         assert_eq!(help_command_arg("/helper"), None);
         assert_eq!(parse_help_command(""), HelpCommand::Show);
         assert_eq!(parse_help_command("list"), HelpCommand::Show);
@@ -17587,36 +18633,29 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("list --json")));
-        assert!(
-            payload["commands"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|row| row["name"] == "model"
-                    && row["description"] == "show or change the active model"
-                    && row["arg_hint"]
-                        .as_str()
-                        .unwrap()
-                        .contains("list --json"))
-        );
-        assert!(
-            payload["commands"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|row| row["name"] == "remember"
-                    && row["arg_hint"]
-                        .as_str()
-                        .unwrap()
-                        .contains("preview --json"))
-        );
+        assert!(payload["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["name"] == "model"
+                && row["description"] == "show or change the active model"
+                && row["arg_hint"].as_str().unwrap().contains("list --json")));
+        assert!(payload["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["name"] == "remember"
+                && row["arg_hint"].as_str().unwrap().contains("preview --json")));
     }
 
     #[test]
     fn clear_command_arg_and_parser_capture_preview_aliases() {
         assert_eq!(clear_command_arg("/clear"), None);
         assert_eq!(clear_command_arg("/new"), None);
-        assert_eq!(clear_command_arg("/clear status"), Some(("/clear", "status")));
+        assert_eq!(
+            clear_command_arg("/clear status"),
+            Some(("/clear", "status"))
+        );
         assert_eq!(clear_command_arg("/new json"), Some(("/new", "json")));
         assert_eq!(
             clear_command_arg("/clear status --json"),
@@ -17939,9 +18978,18 @@ mod tests {
         assert_eq!(send_command_arg("/send list"), Some("list"));
         assert_eq!(send_command_arg("/send json"), Some("json"));
         assert_eq!(send_command_arg("/send show --json"), Some("show --json"));
-        assert_eq!(send_command_arg("/send queued --json"), Some("queued --json"));
-        assert_eq!(send_command_arg("/send pending --json"), Some("pending --json"));
-        assert_eq!(send_command_arg("/send worker finish tests"), Some("worker finish tests"));
+        assert_eq!(
+            send_command_arg("/send queued --json"),
+            Some("queued --json")
+        );
+        assert_eq!(
+            send_command_arg("/send pending --json"),
+            Some("pending --json")
+        );
+        assert_eq!(
+            send_command_arg("/send worker finish tests"),
+            Some("worker finish tests")
+        );
         assert_eq!(send_command_arg("/send-message"), Some(""));
         assert_eq!(
             send_command_arg("/send-message worker finish tests"),
@@ -18111,7 +19159,10 @@ mod tests {
                 prompt: "check tests".to_string()
             }
         );
-        assert!(matches!(parse_schedule_command("10m"), ScheduleCommand::Usage));
+        assert!(matches!(
+            parse_schedule_command("10m"),
+            ScheduleCommand::Usage
+        ));
         let hint = help_command_arg_hint("schedule");
         assert!(hint.contains("inspect"));
         assert!(hint.contains("show-json"));
@@ -18122,7 +19173,10 @@ mod tests {
 
     #[test]
     fn schedule_delay_formats_and_clamps() {
-        assert_eq!(parse_schedule_delay("250ms"), Some(Duration::from_millis(250)));
+        assert_eq!(
+            parse_schedule_delay("250ms"),
+            Some(Duration::from_millis(250))
+        );
         assert_eq!(parse_schedule_delay("2h"), Some(Duration::from_secs(7200)));
         assert_eq!(format_schedule_delay(Duration::from_millis(250)), "250ms");
         assert_eq!(format_schedule_delay(Duration::from_secs(90)), "2m");
@@ -18252,7 +19306,10 @@ mod tests {
         let first = schedule_store_path_for_project(&project).unwrap();
         let second = schedule_store_path_for_project(&project).unwrap();
         assert_eq!(first, second);
-        assert_eq!(first.extension().and_then(|value| value.to_str()), Some("json"));
+        assert_eq!(
+            first.extension().and_then(|value| value.to_str()),
+            Some("json")
+        );
         assert!(first.to_string_lossy().contains("code-schedules"));
     }
 
@@ -18341,9 +19398,15 @@ mod tests {
     #[test]
     fn parse_thinking_level_accepts_supported_levels() {
         assert_eq!(parse_thinking_level("off").unwrap(), ThinkingLevel::Off);
-        assert_eq!(parse_thinking_level("minimal").unwrap(), ThinkingLevel::Minimal);
+        assert_eq!(
+            parse_thinking_level("minimal").unwrap(),
+            ThinkingLevel::Minimal
+        );
         assert_eq!(parse_thinking_level("low").unwrap(), ThinkingLevel::Low);
-        assert_eq!(parse_thinking_level("medium").unwrap(), ThinkingLevel::Medium);
+        assert_eq!(
+            parse_thinking_level("medium").unwrap(),
+            ThinkingLevel::Medium
+        );
         assert_eq!(parse_thinking_level("high").unwrap(), ThinkingLevel::High);
         assert_eq!(parse_thinking_level("xhigh").unwrap(), ThinkingLevel::XHigh);
         assert!(parse_thinking_level("").is_err());
@@ -18381,12 +19444,21 @@ mod tests {
     #[test]
     fn parse_permissions_command_handles_management_actions() {
         assert_eq!(parse_permissions_command(""), PermissionsCommand::Show);
-        assert_eq!(parse_permissions_command("status"), PermissionsCommand::Show);
+        assert_eq!(
+            parse_permissions_command("status"),
+            PermissionsCommand::Show
+        );
         assert_eq!(parse_permissions_command("show"), PermissionsCommand::Show);
-        assert_eq!(parse_permissions_command("current"), PermissionsCommand::Show);
+        assert_eq!(
+            parse_permissions_command("current"),
+            PermissionsCommand::Show
+        );
         assert_eq!(parse_permissions_command("info"), PermissionsCommand::Show);
         assert_eq!(parse_permissions_command("json"), PermissionsCommand::Json);
-        assert_eq!(parse_permissions_command("--json"), PermissionsCommand::Json);
+        assert_eq!(
+            parse_permissions_command("--json"),
+            PermissionsCommand::Json
+        );
         assert_eq!(
             parse_permissions_command("status --json"),
             PermissionsCommand::Json
@@ -18404,15 +19476,27 @@ mod tests {
             PermissionsCommand::Json
         );
         assert_eq!(parse_permissions_command("open"), PermissionsCommand::Open);
-        assert_eq!(parse_permissions_command("settings"), PermissionsCommand::Open);
+        assert_eq!(
+            parse_permissions_command("settings"),
+            PermissionsCommand::Open
+        );
         assert_eq!(parse_permissions_command("edit"), PermissionsCommand::Open);
         assert_eq!(
             parse_permissions_command("approvals"),
             PermissionsCommand::Open
         );
-        assert_eq!(parse_permissions_command("forget"), PermissionsCommand::Forget);
-        assert_eq!(parse_permissions_command("clear"), PermissionsCommand::Forget);
-        assert_eq!(parse_permissions_command("reset"), PermissionsCommand::Forget);
+        assert_eq!(
+            parse_permissions_command("forget"),
+            PermissionsCommand::Forget
+        );
+        assert_eq!(
+            parse_permissions_command("clear"),
+            PermissionsCommand::Forget
+        );
+        assert_eq!(
+            parse_permissions_command("reset"),
+            PermissionsCommand::Forget
+        );
         assert_eq!(
             parse_permissions_command("bypassPermissions"),
             PermissionsCommand::UnsupportedBypass
@@ -18457,8 +19541,14 @@ mod tests {
         assert_eq!(parse_login_slash_target("status"), LoginSlashTarget::Status);
         assert_eq!(parse_login_slash_target("show"), LoginSlashTarget::Status);
         assert_eq!(parse_login_slash_target("info"), LoginSlashTarget::Status);
-        assert_eq!(parse_login_slash_target("json"), LoginSlashTarget::StatusJson);
-        assert_eq!(parse_login_slash_target("--json"), LoginSlashTarget::StatusJson);
+        assert_eq!(
+            parse_login_slash_target("json"),
+            LoginSlashTarget::StatusJson
+        );
+        assert_eq!(
+            parse_login_slash_target("--json"),
+            LoginSlashTarget::StatusJson
+        );
         assert_eq!(
             parse_login_slash_target("status --json"),
             LoginSlashTarget::StatusJson
@@ -18467,10 +19557,19 @@ mod tests {
             parse_login_slash_target("show json"),
             LoginSlashTarget::StatusJson
         );
-        assert_eq!(parse_login_slash_target("libertai"), LoginSlashTarget::Account);
-        assert_eq!(parse_login_slash_target("account"), LoginSlashTarget::Account);
+        assert_eq!(
+            parse_login_slash_target("libertai"),
+            LoginSlashTarget::Account
+        );
+        assert_eq!(
+            parse_login_slash_target("account"),
+            LoginSlashTarget::Account
+        );
         assert_eq!(parse_login_slash_target("key"), LoginSlashTarget::Account);
-        assert_eq!(parse_login_slash_target("api-key"), LoginSlashTarget::Account);
+        assert_eq!(
+            parse_login_slash_target("api-key"),
+            LoginSlashTarget::Account
+        );
         assert_eq!(parse_login_slash_target("api"), LoginSlashTarget::Account);
         assert_eq!(
             parse_login_slash_target("libertai --json"),
@@ -18525,12 +19624,8 @@ mod tests {
         assert_eq!(payload["supported_actions"][4], "--json");
         assert_eq!(payload["supported_actions"][5], "status --json");
         assert_eq!(payload["supported_actions"][15], "show provider --json");
-        let provider_payload = provider_login_payload(
-            "logout",
-            "show anthropic --json",
-            "anthropic",
-            &cfg,
-        );
+        let provider_payload =
+            provider_login_payload("logout", "show anthropic --json", "anthropic", &cfg);
         assert_eq!(provider_payload["command"], "logout");
         assert_eq!(provider_payload["query"], "show anthropic --json");
         assert_eq!(provider_payload["provider"], "anthropic");
@@ -18593,25 +19688,82 @@ mod tests {
             model_usage_text(),
             "/model [status|show|current|json|--json|status --json|show --json|current --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model]"
         );
-        assert!(matches!(parse_model_slash_command(""), ModelSlashCommand::Status));
-        assert!(matches!(parse_model_slash_command("status"), ModelSlashCommand::Status));
-        assert!(matches!(parse_model_slash_command("show"), ModelSlashCommand::Status));
-        assert!(matches!(parse_model_slash_command("current"), ModelSlashCommand::Status));
-        assert!(matches!(parse_model_slash_command("json"), ModelSlashCommand::Json));
-        assert!(matches!(parse_model_slash_command("--json"), ModelSlashCommand::Json));
-        assert!(matches!(parse_model_slash_command("status --json"), ModelSlashCommand::Json));
-        assert!(matches!(parse_model_slash_command("show --json"), ModelSlashCommand::Json));
-        assert!(matches!(parse_model_slash_command("current --json"), ModelSlashCommand::Json));
-        assert!(matches!(parse_model_slash_command("list"), ModelSlashCommand::List));
-        assert!(matches!(parse_model_slash_command("ls"), ModelSlashCommand::List));
-        assert!(matches!(parse_model_slash_command("list --json"), ModelSlashCommand::JsonList));
-        assert!(matches!(parse_model_slash_command("ls --json"), ModelSlashCommand::JsonList));
-        assert!(matches!(parse_model_slash_command("next"), ModelSlashCommand::Next));
-        assert!(matches!(parse_model_slash_command("cycle"), ModelSlashCommand::Next));
-        assert!(matches!(parse_model_slash_command("prev"), ModelSlashCommand::Previous));
-        assert!(matches!(parse_model_slash_command("previous"), ModelSlashCommand::Previous));
-        assert!(matches!(parse_model_slash_command("back"), ModelSlashCommand::Previous));
-        assert!(matches!(parse_model_slash_command("openai/gpt-5"), ModelSlashCommand::Set("openai/gpt-5")));
+        assert!(matches!(
+            parse_model_slash_command(""),
+            ModelSlashCommand::Status
+        ));
+        assert!(matches!(
+            parse_model_slash_command("status"),
+            ModelSlashCommand::Status
+        ));
+        assert!(matches!(
+            parse_model_slash_command("show"),
+            ModelSlashCommand::Status
+        ));
+        assert!(matches!(
+            parse_model_slash_command("current"),
+            ModelSlashCommand::Status
+        ));
+        assert!(matches!(
+            parse_model_slash_command("json"),
+            ModelSlashCommand::Json
+        ));
+        assert!(matches!(
+            parse_model_slash_command("--json"),
+            ModelSlashCommand::Json
+        ));
+        assert!(matches!(
+            parse_model_slash_command("status --json"),
+            ModelSlashCommand::Json
+        ));
+        assert!(matches!(
+            parse_model_slash_command("show --json"),
+            ModelSlashCommand::Json
+        ));
+        assert!(matches!(
+            parse_model_slash_command("current --json"),
+            ModelSlashCommand::Json
+        ));
+        assert!(matches!(
+            parse_model_slash_command("list"),
+            ModelSlashCommand::List
+        ));
+        assert!(matches!(
+            parse_model_slash_command("ls"),
+            ModelSlashCommand::List
+        ));
+        assert!(matches!(
+            parse_model_slash_command("list --json"),
+            ModelSlashCommand::JsonList
+        ));
+        assert!(matches!(
+            parse_model_slash_command("ls --json"),
+            ModelSlashCommand::JsonList
+        ));
+        assert!(matches!(
+            parse_model_slash_command("next"),
+            ModelSlashCommand::Next
+        ));
+        assert!(matches!(
+            parse_model_slash_command("cycle"),
+            ModelSlashCommand::Next
+        ));
+        assert!(matches!(
+            parse_model_slash_command("prev"),
+            ModelSlashCommand::Previous
+        ));
+        assert!(matches!(
+            parse_model_slash_command("previous"),
+            ModelSlashCommand::Previous
+        ));
+        assert!(matches!(
+            parse_model_slash_command("back"),
+            ModelSlashCommand::Previous
+        ));
+        assert!(matches!(
+            parse_model_slash_command("openai/gpt-5"),
+            ModelSlashCommand::Set("openai/gpt-5")
+        ));
 
         let cfg = LibertaiConfig::default();
         let payload = model_json_payload(
@@ -18681,7 +19833,10 @@ mod tests {
             parse_scoped_models_command("reset"),
             ScopedModelsCommand::Clear
         );
-        assert_eq!(parse_scoped_models_command("off"), ScopedModelsCommand::Clear);
+        assert_eq!(
+            parse_scoped_models_command("off"),
+            ScopedModelsCommand::Clear
+        );
         assert_eq!(
             parse_scoped_models_command("qwen*"),
             ScopedModelsCommand::Set(vec!["qwen*".to_string()])
@@ -18714,12 +19869,10 @@ mod tests {
         assert_eq!(payload["query"], "show --json");
         assert_eq!(payload["is_scoped"], true);
         assert_eq!(payload["patterns"][0], "qwen*");
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("show --json"))
-        );
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
     }
 
     #[test]
@@ -18951,18 +20104,14 @@ mod tests {
         assert_eq!(payload["will_write"], false);
         assert_eq!(payload["will_publish"], false);
         assert!(payload["guide"]["bytes"].as_u64().unwrap() > 0);
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("show --json"))
-        );
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("preview --json"))
-        );
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("preview --json")));
     }
 
     #[test]
@@ -19744,7 +20893,10 @@ mod tests {
         assert_eq!(payload["count"], 1);
         assert_eq!(payload["worktree_default_count"], 1);
         assert_eq!(payload["agents"][0]["name"], "reviewer");
-        assert_eq!(payload["agents"][0]["path"], "/tmp/project/.libertai/agents/reviewer.md");
+        assert_eq!(
+            payload["agents"][0]["path"],
+            "/tmp/project/.libertai/agents/reviewer.md"
+        );
         assert!(payload["supported_actions"]
             .as_array()
             .unwrap()
@@ -19814,7 +20966,10 @@ mod tests {
             detect_supported_image_mime_type(b"\xFF\xD8\xFF"),
             Some("image/jpeg")
         );
-        assert_eq!(detect_supported_image_mime_type(b"GIF89a"), Some("image/gif"));
+        assert_eq!(
+            detect_supported_image_mime_type(b"GIF89a"),
+            Some("image/gif")
+        );
         assert_eq!(
             detect_supported_image_mime_type(b"RIFFxxxxWEBPrest"),
             Some("image/webp")
@@ -19942,7 +21097,10 @@ mod tests {
 
     #[test]
     fn parse_template_query_splits_name_and_args() {
-        assert_eq!(parse_template_query("review src/lib.rs").unwrap(), ("review", "src/lib.rs"));
+        assert_eq!(
+            parse_template_query("review src/lib.rs").unwrap(),
+            ("review", "src/lib.rs")
+        );
         assert_eq!(
             parse_template_query("team/audit src/lib.rs").unwrap(),
             ("team/audit", "src/lib.rs")
@@ -20110,7 +21268,9 @@ mod tests {
                     body: "Review changes.".to_string(),
                     source: "project:/tmp/project/.libertai/skills/project-review".to_string(),
                     source_kind: "project".to_string(),
-                    path: Some(PathBuf::from("/tmp/project/.libertai/skills/project-review")),
+                    path: Some(PathBuf::from(
+                        "/tmp/project/.libertai/skills/project-review",
+                    )),
                     agent_created: true,
                     enabled: false,
                 },
@@ -20164,12 +21324,19 @@ mod tests {
         assert!(details.contains("agent-created: yes"));
         assert!(details.contains("Prefer focused findings.\nCite files."));
 
-        let payload = code_skill_detail_json_payload(Path::new("/tmp/project"), "project-review", Some(&skill));
+        let payload = code_skill_detail_json_payload(
+            Path::new("/tmp/project"),
+            "project-review",
+            Some(&skill),
+        );
         assert_eq!(payload["command"], "skills");
         assert_eq!(payload["query"], "show project-review --json");
         assert_eq!(payload["name"], "project-review");
         assert_eq!(payload["skill"]["name"], "project-review");
-        assert_eq!(payload["skill"]["instruction_preview"], "Prefer focused findings.\nCite files.");
+        assert_eq!(
+            payload["skill"]["instruction_preview"],
+            "Prefer focused findings.\nCite files."
+        );
         assert_eq!(payload["will_write"], false);
         assert!(payload["supported_actions"]
             .as_array()
@@ -20184,7 +21351,10 @@ mod tests {
 
     #[test]
     fn review_command_parts_accepts_review_aliases() {
-        assert_eq!(review_command_parts("/review src"), Some(("/review", "src")));
+        assert_eq!(
+            review_command_parts("/review src"),
+            Some(("/review", "src"))
+        );
         assert_eq!(
             review_command_parts("/security-review auth"),
             Some(("/security-review", "auth"))
@@ -20193,7 +21363,10 @@ mod tests {
             review_command_parts("/pr-comments 123"),
             Some(("/pr-comments", "123"))
         );
-        assert_eq!(review_command_parts("/pr_comments"), Some(("/pr_comments", "")));
+        assert_eq!(
+            review_command_parts("/pr_comments"),
+            Some(("/pr_comments", ""))
+        );
         assert_eq!(review_command_parts("/reviewer src"), None);
         assert_eq!(help_command_arg_hint("review"), "[scope]");
         assert_eq!(help_command_arg_hint("security-review"), "[scope]");
@@ -20262,7 +21435,10 @@ mod tests {
             pr_comments_unviewed_arg("/pr_comments unview js/app.js"),
             Some("js/app.js")
         );
-        assert_eq!(parse_pr_comments_file_path("src/lib.rs").unwrap(), "src/lib.rs");
+        assert_eq!(
+            parse_pr_comments_file_path("src/lib.rs").unwrap(),
+            "src/lib.rs"
+        );
         assert!(parse_pr_comments_file_path("").is_err());
         assert!(parse_pr_comments_all_files("--all"));
         assert!(parse_pr_comments_all_files("all"));
@@ -20347,7 +21523,10 @@ mod tests {
             parse_pr_comments_review("comment Summary only.").unwrap(),
             ("comment", "Summary only.")
         );
-        assert_eq!(parse_pr_comments_review("approve").unwrap(), ("approve", ""));
+        assert_eq!(
+            parse_pr_comments_review("approve").unwrap(),
+            ("approve", "")
+        );
     }
 
     #[test]
@@ -20368,7 +21547,10 @@ mod tests {
 
     #[test]
     fn parse_direct_custom_slash_parses_name_and_args() {
-        assert_eq!(parse_direct_custom_slash("/review src"), Some(("review", "src")));
+        assert_eq!(
+            parse_direct_custom_slash("/review src"),
+            Some(("review", "src"))
+        );
         assert_eq!(
             parse_direct_custom_slash("/team/review src"),
             Some(("team/review", "src"))

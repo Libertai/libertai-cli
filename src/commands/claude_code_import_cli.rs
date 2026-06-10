@@ -27,13 +27,24 @@ pub fn run(action: ImportAction) -> Result<()> {
     match action {
         ImportAction::ClaudeCode { action } => match action {
             ClaudeCodeImportAction::List { all, json } => list(all, json),
-            ClaudeCodeImportAction::Show { id_or_path, all, json } => show(&id_or_path, all, json),
-            ClaudeCodeImportAction::Summarize { id_or_path, all, model, print_prompt } => {
-                summarize(&id_or_path, all, model, print_prompt)
-            }
-            ClaudeCodeImportAction::Import { id_or_path, all, model, provider, dry_run } => {
-                import_session(&id_or_path, all, model, provider, dry_run)
-            }
+            ClaudeCodeImportAction::Show {
+                id_or_path,
+                all,
+                json,
+            } => show(&id_or_path, all, json),
+            ClaudeCodeImportAction::Summarize {
+                id_or_path,
+                all,
+                model,
+                print_prompt,
+            } => summarize(&id_or_path, all, model, print_prompt),
+            ClaudeCodeImportAction::Import {
+                id_or_path,
+                all,
+                model,
+                provider,
+                dry_run,
+            } => import_session(&id_or_path, all, model, provider, dry_run),
         },
     }
 }
@@ -63,8 +74,15 @@ fn print_human(cwd: &std::path::Path, all_projects: bool, sessions: &[Discovered
         return;
     }
 
-    let scope = if all_projects { "all projects" } else { &cwd.display().to_string() };
-    println!("Claude Code sessions for {scope} ({} total):\n", sessions.len());
+    let scope = if all_projects {
+        "all projects"
+    } else {
+        &cwd.display().to_string()
+    };
+    println!(
+        "Claude Code sessions for {scope} ({} total):\n",
+        sessions.len()
+    );
     for s in sessions {
         println!("  • {}", s.session_uuid);
         if let Some(cwd) = &s.recorded_cwd {
@@ -74,7 +92,11 @@ fn print_human(cwd: &std::path::Path, all_projects: bool, sessions: &[Discovered
             println!("      branch  : {branch}");
         }
         println!("      mtime   : {}", format_mtime(s.mtime));
-        println!("      records : {}  ({})", s.record_count, format_size(s.size_bytes));
+        println!(
+            "      records : {}  ({})",
+            s.record_count,
+            format_size(s.size_bytes)
+        );
         if let Some(summary) = &s.claude_code_summary {
             println!("      summary : {summary}");
         }
@@ -87,7 +109,10 @@ fn print_human(cwd: &std::path::Path, all_projects: bool, sessions: &[Discovered
 }
 
 fn format_mtime(t: SystemTime) -> String {
-    let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = t
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     DateTime::<Local>::from(UNIX_EPOCH + std::time::Duration::from_secs(secs))
         .format("%Y-%m-%d %H:%M")
         .to_string()
@@ -116,11 +141,15 @@ fn show(id_or_path: &str, all_projects: bool, json: bool) -> Result<()> {
     );
     if !lin.read_files.is_empty() {
         println!("Read    : {} file(s)", lin.read_files.len());
-        for p in &lin.read_files { println!("          {}", p.display()); }
+        for p in &lin.read_files {
+            println!("          {}", p.display());
+        }
     }
     if !lin.modified_files.is_empty() {
         println!("Modified: {} file(s)", lin.modified_files.len());
-        for p in &lin.modified_files { println!("          {}", p.display()); }
+        for p in &lin.modified_files {
+            println!("          {}", p.display());
+        }
     }
     println!();
     print!("{}", render_transcript(&lin));
@@ -145,7 +174,11 @@ fn summarize(
     let cfg = load()?;
     let model = model.unwrap_or_else(|| cfg.default_chat_model.clone());
     let content = call_summarizer(&cfg, &model, &lin, &system, &user)?;
-    if content.ends_with('\n') { print!("{content}"); } else { println!("{content}"); }
+    if content.ends_with('\n') {
+        print!("{content}");
+    } else {
+        println!("{content}");
+    }
     Ok(())
 }
 
@@ -223,15 +256,22 @@ fn call_summarizer(
     let req = ChatRequest {
         model: model.to_string(),
         messages: vec![
-            ChatMessage { role: "system".to_string(), content: system.to_string() },
-            ChatMessage { role: "user".to_string(), content: user.to_string() },
+            ChatMessage {
+                role: "system".to_string(),
+                content: system.to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: user.to_string(),
+            },
         ],
         stream: Some(false),
         max_tokens: None,
     };
     let resp = post_chat_blocking(cfg, &req)?;
-    let body: serde_json::Value =
-        resp.json().context("parsing /v1/chat/completions response")?;
+    let body: serde_json::Value = resp
+        .json()
+        .context("parsing /v1/chat/completions response")?;
     let content = body
         .get("choices")
         .and_then(|c| c.get(0))
@@ -261,7 +301,8 @@ fn resolve_session(id_or_path: &str, all_projects: bool) -> Result<PathBuf> {
         anyhow::bail!(
             "no session with uuid `{id_or_path}` under {} (try --all to scan every project, \
              or pass the full path to a .jsonl)",
-            cwd.join(format!(".claude/projects/{}/", encode_project_dir(&cwd))).display(),
+            cwd.join(format!(".claude/projects/{}/", encode_project_dir(&cwd)))
+                .display(),
         );
     }
     anyhow::bail!("no session with uuid `{id_or_path}` anywhere under $HOME/.claude/projects");

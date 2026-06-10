@@ -222,7 +222,10 @@ pub fn import_memory_file(cwd: &Path, source: &Path) -> Result<MemoryImportResul
     let meta = std::fs::metadata(&source_path)
         .with_context(|| format!("reading metadata for {}", source_path.display()))?;
     if !meta.is_file() {
-        anyhow::bail!("memory import source is not a file: {}", source_path.display());
+        anyhow::bail!(
+            "memory import source is not a file: {}",
+            source_path.display()
+        );
     }
     if meta.len() > MAX_IMPORT_BYTES as u64 {
         anyhow::bail!("memory import source is too large; keep imports under 256 KiB");
@@ -314,13 +317,12 @@ fn import_claude_memory_from_dir(
         .filter(|path| path.file_name().and_then(|s| s.to_str()) != Some("MEMORY.md"))
         .cloned()
         .collect::<Vec<_>>();
-    let import_files = if sidecars.is_empty() {
-        files
-    } else {
-        sidecars
-    };
+    let import_files = if sidecars.is_empty() { files } else { sidecars };
     if import_files.is_empty() {
-        anyhow::bail!("no Claude Code memory markdown files found in {}", source_dir.display());
+        anyhow::bail!(
+            "no Claude Code memory markdown files found in {}",
+            source_dir.display()
+        );
     }
 
     let mut imported_files = 0usize;
@@ -598,7 +600,11 @@ pub fn verify_memory_references_in_content(cwd: &Path, content: &str) -> Vec<Mem
         .collect()
 }
 
-fn memory_reference_from_line(cwd: &Path, line_number: usize, line: &str) -> Option<MemoryReference> {
+fn memory_reference_from_line(
+    cwd: &Path,
+    line_number: usize,
+    line: &str,
+) -> Option<MemoryReference> {
     let marker = "[reference]";
     let marker_idx = line.find(marker)?;
     let text = line[marker_idx + marker.len()..].trim().to_string();
@@ -666,7 +672,11 @@ fn extract_reference_target(cwd: &Path, text: &str) -> Option<String> {
 }
 
 fn clean_reference_token(raw: &str) -> Option<String> {
-    let trimmed = raw.trim().trim_matches('`').trim_matches('"').trim_matches('\'');
+    let trimmed = raw
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('\'');
     let trimmed = trimmed.trim_end_matches(|c: char| matches!(c, ',' | '.' | ';' | ':'));
     if trimmed.is_empty() {
         None
@@ -680,7 +690,10 @@ fn is_external_reference(target: &str) -> bool {
 }
 
 fn resolve_reference_path(cwd: &Path, target: &str) -> PathBuf {
-    let raw = target.strip_prefix("file://").or_else(|| target.strip_prefix("file:")).unwrap_or(target);
+    let raw = target
+        .strip_prefix("file://")
+        .or_else(|| target.strip_prefix("file:"))
+        .unwrap_or(target);
     let path = Path::new(raw);
     if path.is_absolute() {
         path.to_path_buf()
@@ -699,9 +712,8 @@ pub fn clear_memory(cwd: &Path) -> Result<MemoryClearResult> {
 fn clear_memory_path(path: PathBuf, entries_dir: PathBuf) -> Result<MemoryClearResult> {
     let backup_dir = if entries_dir.exists() {
         let backup = next_backup_dir(&entries_dir);
-        std::fs::rename(&entries_dir, &backup).with_context(|| {
-            format!("moving {} to {}", entries_dir.display(), backup.display())
-        })?;
+        std::fs::rename(&entries_dir, &backup)
+            .with_context(|| format!("moving {} to {}", entries_dir.display(), backup.display()))?;
         Some(backup)
     } else {
         None
@@ -912,7 +924,10 @@ mod tests {
         let files = list_memory_files(temp.path()).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].kind, MemoryKind::User);
-        assert!(files[0].path.parent().is_some_and(|path| path.ends_with("user")));
+        assert!(files[0]
+            .path
+            .parent()
+            .is_some_and(|path| path.ends_with("user")));
         let content = std::fs::read_to_string(&files[0].path).unwrap();
         assert!(content.contains("- kind: user"));
         assert!(content.contains("prefers terse answers"));
@@ -943,8 +958,11 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::create_dir_all(&source).unwrap();
         std::fs::write(source.join("MEMORY.md"), "- summarized index\n").unwrap();
-        std::fs::write(source.join("user_profile.md"), "# User\n\nprefers terse answers\n")
-            .unwrap();
+        std::fs::write(
+            source.join("user_profile.md"),
+            "# User\n\nprefers terse answers\n",
+        )
+        .unwrap();
         std::fs::write(
             source.join("reference_docs.md"),
             "# Docs\n\n- kind: reference\n\nSee docs/api.md\n",
@@ -975,7 +993,11 @@ mod tests {
         let project_dir = temp.path().join("-tmp-project-with-hyphen");
         let memory_dir = project_dir.join("memory");
         std::fs::create_dir_all(&memory_dir).unwrap();
-        std::fs::write(memory_dir.join("project_notes.md"), "# Notes\n\nbulk import\n").unwrap();
+        std::fs::write(
+            memory_dir.join("project_notes.md"),
+            "# Notes\n\nbulk import\n",
+        )
+        .unwrap();
 
         let mut projects = std::collections::BTreeMap::new();
         projects.insert(project_dir, cwd.clone());
@@ -1007,7 +1029,10 @@ mod tests {
 
         let backup = result.backup_dir.unwrap();
         assert!(!entries.exists());
-        assert_eq!(std::fs::read_to_string(backup.join("project").join("note.md")).unwrap(), "note");
+        assert_eq!(
+            std::fs::read_to_string(backup.join("project").join("note.md")).unwrap(),
+            "note"
+        );
     }
 
     #[test]
@@ -1025,7 +1050,8 @@ mod tests {
     #[test]
     fn verify_memory_references_marks_external_and_unparsed() {
         let temp = tempfile::tempdir().unwrap();
-        let content = "- [reference] [api](https://example.test/docs)\n- [reference] ask Sam about this\n";
+        let content =
+            "- [reference] [api](https://example.test/docs)\n- [reference] ask Sam about this\n";
         let refs = verify_memory_references_in_content(temp.path(), content);
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].status, MemoryReferenceStatus::External);

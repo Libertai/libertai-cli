@@ -29,7 +29,11 @@ pub struct ExpansionContext {
 }
 
 pub fn discover(cwd: &Path) -> Vec<CustomCommand> {
-    discover_with_home(cwd, dirs::home_dir().as_deref(), dirs::config_dir().as_deref())
+    discover_with_home(
+        cwd,
+        dirs::home_dir().as_deref(),
+        dirs::config_dir().as_deref(),
+    )
 }
 
 fn discover_with_home(
@@ -39,25 +43,65 @@ fn discover_with_home(
 ) -> Vec<CustomCommand> {
     let mut out = Vec::new();
     if let Some(home) = home {
-        scan_dir(&home.join(".claude").join("commands"), CommandSource::User, &mut out);
+        scan_dir(
+            &home.join(".claude").join("commands"),
+            CommandSource::User,
+            &mut out,
+        );
     }
     if let Some(config) = config {
-        scan_dir(&config.join("libertai").join("commands"), CommandSource::User, &mut out);
+        scan_dir(
+            &config.join("libertai").join("commands"),
+            CommandSource::User,
+            &mut out,
+        );
     }
     if let Some(home) = home {
-        scan_dir(&home.join(".liberclaw").join("commands"), CommandSource::User, &mut out);
+        scan_dir(
+            &home.join(".liberclaw").join("commands"),
+            CommandSource::User,
+            &mut out,
+        );
     }
     if let Some(config) = config {
-        scan_skill_dir(&config.join("libertai").join("skills"), CommandSource::User, &mut out);
+        scan_skill_dir(
+            &config.join("libertai").join("skills"),
+            CommandSource::User,
+            &mut out,
+        );
     }
     if let Some(home) = home {
-        scan_skill_dir(&home.join(".claude").join("skills"), CommandSource::User, &mut out);
+        scan_skill_dir(
+            &home.join(".claude").join("skills"),
+            CommandSource::User,
+            &mut out,
+        );
     }
-    scan_dir(&cwd.join(".claude").join("commands"), CommandSource::Project, &mut out);
-    scan_dir(&cwd.join(".libertai").join("commands"), CommandSource::Project, &mut out);
-    scan_dir(&cwd.join(".liberclaw").join("commands"), CommandSource::Project, &mut out);
-    scan_skill_dir(&cwd.join(".claude").join("skills"), CommandSource::Project, &mut out);
-    scan_skill_dir(&cwd.join(".libertai").join("skills"), CommandSource::Project, &mut out);
+    scan_dir(
+        &cwd.join(".claude").join("commands"),
+        CommandSource::Project,
+        &mut out,
+    );
+    scan_dir(
+        &cwd.join(".libertai").join("commands"),
+        CommandSource::Project,
+        &mut out,
+    );
+    scan_dir(
+        &cwd.join(".liberclaw").join("commands"),
+        CommandSource::Project,
+        &mut out,
+    );
+    scan_skill_dir(
+        &cwd.join(".claude").join("skills"),
+        CommandSource::Project,
+        &mut out,
+    );
+    scan_skill_dir(
+        &cwd.join(".libertai").join("skills"),
+        CommandSource::Project,
+        &mut out,
+    );
     dedupe_by_name(&mut out);
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
@@ -77,7 +121,13 @@ pub fn expand_with_context(
         .parent()
         .map(|path| path.display().to_string())
         .unwrap_or_default();
-    expand_body(&command.body, args, &command.argument_names, context, &skill_dir)
+    expand_body(
+        &command.body,
+        args,
+        &command.argument_names,
+        context,
+        &skill_dir,
+    )
 }
 
 fn expand_body(
@@ -153,7 +203,10 @@ fn expand_body(
             }
         }
         if let Some((name, len)) = named_placeholder(rest) {
-            if let Some(idx) = argument_names.iter().position(|candidate| candidate == name) {
+            if let Some(idx) = argument_names
+                .iter()
+                .position(|candidate| candidate == name)
+            {
                 if let Some(value) = positional.get(idx) {
                     out.push_str(value);
                 }
@@ -493,7 +546,10 @@ fn unquote(value: &str) -> String {
 }
 
 fn is_false(value: &str) -> bool {
-    matches!(value.trim().to_ascii_lowercase().as_str(), "false" | "no" | "0")
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "false" | "no" | "0"
+    )
 }
 
 fn parse_argument_names(value: &str) -> Vec<String> {
@@ -657,7 +713,10 @@ mod tests {
 
         let cmds = discover_with_home(temp.path(), None, None);
 
-        assert_eq!(cmds[0].description.as_ref().unwrap().chars().count(), DESCRIPTION_LIMIT);
+        assert_eq!(
+            cmds[0].description.as_ref().unwrap().chars().count(),
+            DESCRIPTION_LIMIT
+        );
     }
 
     #[test]
@@ -729,7 +788,10 @@ mod tests {
 
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].body, "skill");
-        assert_eq!(cmds[0].path.file_name().and_then(|name| name.to_str()), Some("SKILL.md"));
+        assert_eq!(
+            cmds[0].path.file_name().and_then(|name| name.to_str()),
+            Some("SKILL.md")
+        );
     }
 
     #[test]

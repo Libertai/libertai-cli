@@ -162,7 +162,13 @@ impl Tool for McpCallTool {
     ) -> PiResult<ToolExecution> {
         let parsed: McpCallInput = match serde_json::from_value(input) {
             Ok(value) => value,
-            Err(e) => return Ok(output(true, format!("invalid `mcp_call` payload: {e}"), None)),
+            Err(e) => {
+                return Ok(output(
+                    true,
+                    format!("invalid `mcp_call` payload: {e}"),
+                    None,
+                ))
+            }
         };
         let server = parsed.server.trim();
         let tool = parsed.tool.trim();
@@ -233,12 +239,22 @@ impl Tool for McpReadResourceTool {
     ) -> PiResult<ToolExecution> {
         let parsed: McpReadResourceInput = match serde_json::from_value(input) {
             Ok(value) => value,
-            Err(e) => return Ok(output(true, format!("invalid `mcp_read_resource` payload: {e}"), None)),
+            Err(e) => {
+                return Ok(output(
+                    true,
+                    format!("invalid `mcp_read_resource` payload: {e}"),
+                    None,
+                ))
+            }
         };
         let server = parsed.server.trim();
         let uri = parsed.uri.trim();
         if server.is_empty() || uri.is_empty() {
-            return Ok(output(true, "`mcp_read_resource` requires non-empty `server` and `uri` fields".to_string(), None));
+            return Ok(output(
+                true,
+                "`mcp_read_resource` requires non-empty `server` and `uri` fields".to_string(),
+                None,
+            ));
         }
         let run = crate::commands::code_hooks::call_mcp_method_with_config(
             self.cfg.as_ref(),
@@ -290,12 +306,22 @@ impl Tool for McpGetPromptTool {
     ) -> PiResult<ToolExecution> {
         let parsed: McpGetPromptInput = match serde_json::from_value(input) {
             Ok(value) => value,
-            Err(e) => return Ok(output(true, format!("invalid `mcp_get_prompt` payload: {e}"), None)),
+            Err(e) => {
+                return Ok(output(
+                    true,
+                    format!("invalid `mcp_get_prompt` payload: {e}"),
+                    None,
+                ))
+            }
         };
         let server = parsed.server.trim();
         let name = parsed.name.trim();
         if server.is_empty() || name.is_empty() {
-            return Ok(output(true, "`mcp_get_prompt` requires non-empty `server` and `name` fields".to_string(), None));
+            return Ok(output(
+                true,
+                "`mcp_get_prompt` requires non-empty `server` and `name` fields".to_string(),
+                None,
+            ));
         }
         let arguments = parsed
             .arguments

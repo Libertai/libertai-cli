@@ -20,8 +20,7 @@ fn info(json: bool) -> Result<()> {
     // process cwd as the would-be session cwd so the output reflects
     // what a real `libertai code --sandbox=strict` from this directory
     // would expose.
-    let cwd = std::env::current_dir()
-        .map_err(|e| anyhow::anyhow!("cwd lookup failed: {e}"))?;
+    let cwd = std::env::current_dir().map_err(|e| anyhow::anyhow!("cwd lookup failed: {e}"))?;
     let profile = detect_strict_profile(&cwd);
     if json {
         let text = serde_json::to_string_pretty(&profile)

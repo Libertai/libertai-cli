@@ -19,14 +19,14 @@ use async_trait::async_trait;
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{
-    AgentEvent, Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate,
-    create_agent_session,
+    create_agent_session, AgentEvent, Result as PiResult, Tool, ToolExecution, ToolOutput,
+    ToolUpdate,
 };
 
 use crate::commands::code_agents;
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi};
 use crate::commands::code_factory::{LibertaiToolFactory, ModeFlag};
-use crate::commands::code_session::{CodeSessionConfig, SessionPersistence, build_session_options};
+use crate::commands::code_session::{build_session_options, CodeSessionConfig, SessionPersistence};
 use crate::commands::code_skills::{self, SkillPillar};
 use crate::config;
 
@@ -185,7 +185,11 @@ impl Tool for TaskTool {
                 .into_iter()
                 .filter(|name| ceiling.iter().any(|allowed| allowed == name))
                 .collect();
-            if f.is_empty() { ceiling } else { f }
+            if f.is_empty() {
+                ceiling
+            } else {
+                f
+            }
         };
 
         // Load our own Config — subtask runs against the same LibertAI
@@ -620,8 +624,8 @@ fn err_output(text: &str) -> ToolExecution {
 #[cfg(test)]
 mod tests {
     use super::{
-        TaskWorktree, named_subagent_prompt, render_child, should_skip_snapshot_entry,
-        task_wants_same_cwd, task_wants_worktree,
+        named_subagent_prompt, render_child, should_skip_snapshot_entry, task_wants_same_cwd,
+        task_wants_worktree, TaskWorktree,
     };
     use crate::commands::code_agents::{AgentDefinition, AgentSource};
     use pi::model::{ContentBlock, TextContent};

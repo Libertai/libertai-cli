@@ -35,10 +35,17 @@ struct LcodeCli {
     /// With `--list-sessions`, list every project (not just cwd).
     #[arg(long, requires = "list_sessions")]
     all: bool,
+    /// With `--list-sessions`, emit a JSON array instead of the human list.
+    #[arg(long, requires = "list_sessions")]
+    json: bool,
     /// Sandbox the bash tool (`off` / `strict` / `auto`). See
     /// `libertai code --help` for full details. Default: `off`.
     #[arg(long, value_enum, env = "LIBERTAI_SANDBOX", default_value_t = libertai_cli::commands::code_sandbox::SandboxMode::Off)]
     sandbox: libertai_cli::commands::code_sandbox::SandboxMode,
+    /// Print mode: one headless agent turn, then exit. See
+    /// `libertai code --help` for full details.
+    #[arg(long, short = 'p', conflicts_with = "list_sessions")]
+    print: bool,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -54,12 +61,16 @@ fn main() {
             continue_recent: parsed.continue_recent,
             list_sessions: parsed.list_sessions,
             all: parsed.all,
+            json: parsed.json,
             sandbox: parsed.sandbox,
+            print: parsed.print,
             args: parsed.args,
         },
     };
     if let Err(e) = libertai_cli::cli::dispatch(cli) {
         eprintln!("error: {e:#}");
-        std::process::exit(1);
+        // Same exit-code contract as the `libertai` binary (1 generic,
+        // 2 usage via clap, 3 auth, 4 network, 5 API).
+        std::process::exit(libertai_cli::client::exit_code(&e));
     }
 }

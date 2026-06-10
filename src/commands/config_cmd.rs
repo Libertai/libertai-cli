@@ -138,14 +138,18 @@ fn unset(key: &str) -> Result<()> {
             cfg.launcher_defaults.sonnet_model = DEFAULT_FAST_MODEL.into();
             cfg.launcher_defaults.haiku_model = DEFAULT_FAST_MODEL.into();
         }
-        "launcher_defaults.opus_model" => cfg.launcher_defaults.opus_model = DEFAULT_OPUS_MODEL.into(),
-        "launcher_defaults.sonnet_model" => cfg.launcher_defaults.sonnet_model = DEFAULT_FAST_MODEL.into(),
-        "launcher_defaults.haiku_model" => cfg.launcher_defaults.haiku_model = DEFAULT_FAST_MODEL.into(),
+        "launcher_defaults.opus_model" => {
+            cfg.launcher_defaults.opus_model = DEFAULT_OPUS_MODEL.into()
+        }
+        "launcher_defaults.sonnet_model" => {
+            cfg.launcher_defaults.sonnet_model = DEFAULT_FAST_MODEL.into()
+        }
+        "launcher_defaults.haiku_model" => {
+            cfg.launcher_defaults.haiku_model = DEFAULT_FAST_MODEL.into()
+        }
         "http_timeout_secs" => cfg.http_timeout_secs = DEFAULT_HTTP_TIMEOUT_SECS,
         "check_for_updates" => cfg.check_for_updates = DEFAULT_CHECK_FOR_UPDATES,
-        "smart_approval_enabled" => {
-            cfg.smart_approval_enabled = DEFAULT_SMART_APPROVAL_ENABLED
-        }
+        "smart_approval_enabled" => cfg.smart_approval_enabled = DEFAULT_SMART_APPROVAL_ENABLED,
         "smart_approval_model" => cfg.smart_approval_model = DEFAULT_SMART_APPROVAL_MODEL.into(),
         "code_auto_compaction_enabled" => {
             cfg.code_auto_compaction_enabled = DEFAULT_CODE_AUTO_COMPACTION_ENABLED
@@ -158,9 +162,9 @@ fn unset(key: &str) -> Result<()> {
         }
         "code_turn_notifications" => cfg.code_turn_notifications = DEFAULT_CODE_TURN_NOTIFICATIONS,
         "hooks" => cfg.hooks = Default::default(),
-        k if k.starts_with("auth.") => bail!(
-            "'{k}' is managed by `libertai login`/`libertai logout`; unset is not supported"
-        ),
+        k if k.starts_with("auth.") => {
+            bail!("'{k}' is managed by `libertai login`/`libertai logout`; unset is not supported")
+        }
         _ => bail!("unknown config key: {key} (use `all` to reset everything)"),
     }
     config::save(&cfg)?;

@@ -131,7 +131,10 @@ fn build_smart_approval_messages(
 }
 
 fn parse_smart_approval_response(text: &str) -> SmartApprovalVerdict {
-    let first = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
+    let first = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
     let mut parts = first.trim().splitn(2, char::is_whitespace);
     let verdict = parts
         .next()

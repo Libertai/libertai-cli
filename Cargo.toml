@@ -20,6 +20,13 @@ assets = [
     ["target/release/libertai", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/libertai/README", "644"],
     ["LICENSE", "usr/share/doc/libertai/LICENSE", "644"],
+    # Completions + man page are committed under packaging/ and kept in sync
+    # with the CLI by tests/probes_completions.rs; regenerate with
+    # packaging/generate-assets.sh after changing the CLI surface.
+    ["packaging/completions/libertai.bash", "usr/share/bash-completion/completions/libertai", "644"],
+    ["packaging/completions/_libertai", "usr/share/zsh/vendor-completions/_libertai", "644"],
+    ["packaging/completions/libertai.fish", "usr/share/fish/vendor_completions.d/libertai.fish", "644"],
+    ["packaging/man/libertai.1", "usr/share/man/man1/libertai.1", "644"],
 ]
 
 [lib]
@@ -36,6 +43,14 @@ path = "src/bin/lcode.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
+# `libertai completions <shell>` + hidden `libertai man` — both generated
+# from the same `Cli` derive and printed to stdout for packaging to capture.
+clap_complete = "4"
+clap_mangen = "0.2"
+# Hostname for the per-device API key label minted at login. The libc
+# gethostname(2) wrapper works on minimal containers and Windows, unlike
+# shelling out to a `hostname` binary.
+gethostname = "1"
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -84,6 +99,12 @@ crossterm = "0.29"
 # Catch Ctrl-C during an in-flight agent stream and forward it to pi's
 # AbortHandle so the REPL survives the interrupt.
 ctrlc = "3"
+# `libertai chat` line editing — persisted history, Emacs keys,
+# bracketed-paste multiline input, styled prompts that self-disable on
+# NO_COLOR/non-TTY. Chosen over reedline: synchronous (no extra
+# runtime), much smaller dependency tree; pi's own editor is welded to
+# its TUI event loop and is not cleanly reusable here.
+rustyline = "18"
 # Date formatting for /remember bullets. Pi pulls chrono in transitively
 # but we declare it explicitly so `use chrono::Local` resolves cleanly.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

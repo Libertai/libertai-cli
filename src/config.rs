@@ -32,7 +32,10 @@ pub const DEFAULT_CODE_TURN_NOTIFICATIONS: bool = false;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default = "default_api_base", skip_serializing_if = "is_default_api_base")]
+    #[serde(
+        default = "default_api_base",
+        skip_serializing_if = "is_default_api_base"
+    )]
     pub api_base: String,
     #[serde(
         default = "default_account_base",
@@ -112,7 +115,11 @@ pub struct Config {
     pub status_line_command: String,
     #[serde(default, skip_serializing_if = "HooksConfig::is_default")]
     pub hooks: HooksConfig,
-    #[serde(default, rename = "mcpServers", skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        rename = "mcpServers",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
     pub mcp_servers: HashMap<String, McpServerConfig>,
     #[serde(default)]
     pub auth: Auth,
@@ -270,7 +277,12 @@ pub struct McpResourceConfig {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
-    #[serde(default, rename = "mimeType", alias = "mime_type", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "mimeType",
+        alias = "mime_type",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub mime_type: String,
 }
 
@@ -327,21 +339,37 @@ fn is_true(value: &bool) -> bool {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct HooksConfig {
-    #[serde(default, rename = "UserPromptSubmit", skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        rename = "UserPromptSubmit",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub user_prompt_submit: Vec<HookCommandConfig>,
     #[serde(default, rename = "PreToolUse", skip_serializing_if = "Vec::is_empty")]
     pub pre_tool_use: Vec<HookCommandConfig>,
     #[serde(default, rename = "PostToolUse", skip_serializing_if = "Vec::is_empty")]
     pub post_tool_use: Vec<HookCommandConfig>,
-    #[serde(default, rename = "SubagentStop", skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        rename = "SubagentStop",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub subagent_stop: Vec<HookCommandConfig>,
-    #[serde(default, rename = "SessionStart", skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        rename = "SessionStart",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub session_start: Vec<HookCommandConfig>,
     #[serde(default, rename = "Stop", skip_serializing_if = "Vec::is_empty")]
     pub stop: Vec<HookCommandConfig>,
     #[serde(default, rename = "SessionEnd", skip_serializing_if = "Vec::is_empty")]
     pub session_end: Vec<HookCommandConfig>,
-    #[serde(default, rename = "Notification", skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        rename = "Notification",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub notification: Vec<HookCommandConfig>,
 }
 
@@ -383,8 +411,10 @@ impl<'de> Deserialize<'de> for HooksConfig {
             session_start: deserialize_hook_rows(raw.session_start)
                 .map_err(serde::de::Error::custom)?,
             stop: deserialize_hook_rows(raw.stop).map_err(serde::de::Error::custom)?,
-            session_end: deserialize_hook_rows(raw.session_end).map_err(serde::de::Error::custom)?,
-            notification: deserialize_hook_rows(raw.notification).map_err(serde::de::Error::custom)?,
+            session_end: deserialize_hook_rows(raw.session_end)
+                .map_err(serde::de::Error::custom)?,
+            notification: deserialize_hook_rows(raw.notification)
+                .map_err(serde::de::Error::custom)?,
         })
     }
 }
@@ -429,13 +459,21 @@ pub struct HookCommandConfig {
     pub url: String,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: HashMap<String, String>,
-    #[serde(default, rename = "allowedEnvVars", skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        rename = "allowedEnvVars",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub allowed_env_vars: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub prompt: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
-    #[serde(default, rename = "reviewPolicy", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "reviewPolicy",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub review_policy: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source: String,
@@ -445,7 +483,11 @@ pub struct HookCommandConfig {
     pub tool: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<serde_json::Value>,
-    #[serde(default, rename = "statusMessage", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "statusMessage",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub status_message: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub shell: String,
@@ -462,11 +504,7 @@ pub struct HookCommandConfig {
         skip_serializing_if = "is_false"
     )]
     pub async_hook: bool,
-    #[serde(
-        default,
-        rename = "continueOnBlock",
-        skip_serializing_if = "is_false"
-    )]
+    #[serde(default, rename = "continueOnBlock", skip_serializing_if = "is_false")]
     pub continue_on_block: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub once: bool,
@@ -698,7 +736,10 @@ fn deserialize_hook_rows(
                 child.shell = defaults.shell.clone();
             }
             for (key, value) in &defaults.extra {
-                child.extra.entry(key.clone()).or_insert_with(|| value.clone());
+                child
+                    .extra
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
             }
             out.push(child);
         }
@@ -706,15 +747,11 @@ fn deserialize_hook_rows(
     Ok(out)
 }
 
-fn deserialize_hook_row(
-    row: serde_json::Value,
-) -> std::result::Result<HookCommandConfig, String> {
+fn deserialize_hook_row(row: serde_json::Value) -> std::result::Result<HookCommandConfig, String> {
     serde_json::from_value(row).map_err(|e| format!("invalid hook row: {e}"))
 }
 
-fn hook_group_defaults(
-    row: &serde_json::Value,
-) -> std::result::Result<HookGroupDefaults, String> {
+fn hook_group_defaults(row: &serde_json::Value) -> std::result::Result<HookGroupDefaults, String> {
     let matcher = row
         .get("matcher")
         .or_else(|| row.get("matchers"))
@@ -776,9 +813,7 @@ fn matcher_from_json_value(value: &serde_json::Value) -> std::result::Result<Str
     }
 }
 
-fn timeout_from_json_value(
-    row: &serde_json::Value,
-) -> std::result::Result<Option<u64>, String> {
+fn timeout_from_json_value(row: &serde_json::Value) -> std::result::Result<Option<u64>, String> {
     match row.get("timeout") {
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(serde_json::Value::Number(value)) => value
@@ -1038,10 +1073,10 @@ pub fn load() -> Result<Config> {
     if !path.exists() {
         return Ok(Config::default());
     }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let cfg: Config = toml::from_str(&raw)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let cfg: Config =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
     enforce_https_bases(&cfg)?;
     Ok(cfg)
 }
@@ -1065,9 +1100,7 @@ fn enforce_https_bases(cfg: &Config) -> Result<()> {
             || parsed.fragment().is_some()
             || parsed.host().is_none()
         {
-            anyhow::bail!(
-                "config: {name} must be a plain https://host URL — got {trimmed}"
-            );
+            anyhow::bail!("config: {name} must be a plain https://host URL — got {trimmed}");
         }
     }
     Ok(())
@@ -1077,8 +1110,7 @@ pub fn save(cfg: &Config) -> Result<()> {
     enforce_https_bases(cfg)?;
     let path = config_path()?;
     if let Some(parent) = path.parent() {
-        create_dir_secure(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        create_dir_secure(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     let raw = toml::to_string_pretty(cfg).context("serializing config")?;
     write_file_secure(&path, raw.as_bytes())
@@ -1138,6 +1170,28 @@ pub fn set_file_mode_600(path: &std::path::Path) -> Result<()> {
 
 #[cfg(not(unix))]
 pub fn set_file_mode_600(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
+/// Chmod an existing directory to `0o700` if it is group/world-accessible.
+/// No-op when the directory is already owner-only (or on non-unix).
+#[cfg(unix)]
+pub(crate) fn tighten_dir_mode_700(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    let mut perm = metadata.permissions();
+    if perm.mode() & 0o077 != 0 {
+        perm.set_mode(0o700);
+        std::fs::set_permissions(path, perm)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn tighten_dir_mode_700(_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 

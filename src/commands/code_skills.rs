@@ -125,7 +125,9 @@ pub fn prompt_for_pillar(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Opti
     }
 
     let mut out = String::from("## Active Agent Skills\n\n");
-    out.push_str("The following Agent Skills are active for this session. Apply them when relevant.\n");
+    out.push_str(
+        "The following Agent Skills are active for this session. Apply them when relevant.\n",
+    );
     for skill in skills {
         out.push_str("\n### ");
         out.push_str(&skill.name);
@@ -162,7 +164,10 @@ pub fn active_skills(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Vec<Agen
         .collect())
 }
 
-pub fn skill_inventory(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Vec<SkillInventoryEntry>> {
+pub fn skill_inventory(
+    pillar: SkillPillar,
+    cwd: Option<&Path>,
+) -> Result<Vec<SkillInventoryEntry>> {
     let disabled = load_disabled_skill_names()?;
     Ok(collect_matching_skills(pillar, cwd)?
         .into_iter()
@@ -577,7 +582,10 @@ mod tests {
         };
 
         assert_eq!(entry.source_kind, "user");
-        assert_eq!(entry.path.as_deref(), Some(Path::new("/tmp/proposed-skill")));
+        assert_eq!(
+            entry.path.as_deref(),
+            Some(Path::new("/tmp/proposed-skill"))
+        );
         assert!(entry.agent_created);
     }
 
@@ -619,13 +627,9 @@ mod tests {
         )
         .expect("write skill");
 
-        let skills = collect_matching_skills_with_roots(
-            SkillPillar::Code,
-            None,
-            Some(&home),
-            Some(&config),
-        )
-        .expect("skills");
+        let skills =
+            collect_matching_skills_with_roots(SkillPillar::Code, None, Some(&home), Some(&config))
+                .expect("skills");
         let skill = skills
             .iter()
             .find(|skill| skill.name == "config-review")

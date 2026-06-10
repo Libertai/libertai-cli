@@ -107,7 +107,10 @@ mod tests {
     fn git_repo_adds_branch_status_and_commits() {
         let temp = tempfile::tempdir().unwrap();
         git(temp.path(), &["init"]);
-        git(temp.path(), &["config", "user.email", "test@example.invalid"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
         git(temp.path(), &["config", "user.name", "Test User"]);
         std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
         git(temp.path(), &["add", "README.md"]);

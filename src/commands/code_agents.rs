@@ -100,7 +100,10 @@ pub fn delete_agent(cwd: &Path, name: &str) -> Result<PathBuf> {
 }
 
 fn project_agent_dirs(cwd: &Path) -> Vec<PathBuf> {
-    vec![cwd.join(".claude").join("agents"), cwd.join(".libertai").join("agents")]
+    vec![
+        cwd.join(".claude").join("agents"),
+        cwd.join(".libertai").join("agents"),
+    ]
 }
 
 fn user_agent_dirs() -> Vec<PathBuf> {
@@ -309,7 +312,10 @@ mod tests {
 
         assert_eq!(agent.name, "reviewer");
         assert_eq!(agent.description, "Reviews changes");
-        assert_eq!(agent.tools, Some(vec!["read".into(), "grep".into(), "find".into()]));
+        assert_eq!(
+            agent.tools,
+            Some(vec!["read".into(), "grep".into(), "find".into()])
+        );
         assert_eq!(agent.model.as_deref(), Some("gpt-4o"));
         assert!(!agent.worktree);
         assert_eq!(agent.system_prompt, "Focus on correctness.");
@@ -357,7 +363,12 @@ mod tests {
 
         assert_eq!(
             agent.tools,
-            Some(vec!["read".into(), "grep".into(), "find".into(), "ls".into()])
+            Some(vec![
+                "read".into(),
+                "grep".into(),
+                "find".into(),
+                "ls".into()
+            ])
         );
 
         let agent = parse_agent_md(
@@ -395,7 +406,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             path,
-            tmp.path().join(".libertai").join("agents").join("reviewer.md")
+            tmp.path()
+                .join(".libertai")
+                .join("agents")
+                .join("reviewer.md")
         );
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("name: reviewer"));
@@ -445,7 +459,12 @@ mod tests {
         .unwrap();
 
         let mut by_name = BTreeMap::new();
-        load_dir(&user_agents, AgentSource::User(user_agents.clone()), &mut by_name).unwrap();
+        load_dir(
+            &user_agents,
+            AgentSource::User(user_agents.clone()),
+            &mut by_name,
+        )
+        .unwrap();
         load_dir(
             &project_agents,
             AgentSource::Project(project_agents.clone()),

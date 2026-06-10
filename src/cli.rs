@@ -15,12 +15,17 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Log in (paste API key or sign with wallet).
+    /// Log in (browser sign-in or paste an API key).
     Login,
-    /// Clear saved credentials (keeps a .bak of the previous config).
+    /// Clear saved credentials (secrets removed; other settings kept).
     Logout,
     /// Show current auth state and defaults.
-    Status,
+    Status {
+        /// Emit JSON (auth state, base URLs, defaults) instead of the
+        /// human summary.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Manage API keys.
     Keys {
@@ -30,9 +35,14 @@ pub enum Command {
 
     /// List available models.
     Models {
-        /// Bypass cache (not yet used; placeholder for future caching).
+        /// Re-sync the persisted model catalog: fetches `/v1/models` and
+        /// merges any new models into pi's `models.json` so they become
+        /// selectable in `libertai code` (`/model`).
         #[arg(long)]
         refresh: bool,
+        /// Emit the `/v1/models` listing as JSON instead of the table.
+        #[arg(long)]
+        json: bool,
     },
 
     /// One-shot prompt, non-streaming.
@@ -190,6 +200,10 @@ pub enum Command {
         /// With `--list-sessions`, show sessions across every project.
         #[arg(long, requires = "list_sessions")]
         all: bool,
+        /// With `--list-sessions`, emit a JSON array (path, name,
+        /// message_count, …) instead of the human list.
+        #[arg(long, requires = "list_sessions")]
+        json: bool,
         /// Sandbox the bash tool. `off` (default) runs bash with the
         /// user's full host privileges. `strict` wraps it in `bwrap`
         /// (Linux only today) with no network, read-only system dirs,
@@ -199,7 +213,21 @@ pub enum Command {
         /// Also honours the `LIBERTAI_SANDBOX` env var.
         #[arg(long, value_enum, env = "LIBERTAI_SANDBOX", default_value_t = crate::commands::code_sandbox::SandboxMode::Off)]
         sandbox: crate::commands::code_sandbox::SandboxMode,
-        /// Initial prompt (non-interactive mode if `--print`).
+        /// Print mode (like `claude -p`): run a single agent turn
+        /// headlessly and exit — no TUI, no interactive prompts. The
+        /// assistant's text streams to stdout; turn/tool noise goes to
+        /// stderr. Tool calls not already covered by an allow rule are
+        /// auto-denied instead of prompting, so scripts never hang.
+        /// The prompt comes from the trailing args, piped stdin, or
+        /// both (stdin becomes context above the args prompt). Composes
+        /// with `--resume` / `--continue` to run one more headless turn
+        /// against a saved session.
+        #[arg(long, short = 'p', conflicts_with = "list_sessions")]
+        print: bool,
+        /// Initial prompt. When given, runs a single one-shot turn and
+        /// exits (tool approvals still prompt on the terminal unless
+        /// `--print` is also set). Without a prompt and without
+        /// `--print`, starts the interactive REPL.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -227,6 +255,27 @@ pub enum Command {
         #[command(subcommand)]
         action: ImportAction,
     },
+
+    /// Print a shell completion script to stdout.
+    ///
+    /// Examples:
+    ///   libertai completions bash > ~/.local/share/bash-completion/completions/libertai
+    ///   libertai completions zsh  > "${fpath[1]}/_libertai"
+    ///   libertai completions fish > ~/.config/fish/completions/libertai.fish
+    #[command(verbatim_doc_comment)]
+    Completions {
+        /// Shell to generate the script for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+
+    /// Render the top-level man page (roff) to stdout.
+    ///
+    /// Hidden: exists so packaging can capture it at build time
+    /// (`libertai man > libertai.1`); see packaging/generate-assets.sh
+    /// and the brew formula template.
+    #[command(hide = true)]
+    Man,
 }
 
 #[derive(Debug, Subcommand)]
@@ -328,7 +377,12 @@ pub enum SandboxAction {
 #[derive(Debug, Subcommand)]
 pub enum KeysAction {
     /// List all API keys for the current account.
-    List,
+    List {
+        /// Emit the key rows as JSON (mirrors the `/api-keys` response)
+        /// instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Create a new API key.
     Create {
         name: String,
@@ -379,9 +433,9 @@ pub fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Login => crate::commands::login::run(),
         Command::Logout => crate::commands::logout::run(),
-        Command::Status => crate::commands::status::run(),
+        Command::Status { json } => crate::commands::status::run(json),
         Command::Keys { action } => crate::commands::keys::run(action),
-        Command::Models { refresh } => crate::commands::models::run(refresh),
+        Command::Models { refresh, json } => crate::commands::models::run(refresh, json),
         Command::Ask { prompt, model } => crate::commands::ask::run(prompt.join(" "), model),
         Command::Search {
             query,
@@ -420,7 +474,9 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             continue_recent,
             list_sessions,
             all,
+            json,
             sandbox,
+            print,
             args,
         } => crate::commands::code::run(
             model,
@@ -430,13 +486,17 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             continue_recent,
             list_sessions,
             all,
+            json,
             sandbox,
+            print,
             args,
         ),
         Command::Config { action } => crate::commands::config_cmd::run(action),
         Command::Skills { action } => crate::commands::skills::run(action),
         Command::Sandbox { action } => crate::commands::code_sandbox_cli::run(action),
         Command::Import { action } => crate::commands::claude_code_import_cli::run(action),
+        Command::Completions { shell } => crate::commands::completions::run(shell),
+        Command::Man => crate::commands::completions::man(),
     }
 }
 
@@ -444,7 +504,7 @@ fn command_name(cmd: &Command) -> &'static str {
     match cmd {
         Command::Login => "login",
         Command::Logout => "logout",
-        Command::Status => "status",
+        Command::Status { .. } => "status",
         Command::Keys { .. } => "keys",
         Command::Models { .. } => "models",
         Command::Ask { .. } => "ask",
@@ -463,5 +523,7 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::Skills { .. } => "skills",
         Command::Sandbox { .. } => "sandbox",
         Command::Import { .. } => "import",
+        Command::Completions { .. } => "completions",
+        Command::Man => "man",
     }
 }

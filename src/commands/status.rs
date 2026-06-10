@@ -1,38 +1,80 @@
-use anyhow::Result;
-use owo_colors::OwoColorize;
+use anyhow::{Context, Result};
 
-use crate::config::{self, mask_key};
+use crate::commands::output::Styler;
+use crate::config::{self, mask_key, Config};
 
-pub fn run() -> Result<()> {
+pub fn run(json: bool) -> Result<()> {
     let cfg = config::load()?;
+    if json {
+        return print_json(&cfg);
+    }
+    print_human(&cfg);
+    Ok(())
+}
 
-    println!("{}", "LibertAI status".bold().underline());
-    println!("  {:<22} {}", "API base:".dimmed(), cfg.api_base);
+/// Machine-readable status: auth state, base URLs, defaults. Goes to
+/// stdout with nothing else; field names are part of the CLI contract.
+fn print_json(cfg: &Config) -> Result<()> {
+    let value = serde_json::json!({
+        "api_base": cfg.api_base,
+        "account_base": cfg.account_base,
+        "search_base": cfg.search_base,
+        "defaults": {
+            "chat_model": cfg.default_chat_model,
+            "code_model": cfg.default_code_model,
+            "code_provider": cfg.default_code_provider,
+            "image_model": cfg.default_image_model,
+            "launcher": {
+                "opus": cfg.launcher_defaults.opus_model,
+                "sonnet": cfg.launcher_defaults.sonnet_model,
+                "haiku": cfg.launcher_defaults.haiku_model,
+            },
+        },
+        "auth": {
+            "logged_in": cfg.auth.api_key.is_some(),
+            "api_key_masked": cfg.auth.api_key.as_deref().map(mask_key),
+            "expires_at": cfg.auth.expires_at,
+            "wallet_address": cfg.auth.wallet_address,
+            "chain": cfg.auth.chain,
+        },
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).context("rendering status")?
+    );
+    Ok(())
+}
+
+fn print_human(cfg: &Config) {
+    let st = Styler::stdout();
+
+    println!("{}", st.heading("LibertAI status"));
+    println!("  {:<22} {}", st.dimmed("API base:"), cfg.api_base);
     if cfg.account_base != cfg.api_base {
-        println!("  {:<22} {}", "Account base:".dimmed(), cfg.account_base);
+        println!("  {:<22} {}", st.dimmed("Account base:"), cfg.account_base);
     }
     println!(
         "  {:<22} {}",
-        "Default chat model:".dimmed(),
+        st.dimmed("Default chat model:"),
         cfg.default_chat_model
     );
     println!(
         "  {:<22} {}",
-        "Default code model:".dimmed(),
+        st.dimmed("Default code model:"),
         cfg.default_code_model
     );
     println!(
         "  {:<22} {}",
-        "Default image model:".dimmed(),
+        st.dimmed("Default image model:"),
         cfg.default_image_model
     );
     println!(
         "  {:<22} {}{}",
-        "Smart approvals:".dimmed(),
+        st.dimmed("Smart approvals:"),
         if cfg.smart_approval_enabled {
-            "enabled".green().to_string()
+            st.green("enabled")
         } else {
-            "disabled".dimmed().to_string()
+            st.dimmed("disabled")
         },
         if cfg.smart_approval_enabled {
             format!(" ({})", cfg.smart_approval_model)
@@ -42,107 +84,92 @@ pub fn run() -> Result<()> {
     );
     println!(
         "  {:<22} {} (reserve={}, keep_recent={})",
-        "Auto compaction:".dimmed(),
+        st.dimmed("Auto compaction:"),
         if cfg.code_auto_compaction_enabled {
-            "enabled".green().to_string()
+            st.green("enabled")
         } else {
-            "disabled".dimmed().to_string()
+            st.dimmed("disabled")
         },
         cfg.code_compaction_reserve_tokens,
         cfg.code_compaction_keep_recent_tokens
     );
     println!(
         "  {:<22} {}",
-        "UserPrompt hooks:".dimmed(),
+        st.dimmed("UserPrompt hooks:"),
         runnable_hook_count(&cfg.hooks.user_prompt_submit)
     );
     println!(
         "  {:<22} {}",
-        "PreToolUse hooks:".dimmed(),
+        st.dimmed("PreToolUse hooks:"),
         runnable_hook_count(&cfg.hooks.pre_tool_use)
     );
     println!(
         "  {:<22} {}",
-        "PostToolUse hooks:".dimmed(),
+        st.dimmed("PostToolUse hooks:"),
         runnable_hook_count(&cfg.hooks.post_tool_use)
     );
     println!(
         "  {:<22} {}",
-        "SubagentStop hooks:".dimmed(),
+        st.dimmed("SubagentStop hooks:"),
         runnable_hook_count(&cfg.hooks.subagent_stop)
     );
     println!(
         "  {:<22} {}",
-        "SessionStart hooks:".dimmed(),
+        st.dimmed("SessionStart hooks:"),
         runnable_hook_count(&cfg.hooks.session_start)
     );
     println!(
         "  {:<22} {}",
-        "Stop hooks:".dimmed(),
+        st.dimmed("Stop hooks:"),
         runnable_hook_count(&cfg.hooks.stop)
     );
     println!(
         "  {:<22} {}",
-        "SessionEnd hooks:".dimmed(),
+        st.dimmed("SessionEnd hooks:"),
         runnable_hook_count(&cfg.hooks.session_end)
     );
     println!(
         "  {:<22} {}",
-        "Notification hooks:".dimmed(),
+        st.dimmed("Notification hooks:"),
         runnable_hook_count(&cfg.hooks.notification)
     );
 
-    println!("  {}", "Launcher defaults:".dimmed());
+    println!("  {}", st.dimmed("Launcher defaults:"));
     println!(
         "    {:<20} {}",
-        "opus:".dimmed(),
+        st.dimmed("opus:"),
         cfg.launcher_defaults.opus_model
     );
     println!(
         "    {:<20} {}",
-        "sonnet:".dimmed(),
+        st.dimmed("sonnet:"),
         cfg.launcher_defaults.sonnet_model
     );
     println!(
         "    {:<20} {}",
-        "haiku:".dimmed(),
+        st.dimmed("haiku:"),
         cfg.launcher_defaults.haiku_model
     );
 
     match cfg.auth.api_key.as_deref() {
-        Some(k) => println!(
-            "  {:<22} {}",
-            "Auth:".dimmed(),
-            mask_key(k).green()
-        ),
-        None => println!(
-            "  {:<22} {}",
-            "Auth:".dimmed(),
-            "not logged in".red()
-        ),
+        Some(k) => println!("  {:<22} {}", st.dimmed("Auth:"), st.green(&mask_key(k))),
+        None => println!("  {:<22} {}", st.dimmed("Auth:"), st.red("not logged in")),
     }
 
     if let Some(exp) = cfg.auth.expires_at.as_deref() {
         let date = exp.split('T').next().unwrap_or(exp);
         println!(
             "  {:<22} {} {}",
-            "Key expires:".dimmed(),
+            st.dimmed("Key expires:"),
             date,
-            "(run `libertai login` to renew)".dimmed()
+            st.dimmed("(run `libertai login` to renew)")
         );
     }
 
     if let Some(addr) = cfg.auth.wallet_address.as_deref() {
         let chain = cfg.auth.chain.as_deref().unwrap_or("?");
-        println!(
-            "  {:<22} {} ({})",
-            "Wallet:".dimmed(),
-            addr,
-            chain
-        );
+        println!("  {:<22} {} ({})", st.dimmed("Wallet:"), addr, chain);
     }
-
-    Ok(())
 }
 
 fn runnable_hook_count(hooks: &[crate::config::HookCommandConfig]) -> usize {

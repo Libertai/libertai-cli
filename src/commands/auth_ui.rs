@@ -20,7 +20,9 @@ pub fn confirm_signing(term: &Term, account_base: &str, message: &str) -> Result
     eprintln!();
     eprintln!(
         "{}",
-        "The server is asking you to sign this message:".yellow().bold()
+        "The server is asking you to sign this message:"
+            .yellow()
+            .bold()
     );
     eprintln!("  host:    {host}");
     eprintln!("  message: {message}");

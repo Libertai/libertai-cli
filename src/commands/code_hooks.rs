@@ -16,6 +16,7 @@ use pi::model::ContentBlock;
 use pi::sdk::{create_agent_session, AgentEvent, ToolOutput};
 use serde_json::json;
 
+use crate::client::{post_chat_blocking, ChatMessage, ChatRequest};
 use crate::commands::code_approvals::{
     ApprovalState, ApprovalUi, PromptChoice, ToolPolicy, ToolPolicyDecision,
 };
@@ -25,7 +26,6 @@ use crate::commands::code_session::{
 };
 use crate::commands::code_skills::{self, SkillPillar};
 use crate::config::{Config, HookCommandConfig};
-use crate::client::{post_chat_blocking, ChatMessage, ChatRequest};
 
 const AGENT_HOOK_TOOLS: &[&str] = &["read", "grep", "find", "ls"];
 
@@ -232,10 +232,7 @@ fn once_hook_keys() -> &'static Mutex<HashSet<String>> {
 }
 
 fn reset_once_hook_state() {
-    once_hook_keys()
-        .lock()
-        .expect("once hook lock")
-        .clear();
+    once_hook_keys().lock().expect("once hook lock").clear();
 }
 
 fn hook_is_http(hook: &HookCommandConfig) -> bool {
@@ -322,17 +319,19 @@ impl ToolPolicy for ConfiguredHookPolicy {
 
             let run = run_configured_hook(hook, &cwd, &payload, "PreToolUse");
             if run.status == 2 {
-                deny_reason = Some(first_non_empty(&run.stderr, &run.stdout).unwrap_or_else(|| {
-                    "PreToolUse hook denied this tool call".to_string()
-                }));
+                deny_reason = Some(
+                    first_non_empty(&run.stderr, &run.stdout)
+                        .unwrap_or_else(|| "PreToolUse hook denied this tool call".to_string()),
+                );
                 continue;
             }
 
             match pre_tool_decision_from_stdout(&run.stdout) {
                 ToolPolicyDecision::Deny { reason } => {
-                    deny_reason = Some(
-                        reason.unwrap_or_else(|| "PreToolUse hook denied this tool call".to_string()),
-                    );
+                    deny_reason =
+                        Some(reason.unwrap_or_else(|| {
+                            "PreToolUse hook denied this tool call".to_string()
+                        }));
                 }
                 ToolPolicyDecision::Allow {
                     updated_input: input,
@@ -448,9 +447,8 @@ fn run_tool_completion_hooks(
         }
         let run = run_configured_hook(hook, cwd, payload, event_name);
         if run.status != 0 {
-            let detail = first_non_empty(&run.stderr, &run.stdout).unwrap_or_else(|| {
-                format!("hook exited with status {}", run.status)
-            });
+            let detail = first_non_empty(&run.stderr, &run.stdout)
+                .unwrap_or_else(|| format!("hook exited with status {}", run.status));
             eprintln!(
                 "  \x1b[2m[hook {event_name}] {}: {}\x1b[0m",
                 hook_target(hook),
@@ -553,8 +551,11 @@ impl PersistentStdioMcpClient {
             }
         });
 
-        write_mcp_message(&mut stdin, &mcp_initialize_request_with_roots(1, &server.roots))
-            .map_err(|e| format!("writing MCP initialize request: {e}"))?;
+        write_mcp_message(
+            &mut stdin,
+            &mcp_initialize_request_with_roots(1, &server.roots),
+        )
+        .map_err(|e| format!("writing MCP initialize request: {e}"))?;
         let init_response =
             wait_for_mcp_response_with_roots(&rx, Some(&mut stdin), &server.roots, 1, timeout)
                 .map_err(|e| format!("MCP initialize failed: {e}"))?;
@@ -1676,25 +1677,24 @@ fn run_mcp_http_tool_hook(
             "arguments": input,
         },
     });
-    let (call_response, _) =
-        match post_mcp_http_message(
-            &client,
-            server,
-            url,
-            &call,
-            session_id.as_deref(),
-            &server.roots,
-            2,
-        ) {
-            Ok(response) => response,
-            Err(e) => {
-                return HookRun {
-                    status: 1,
-                    stdout: String::new(),
-                    stderr: format!("MCP HTTP tools/call failed for `{server_name}`: {e}"),
-                };
-            }
-        };
+    let (call_response, _) = match post_mcp_http_message(
+        &client,
+        server,
+        url,
+        &call,
+        session_id.as_deref(),
+        &server.roots,
+        2,
+    ) {
+        Ok(response) => response,
+        Err(e) => {
+            return HookRun {
+                status: 1,
+                stdout: String::new(),
+                stderr: format!("MCP HTTP tools/call failed for `{server_name}`: {e}"),
+            };
+        }
+    };
     let response = match mcp_response_result(call_response) {
         Ok(response) => response,
         Err(e) => {
@@ -1819,7 +1819,10 @@ fn send_mcp_http_request(
     let mut request = client
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(reqwest::header::ACCEPT, "application/json, text/event-stream")
+        .header(
+            reqwest::header::ACCEPT,
+            "application/json, text/event-stream",
+        )
         .header("mcp-protocol-version", "2025-03-26")
         .json(message);
     if let Some(session_id) = session_id {
@@ -1851,8 +1854,8 @@ fn parse_mcp_http_sse_response_with_roots_and_notifications(
         if data == "[DONE]" {
             continue;
         }
-        let value: serde_json::Value = serde_json::from_str(data)
-            .map_err(|e| format!("invalid MCP HTTP SSE data: {e}"))?;
+        let value: serde_json::Value =
+            serde_json::from_str(data).map_err(|e| format!("invalid MCP HTTP SSE data: {e}"))?;
         if let Some(notification) = mcp_notification(&value) {
             notifications.push(notification);
             continue;
@@ -2228,7 +2231,9 @@ fn resolve_mcp_sse_endpoint(base_url: &str, endpoint: &str) -> Result<String, St
         return Ok(endpoint.to_string());
     }
     let base = url::Url::parse(base_url).map_err(|e| e.to_string())?;
-    base.join(endpoint).map(|url| url.to_string()).map_err(|e| e.to_string())
+    base.join(endpoint)
+        .map(|url| url.to_string())
+        .map_err(|e| e.to_string())
 }
 
 fn write_mcp_message<W: Write + ?Sized>(
@@ -2362,8 +2367,13 @@ fn subscribe_sse_resources(
     for uri in subscription_uris(server) {
         let id = next_id;
         next_id = next_id.saturating_add(1);
-        if post_mcp_sse_message(client, server, endpoint, &resources_subscribe_request(id, &uri))
-            .is_ok()
+        if post_mcp_sse_message(
+            client,
+            server,
+            endpoint,
+            &resources_subscribe_request(id, &uri),
+        )
+        .is_ok()
         {
             let _ = wait_for_mcp_sse_response_with_roots(
                 rx,
@@ -2937,7 +2947,12 @@ async fn run_agent_hook_async(
         max_tool_iterations: 25,
         tool_factory: factory,
         persistence: SessionPersistence::Ephemeral,
-        enabled_tools: Some(AGENT_HOOK_TOOLS.iter().map(|tool| tool.to_string()).collect()),
+        enabled_tools: Some(
+            AGENT_HOOK_TOOLS
+                .iter()
+                .map(|tool| tool.to_string())
+                .collect(),
+        ),
         append_system_prompt,
         max_tokens,
         bash_command_wrapper: None,
@@ -3062,7 +3077,11 @@ fn run_shell_hook(
         let _ = stdin.write_all(payload.to_string().as_bytes());
     }
 
-    if let Some(timeout) = hook.timeout.filter(|secs| *secs > 0).map(Duration::from_secs) {
+    if let Some(timeout) = hook
+        .timeout
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+    {
         let deadline = Instant::now() + timeout;
         loop {
             match child.try_wait() {
@@ -3072,7 +3091,8 @@ fn run_shell_hook(
                     return match child.wait_with_output() {
                         Ok(output) => {
                             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                            let timeout_msg = format!("hook timed out after {}s", timeout.as_secs());
+                            let timeout_msg =
+                                format!("hook timed out after {}s", timeout.as_secs());
                             HookRun {
                                 status: 124,
                                 stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
@@ -3130,7 +3150,11 @@ fn shell_command(command: &str, shell: &str) -> Command {
         Command::new(shell)
     };
     let shell_name = if shell.is_empty() {
-        if cfg!(windows) { "cmd" } else { "sh" }
+        if cfg!(windows) {
+            "cmd"
+        } else {
+            "sh"
+        }
     } else {
         std::path::Path::new(shell)
             .file_name()
@@ -3248,7 +3272,10 @@ fn claude_tool_alias(name: &str) -> Option<&'static str> {
 }
 
 fn condition_input_value(tool_name: &str, payload: &serde_json::Value) -> Option<String> {
-    if let Some(input) = payload.get("tool_input").or_else(|| payload.get("toolInput")) {
+    if let Some(input) = payload
+        .get("tool_input")
+        .or_else(|| payload.get("toolInput"))
+    {
         let tool = tool_name.to_ascii_lowercase();
         for key in condition_input_keys(&tool) {
             if let Some(value) = input.get(key).and_then(serde_json::Value::as_str) {
@@ -3582,7 +3609,10 @@ mod tests {
         assert_eq!(roots[0]["uri"], "file:///repo");
         assert_eq!(roots[0]["name"], "repo");
         assert_eq!(roots[1]["name"], "docs");
-        assert!(roots[1]["uri"].as_str().unwrap().starts_with("file:///tmp/docs"));
+        assert!(roots[1]["uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("file:///tmp/docs"));
     }
 
     #[test]
@@ -3759,7 +3789,10 @@ mod tests {
         );
         assert_eq!(run.status, 0, "stderr: {}", run.stderr);
         assert_eq!(run.stdout, "sampling answered");
-        assert!(reset_mcp_cli_session_for_config("docs-sampling-test", &server));
+        assert!(reset_mcp_cli_session_for_config(
+            "docs-sampling-test",
+            &server
+        ));
     }
 
     #[test]
@@ -3805,7 +3838,10 @@ mod tests {
         );
         assert_eq!(run.status, 0, "stderr: {}", run.stderr);
         assert_eq!(run.stdout, "subscribed");
-        assert!(reset_mcp_cli_session_for_config("docs-subscribe-test", &server));
+        assert!(reset_mcp_cli_session_for_config(
+            "docs-subscribe-test",
+            &server
+        ));
     }
 
     #[test]
@@ -3862,7 +3898,10 @@ mod tests {
         );
         assert_eq!(read.status, 0, "stderr: {}", read.stderr);
         assert!(read.stdout.contains("fresh context"));
-        assert!(reset_mcp_cli_session_for_config("docs-refresh-test", &server));
+        assert!(reset_mcp_cli_session_for_config(
+            "docs-refresh-test",
+            &server
+        ));
     }
 
     #[test]
@@ -4720,7 +4759,10 @@ mod tests {
 
         std::env::set_var("LIBERTAI_HOOK_TOKEN", "secret");
         let mut headers = std::collections::HashMap::new();
-        headers.insert("x-test-token".to_string(), "token-$LIBERTAI_HOOK_TOKEN".to_string());
+        headers.insert(
+            "x-test-token".to_string(),
+            "token-$LIBERTAI_HOOK_TOKEN".to_string(),
+        );
         let hook = HookCommandConfig {
             hook_type: "http".to_string(),
             url: format!("http://{addr}/hook"),
@@ -4779,7 +4821,9 @@ mod tests {
             &json!({"event":"PreToolUse","toolName":"bash"}),
         );
         assert_eq!(messages.len(), 2);
-        assert!(messages[0].content.contains("Claude Code-style hook handler"));
+        assert!(messages[0]
+            .content
+            .contains("Claude Code-style hook handler"));
         assert!(messages[1].content.contains("Review this payload."));
         assert!(messages[1].content.contains("\"toolName\": \"bash\""));
     }
@@ -4828,11 +4872,9 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(std::fs::read_to_string(event_path).unwrap(), "PostToolUse");
-        assert!(
-            std::fs::read_to_string(payload_path)
-                .unwrap()
-                .contains("\"event\":\"PostToolUse\"")
-        );
+        assert!(std::fs::read_to_string(payload_path)
+            .unwrap()
+            .contains("\"event\":\"PostToolUse\""));
     }
 
     #[test]
@@ -5109,8 +5151,7 @@ mod tests {
             default_code_model: "test-code-model".to_string(),
             ..Config::default()
         };
-        let payload =
-            lifecycle_payload(std::path::Path::new("/tmp/project"), &cfg, "SessionStart");
+        let payload = lifecycle_payload(std::path::Path::new("/tmp/project"), &cfg, "SessionStart");
 
         assert_eq!(payload["event"], "SessionStart");
         assert_eq!(payload["provider"], "libertai");

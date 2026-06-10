@@ -163,7 +163,9 @@ impl Tool for GuardrailTool {
             match after {
                 GuardrailDecision::Allow => {}
                 GuardrailDecision::Warn(warning) => prepend_warning(output, &warning),
-                GuardrailDecision::Halt(reason) => return Ok(guardrail_output(&reason, true).into()),
+                GuardrailDecision::Halt(reason) => {
+                    return Ok(guardrail_output(&reason, true).into())
+                }
             }
         }
         Ok(execution)
@@ -184,7 +186,9 @@ impl Tool for GuardrailTool {
             match after {
                 GuardrailDecision::Allow => {}
                 GuardrailDecision::Warn(warning) => prepend_warning(output, &warning),
-                GuardrailDecision::Halt(reason) => return Ok(guardrail_output(&reason, true).into()),
+                GuardrailDecision::Halt(reason) => {
+                    return Ok(guardrail_output(&reason, true).into())
+                }
             }
         }
         Ok(execution)
@@ -199,9 +203,10 @@ fn execution_output_mut(execution: &mut ToolExecution) -> Option<&mut ToolOutput
 }
 
 fn prepend_warning(output: &mut ToolOutput, warning: &str) {
-    output
-        .content
-        .insert(0, ContentBlock::Text(TextContent::new(format!("{warning}\n"))));
+    output.content.insert(
+        0,
+        ContentBlock::Text(TextContent::new(format!("{warning}\n"))),
+    );
 }
 
 fn guardrail_output(reason: &str, is_error: bool) -> ToolOutput {
@@ -268,11 +273,19 @@ fn trailing_exact_count(calls: &VecDeque<RecentCall>, tool: &str, args: &str) ->
 }
 
 fn trailing_tool_count(calls: &VecDeque<RecentCall>, tool: &str) -> usize {
-    calls.iter().rev().take_while(|call| call.tool == tool).count()
+    calls
+        .iter()
+        .rev()
+        .take_while(|call| call.tool == tool)
+        .count()
 }
 
 fn trailing_result_count(results: &VecDeque<String>, hash: &str) -> usize {
-    results.iter().rev().take_while(|item| *item == hash).count()
+    results
+        .iter()
+        .rev()
+        .take_while(|item| *item == hash)
+        .count()
 }
 
 fn trim_deque<T>(deque: &mut VecDeque<T>, max_len: usize) {
@@ -299,8 +312,14 @@ mod tests {
     #[test]
     fn warns_then_halts_repeated_exact_calls() {
         let mut state = ToolGuardrailState::default();
-        assert_eq!(state.before_call("read", &input("a")), GuardrailDecision::Allow);
-        assert_eq!(state.before_call("read", &input("a")), GuardrailDecision::Allow);
+        assert_eq!(
+            state.before_call("read", &input("a")),
+            GuardrailDecision::Allow
+        );
+        assert_eq!(
+            state.before_call("read", &input("a")),
+            GuardrailDecision::Allow
+        );
         assert!(matches!(
             state.before_call("read", &input("a")),
             GuardrailDecision::Warn(_)

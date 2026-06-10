@@ -290,15 +290,10 @@ fn default_lib_paths() -> Vec<PathBuf> {
 }
 
 fn default_config_paths() -> Vec<PathBuf> {
-    [
-        "/etc/passwd",
-        "/etc/group",
-        "/etc/resolv.conf",
-        "/etc/ssl",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .collect()
+    ["/etc/passwd", "/etc/group", "/etc/resolv.conf", "/etc/ssl"]
+        .iter()
+        .map(PathBuf::from)
+        .collect()
 }
 
 fn default_env(cwd: &Path) -> Vec<(String, String)> {
@@ -488,13 +483,17 @@ pub fn format_profile_text(profile: &StrictProfile) -> String {
     let _ = writeln!(
         out,
         "  network:  {}",
-        if profile.network_allowed { "ALLOWED" } else { "blocked" }
+        if profile.network_allowed {
+            "ALLOWED"
+        } else {
+            "blocked"
+        }
     );
     let _ = writeln!(out);
     for (label, kind) in [
         ("Binary paths (bound, prepended to $PATH)", BindKind::Bin),
-        ("Library paths (bound, no $PATH entry)",     BindKind::Lib),
-        ("Config files",                              BindKind::Config),
+        ("Library paths (bound, no $PATH entry)", BindKind::Lib),
+        ("Config files", BindKind::Config),
     ] {
         let _ = writeln!(out, "  {label}:");
         for b in profile.binds.iter().filter(|b| b.kind == kind) {
@@ -504,11 +503,7 @@ pub fn format_profile_text(profile: &StrictProfile) -> String {
                 BindSource::Default => "",
                 BindSource::Custom => " [custom]",
             };
-            let _ = writeln!(
-                out,
-                "    [{presence}]{state}{src} {}",
-                b.path.display()
-            );
+            let _ = writeln!(out, "    [{presence}]{state}{src} {}", b.path.display());
         }
         let _ = writeln!(out);
     }
@@ -554,7 +549,10 @@ mod tests {
         let p = detect_strict_profile(&PathBuf::from("/work"));
         // Every default entry should appear once.
         assert!(p.binds.iter().any(|b| b.path == PathBuf::from("/usr/bin")));
-        assert!(p.binds.iter().any(|b| b.path == PathBuf::from("/etc/passwd")));
+        assert!(p
+            .binds
+            .iter()
+            .any(|b| b.path == PathBuf::from("/etc/passwd")));
         // All defaults start enabled.
         assert!(p.binds.iter().all(|b| b.enabled));
     }
@@ -615,13 +613,16 @@ mod tests {
     fn path_env_reflects_enabled_bins() {
         let mut profile = detect_strict_profile(&PathBuf::from("/work"));
         // Disable /usr/bin to make sure it drops out.
-        apply_policy_override(&mut profile, &SandboxPolicy {
-            disabled: vec![PathBuf::from("/usr/bin")],
-            custom: vec![CustomBind {
-                path: PathBuf::from("/opt/custom/bin"),
-                kind: BindKind::Bin,
-            }],
-        });
+        apply_policy_override(
+            &mut profile,
+            &SandboxPolicy {
+                disabled: vec![PathBuf::from("/usr/bin")],
+                custom: vec![CustomBind {
+                    path: PathBuf::from("/opt/custom/bin"),
+                    kind: BindKind::Bin,
+                }],
+            },
+        );
         let argv = profile_to_argv(&profile);
         let path_idx = argv.iter().position(|a| a == "PATH").unwrap();
         let path_val = &argv[path_idx + 1];
@@ -636,7 +637,9 @@ mod tests {
         if super::binary_on_path("bwrap").is_some() {
             return;
         }
-        assert!(build_command_wrapper(SandboxMode::Strict, &PathBuf::from("/work"), None).is_none());
+        assert!(
+            build_command_wrapper(SandboxMode::Strict, &PathBuf::from("/work"), None).is_none()
+        );
         assert!(!is_strict_supported());
     }
 

@@ -338,7 +338,10 @@ mod tests {
 
     #[test]
     fn diff_preview_caps_long_output() {
-        let content = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let content = (0..100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let preview = approval_diff_preview("write", &json!({"content": content})).unwrap();
         assert!(preview.contains("lines omitted"));
         assert!(preview.lines().count() <= MAX_DIFF_LINES + 1);
@@ -349,8 +352,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("notes.txt");
         std::fs::write(&path, "alpha\nbeta\n").unwrap();
-        let snapshot = file_snapshot_before_tool("write", &json!({"path":"notes.txt"}), temp.path())
-            .unwrap();
+        let snapshot =
+            file_snapshot_before_tool("write", &json!({"path":"notes.txt"}), temp.path()).unwrap();
 
         std::fs::write(&path, "alpha\ngamma\n").unwrap();
         let diff = post_execution_diff(&snapshot).unwrap();
@@ -363,8 +366,8 @@ mod tests {
     #[test]
     fn post_execution_diff_renders_new_file_from_missing_snapshot() {
         let temp = tempfile::tempdir().unwrap();
-        let snapshot = file_snapshot_before_tool("write", &json!({"path":"new.txt"}), temp.path())
-            .unwrap();
+        let snapshot =
+            file_snapshot_before_tool("write", &json!({"path":"new.txt"}), temp.path()).unwrap();
 
         std::fs::write(temp.path().join("new.txt"), "hello\n").unwrap();
         let diff = post_execution_diff(&snapshot).unwrap();

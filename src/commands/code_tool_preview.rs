@@ -238,7 +238,10 @@ mod tests {
             "write notes.md (5B)"
         );
         assert_eq!(
-            tool_preview("hashline_edit", &json!({"path":"src/lib.rs","edits":[{},{}]})),
+            tool_preview(
+                "hashline_edit",
+                &json!({"path":"src/lib.rs","edits":[{},{}]})
+            ),
             "hashline_edit src/lib.rs (2 edits)"
         );
     }

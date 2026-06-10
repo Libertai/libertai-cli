@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
-use owo_colors::OwoColorize;
 use std::path::{Path, PathBuf};
 
 use crate::cli::SkillsAction;
+use crate::commands::output::Styler;
 
 struct BundledSkill {
     /// Directory name under `.claude/skills/`.
@@ -56,13 +56,12 @@ pub fn install(host: Host, project: bool, force: bool) -> Result<()> {
         if skill_path.exists() && !force {
             continue;
         }
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         std::fs::write(&skill_path, s.body)
             .with_context(|| format!("writing {}", skill_path.display()))?;
         eprintln!(
             "  {} {}",
-            "skill:".dimmed(),
+            Styler::stderr().dimmed("skill:"),
             skill_path.display()
         );
     }
@@ -74,8 +73,7 @@ pub fn uninstall(host: Host, project: bool) -> Result<()> {
     for s in BUNDLED {
         let dir = base.join(s.name);
         if dir.exists() {
-            std::fs::remove_dir_all(&dir)
-                .with_context(|| format!("removing {}", dir.display()))?;
+            std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
             eprintln!("removed skill: {}", dir.display());
         }
     }
@@ -93,8 +91,7 @@ pub fn install_if_missing(host: Host) -> Result<usize> {
         if skill_path.exists() {
             continue;
         }
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         std::fs::write(&skill_path, s.body)
             .with_context(|| format!("writing {}", skill_path.display()))?;
         installed += 1;
