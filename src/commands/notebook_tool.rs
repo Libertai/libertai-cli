@@ -132,15 +132,19 @@ Use this instead of raw JSON reads when inspecting notebooks."
             Err(e) => return Ok(err_output(&format!("invalid `notebook_read` payload: {e}"))),
         };
 
-        let max_chars = parsed.max_chars.unwrap_or(MAX_READ_CHARS).clamp(1_000, 50_000);
+        let max_chars = parsed
+            .max_chars
+            .unwrap_or(MAX_READ_CHARS)
+            .clamp(1_000, 50_000);
         let notebook = match read_notebook(&parsed.path) {
             Ok(v) => v,
             Err(e) => return Ok(err_output(&e)),
         };
-        let summary = match summarize_notebook(&parsed.path, &notebook, parsed.cell_index, max_chars) {
-            Ok(v) => v,
-            Err(e) => return Ok(err_output(&e)),
-        };
+        let summary =
+            match summarize_notebook(&parsed.path, &notebook, parsed.cell_index, max_chars) {
+                Ok(v) => v,
+                Err(e) => return Ok(err_output(&e)),
+            };
         Ok(notebook_output(&summary, &notebook, false))
     }
 
@@ -236,9 +240,16 @@ then return a compact cell/output summary. This mutates notebook outputs and sho
     ) -> PiResult<ToolExecution> {
         let parsed: NotebookExecuteInput = match serde_json::from_value(input) {
             Ok(v) => v,
-            Err(e) => return Ok(err_output(&format!("invalid `notebook_execute` payload: {e}"))),
+            Err(e) => {
+                return Ok(err_output(&format!(
+                    "invalid `notebook_execute` payload: {e}"
+                )))
+            }
         };
-        let max_chars = parsed.max_chars.unwrap_or(MAX_READ_CHARS).clamp(1_000, 50_000);
+        let max_chars = parsed
+            .max_chars
+            .unwrap_or(MAX_READ_CHARS)
+            .clamp(1_000, 50_000);
         let timeout = parsed
             .timeout_seconds
             .unwrap_or(DEFAULT_EXECUTE_TIMEOUT_SECS)
@@ -521,7 +532,10 @@ fn source_to_string(source: Option<&Value>) -> String {
 fn output_preview(output: &Value) -> String {
     if let Some(output_type) = output.get("output_type").and_then(Value::as_str) {
         if output_type == "error" {
-            let ename = output.get("ename").and_then(Value::as_str).unwrap_or("error");
+            let ename = output
+                .get("ename")
+                .and_then(Value::as_str)
+                .unwrap_or("error");
             let evalue = output.get("evalue").and_then(Value::as_str).unwrap_or("");
             let traceback = output
                 .get("traceback")
@@ -583,7 +597,10 @@ fn output_label(output: &Value) -> String {
         .unwrap_or("output");
     match output_type {
         "stream" => {
-            let name = output.get("name").and_then(Value::as_str).unwrap_or("stream");
+            let name = output
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("stream");
             format!("stream/{name}")
         }
         "display_data" | "execute_result" => {
@@ -599,7 +616,10 @@ fn output_label(output: &Value) -> String {
             format!("{output_type} [{mimes}]")
         }
         "error" => {
-            let ename = output.get("ename").and_then(Value::as_str).unwrap_or("error");
+            let ename = output
+                .get("ename")
+                .and_then(Value::as_str)
+                .unwrap_or("error");
             format!("error/{ename}")
         }
         other => other.to_string(),
@@ -661,7 +681,10 @@ fn replace_cell_source(cell: &mut Value, cell_type: &str, source: &str) -> Resul
     let object = cell
         .as_object_mut()
         .ok_or_else(|| "target cell is not a JSON object".to_string())?;
-    object.insert("cell_type".to_string(), Value::String(cell_type.to_string()));
+    object.insert(
+        "cell_type".to_string(),
+        Value::String(cell_type.to_string()),
+    );
     object.insert("source".to_string(), Value::Array(source_lines(source)));
     object
         .entry("metadata".to_string())
@@ -670,7 +693,9 @@ fn replace_cell_source(cell: &mut Value, cell_type: &str, source: &str) -> Resul
         object
             .entry("execution_count".to_string())
             .or_insert(Value::Null);
-        object.entry("outputs".to_string()).or_insert_with(|| json!([]));
+        object
+            .entry("outputs".to_string())
+            .or_insert_with(|| json!([]));
     }
     Ok(())
 }
@@ -693,7 +718,9 @@ fn new_cell(cell_type: &str, source: &str) -> Result<Value, String> {
 fn validate_cell_type(cell_type: &str) -> Result<(), String> {
     match cell_type {
         "code" | "markdown" | "raw" => Ok(()),
-        other => Err(format!("unsupported cell_type `{other}`; use code, markdown, or raw")),
+        other => Err(format!(
+            "unsupported cell_type `{other}`; use code, markdown, or raw"
+        )),
     }
 }
 
@@ -728,7 +755,11 @@ fn text_output(text: &str, is_error: bool) -> ToolExecution {
 
 fn notebook_output(text: &str, notebook: &Value, is_error: bool) -> ToolExecution {
     let mut content = vec![ContentBlock::Text(TextContent::new(text.to_string()))];
-    content.extend(notebook_images(notebook).into_iter().map(ContentBlock::Image));
+    content.extend(
+        notebook_images(notebook)
+            .into_iter()
+            .map(ContentBlock::Image),
+    );
     ToolOutput {
         content,
         details: None,
@@ -852,8 +883,8 @@ mod tests {
 
     #[test]
     fn summarize_single_cell_checks_range() {
-        let err = summarize_notebook("demo.ipynb", &sample_notebook(), Some(3), 10_000)
-            .unwrap_err();
+        let err =
+            summarize_notebook("demo.ipynb", &sample_notebook(), Some(3), 10_000).unwrap_err();
         assert!(err.contains("out of range"));
     }
 
@@ -876,7 +907,10 @@ mod tests {
     #[test]
     fn new_markdown_cell_has_expected_shape() {
         let cell = new_cell("markdown", "hello\nworld").unwrap();
-        assert_eq!(cell.get("cell_type").and_then(Value::as_str), Some("markdown"));
+        assert_eq!(
+            cell.get("cell_type").and_then(Value::as_str),
+            Some("markdown")
+        );
         assert_eq!(source_to_string(cell.get("source")), "hello\nworld");
         assert!(cell.get("outputs").is_none());
     }
@@ -928,9 +962,7 @@ mod tests {
             panic!("expected done output");
         };
         assert_eq!(output.content.len(), 3);
-        assert!(
-            matches!(&output.content[0], ContentBlock::Text(text) if text.text == "summary")
-        );
+        assert!(matches!(&output.content[0], ContentBlock::Text(text) if text.text == "summary"));
         assert!(
             matches!(&output.content[1], ContentBlock::Image(image) if image.mime_type == "image/png")
         );
@@ -947,7 +979,11 @@ mod tests {
             std::process::id(),
             "edit"
         ));
-        fs::write(&path, serde_json::to_string_pretty(&sample_notebook()).unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&sample_notebook()).unwrap(),
+        )
+        .unwrap();
 
         let path_str = path.to_string_lossy().to_string();
         edit_notebook_file(&NotebookEditInput {

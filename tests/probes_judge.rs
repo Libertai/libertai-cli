@@ -30,10 +30,10 @@ const DEFAULT_JUDGE_MODEL: &str = "hermes-3-8b-tee";
 pub fn judge(criterion: &str, payload: &str) -> bool {
     let key = resolve_api_key()
         .expect("tier-2 probes need an API key — set LIBERTAI_API_KEY or run `libertai login`");
-    let api_base = std::env::var("LIBERTAI_API_BASE")
-        .unwrap_or_else(|_| DEFAULT_API_BASE.to_string());
-    let model = std::env::var("LIBERTAI_JUDGE_MODEL")
-        .unwrap_or_else(|_| DEFAULT_JUDGE_MODEL.to_string());
+    let api_base =
+        std::env::var("LIBERTAI_API_BASE").unwrap_or_else(|_| DEFAULT_API_BASE.to_string());
+    let model =
+        std::env::var("LIBERTAI_JUDGE_MODEL").unwrap_or_else(|_| DEFAULT_JUDGE_MODEL.to_string());
 
     let url = format!("{}/v1/chat/completions", api_base.trim_end_matches('/'));
 
@@ -103,10 +103,7 @@ fn resolve_api_key() -> Option<String> {
 #[ignore = "tier-2: hits the LibertAI API; gate with --include-ignored"]
 fn judge_smoke_says_yes_to_obvious_match() {
     assert!(
-        judge(
-            "is the payload the single letter A (uppercase)",
-            "A"
-        ),
+        judge("is the payload the single letter A (uppercase)", "A"),
         "judge should say yes for an obvious match"
     );
 }
@@ -115,10 +112,7 @@ fn judge_smoke_says_yes_to_obvious_match() {
 #[ignore = "tier-2: hits the LibertAI API; gate with --include-ignored"]
 fn judge_smoke_says_no_to_obvious_mismatch() {
     assert!(
-        !judge(
-            "is the payload the single letter A (uppercase)",
-            "Z"
-        ),
+        !judge("is the payload the single letter A (uppercase)", "Z"),
         "judge should say no for an obvious mismatch"
     );
 }

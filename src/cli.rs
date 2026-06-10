@@ -199,7 +199,21 @@ pub enum Command {
         /// Also honours the `LIBERTAI_SANDBOX` env var.
         #[arg(long, value_enum, env = "LIBERTAI_SANDBOX", default_value_t = crate::commands::code_sandbox::SandboxMode::Off)]
         sandbox: crate::commands::code_sandbox::SandboxMode,
-        /// Initial prompt (non-interactive mode if `--print`).
+        /// Print mode (like `claude -p`): run a single agent turn
+        /// headlessly and exit — no TUI, no interactive prompts. The
+        /// assistant's text streams to stdout; turn/tool noise goes to
+        /// stderr. Tool calls not already covered by an allow rule are
+        /// auto-denied instead of prompting, so scripts never hang.
+        /// The prompt comes from the trailing args, piped stdin, or
+        /// both (stdin becomes context above the args prompt). Composes
+        /// with `--resume` / `--continue` to run one more headless turn
+        /// against a saved session.
+        #[arg(long, short = 'p', conflicts_with = "list_sessions")]
+        print: bool,
+        /// Initial prompt. When given, runs a single one-shot turn and
+        /// exits (tool approvals still prompt on the terminal unless
+        /// `--print` is also set). Without a prompt and without
+        /// `--print`, starts the interactive REPL.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -421,6 +435,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             list_sessions,
             all,
             sandbox,
+            print,
             args,
         } => crate::commands::code::run(
             model,
@@ -431,6 +446,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             list_sessions,
             all,
             sandbox,
+            print,
             args,
         ),
         Command::Config { action } => crate::commands::config_cmd::run(action),

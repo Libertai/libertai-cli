@@ -77,12 +77,18 @@ impl Tool for PushNotificationTool {
     ) -> PiResult<ToolExecution> {
         let parsed: NotificationInput = match serde_json::from_value(input) {
             Ok(v) => v,
-            Err(e) => return Ok(err_output(&format!("invalid `push_notification` payload: {e}"))),
+            Err(e) => {
+                return Ok(err_output(&format!(
+                    "invalid `push_notification` payload: {e}"
+                )))
+            }
         };
         let title = parsed.title.trim();
         let body = parsed.body.trim();
         if title.is_empty() || body.is_empty() {
-            return Ok(err_output("push_notification requires non-empty title and body"));
+            return Ok(err_output(
+                "push_notification requires non-empty title and body",
+            ));
         }
 
         let outcome = self.ui.notify(title, body).await;
@@ -92,9 +98,10 @@ impl Tool for PushNotificationTool {
 
         match outcome {
             NotifyOutcome::Sent => Ok(text_output("notification sent", false)),
-            NotifyOutcome::Skipped(reason) => {
-                Ok(text_output(&format!("notification skipped: {reason}"), false))
-            }
+            NotifyOutcome::Skipped(reason) => Ok(text_output(
+                &format!("notification skipped: {reason}"),
+                false,
+            )),
         }
     }
 

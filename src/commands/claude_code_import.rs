@@ -82,15 +82,22 @@ pub fn discover(cwd: &Path, all_projects: bool) -> Result<Vec<DiscoveredSession>
     } else {
         let encoded = encode_project_dir(cwd);
         let p = root.join(&encoded);
-        if p.is_dir() { vec![p] } else { Vec::new() }
+        if p.is_dir() {
+            vec![p]
+        } else {
+            Vec::new()
+        }
     };
 
     let mut sessions = Vec::new();
     for proj in &project_dirs {
-        let entries = std::fs::read_dir(proj)
-            .with_context(|| format!("read_dir({})", proj.display()))?;
+        let entries =
+            std::fs::read_dir(proj).with_context(|| format!("read_dir({})", proj.display()))?;
         for entry in entries {
-            let entry = match entry { Ok(e) => e, Err(_) => continue };
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
@@ -108,7 +115,10 @@ pub fn discover(cwd: &Path, all_projects: bool) -> Result<Vec<DiscoveredSession>
 fn list_project_dirs(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(root)? {
-        let entry = match entry { Ok(e) => e, Err(_) => continue };
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
         if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             out.push(entry.path());
         }
@@ -168,8 +178,13 @@ fn peek_jsonl(path: &Path) -> Result<PeekInfo> {
     let reader = BufReader::new(file);
     let mut info = PeekInfo::default();
     for line in reader.lines() {
-        let line = match line { Ok(l) => l, Err(_) => continue };
-        if line.trim().is_empty() { continue; }
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
         info.record_count += 1;
         let rec: RecordHead = match serde_json::from_str(&line) {
             Ok(r) => r,
@@ -179,18 +194,20 @@ fn peek_jsonl(path: &Path) -> Result<PeekInfo> {
             info.claude_code_summary = rec.summary;
         }
         if info.recorded_cwd.is_none() {
-            if let Some(c) = rec.cwd { info.recorded_cwd = Some(PathBuf::from(c)); }
+            if let Some(c) = rec.cwd {
+                info.recorded_cwd = Some(PathBuf::from(c));
+            }
         }
         if info.git_branch.is_none() && rec.git_branch.is_some() {
             info.git_branch = rec.git_branch;
         }
-        if info.first_user_message.is_none()
-            && rec.typ.as_deref() == Some("user")
-        {
+        if info.first_user_message.is_none() && rec.typ.as_deref() == Some("user") {
             if let Some(msg) = rec.message {
                 if msg.role.as_deref() == Some("user") {
-                    info.first_user_message =
-                        msg.content.and_then(extract_text).map(|s| truncate(&s, 120));
+                    info.first_user_message = msg
+                        .content
+                        .and_then(extract_text)
+                        .map(|s| truncate(&s, 120));
                 }
             }
         }
@@ -250,8 +267,14 @@ fn truncate(s: &str, max: usize) -> String {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LinearMessage {
-    User { text: String, timestamp: Option<String> },
-    Assistant { text: String, timestamp: Option<String> },
+    User {
+        text: String,
+        timestamp: Option<String>,
+    },
+    Assistant {
+        text: String,
+        timestamp: Option<String>,
+    },
     ToolUse {
         name: String,
         args_preview: String,
@@ -316,8 +339,13 @@ pub fn linearize(jsonl_path: &Path) -> Result<LinearizedSession> {
     let mut git_branch: Option<String> = None;
 
     for line in reader.lines() {
-        let line = match line { Ok(l) => l, Err(_) => continue };
-        if line.trim().is_empty() { continue; }
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
         let rec: RawRecord = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(_) => continue,
@@ -327,10 +355,14 @@ pub fn linearize(jsonl_path: &Path) -> Result<LinearizedSession> {
             continue;
         }
         if recorded_cwd.is_none() {
-            if let Some(c) = &rec.cwd { recorded_cwd = Some(PathBuf::from(c)); }
+            if let Some(c) = &rec.cwd {
+                recorded_cwd = Some(PathBuf::from(c));
+            }
         }
         if git_branch.is_none() {
-            if let Some(b) = &rec.git_branch { git_branch = Some(b.clone()); }
+            if let Some(b) = &rec.git_branch {
+                git_branch = Some(b.clone());
+            }
         }
         records.push(rec);
     }
@@ -340,7 +372,10 @@ pub fn linearize(jsonl_path: &Path) -> Result<LinearizedSession> {
     let dropped_branches = total_records.saturating_sub(chain.len()).saturating_sub(
         // `summary` index records aren't part of any user-visible branch;
         // don't count them against the "branches dropped" stat.
-        records.iter().filter(|r| r.typ.as_deref() == Some("summary")).count(),
+        records
+            .iter()
+            .filter(|r| r.typ.as_deref() == Some("summary"))
+            .count(),
     );
 
     let mut messages = Vec::new();
@@ -407,7 +442,11 @@ pub fn linearize(jsonl_path: &Path) -> Result<LinearizedSession> {
 }
 
 #[derive(Copy, Clone)]
-enum Role { User, Assistant, Unknown }
+enum Role {
+    User,
+    Assistant,
+    Unknown,
+}
 
 fn role_of(rec: &RawRecord) -> Role {
     match rec.typ.as_deref() {
@@ -429,8 +468,14 @@ fn iter_content_blocks(value: &serde_json::Value) -> Vec<serde_json::Value> {
 
 enum Block {
     Text(String),
-    ToolUse { name: String, input: serde_json::Value },
-    ToolResult { content: serde_json::Value, is_error: bool },
+    ToolUse {
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        content: serde_json::Value,
+        is_error: bool,
+    },
     Other,
 }
 
@@ -438,15 +483,32 @@ fn classify_block(block: &serde_json::Value) -> Block {
     let typ = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match typ {
         "text" => Block::Text(
-            block.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            block
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
         ),
         "tool_use" => Block::ToolUse {
-            name: block.get("name").and_then(|v| v.as_str()).unwrap_or("tool").to_string(),
-            input: block.get("input").cloned().unwrap_or(serde_json::Value::Null),
+            name: block
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("tool")
+                .to_string(),
+            input: block
+                .get("input")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
         },
         "tool_result" => Block::ToolResult {
-            content: block.get("content").cloned().unwrap_or(serde_json::Value::Null),
-            is_error: block.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false),
+            content: block
+                .get("content")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            is_error: block
+                .get("is_error")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         },
         _ => Block::Other,
     }
@@ -471,8 +533,12 @@ fn record_file_ops(
     let Some(p) = path_str else { return };
     let path = PathBuf::from(p);
     match tool {
-        "Read" => { read_files.insert(path); }
-        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => { modified_files.insert(path); }
+        "Read" => {
+            read_files.insert(path);
+        }
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
+            modified_files.insert(path);
+        }
         _ => {}
     }
 }
@@ -492,7 +558,9 @@ fn tool_result_preview(content: &serde_json::Value) -> String {
         let mut out = String::new();
         for item in arr {
             if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
-                if !out.is_empty() { out.push('\n'); }
+                if !out.is_empty() {
+                    out.push('\n');
+                }
                 out.push_str(t);
             }
         }
@@ -509,22 +577,35 @@ fn pick_live_branch(records: &[RawRecord]) -> Vec<usize> {
     let mut by_uuid: HashMap<&str, usize> = HashMap::new();
     let mut children: HashSet<&str> = HashSet::new();
     for (i, r) in records.iter().enumerate() {
-        if let Some(u) = r.uuid.as_deref() { by_uuid.insert(u, i); }
-        if let Some(p) = r.parent_uuid.as_deref() { children.insert(p); }
+        if let Some(u) = r.uuid.as_deref() {
+            by_uuid.insert(u, i);
+        }
+        if let Some(p) = r.parent_uuid.as_deref() {
+            children.insert(p);
+        }
     }
     let mut leaves: Vec<usize> = Vec::new();
     for (i, r) in records.iter().enumerate() {
-        let uuid = match r.uuid.as_deref() { Some(u) => u, None => continue };
-        if r.typ.as_deref() == Some("summary") { continue; }
+        let uuid = match r.uuid.as_deref() {
+            Some(u) => u,
+            None => continue,
+        };
+        if r.typ.as_deref() == Some("summary") {
+            continue;
+        }
         if !children.contains(uuid) {
             leaves.push(i);
         }
     }
     if leaves.is_empty() {
-        return (0..records.len()).filter(|&i| records[i].typ.as_deref() != Some("summary")).collect();
+        return (0..records.len())
+            .filter(|&i| records[i].typ.as_deref() != Some("summary"))
+            .collect();
     }
     leaves.sort_by(|&a, &b| {
-        records[b].timestamp.cmp(&records[a].timestamp)
+        records[b]
+            .timestamp
+            .cmp(&records[a].timestamp)
             .then_with(|| b.cmp(&a))
     });
     let leaf = leaves[0];
@@ -658,15 +739,12 @@ pub struct WrittenPiSession {
 /// schema, this fails to compile rather than silently producing
 /// broken sessions.
 pub fn write_pi_session_file(inputs: PiSessionInputs<'_>) -> Result<WrittenPiSession> {
-    use pi::session::{
-        encode_cwd, CompactionEntry, EntryBase, SessionEntry, SessionHeader,
-    };
+    use pi::session::{encode_cwd, CompactionEntry, EntryBase, SessionEntry, SessionHeader};
     use pi::session_index::SessionIndex;
 
     let sessions_root = pi_sessions_root()?;
     let dir = sessions_root.join(encode_cwd(inputs.cwd));
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create_dir_all({})", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create_dir_all({})", dir.display()))?;
 
     let mut header = SessionHeader::new();
     header.cwd = inputs.cwd.display().to_string();
@@ -694,24 +772,33 @@ pub fn write_pi_session_file(inputs: PiSessionInputs<'_>) -> Result<WrittenPiSes
         from_hook: Some(false),
     });
 
-    let file_name = format!("{}_{}.jsonl", fs_safe_timestamp(&header.timestamp), &session_id[..8]);
+    let file_name = format!(
+        "{}_{}.jsonl",
+        fs_safe_timestamp(&header.timestamp),
+        &session_id[..8]
+    );
     let jsonl_path = dir.join(file_name);
 
-    let mut buf = serde_json::to_string(&header)
-        .context("serialize SessionHeader")?;
+    let mut buf = serde_json::to_string(&header).context("serialize SessionHeader")?;
     buf.push('\n');
     buf.push_str(&serde_json::to_string(&compaction).context("serialize Compaction entry")?);
     buf.push('\n');
-    std::fs::write(&jsonl_path, buf)
-        .with_context(|| format!("write {}", jsonl_path.display()))?;
+    std::fs::write(&jsonl_path, buf).with_context(|| format!("write {}", jsonl_path.display()))?;
 
     // Register in pi's SQLite index so `libertai code --list-sessions`
     // and the desktop picker see the new session immediately. Without
     // this, the file is on disk but pi only walks it on a full reindex.
-    let _ = SessionIndex::for_sessions_root(&sessions_root)
-        .index_session_snapshot(&jsonl_path, &header, 1, None);
+    let _ = SessionIndex::for_sessions_root(&sessions_root).index_session_snapshot(
+        &jsonl_path,
+        &header,
+        1,
+        None,
+    );
 
-    Ok(WrittenPiSession { session_id, jsonl_path })
+    Ok(WrittenPiSession {
+        session_id,
+        jsonl_path,
+    })
 }
 
 /// `$PI_HOME` override (used by tests) → `~/.pi`, suffixed with
@@ -763,11 +850,19 @@ pub fn render_transcript(session: &LinearizedSession) -> String {
                 out.push_str(text.trim());
                 out.push_str("\n\n");
             }
-            LinearMessage::ToolUse { name, args_preview, .. } => {
+            LinearMessage::ToolUse {
+                name, args_preview, ..
+            } => {
                 out.push_str(&format!("### TOOL {name}\n{args_preview}\n\n"));
             }
-            LinearMessage::ToolResult { preview, is_error, .. } => {
-                out.push_str(if *is_error { "### TOOL RESULT (error)\n" } else { "### TOOL RESULT\n" });
+            LinearMessage::ToolResult {
+                preview, is_error, ..
+            } => {
+                out.push_str(if *is_error {
+                    "### TOOL RESULT (error)\n"
+                } else {
+                    "### TOOL RESULT\n"
+                });
                 out.push_str(preview);
                 out.push_str("\n\n");
             }
@@ -784,7 +879,10 @@ mod systime_serde {
     use serde::Serializer;
 
     pub fn serialize<S: Serializer>(t: &SystemTime, s: S) -> Result<S::Ok, S::Error> {
-        let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let secs = t
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let dt = DateTime::<Utc>::from_timestamp(secs as i64, 0).unwrap_or_default();
         s.serialize_str(&dt.to_rfc3339())
     }
@@ -851,7 +949,11 @@ mod tests {
     }
 
     fn assistant_tool_use(
-        uuid: &str, parent: &str, ts: &str, tool: &str, input: serde_json::Value,
+        uuid: &str,
+        parent: &str,
+        ts: &str,
+        tool: &str,
+        input: serde_json::Value,
     ) -> serde_json::Value {
         serde_json::json!({
             "type": "assistant", "uuid": uuid, "parentUuid": parent,
@@ -867,16 +969,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("s.jsonl");
         // root → u1 → a1 (early leaf) AND root → u1 → a2 (later leaf, the "live" branch).
-        write_records(&path, &[
-            user("u1", None, "2026-05-21T10:00:00Z", "hello"),
-            assistant_text("a1", "u1", "2026-05-21T10:00:05Z", "old reply"),
-            assistant_text("a2", "u1", "2026-05-21T10:01:00Z", "new reply"),
-        ]);
+        write_records(
+            &path,
+            &[
+                user("u1", None, "2026-05-21T10:00:00Z", "hello"),
+                assistant_text("a1", "u1", "2026-05-21T10:00:05Z", "old reply"),
+                assistant_text("a2", "u1", "2026-05-21T10:01:00Z", "new reply"),
+            ],
+        );
         let lin = linearize(&path).unwrap();
-        let texts: Vec<&str> = lin.messages.iter().filter_map(|m| match m {
-            LinearMessage::Assistant { text, .. } => Some(text.as_str()),
-            _ => None,
-        }).collect();
+        let texts: Vec<&str> = lin
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                LinearMessage::Assistant { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(texts, vec!["new reply"], "expected the latest-leaf branch");
         assert_eq!(lin.dropped_sidechain, 0);
     }
@@ -890,11 +999,14 @@ mod tests {
             "timestamp": "2026-05-21T10:00:00Z", "isSidechain": true,
             "message": { "role": "user", "content": "sub-agent prompt" },
         });
-        write_records(&path, &[
-            sidechain,
-            user("u1", None, "2026-05-21T10:00:00Z", "hi"),
-            assistant_text("a1", "u1", "2026-05-21T10:00:05Z", "hello"),
-        ]);
+        write_records(
+            &path,
+            &[
+                sidechain,
+                user("u1", None, "2026-05-21T10:00:00Z", "hi"),
+                assistant_text("a1", "u1", "2026-05-21T10:00:05Z", "hello"),
+            ],
+        );
         let lin = linearize(&path).unwrap();
         assert_eq!(lin.dropped_sidechain, 1);
         assert_eq!(lin.messages.len(), 2);
@@ -904,17 +1016,40 @@ mod tests {
     fn linearize_records_file_ops_per_tool() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("s.jsonl");
-        write_records(&path, &[
-            user("u1", None, "2026-05-21T10:00:00Z", "go"),
-            assistant_tool_use("a1", "u1", "2026-05-21T10:00:05Z", "Read",
-                serde_json::json!({ "file_path": "/x/read-me.rs" })),
-            assistant_tool_use("a2", "a1", "2026-05-21T10:00:06Z", "Edit",
-                serde_json::json!({ "file_path": "/x/edit-me.rs", "old_string": "", "new_string": "" })),
-            assistant_tool_use("a3", "a2", "2026-05-21T10:00:07Z", "Write",
-                serde_json::json!({ "file_path": "/x/new.rs", "content": "" })),
-            assistant_tool_use("a4", "a3", "2026-05-21T10:00:08Z", "Bash",
-                serde_json::json!({ "command": "ls /tmp" })),
-        ]);
+        write_records(
+            &path,
+            &[
+                user("u1", None, "2026-05-21T10:00:00Z", "go"),
+                assistant_tool_use(
+                    "a1",
+                    "u1",
+                    "2026-05-21T10:00:05Z",
+                    "Read",
+                    serde_json::json!({ "file_path": "/x/read-me.rs" }),
+                ),
+                assistant_tool_use(
+                    "a2",
+                    "a1",
+                    "2026-05-21T10:00:06Z",
+                    "Edit",
+                    serde_json::json!({ "file_path": "/x/edit-me.rs", "old_string": "", "new_string": "" }),
+                ),
+                assistant_tool_use(
+                    "a3",
+                    "a2",
+                    "2026-05-21T10:00:07Z",
+                    "Write",
+                    serde_json::json!({ "file_path": "/x/new.rs", "content": "" }),
+                ),
+                assistant_tool_use(
+                    "a4",
+                    "a3",
+                    "2026-05-21T10:00:08Z",
+                    "Bash",
+                    serde_json::json!({ "command": "ls /tmp" }),
+                ),
+            ],
+        );
         let lin = linearize(&path).unwrap();
         let read: Vec<_> = lin.read_files.iter().collect();
         let modified: Vec<_> = lin.modified_files.iter().collect();
@@ -965,10 +1100,7 @@ mod tests {
                 let details = c.details.expect("details");
                 assert_eq!(details["source"], "claude-code");
                 assert_eq!(details["sourceSessionUuid"], "abc-123");
-                assert_eq!(
-                    details["readFiles"],
-                    serde_json::json!(["/proj/foo/a.rs"]),
-                );
+                assert_eq!(details["readFiles"], serde_json::json!(["/proj/foo/a.rs"]),);
             }
             _ => panic!("expected Compaction entry"),
         }
@@ -976,7 +1108,12 @@ mod tests {
 
         // File landed under the encoded cwd dir.
         assert!(
-            written.jsonl_path.parent().unwrap().to_string_lossy().ends_with("--proj-foo--"),
+            written
+                .jsonl_path
+                .parent()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("--proj-foo--"),
             "path: {}",
             written.jsonl_path.display(),
         );
@@ -992,14 +1129,20 @@ mod tests {
             "cwd": "/proj", "gitBranch": "feat/x",
             "message": { "role": "user", "content": "do the thing" },
         });
-        write_records(&path, &[
-            with_meta,
-            assistant_text("a1", "u1", "2026-05-21T10:00:05Z", "thing done"),
-        ]);
+        write_records(
+            &path,
+            &[
+                with_meta,
+                assistant_text("a1", "u1", "2026-05-21T10:00:05Z", "thing done"),
+            ],
+        );
         let lin = linearize(&path).unwrap();
         let (system, user) = build_summary_prompt(&lin);
         assert!(system.contains("/proj"), "system mentions cwd: {system}");
-        assert!(system.contains("feat/x"), "system mentions branch: {system}");
+        assert!(
+            system.contains("feat/x"),
+            "system mentions branch: {system}"
+        );
         assert!(system.contains("## Goal"), "system carries pi template");
         assert!(user.contains("### USER\ndo the thing"));
         assert!(user.contains("### ASSISTANT\nthing done"));
@@ -1009,10 +1152,13 @@ mod tests {
     fn render_transcript_groups_roles() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("s.jsonl");
-        write_records(&path, &[
-            user("u1", None, "2026-05-21T10:00:00Z", "hello"),
-            assistant_text("a1", "u1", "2026-05-21T10:00:05Z", "hi back"),
-        ]);
+        write_records(
+            &path,
+            &[
+                user("u1", None, "2026-05-21T10:00:00Z", "hello"),
+                assistant_text("a1", "u1", "2026-05-21T10:00:05Z", "hi back"),
+            ],
+        );
         let lin = linearize(&path).unwrap();
         let rendered = render_transcript(&lin);
         assert!(rendered.contains("### USER\nhello"));
@@ -1043,7 +1189,10 @@ mod tests {
         .unwrap();
         let info = peek_jsonl(&path).unwrap();
         assert_eq!(info.record_count, 2);
-        assert_eq!(info.claude_code_summary.as_deref(), Some("Old session about X"));
+        assert_eq!(
+            info.claude_code_summary.as_deref(),
+            Some("Old session about X")
+        );
         assert_eq!(info.first_user_message.as_deref(), Some("hi there"));
         assert_eq!(info.git_branch.as_deref(), Some("main"));
         assert_eq!(info.recorded_cwd, Some(PathBuf::from("/home/x/proj")));

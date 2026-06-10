@@ -35,9 +35,8 @@ pub fn personal_sign(sk: &SigningKey, message: &str) -> Result<String> {
     let prefixed = format!("\x19Ethereum Signed Message:\n{}{}", message.len(), message);
     let digest = Keccak256::digest(prefixed.as_bytes());
 
-    let (sig, rec_id): (Signature, RecoveryId) = sk
-        .sign_prehash(&digest)
-        .context("ecdsa sign failed")?;
+    let (sig, rec_id): (Signature, RecoveryId) =
+        sk.sign_prehash(&digest).context("ecdsa sign failed")?;
 
     let mut out = [0u8; 65];
     let bytes = sig.to_bytes();

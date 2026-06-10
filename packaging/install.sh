@@ -15,6 +15,7 @@ BIN="libertai"
 DEST="${LIBERTAI_INSTALL_DIR:-$HOME/.local/bin}"
 
 err() { printf 'error: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'WARNING: %s\n' "$*" >&2; }
 info() { printf '%s\n' "$*"; }
 
 need() {
@@ -83,7 +84,8 @@ if curl -fsSL -o "$TMP_SHA" "$SHA_URL" 2>/dev/null; then
     fi
     info "Checksum verified."
 else
-    info "Warning: no .sha256 published for $VERSION — skipping checksum verification."
+    warn "no .sha256 checksum published for $VERSION — installing WITHOUT verification."
+    warn "Newer releases publish checksums; consider installing the latest release instead."
 fi
 
 install -m 0755 "$TMP" "$DEST/$BIN" \

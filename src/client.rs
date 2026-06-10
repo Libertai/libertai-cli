@@ -110,10 +110,7 @@ pub struct ChatRequest {
 
 pub fn post_chat_blocking(cfg: &Config, req: &ChatRequest) -> Result<reqwest::blocking::Response> {
     let key = require_api_key(cfg)?;
-    let url = format!(
-        "{}/v1/chat/completions",
-        cfg.api_base.trim_end_matches('/')
-    );
+    let url = format!("{}/v1/chat/completions", cfg.api_base.trim_end_matches('/'));
     // Streaming must not carry a total-request timeout — the connection lives
     // as long as the server is emitting tokens. Non-streaming (`ask`) bounds
     // the whole generation by `http_timeout_secs` so a slow model does not
@@ -332,7 +329,8 @@ pub fn create_cli_api_key(cfg: &Config, access_token: &str, host: &str) -> Resul
         .send()
         .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
     let resp = check_status(resp, &url)?;
-    resp.json::<FullApiKey>().context("parsing CLI key response")
+    resp.json::<FullApiKey>()
+        .context("parsing CLI key response")
 }
 
 #[derive(Debug, Deserialize)]
@@ -398,14 +396,12 @@ pub fn create_api_key(cfg: &Config, jwt: &str, body: &ApiKeyCreate<'_>) -> Resul
         .send()
         .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
     let resp = check_status(resp, &url)?;
-    resp.json::<FullApiKey>().context("parsing create-key response")
+    resp.json::<FullApiKey>()
+        .context("parsing create-key response")
 }
 
 pub fn delete_api_key(cfg: &Config, jwt: &str, id: &str) -> Result<()> {
-    let url = format!(
-        "{}/api-keys/{id}",
-        cfg.account_base.trim_end_matches('/')
-    );
+    let url = format!("{}/api-keys/{id}", cfg.account_base.trim_end_matches('/'));
     let resp = http(cfg)?
         .delete(&url)
         .header(reqwest::header::COOKIE, format!("libertai_auth={jwt}"))

@@ -20,17 +20,12 @@ pub fn run() -> Result<()> {
         std::path::PathBuf::from(s)
     };
 
-    std::fs::rename(&path, &backup).with_context(|| {
-        format!("renaming {} → {}", path.display(), backup.display())
-    })?;
+    std::fs::rename(&path, &backup)
+        .with_context(|| format!("renaming {} → {}", path.display(), backup.display()))?;
     // Backup can inherit permissive perms if the original file was ever touched
     // by hand; re-chmod to 0600 so the backed-up key material can't leak.
-    set_file_mode_600(&backup)
-        .with_context(|| format!("chmod 0600 {}", backup.display()))?;
+    set_file_mode_600(&backup).with_context(|| format!("chmod 0600 {}", backup.display()))?;
 
-    eprintln!(
-        "Logged out. Previous config moved to {}",
-        backup.display()
-    );
+    eprintln!("Logged out. Previous config moved to {}", backup.display());
     Ok(())
 }

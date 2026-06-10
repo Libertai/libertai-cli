@@ -117,7 +117,11 @@ impl Tool for ImageGenTool {
     ) -> PiResult<ToolExecution> {
         let parsed: ImageInput = match serde_json::from_value(input) {
             Ok(v) => v,
-            Err(e) => return Ok(err_output(&format!("invalid `generate_image` payload: {e}"))),
+            Err(e) => {
+                return Ok(err_output(&format!(
+                    "invalid `generate_image` payload: {e}"
+                )))
+            }
         };
 
         let rel = parsed.filename.trim();
@@ -126,9 +130,7 @@ impl Tool for ImageGenTool {
         }
         let rel_path = Path::new(rel);
         if rel_path.is_absolute() {
-            return Ok(err_output(&format!(
-                "filename must be relative, got {rel}"
-            )));
+            return Ok(err_output(&format!("filename must be relative, got {rel}")));
         }
         if rel_path
             .components()
@@ -187,10 +189,7 @@ impl Tool for ImageGenTool {
             if let Some(parent) = absolute.parent() {
                 if !parent.exists() {
                     if let Err(e) = std::fs::create_dir_all(parent) {
-                        return Ok(err_output(&format!(
-                            "creating {}: {e}",
-                            parent.display()
-                        )));
+                        return Ok(err_output(&format!("creating {}: {e}", parent.display())));
                     }
                 }
             }

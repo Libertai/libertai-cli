@@ -82,8 +82,16 @@ pub fn run(model: Option<String>, system: Option<String>) -> Result<()> {
                     .and_then(|e| e.get("message"))
                     .and_then(|m| m.as_str())
                     .map(|s| s.to_string())
-                    .or_else(|| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()))
-                    .or_else(|| v.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()));
+                    .or_else(|| {
+                        v.get("error")
+                            .and_then(|e| e.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .or_else(|| {
+                        v.get("message")
+                            .and_then(|m| m.as_str())
+                            .map(|s| s.to_string())
+                    });
                 match msg {
                     Some(m) => format!("error: {m}"),
                     None => {

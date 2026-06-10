@@ -124,10 +124,7 @@ struct McpInventory {
     diagnostics: Vec<String>,
 }
 
-fn probe_stdio_server(
-    server: &McpServerConfig,
-    timeout: Duration,
-) -> Result<McpInventory, String> {
+fn probe_stdio_server(server: &McpServerConfig, timeout: Duration) -> Result<McpInventory, String> {
     let mut cmd = Command::new(server.command.trim());
     cmd.args(&server.args)
         .envs(&server.env)
@@ -230,10 +227,7 @@ fn cleanup_stdio_probe(
     }
 }
 
-fn probe_http_server(
-    server: &McpServerConfig,
-    timeout: Duration,
-) -> Result<McpInventory, String> {
+fn probe_http_server(server: &McpServerConfig, timeout: Duration) -> Result<McpInventory, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(timeout)
         .build()
@@ -618,7 +612,10 @@ fn send_mcp_http_request(
     let mut request = client
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(reqwest::header::ACCEPT, "application/json, text/event-stream")
+        .header(
+            reqwest::header::ACCEPT,
+            "application/json, text/event-stream",
+        )
         .header("mcp-protocol-version", "2025-03-26")
         .json(message);
     if let Some(session_id) = session_id {
@@ -667,7 +664,10 @@ mod tests {
     #[test]
     fn inventory_collects_tool_resource_and_prompt_names() {
         let mut inventory = McpInventory::default();
-        inventory.extend("tools", &json!({"tools":[{"name":"search"},{"name":"read"}]}));
+        inventory.extend(
+            "tools",
+            &json!({"tools":[{"name":"search"},{"name":"read"}]}),
+        );
         inventory.extend(
             "resources",
             &json!({"resources":[{"uri":"file:///tmp/a"},{"name":"docs"}]}),
@@ -825,7 +825,12 @@ mod tests {
         handle.join().unwrap();
         assert_eq!(report.servers.len(), 1);
         let server = &report.servers[0];
-        assert_eq!(server.status, McpProbeStatus::Ok, "{:?}", server.diagnostics);
+        assert_eq!(
+            server.status,
+            McpProbeStatus::Ok,
+            "{:?}",
+            server.diagnostics
+        );
         assert_eq!(server.transport, "legacy-sse");
         assert_eq!(server.tools, vec!["search"]);
         assert_eq!(server.resources, vec!["file:///tmp/a"]);

@@ -24,8 +24,8 @@ use std::sync::Arc;
 use pi::sdk::{default_tool_registry, Config as PiConfig, Tool, ToolFactory, ToolRegistry};
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi, ToolPolicy};
-use crate::commands::code_aux::{smart_approval_from_config, SmartApproval};
 use crate::commands::code_ask_user::AskUserTool;
+use crate::commands::code_aux::{smart_approval_from_config, SmartApproval};
 use crate::commands::code_guardrail::{GuardrailTool, ToolGuardrailState};
 use crate::commands::code_mcp_tool::{cached_mcp_context_tools, named_mcp_tools, McpCallTool};
 use crate::commands::code_notification::PushNotificationTool;
@@ -214,9 +214,9 @@ impl LibertaiToolFactory {
         features: FactoryFeatures,
         libertai_cfg: Option<Arc<LibertaiConfig>>,
     ) -> Self {
-        let smart_approval = libertai_cfg.as_ref().and_then(|cfg| {
-            smart_approval_from_config(Arc::clone(cfg))
-        });
+        let smart_approval = libertai_cfg
+            .as_ref()
+            .and_then(|cfg| smart_approval_from_config(Arc::clone(cfg)));
         Self {
             mode,
             approvals,
@@ -382,7 +382,12 @@ mod tests {
 }
 
 impl ToolFactory for LibertaiToolFactory {
-    fn create_tool_registry(&self, enabled: &[&str], cwd: &Path, config: &PiConfig) -> ToolRegistry {
+    fn create_tool_registry(
+        &self,
+        enabled: &[&str],
+        cwd: &Path,
+        config: &PiConfig,
+    ) -> ToolRegistry {
         // 1. Snapshot pi's default tools for the enabled set. We don't
         //    filter by mode here — the registry stays stable for the
         //    whole session and the mode flag is checked at call time
@@ -497,7 +502,11 @@ impl ToolFactory for LibertaiToolFactory {
             .with_smart_approval(self.smart_approval.clone());
             wrapped.push(Box::new(notebook_edit));
             let notebook_execute = ApprovalTool::new(
-                self.wrap_path_safety(Box::new(NotebookExecuteTool::new()), cwd, safe_root.as_ref()),
+                self.wrap_path_safety(
+                    Box::new(NotebookExecuteTool::new()),
+                    cwd,
+                    safe_root.as_ref(),
+                ),
                 Arc::clone(&self.approvals),
                 self.mode.clone(),
                 Arc::clone(&self.ui),

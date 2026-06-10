@@ -9,6 +9,7 @@ use crate::client::{
     auth_login, auth_message, create_api_key, delete_api_key, list_api_keys, ApiKeyCreate,
 };
 use crate::commands::auth_ui::{confirm_signing, validate_limit};
+use crate::commands::login::{browser_sso_access_token, open_url};
 use crate::config::{load, Config};
 
 pub fn run(action: KeysAction) -> Result<()> {
@@ -20,28 +21,34 @@ pub fn run(action: KeysAction) -> Result<()> {
     }
 }
 
+/// Key management (`/api-keys`) requires a session token — the stored `LTAI_`
+/// inference key cannot authenticate it. Legacy wallet logins sign for a JWT
+/// locally; everyone else (browser-SSO and pasted-key logins) confirms in the
+/// browser via the same loopback flow `libertai login` uses.
 fn acquire_jwt(cfg: &Config) -> Result<String> {
-    let address = cfg
-        .auth
-        .wallet_address
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!(
-            "no wallet address on file — run `libertai login` and pick the wallet flow first"
-        ))?;
-    let chain = cfg
-        .auth
-        .chain
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!(
-            "no chain on file — run `libertai login` and pick the wallet flow first"
-        ))?;
+    match (
+        cfg.auth.wallet_address.as_deref(),
+        cfg.auth.chain.as_deref(),
+    ) {
+        (Some(address), Some(chain)) => acquire_jwt_wallet(cfg, address, chain),
+        _ => acquire_jwt_browser(cfg),
+    }
+}
 
+fn acquire_jwt_browser(cfg: &Config) -> Result<String> {
     eprintln!(
-        "{} Signing in as {} on {}.",
-        "!".yellow(),
-        address,
-        chain
+        "{} Managing keys needs a quick sign-in confirmation in your browser.",
+        "!".yellow()
     );
+    browser_sso_access_token(cfg, "LibertAI CLI (key management)", |url| {
+        eprintln!("Opening your browser to sign in…");
+        eprintln!("If it doesn't open, visit:\n  {url}");
+        let _ = open_url(url);
+    })
+}
+
+fn acquire_jwt_wallet(cfg: &Config, address: &str, chain: &str) -> Result<String> {
+    eprintln!("{} Signing in as {} on {}.", "!".yellow(), address, chain);
     let pk = zeroize::Zeroizing::new(
         Password::new()
             .with_prompt("Private key (hex)")

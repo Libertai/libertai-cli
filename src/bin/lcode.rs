@@ -39,6 +39,10 @@ struct LcodeCli {
     /// `libertai code --help` for full details. Default: `off`.
     #[arg(long, value_enum, env = "LIBERTAI_SANDBOX", default_value_t = libertai_cli::commands::code_sandbox::SandboxMode::Off)]
     sandbox: libertai_cli::commands::code_sandbox::SandboxMode,
+    /// Print mode: one headless agent turn, then exit. See
+    /// `libertai code --help` for full details.
+    #[arg(long, short = 'p', conflicts_with = "list_sessions")]
+    print: bool,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -55,6 +59,7 @@ fn main() {
             list_sessions: parsed.list_sessions,
             all: parsed.all,
             sandbox: parsed.sandbox,
+            print: parsed.print,
             args: parsed.args,
         },
     };

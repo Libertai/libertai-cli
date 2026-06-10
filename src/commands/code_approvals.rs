@@ -74,7 +74,9 @@ pub enum ToolPolicyDecision {
         additional_context: Option<String>,
     },
     Defer,
-    Deny { reason: Option<String> },
+    Deny {
+        reason: Option<String>,
+    },
 }
 
 /// Result of an [`ApprovalUi::ask`] call. Mirrors [`PromptChoice`]'s
@@ -352,7 +354,11 @@ pub fn wildcard_match(pattern: &str, text: &str) -> bool {
         return false;
     }
     // Interior segments must appear in order at non-overlapping positions.
-    let mut pos = if parts[0].is_empty() { 0 } else { parts[0].len() };
+    let mut pos = if parts[0].is_empty() {
+        0
+    } else {
+        parts[0].len()
+    };
     for i in 1..last {
         let seg = parts[i];
         if seg.is_empty() {
@@ -401,21 +407,13 @@ pub trait ApprovalUi: Send + Sync {
     /// [`Self::decide`] must override this to pick the request back up
     /// using `payload` (which carries the original tool name, preview,
     /// always_rule, etc. as serialised by the tool wrapper).
-    async fn resume_decide(
-        &self,
-        _request_id: &str,
-        _payload: serde_json::Value,
-    ) -> PromptChoice {
+    async fn resume_decide(&self, _request_id: &str, _payload: serde_json::Value) -> PromptChoice {
         PromptChoice::Deny
     }
     /// Re-fire a previously paused ask_user request. Same contract as
     /// [`Self::resume_decide`] but for ask_user. Default impl mirrors
     /// the legacy "cancelled" envelope.
-    async fn resume_ask(
-        &self,
-        _request_id: &str,
-        _payload: serde_json::Value,
-    ) -> AskOutcome {
+    async fn resume_ask(&self, _request_id: &str, _payload: serde_json::Value) -> AskOutcome {
         AskOutcome::Answer(serde_json::json!({
             "cancelled": true,
             "reason": "RESUME_NOT_SUPPORTED",
@@ -745,13 +743,11 @@ impl Tool for ApprovalTool {
         }
         let always_label = sanitize_inline(&subject.suggested_label);
         match self.ui.decide(name, &preview, &always_label).await {
-            PromptChoice::Allow => {
-                with_policy_context(
-                    self.execute_inner(tool_call_id, effective_input, on_update)
-                        .await,
-                    &policy_decision,
-                )
-            }
+            PromptChoice::Allow => with_policy_context(
+                self.execute_inner(tool_call_id, effective_input, on_update)
+                    .await,
+                &policy_decision,
+            ),
             PromptChoice::AlwaysAllow => {
                 self.state.record_always(subject.suggested_rule);
                 with_policy_context(
@@ -819,9 +815,11 @@ fn with_policy_context(
     };
     result.map(|execution| match execution {
         ToolExecution::Done(mut output) => {
-            output.content.push(ContentBlock::Text(TextContent::new(format!(
-                "Additional context from PreToolUse hook:\n\n{context}"
-            ))));
+            output
+                .content
+                .push(ContentBlock::Text(TextContent::new(format!(
+                    "Additional context from PreToolUse hook:\n\n{context}"
+                ))));
             ToolExecution::Done(output)
         }
         paused => paused,
@@ -840,9 +838,11 @@ fn with_post_execution_diff(
     };
     result.map(|execution| match execution {
         ToolExecution::Done(mut output) if !output.is_error => {
-            output.content.push(ContentBlock::Text(TextContent::new(format!(
-                "Filesystem delta after execution:\n{diff}"
-            ))));
+            output
+                .content
+                .push(ContentBlock::Text(TextContent::new(format!(
+                    "Filesystem delta after execution:\n{diff}"
+                ))));
             ToolExecution::Done(output)
         }
         other => other,
@@ -1100,7 +1100,11 @@ pub fn sanitize(s: &str) -> String {
     for c in s.chars() {
         match state {
             State::AfterEsc => {
-                state = if c == '[' { State::InCsi } else { State::Normal };
+                state = if c == '[' {
+                    State::InCsi
+                } else {
+                    State::Normal
+                };
                 continue;
             }
             State::InCsi => {
@@ -1424,7 +1428,10 @@ mod tests {
         let updates = updates.lock().unwrap();
         assert_eq!(updates.len(), 1);
         assert!(update_text(&updates[0]).contains("smart approval auto-approved `bash`"));
-        assert_eq!(updates[0].details.as_ref().unwrap()["kind"], "smart_approval");
+        assert_eq!(
+            updates[0].details.as_ref().unwrap()["kind"],
+            "smart_approval"
+        );
         assert_eq!(updates[0].details.as_ref().unwrap()["decision"], "approved");
         assert_eq!(ui_calls.load(Ordering::Relaxed), 0);
     }
@@ -1492,12 +1499,17 @@ mod tests {
         assert!(matches!(execution, ToolExecution::Done(_)));
         let updates = updates.lock().unwrap();
         assert_eq!(updates.len(), 1);
-        assert!(update_text(&updates[0]).contains(
-            "smart approval auto-denied `bash`: dangerous command"
-        ));
-        assert_eq!(updates[0].details.as_ref().unwrap()["kind"], "smart_approval");
+        assert!(update_text(&updates[0])
+            .contains("smart approval auto-denied `bash`: dangerous command"));
+        assert_eq!(
+            updates[0].details.as_ref().unwrap()["kind"],
+            "smart_approval"
+        );
         assert_eq!(updates[0].details.as_ref().unwrap()["decision"], "denied");
-        assert_eq!(updates[0].details.as_ref().unwrap()["reason"], "dangerous command");
+        assert_eq!(
+            updates[0].details.as_ref().unwrap()["reason"],
+            "dangerous command"
+        );
         assert_eq!(ui_calls.load(Ordering::Relaxed), 0);
     }
 
@@ -1567,7 +1579,10 @@ mod tests {
     fn exact_does_not_match_compound() {
         // Security property: an exact rule for a simple command must not
         // match a compound command that starts the same way.
-        assert!(!wildcard_match("npm run build", "npm run build && rm -rf /"));
+        assert!(!wildcard_match(
+            "npm run build",
+            "npm run build && rm -rf /"
+        ));
     }
 
     #[test]

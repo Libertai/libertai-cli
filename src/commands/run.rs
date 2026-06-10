@@ -1,6 +1,6 @@
-use anyhow::{bail, Result};
 #[cfg(not(unix))]
 use anyhow::Context;
+use anyhow::{bail, Result};
 use std::process::Command;
 
 use crate::config::{self, Config};

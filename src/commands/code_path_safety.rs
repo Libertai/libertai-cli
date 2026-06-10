@@ -113,7 +113,10 @@ fn sensitive_path_reason(path: &Path) -> Option<String> {
     let components = path_components_lower(path);
 
     if path == Path::new("/etc/passwd") || path == Path::new("/etc/shadow") {
-        return Some(format!("write denied: `{}` is a system account file", path.display()));
+        return Some(format!(
+            "write denied: `{}` is a system account file",
+            path.display()
+        ));
     }
 
     if matches!(
@@ -233,8 +236,12 @@ mod tests {
 
     #[test]
     fn denies_cloud_credentials() {
-        let err = check_write_path("/home/me/.config/gcloud/application_default_credentials.json", &cwd(), None)
-            .unwrap_err();
+        let err = check_write_path(
+            "/home/me/.config/gcloud/application_default_credentials.json",
+            &cwd(),
+            None,
+        )
+        .unwrap_err();
         assert!(err.contains("cloud credential"));
     }
 

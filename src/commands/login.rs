@@ -46,7 +46,10 @@ pub fn run() -> Result<()> {
         .as_deref()
         .map(|e| format!("  (expires {})", e.split('T').next().unwrap_or(e)))
         .unwrap_or_default();
-    eprintln!("Logged in. Key: {masked}{expiry_note}  →  {}", path.display());
+    eprintln!(
+        "Logged in. Key: {masked}{expiry_note}  →  {}",
+        path.display()
+    );
     Ok(())
 }
 
@@ -73,6 +76,34 @@ fn login_with_browser(cfg: &mut Config) -> Result<()> {
 ///
 /// On success, `cfg.auth` is updated with the minted key (the caller persists `cfg`).
 pub fn browser_sso_login(cfg: &mut Config, client: &str, open: impl FnOnce(&str)) -> Result<()> {
+    let access_token = browser_sso_access_token(cfg, client, open)?;
+
+    // Per-device key: a stable random id (persisted in config) keeps this device's key
+    // name unique, so logging in elsewhere mints a separate key instead of rotating —
+    // and disconnecting — this one. Re-login on this device reuses the id (rotates in place).
+    let device_id = cfg.auth.device_id.clone().unwrap_or_else(new_device_id);
+    cfg.auth.device_id = Some(device_id.clone());
+    let host = format!("{}-{}", device_hostname(), device_id);
+    let created = create_cli_api_key(cfg, &access_token, &host).context("creating CLI API key")?;
+
+    cfg.auth.expires_at = created.expires_at;
+    cfg.auth.api_key = Some(created.full_key);
+    cfg.auth.wallet_address = None;
+    cfg.auth.chain = None;
+    Ok(())
+}
+
+/// Steps 1–4 of the browser SSO flow, stopping after the code exchange: returns
+/// the short-lived session access token without minting a key. `libertai login`
+/// uses it to then mint this device's CLI key; `libertai keys` uses the token
+/// directly, because the account's key-management endpoints (`/api-keys`)
+/// require a session token — the stored `LTAI_` inference key cannot
+/// authenticate them.
+pub fn browser_sso_access_token(
+    cfg: &Config,
+    client: &str,
+    open: impl FnOnce(&str),
+) -> Result<String> {
     // PKCE: keep `verifier` secret; send only its SHA256 (the challenge).
     let mut vbytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut vbytes);
@@ -110,25 +141,7 @@ pub fn browser_sso_login(cfg: &mut Config, client: &str, open: impl FnOnce(&str)
         anyhow::bail!("login state mismatch — aborting (possible interference)");
     }
 
-    let access_token = exchange_code(cfg, &code, &verifier).context("exchanging login code")?;
-
-    // Per-device key: a stable random id (persisted in config) keeps this device's key
-    // name unique, so logging in elsewhere mints a separate key instead of rotating —
-    // and disconnecting — this one. Re-login on this device reuses the id (rotates in place).
-    let device_id = cfg
-        .auth
-        .device_id
-        .clone()
-        .unwrap_or_else(new_device_id);
-    cfg.auth.device_id = Some(device_id.clone());
-    let host = format!("{}-{}", device_hostname(), device_id);
-    let created = create_cli_api_key(cfg, &access_token, &host).context("creating CLI API key")?;
-
-    cfg.auth.expires_at = created.expires_at;
-    cfg.auth.api_key = Some(created.full_key);
-    cfg.auth.wallet_address = None;
-    cfg.auth.chain = None;
-    Ok(())
+    exchange_code(cfg, &code, &verifier).context("exchanging login code")
 }
 
 /// Random 8-hex-char id identifying this CLI install (not security-sensitive).
@@ -188,7 +201,9 @@ fn wait_for_callback(server: tiny_http::Server) -> Result<(String, String)> {
         .context("waiting for the browser login callback")?
     {
         Some(req) => req,
-        None => anyhow::bail!("timed out waiting for browser sign-in — no response after 5 minutes"),
+        None => {
+            anyhow::bail!("timed out waiting for browser sign-in — no response after 5 minutes")
+        }
     };
 
     // The request line carries only the path+query; parse it with a dummy base.
@@ -258,7 +273,7 @@ fn login_with_api_key(cfg: &mut Config, term: &Term) -> Result<()> {
     Ok(())
 }
 
-fn open_url(url: &str) -> Result<()> {
+pub(crate) fn open_url(url: &str) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         let _ = std::process::Command::new("cmd")
@@ -289,4 +304,3 @@ fn open_url(url: &str) -> Result<()> {
         Ok(())
     }
 }
-

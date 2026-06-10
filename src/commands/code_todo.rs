@@ -165,9 +165,9 @@ fn render_todo_list(items: &[TodoItem]) {
     eprintln!("  \x1b[2m⎯ task list ⎯\x1b[0m");
     for item in items {
         let (glyph, colour) = match item.status {
-            TodoStatus::Completed => ("\u{2611}", "\x1b[32m"),   // ☑ green
-            TodoStatus::Active => ("\u{25a0}", "\x1b[33;1m"),    // ■ bold amber
-            TodoStatus::Pending => ("\u{2610}", "\x1b[2m"),      // ☐ dim
+            TodoStatus::Completed => ("\u{2611}", "\x1b[32m"), // ☑ green
+            TodoStatus::Active => ("\u{25a0}", "\x1b[33;1m"),  // ■ bold amber
+            TodoStatus::Pending => ("\u{2610}", "\x1b[2m"),    // ☐ dim
         };
         eprintln!(
             "  {colour}{glyph}\x1b[0m {}{}\x1b[0m",

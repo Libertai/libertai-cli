@@ -110,16 +110,8 @@ pub fn run() -> Result<()> {
     );
 
     match cfg.auth.api_key.as_deref() {
-        Some(k) => println!(
-            "  {:<22} {}",
-            "Auth:".dimmed(),
-            mask_key(k).green()
-        ),
-        None => println!(
-            "  {:<22} {}",
-            "Auth:".dimmed(),
-            "not logged in".red()
-        ),
+        Some(k) => println!("  {:<22} {}", "Auth:".dimmed(), mask_key(k).green()),
+        None => println!("  {:<22} {}", "Auth:".dimmed(), "not logged in".red()),
     }
 
     if let Some(exp) = cfg.auth.expires_at.as_deref() {
@@ -134,12 +126,7 @@ pub fn run() -> Result<()> {
 
     if let Some(addr) = cfg.auth.wallet_address.as_deref() {
         let chain = cfg.auth.chain.as_deref().unwrap_or("?");
-        println!(
-            "  {:<22} {} ({})",
-            "Wallet:".dimmed(),
-            addr,
-            chain
-        );
+        println!("  {:<22} {} ({})", "Wallet:".dimmed(), addr, chain);
     }
 
     Ok(())

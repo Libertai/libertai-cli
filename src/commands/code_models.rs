@@ -111,10 +111,12 @@ pub fn ensure_libertai_registered(cfg: &Config) -> Result<()> {
         })?;
 
     entry.insert("baseUrl".to_string(), Value::String(base_url));
-    entry.entry("api".to_string())
+    entry
+        .entry("api".to_string())
         .or_insert_with(|| Value::String("openai-completions".into()));
     entry.insert("apiKey".to_string(), Value::String(api_key));
-    entry.entry("authHeader".to_string())
+    entry
+        .entry("authHeader".to_string())
         .or_insert_with(|| Value::Bool(true));
 
     // `contextWindow` defaults to a generous 32k. The libertai endpoint
@@ -127,9 +129,9 @@ pub fn ensure_libertai_registered(cfg: &Config) -> Result<()> {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let already_present = existing.iter().any(|m| {
-        m.get("id").and_then(|id| id.as_str()) == Some(default_model.as_str())
-    });
+    let already_present = existing
+        .iter()
+        .any(|m| m.get("id").and_then(|id| id.as_str()) == Some(default_model.as_str()));
     let mut models_array = existing;
     if models_array.is_empty() || !already_present {
         models_array.push(json!({
@@ -143,8 +145,7 @@ pub fn ensure_libertai_registered(cfg: &Config) -> Result<()> {
 
     // Pretty-print for human readability — the file is occasionally edited
     // by hand (pi docs recommend it) and diffs are easier this way.
-    let serialized = serde_json::to_string_pretty(&root)
-        .context("serializing models.json")?;
+    let serialized = serde_json::to_string_pretty(&root).context("serializing models.json")?;
 
     if let Some(parent) = models_path.parent() {
         config::create_dir_secure(parent)

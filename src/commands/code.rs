@@ -14,11 +14,9 @@ use anyhow::{bail, Result};
 use pi::model::AssistantMessageEvent;
 use pi::sdk::{create_agent_session, AgentEvent};
 
-use crate::commands::code_approvals::ApprovalState;
+use crate::commands::code_approvals::{ApprovalState, ApprovalUi, NotifyOutcome, PromptChoice};
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
-use crate::commands::code_sandbox::{
-    build_command_wrapper, is_strict_supported, SandboxMode,
-};
+use crate::commands::code_sandbox::{build_command_wrapper, is_strict_supported, SandboxMode};
 use crate::commands::code_session::{
     build_session_options, list_past_sessions, most_recent_session, CodeSessionConfig,
     SessionPersistence,
@@ -38,6 +36,7 @@ pub fn run(
     list_sessions: bool,
     all: bool,
     sandbox: SandboxMode,
+    print: bool,
     args: Vec<String>,
 ) -> Result<()> {
     let cfg = config::load()?;
@@ -95,15 +94,14 @@ pub fn run(
     }
     let bash_command_wrapper = build_command_wrapper(
         sandbox,
-        &std::env::current_dir()
-            .map_err(|e| anyhow::anyhow!("cwd lookup failed: {e}"))?,
+        &std::env::current_dir().map_err(|e| anyhow::anyhow!("cwd lookup failed: {e}"))?,
         // CLI doesn't carry a persisted SandboxPolicy override today;
         // host-detected defaults apply verbatim. The desktop passes
         // `Some(&policy)` to let users uncheck binds in settings.
         None,
     );
 
-    if args.is_empty() {
+    if args.is_empty() && !print {
         // No prompt on the command line → interactive REPL.
         // Raw-mode UI + input bar + agent session reuse live in code_ui.
         return code_ui::run_interactive(
@@ -116,7 +114,7 @@ pub fn run(
         );
     }
 
-    let prompt = args.join(" ");
+    let prompt = build_oneshot_prompt(&args, print)?;
 
     // pi uses asupersync as its async runtime (not tokio).
     let reactor = asupersync::runtime::reactor::create_reactor()
@@ -133,18 +131,27 @@ pub fn run(
     let approvals = Arc::new(ApprovalState::with_persistent_store(
         crate::config::allow_rules_path()?,
     )?);
-    let ui = Arc::new(TerminalApprovalUi);
+    // --print never blocks on the terminal: anything that would need an
+    // interactive approval is auto-denied instead. Without it, one-shot
+    // runs keep the terminal micro-prompt (the user is still at a TTY).
+    let ui: Arc<dyn ApprovalUi> = if print {
+        Arc::new(PrintModeApprovalUi)
+    } else {
+        Arc::new(TerminalApprovalUi)
+    };
     let cfg = Arc::new(cfg);
-    let factory = Arc::new(LibertaiToolFactory::new_with_features(
-        ModeFlag::new(mode),
-        approvals,
-        ui,
-        FactoryFeatures::cli_defaults(),
-        Some(Arc::clone(&cfg)),
-    )
-    .with_tool_policy(crate::commands::code_hooks::tool_policy_from_config(
-        Arc::clone(&cfg),
-    )));
+    let factory = Arc::new(
+        LibertaiToolFactory::new_with_features(
+            ModeFlag::new(mode),
+            approvals,
+            ui,
+            FactoryFeatures::cli_defaults(),
+            Some(Arc::clone(&cfg)),
+        )
+        .with_tool_policy(crate::commands::code_hooks::tool_policy_from_config(
+            Arc::clone(&cfg),
+        )),
+    );
 
     runtime.block_on(async move {
         run_async(
@@ -184,8 +191,7 @@ async fn run_async(
     let append_system_prompt =
         code_skills::prompt_for_pillar(SkillPillar::Code, skill_cwd.as_deref())?;
     // Git context is injected once by pi (build_git_context); do not duplicate it here.
-    let append_system_prompt =
-        crate::commands::code_mode_prompt::apply(append_system_prompt, mode);
+    let append_system_prompt = crate::commands::code_mode_prompt::apply(append_system_prompt, mode);
     let options = build_session_options(CodeSessionConfig {
         provider,
         model,
@@ -212,8 +218,7 @@ async fn run_async(
 
     let _session_hooks = crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(&cfg));
     let hook_cfg = Arc::clone(&cfg);
-    let prompt =
-        crate::commands::code_hooks::run_user_prompt_submit_hooks(cfg.as_ref(), &prompt)?;
+    let prompt = crate::commands::code_hooks::run_user_prompt_submit_hooks(cfg.as_ref(), &prompt)?;
     let msg = handle
         .prompt(prompt, move |event| {
             crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
@@ -271,15 +276,75 @@ fn render(event: AgentEvent) {
     }
 }
 
+/// Assemble the prompt for a one-shot (non-REPL) run.
+///
+/// Without `--print` the trailing args are the whole prompt and stdin
+/// is left untouched (the terminal approval prompt may still need it).
+/// With `--print`, `claude -p` semantics apply: the prompt can come
+/// from the args, from piped stdin, or both — piped stdin is placed
+/// above the args prompt as context.
+fn build_oneshot_prompt(args: &[String], print: bool) -> Result<String> {
+    let arg_prompt = args.join(" ");
+    if !print {
+        return Ok(arg_prompt);
+    }
+    match (read_piped_stdin(), arg_prompt.is_empty()) {
+        (Some(ctx), false) => Ok(format!("{ctx}\n\n{arg_prompt}")),
+        (Some(ctx), true) => Ok(ctx),
+        (None, false) => Ok(arg_prompt),
+        (None, true) => bail!(
+            "--print needs a prompt: pass it as arguments \
+             (`libertai code -p \"fix the build\"`) or pipe it on stdin",
+        ),
+    }
+}
+
+/// Read piped stdin to EOF. Returns `None` when stdin is a TTY (nothing
+/// was piped) or the piped input is blank.
+fn read_piped_stdin() -> Option<String> {
+    use std::io::{IsTerminal, Read};
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return None;
+    }
+    let mut buf = String::new();
+    stdin.read_to_string(&mut buf).ok()?;
+    let trimmed = buf.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// `--print` approval UI: never blocks on the terminal.
+///
+/// Read-only tools and persisted allow rules are resolved before the UI
+/// is consulted (see `ApprovalState`), so this only fires for calls the
+/// user hasn't pre-approved — those are denied with a stderr note,
+/// mirroring how `claude -p` refuses un-permitted tools rather than
+/// hanging a script on a hidden prompt.
+struct PrintModeApprovalUi;
+
+#[async_trait::async_trait]
+impl ApprovalUi for PrintModeApprovalUi {
+    async fn decide(&self, tool_name: &str, _preview: &str, always_rule: &str) -> PromptChoice {
+        eprintln!(
+            "  \x1b[2m[print] {tool_name} needs approval — auto-denied (non-interactive). \
+             Pre-approve it by running interactively once and choosing \
+             \"always allow\" ({always_rule}).\x1b[0m"
+        );
+        PromptChoice::Deny
+    }
+
+    async fn notify(&self, title: &str, body: &str) -> NotifyOutcome {
+        // Plain stderr rendering is already headless-safe; reuse it.
+        crate::commands::code_term::notify_terminal(title, body)
+    }
+}
+
 /// Resolve `--resume <path>` / `--continue` to an explicit JSONL path.
 ///
 /// Returns `Ok(None)` for "no resume requested". `--resume` and
 /// `--continue` are mutually exclusive at the clap layer so we never see
 /// both set here.
-fn resolve_resume_path(
-    resume: Option<PathBuf>,
-    continue_recent: bool,
-) -> Result<Option<PathBuf>> {
+fn resolve_resume_path(resume: Option<PathBuf>, continue_recent: bool) -> Result<Option<PathBuf>> {
     if let Some(p) = resume {
         if !p.exists() {
             bail!("--resume: session file not found: {}", p.display());

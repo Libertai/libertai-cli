@@ -74,8 +74,8 @@ pub fn collect_pr_comments_snapshot(cwd: &Path, scope: &str) -> PrCommentsSnapsh
     } else {
         None
     };
-    let review_threads = pr_reference_from_view(&pr_view)
-        .map(|pr| run_gh(cwd, &pr_review_threads_args(&pr)));
+    let review_threads =
+        pr_reference_from_view(&pr_view).map(|pr| run_gh(cwd, &pr_review_threads_args(&pr)));
     PrCommentsSnapshot {
         pr_view,
         checks,
@@ -613,13 +613,9 @@ fn render_capture(out: &mut String, label: &str, capture: &CommandCapture) {
 fn shell_join(args: &[String]) -> String {
     args.iter()
         .map(|arg| {
-            if arg
-                .chars()
-                .all(|ch| {
-                    ch.is_ascii_alphanumeric()
-                        || matches!(ch, '-' | '_' | '/' | ':' | '.' | ',')
-                })
-            {
+            if arg.chars().all(|ch| {
+                ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | ':' | '.' | ',')
+            }) {
                 arg.clone()
             } else {
                 format!("'{}'", arg.replace('\'', "'\\''"))
@@ -702,7 +698,9 @@ mod tests {
         let capture = CommandCapture {
             command: "gh pr view".to_string(),
             status: Some(0),
-            stdout: r#"{"number":42,"url":"https://github.com/Libertai/libertai-code-desktop/pull/42"}"#.to_string(),
+            stdout:
+                r#"{"number":42,"url":"https://github.com/Libertai/libertai-code-desktop/pull/42"}"#
+                    .to_string(),
             stderr: String::new(),
             error: None,
         };
@@ -799,7 +797,10 @@ mod tests {
         assert_eq!(capture.error.as_deref(), Some("file path is required"));
 
         let capture = create_review_thread(Path::new("."), "", "src/lib.rs", 0, "body");
-        assert_eq!(capture.error.as_deref(), Some("line must be greater than zero"));
+        assert_eq!(
+            capture.error.as_deref(),
+            Some("line must be greater than zero")
+        );
 
         let capture = create_review_thread(Path::new("."), "", "src/lib.rs", 12, "");
         assert_eq!(
@@ -824,19 +825,28 @@ mod tests {
     #[test]
     fn resolve_review_thread_uses_github_graphql_mutation() {
         let capture = resolve_review_thread(Path::new("."), "");
-        assert_eq!(capture.error.as_deref(), Some("review thread id is required"));
+        assert_eq!(
+            capture.error.as_deref(),
+            Some("review thread id is required")
+        );
     }
 
     #[test]
     fn unresolve_review_thread_uses_github_graphql_mutation() {
         let capture = unresolve_review_thread(Path::new("."), "");
-        assert_eq!(capture.error.as_deref(), Some("review thread id is required"));
+        assert_eq!(
+            capture.error.as_deref(),
+            Some("review thread id is required")
+        );
     }
 
     #[test]
     fn reply_review_thread_validates_required_fields() {
         let capture = reply_review_thread(Path::new("."), "", "fixed");
-        assert_eq!(capture.error.as_deref(), Some("review thread id is required"));
+        assert_eq!(
+            capture.error.as_deref(),
+            Some("review thread id is required")
+        );
         let capture = reply_review_thread(Path::new("."), "PRRT_1", "");
         assert_eq!(
             capture.error.as_deref(),
@@ -847,7 +857,10 @@ mod tests {
     #[test]
     fn edit_review_comment_validates_required_fields() {
         let capture = edit_review_comment(Path::new("."), "", "updated");
-        assert_eq!(capture.error.as_deref(), Some("review comment id is required"));
+        assert_eq!(
+            capture.error.as_deref(),
+            Some("review comment id is required")
+        );
         let capture = edit_review_comment(Path::new("."), "PRRC_1", "");
         assert_eq!(
             capture.error.as_deref(),

@@ -477,8 +477,7 @@ enum ConfigSettingsTarget {
 /// ever need that, add a per-invocation reset step and document the
 /// invariant more loudly.
 static BAR_STATUS: Mutex<Option<BarStatus>> = Mutex::new(None);
-static STATUS_LINE_COMMAND_CACHE: OnceLock<Mutex<Option<StatusLineCommandCache>>> =
-    OnceLock::new();
+static STATUS_LINE_COMMAND_CACHE: OnceLock<Mutex<Option<StatusLineCommandCache>>> = OnceLock::new();
 static VIM_INPUT_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Current in-flight abort handle, populated for the duration of each
@@ -768,9 +767,7 @@ fn print_banner(provider: &str, model: &str, mode: Mode) {
         Mode::AcceptEdits => format!(" {DIM}[accept-edits]{RESET}"),
         Mode::Plan => format!(" {DIM}[plan]{RESET}"),
     };
-    println!(
-        "{BOLD}libertai code{RESET} {DIM}— interactive ({provider}/{model}){RESET}{mode_tag}"
-    );
+    println!("{BOLD}libertai code{RESET} {DIM}— interactive ({provider}/{model}){RESET}{mode_tag}");
     println!("{DIM}  type /help for commands, /exit or Ctrl+D to quit{RESET}");
     println!();
 }
@@ -800,8 +797,7 @@ async fn repl_loop(
         Arc::clone(&cfg),
     )
     .await?;
-    let mut session_hooks =
-        crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(&cfg));
+    let mut session_hooks = crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(&cfg));
 
     // If we resumed, print the rehydrated transcript so the user has
     // visual context before the input bar takes over. Skipped for fresh
@@ -848,12 +844,11 @@ async fn repl_loop(
 
     loop {
         let autonomous_turn = if let Some(prompt) = pop_due_scheduled_prompt(&mut scheduled_runs) {
-            if let Err(err) =
-                persist_scheduled_runs_if_configured(schedule_store_path.as_deref(), &scheduled_runs)
-            {
-                eprintln!(
-                    "{DIM}  /schedule: could not save scheduled prompts: {err}.{RESET}"
-                );
+            if let Err(err) = persist_scheduled_runs_if_configured(
+                schedule_store_path.as_deref(),
+                &scheduled_runs,
+            ) {
+                eprintln!("{DIM}  /schedule: could not save scheduled prompts: {err}.{RESET}");
             }
             Some(prompt)
         } else if let Some(prompt) = autonomous_queue.pop_front() {
@@ -905,7 +900,7 @@ async fn repl_loop(
                     announce_mode_change(new_mode);
                     continue;
                 }
-            }
+            },
         };
 
         let trimmed_owned = line.trim().to_string();
@@ -986,10 +981,7 @@ async fn repl_loop(
                 HotkeysCommand::Show => print_hotkeys(),
                 HotkeysCommand::Json => print_hotkeys_json(rest),
                 HotkeysCommand::Usage => {
-                    println!(
-                        "{DIM}  usage:{RESET} {}",
-                        hotkeys_usage_text()
-                    );
+                    println!("{DIM}  usage:{RESET} {}", hotkeys_usage_text());
                 }
             }
             continue;
@@ -1011,14 +1003,11 @@ async fn repl_loop(
                         Ok(next) => {
                             drop(session_hooks);
                             handle = next;
-                            session_hooks =
-                                crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(
-                                    &cfg,
-                                ));
+                            session_hooks = crate::commands::code_hooks::SessionHookGuard::start(
+                                Arc::clone(&cfg),
+                            );
                             usage_history.clear();
-                            update_bar_status(|status| {
-                                status.output_style = output_style.clone()
-                            });
+                            update_bar_status(|status| status.output_style = output_style.clone());
                         }
                         Err(e) => eprintln!("{DIM}  /reload: {e:#}{RESET}"),
                     }
@@ -1521,10 +1510,9 @@ async fn repl_loop(
                         Ok(next) => {
                             drop(session_hooks);
                             handle = next;
-                            session_hooks =
-                                crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(
-                                    &cfg,
-                                ));
+                            session_hooks = crate::commands::code_hooks::SessionHookGuard::start(
+                                Arc::clone(&cfg),
+                            );
                             usage_history.clear();
                             update_bar_status(|status| status.output_style = output_style.clone());
                         }
@@ -1560,7 +1548,11 @@ async fn repl_loop(
             println!(
                 "{DIM}  /loop: queued {} autonomous turn(s){}.{RESET}",
                 request.turns,
-                if request.goal.is_empty() { "" } else { " with a goal" }
+                if request.goal.is_empty() {
+                    ""
+                } else {
+                    " with a goal"
+                }
             );
             continue;
         }
@@ -1595,7 +1587,9 @@ async fn repl_loop(
                 ScheduleCommand::Status => print_schedule_status(&scheduled_runs),
                 ScheduleCommand::Json => print_schedule_json(&scheduled_runs, rest, None),
                 ScheduleCommand::Show(id) => print_schedule_details(&scheduled_runs, &id),
-                ScheduleCommand::ShowJson(id) => print_schedule_json(&scheduled_runs, rest, Some(&id)),
+                ScheduleCommand::ShowJson(id) => {
+                    print_schedule_json(&scheduled_runs, rest, Some(&id))
+                }
                 ScheduleCommand::Run(id) => {
                     let now = Instant::now();
                     if let Some(run) = scheduled_runs.iter_mut().find(|run| run.id == id) {
@@ -1977,10 +1971,7 @@ async fn repl_loop(
                                         "{DIM}  /agent: started background agent `{}` pid {}.{RESET}",
                                         launch.name, started.pid
                                     );
-                                    println!(
-                                        "{DIM}  log: {}{RESET}",
-                                        started.log_path.display()
-                                    );
+                                    println!("{DIM}  log: {}{RESET}", started.log_path.display());
                                 }
                                 Err(e) => {
                                     eprintln!("{DIM}  /agent: {e:#}{RESET}");
@@ -2168,7 +2159,9 @@ async fn repl_loop(
             ) {
                 Ok(agent_line) => {
                     pending_shell_context.clear();
-                    handle.prompt_with_abort(agent_line, abort_signal, render).await
+                    handle
+                        .prompt_with_abort(agent_line, abort_signal, render)
+                        .await
                 }
                 Err(e) => {
                     clear_current_abort();
@@ -2208,11 +2201,7 @@ async fn repl_loop(
                 });
                 eprintln!(
                     "{DIM}  {}/{}  stop: {:?}  in={} out={}{RESET}",
-                    msg.provider,
-                    msg.model,
-                    msg.stop_reason,
-                    msg.usage.input,
-                    msg.usage.output,
+                    msg.provider, msg.model, msg.stop_reason, msg.usage.input, msg.usage.output,
                 );
                 if cfg.code_turn_notifications && !is_autonomous {
                     crate::commands::code_term::notify_terminal(
@@ -2346,9 +2335,10 @@ fn parse_init_from_agent_action(input: &str) -> Option<InitFromAgentAction> {
             "preview" => Some(InitFromAgentAction::PreviewSections(indexes)),
             "preview-append" => Some(InitFromAgentAction::PreviewApplySections("append", indexes)),
             "preview-merge" => Some(InitFromAgentAction::PreviewApplySections("merge", indexes)),
-            "preview-merge-lines" => {
-                Some(InitFromAgentAction::PreviewApplySections("merge-lines", indexes))
-            }
+            "preview-merge-lines" => Some(InitFromAgentAction::PreviewApplySections(
+                "merge-lines",
+                indexes,
+            )),
             "append" => Some(InitFromAgentAction::AppendSections(indexes)),
             "merge" => Some(InitFromAgentAction::MergeSections(indexes)),
             "merge-lines" => Some(InitFromAgentAction::MergeLineSections(indexes)),
@@ -2485,7 +2475,11 @@ fn prompt_plan_exit_handoff() -> Result<bool> {
     drop(_guard);
     eprintln!(
         "\x1b[2m{}\x1b[0m",
-        if approved { "approved" } else { "kept in plan mode" }
+        if approved {
+            "approved"
+        } else {
+            "kept in plan mode"
+        }
     );
     Ok(approved)
 }
@@ -2509,16 +2503,18 @@ async fn build_handle(
     // tracks runtime toggles via Shift+Tab.
     let initial_mode = mode.get();
     let ui = Arc::new(TerminalApprovalUi);
-    let factory = Arc::new(LibertaiToolFactory::new_with_features(
-        mode,
-        approvals,
-        ui,
-        FactoryFeatures::cli_defaults(),
-        Some(Arc::clone(&cfg)),
-    )
-    .with_tool_policy(crate::commands::code_hooks::tool_policy_from_config(
-        Arc::clone(&cfg),
-    )));
+    let factory = Arc::new(
+        LibertaiToolFactory::new_with_features(
+            mode,
+            approvals,
+            ui,
+            FactoryFeatures::cli_defaults(),
+            Some(Arc::clone(&cfg)),
+        )
+        .with_tool_policy(crate::commands::code_hooks::tool_policy_from_config(
+            Arc::clone(&cfg),
+        )),
+    );
     let persistence = match resume_path {
         Some(p) => SessionPersistence::Resume(p),
         None => SessionPersistence::Fresh,
@@ -2687,8 +2683,8 @@ fn resume_preview_arg(trimmed: &str) -> Option<&str> {
     let rest = trimmed.strip_prefix("/resume ")?.trim();
     match normalize_help_command_arg(rest).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" | "json" | "--json"
-        | "status --json" | "state --json" | "show --json" | "info --json"
-        | "preview --json" | "help" | "usage" => Some(rest),
+        | "status --json" | "state --json" | "show --json" | "info --json" | "preview --json"
+        | "help" | "usage" => Some(rest),
         _ => None,
     }
 }
@@ -2696,8 +2692,8 @@ fn resume_preview_arg(trimmed: &str) -> Option<&str> {
 fn parse_resume_preview_command(input: &str) -> ResumePreviewCommand {
     match normalize_help_command_arg(input).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" => ResumePreviewCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" | "preview --json" => ResumePreviewCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
+        | "preview --json" => ResumePreviewCommand::Json,
         _ => ResumePreviewCommand::Usage,
     }
 }
@@ -2754,7 +2750,9 @@ fn resume_json_payload(query: &str) -> Result<serde_json::Value> {
 fn print_resume_status() -> Result<()> {
     let payload = resume_json_payload("status")?;
     let count = payload["candidate_count"].as_u64().unwrap_or(0);
-    let default_path = payload["default_target"]["path"].as_str().unwrap_or("(none)");
+    let default_path = payload["default_target"]["path"]
+        .as_str()
+        .unwrap_or("(none)");
     println!(
         "{DIM}  /resume: {count} saved session(s) for this cwd. Running `/resume` resumes the most recent target: {default_path}.{RESET}"
     );
@@ -2889,8 +2887,7 @@ fn is_thinking_status_arg(input: &str) -> bool {
 fn is_thinking_json_arg(input: &str) -> bool {
     matches!(
         normalize_help_command_arg(input).as_str(),
-        "json" | "--json" | "status --json" | "show --json" | "current --json"
-            | "info --json"
+        "json" | "--json" | "status --json" | "show --json" | "current --json" | "info --json"
     )
 }
 
@@ -2916,8 +2913,8 @@ enum NameCommand {
 fn parse_name_command(input: &str) -> NameCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "status" | "state" | "show" | "current" | "info" => NameCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "current --json" | "info --json" => NameCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "current --json"
+        | "info --json" => NameCommand::Json,
         _ => NameCommand::Set,
     }
 }
@@ -3025,11 +3022,23 @@ fn print_help() {
     println!("{DIM}  /exit     — quit the REPL (also /quit, Ctrl+D){RESET}");
     println!("{DIM}  /plan     — toggle plan mode (also Shift+Tab){RESET}");
     println!("{DIM}  {}{RESET}", permissions_usage_text());
-    println!("{DIM}  {} — alias for /permissions{RESET}", mode_usage_text());
+    println!(
+        "{DIM}  {} — alias for /permissions{RESET}",
+        mode_usage_text()
+    );
     println!("{DIM}  {}{RESET}", model_usage_text());
-    println!("{DIM}  {} — set/show this session's display name (also /rename){RESET}", name_usage_text());
-    println!("{DIM}  {} — show current REPL session status{RESET}", status_usage_text());
-    println!("{DIM}  {} — run a local session/config diagnostic report{RESET}", doctor_usage_text());
+    println!(
+        "{DIM}  {} — set/show this session's display name (also /rename){RESET}",
+        name_usage_text()
+    );
+    println!(
+        "{DIM}  {} — show current REPL session status{RESET}",
+        status_usage_text()
+    );
+    println!(
+        "{DIM}  {} — run a local session/config diagnostic report{RESET}",
+        doctor_usage_text()
+    );
     println!("{DIM}  /abort [status|cancel|stop|interrupt] — show how to interrupt the active CLI turn{RESET}");
     println!("{DIM}  /review [scope] — ask the agent to review current code changes{RESET}");
     println!("{DIM}  /security-review [scope] — ask for a focused security review{RESET}");
@@ -3037,18 +3046,10 @@ fn print_help() {
     println!(
         "{DIM}  /pr_comments reply <thread_id> <body> — reply to a GitHub PR review thread{RESET}"
     );
-    println!(
-        "{DIM}  /pr_comments resolve <thread_id> — resolve a GitHub PR review thread{RESET}"
-    );
-    println!(
-        "{DIM}  /pr_comments unresolve <thread_id> — reopen a GitHub PR review thread{RESET}"
-    );
-    println!(
-        "{DIM}  /pr_comments viewed <path> — mark a pull request file as viewed{RESET}"
-    );
-    println!(
-        "{DIM}  /pr_comments unviewed <path> — mark a pull request file as unviewed{RESET}"
-    );
+    println!("{DIM}  /pr_comments resolve <thread_id> — resolve a GitHub PR review thread{RESET}");
+    println!("{DIM}  /pr_comments unresolve <thread_id> — reopen a GitHub PR review thread{RESET}");
+    println!("{DIM}  /pr_comments viewed <path> — mark a pull request file as viewed{RESET}");
+    println!("{DIM}  /pr_comments unviewed <path> — mark a pull request file as unviewed{RESET}");
     println!(
         "{DIM}  /pr_comments thread <path>:<line> <body> — add a GitHub PR line review thread{RESET}"
     );
@@ -3061,17 +3062,41 @@ fn print_help() {
     println!(
         "{DIM}  /pr_comments drafts submit [approve|comment|request_changes] [body] — publish queued draft threads, optionally with a review event{RESET}"
     );
-    println!("{DIM}  {} — inspect the bash sandbox profile{RESET}", sandbox_usage_text());
-    println!("{DIM}  {} — show token usage for this REPL session{RESET}", usage_slash_usage_text());
-    println!("{DIM}  {} — show recent submitted prompts{RESET}", history_usage_text());
-    println!("{DIM}  {} — copy the last assistant response to the terminal clipboard{RESET}", copy_usage_text());
+    println!(
+        "{DIM}  {} — inspect the bash sandbox profile{RESET}",
+        sandbox_usage_text()
+    );
+    println!(
+        "{DIM}  {} — show token usage for this REPL session{RESET}",
+        usage_slash_usage_text()
+    );
+    println!(
+        "{DIM}  {} — show recent submitted prompts{RESET}",
+        history_usage_text()
+    );
+    println!(
+        "{DIM}  {} — copy the last assistant response to the terminal clipboard{RESET}",
+        copy_usage_text()
+    );
     println!("{DIM}  /config [status|show|current|info|path|open|backends|defaults|agents|skills|hooks|mcp|approvals|appearance|sandbox|advanced|set <key> <value>|unset <key>] — show or update active config{RESET}");
     println!("{DIM}  /hooks    — show configured command hooks (/hook is accepted too){RESET}");
     println!("{DIM}  /mcp      — show terminal MCP support status{RESET}");
-    println!("{DIM}  {} — customize the input-bar status line{RESET}", status_line_usage_text());
-    println!("{DIM}  {} — show input bar keyboard controls{RESET}", hotkeys_usage_text());
-    println!("{DIM}  {} — show a bounded project tree{RESET}", tree_usage_text());
-    println!("{DIM}  {} — show recent git commits{RESET}", changelog_usage_text());
+    println!(
+        "{DIM}  {} — customize the input-bar status line{RESET}",
+        status_line_usage_text()
+    );
+    println!(
+        "{DIM}  {} — show input bar keyboard controls{RESET}",
+        hotkeys_usage_text()
+    );
+    println!(
+        "{DIM}  {} — show a bounded project tree{RESET}",
+        tree_usage_text()
+    );
+    println!(
+        "{DIM}  {} — show recent git commits{RESET}",
+        changelog_usage_text()
+    );
     println!("{DIM}  /reload [config|session|now|fresh] — reload config and start a fresh agent session{RESET}");
     println!("{DIM}  /resume [session|path] — resume the latest or specified saved session{RESET}");
     println!("{DIM}  /fork [list|index|id] — fork from a previous user message{RESET}");
@@ -3085,9 +3110,17 @@ fn print_help() {
     println!("{DIM}  /notify on|enable|enabled|off|disable|disabled|clear|status|state|show|test|ping — turn-complete terminal notifications{RESET}");
     println!("{DIM}  /image <path> [prompt] — attach a local image to the next prompt{RESET}");
     println!("{DIM}  /attach <path> [prompt] — alias for /image{RESET}");
-    println!("{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}");
-    println!("{DIM}  {} — inspect auth or run libertai login{RESET}", login_usage_text());
-    println!("{DIM}  {} — run libertai logout or explain provider logout{RESET}", logout_usage_text());
+    println!(
+        "{DIM}  /mention <path> [prompt] — attach a local text file to the next prompt{RESET}"
+    );
+    println!(
+        "{DIM}  {} — inspect auth or run libertai login{RESET}",
+        login_usage_text()
+    );
+    println!(
+        "{DIM}  {} — run libertai logout or explain provider logout{RESET}",
+        logout_usage_text()
+    );
     println!("{DIM}  /memory   — show project memory (/memory open|edit|clear|files|references|import <path>|import-claude|import-claude-all|path){RESET}");
     println!("{DIM}  /skills [list|status|show|json|--json|status --json|list --json|show --json|show <name>|show <name> --json|open|settings|edit|enable|on <name>|disable|off <name>] — manage code-agent skills for new sessions{RESET}");
     println!(
@@ -3164,10 +3197,18 @@ fn help_command_rows() -> &'static [(&'static str, &'static [&'static str], &'st
         ("agent", &[], "run a named sub-agent task"),
         ("agents", &[], "manage named and background sub-agents"),
         ("attach", &[], "attach a local file to the next prompt"),
-        ("auto", &["autorun", "continuous"], "run bounded continuous execution"),
+        (
+            "auto",
+            &["autorun", "continuous"],
+            "run bounded continuous execution",
+        ),
         ("bug", &[], "print a bug report diagnostic template"),
         ("changelog", &[], "show recent git commits"),
-        ("clear", &["new"], "wipe the screen and start a fresh session"),
+        (
+            "clear",
+            &["new"],
+            "wipe the screen and start a fresh session",
+        ),
         ("compact", &[], "compact older conversation history"),
         ("config", &["settings"], "show or update active config"),
         ("copy", &[], "copy the last assistant response"),
@@ -3184,16 +3225,40 @@ fn help_command_rows() -> &'static [(&'static str, &'static [&'static str], &'st
         ("image", &[], "attach a local image to the next prompt"),
         ("init", &[], "create or merge AGENTS.md guidance"),
         ("login", &[], "inspect auth or run libertai login"),
-        ("logout", &[], "run libertai logout or explain provider logout"),
-        ("loop", &["autoloop"], "run bounded autonomous follow-up turns"),
+        (
+            "logout",
+            &[],
+            "run libertai logout or explain provider logout",
+        ),
+        (
+            "loop",
+            &["autoloop"],
+            "run bounded autonomous follow-up turns",
+        ),
         ("mcp", &[], "show terminal MCP support status"),
         ("memory", &[], "show or update project memory"),
-        ("mention", &[], "attach a local text file to the next prompt"),
+        (
+            "mention",
+            &[],
+            "attach a local text file to the next prompt",
+        ),
         ("mode", &[], "show or change permission mode"),
         ("model", &[], "show or change the active model"),
-        ("name", &["rename"], "show or set this session's display name"),
-        ("notify", &["notifications"], "configure turn-complete notifications"),
-        ("onboarding", &["onboard"], "write or publish a project onboarding guide"),
+        (
+            "name",
+            &["rename"],
+            "show or set this session's display name",
+        ),
+        (
+            "notify",
+            &["notifications"],
+            "configure turn-complete notifications",
+        ),
+        (
+            "onboarding",
+            &["onboard"],
+            "write or publish a project onboarding guide",
+        ),
         ("output-style", &[], "show or change output style"),
         ("permissions", &[], "show or change permission mode"),
         ("plan", &[], "toggle plan mode"),
@@ -3202,19 +3267,39 @@ fn help_command_rows() -> &'static [(&'static str, &'static [&'static str], &'st
             &["pr-comments"],
             "inspect or update GitHub PR review comments",
         ),
-        ("reload", &[], "reload config and start a fresh agent session"),
+        (
+            "reload",
+            &[],
+            "reload config and start a fresh agent session",
+        ),
         ("remember", &[], "append typed project memory"),
         ("resume", &[], "resume a saved session"),
-        ("review", &[], "ask the agent to review current code changes"),
+        (
+            "review",
+            &[],
+            "ask the agent to review current code changes",
+        ),
         ("sandbox", &[], "inspect the bash sandbox profile"),
         ("schedule", &["cron"], "queue a due follow-up prompt"),
-        ("scoped-models", &["scoped"], "filter model list and cycling"),
+        (
+            "scoped-models",
+            &["scoped"],
+            "filter model list and cycling",
+        ),
         ("security-review", &[], "ask for a focused security review"),
-        ("send", &["send-message"], "show terminal inter-session send status"),
+        (
+            "send",
+            &["send-message"],
+            "show terminal inter-session send status",
+        ),
         ("share", &[], "write or publish shareable HTML transcript"),
         ("skills", &[], "manage code-agent skills"),
         ("status", &[], "show current REPL session status"),
-        ("statusline", &["status-line"], "customize the input-bar status line"),
+        (
+            "statusline",
+            &["status-line"],
+            "customize the input-bar status line",
+        ),
         ("template", &[], "expand a prompt template"),
         ("theme", &[], "show terminal theme status"),
         ("thinking", &["think", "t"], "show or set thinking budget"),
@@ -3340,8 +3425,8 @@ fn clear_command_arg(trimmed: &str) -> Option<(&'static str, &str)> {
 fn parse_clear_command(input: &str) -> ClearCommand {
     match normalize_help_command_arg(input).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" => ClearCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" | "preview --json" => ClearCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
+        | "preview --json" => ClearCommand::Json,
         _ => ClearCommand::Usage,
     }
 }
@@ -3378,9 +3463,7 @@ fn print_clear_status(command: &str, provider: &str, model: &str, mode: Mode) {
 }
 
 fn print_clear_json(command: &str, provider: &str, model: &str, mode: Mode, query: &str) {
-    match serde_json::to_string_pretty(&clear_json_payload(
-        command, provider, model, mode, query,
-    )) {
+    match serde_json::to_string_pretty(&clear_json_payload(command, provider, model, mode, query)) {
         Ok(raw) => println!("{raw}"),
         Err(e) => eprintln!("{DIM}  {command} json failed: {e}{RESET}"),
     }
@@ -3407,8 +3490,8 @@ fn forget_command_arg(trimmed: &str) -> Option<&str> {
 fn parse_forget_command(input: &str) -> ForgetCommand {
     match normalize_help_command_arg(input).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" => ForgetCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" | "preview --json" => ForgetCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
+        | "preview --json" => ForgetCommand::Json,
         _ => ForgetCommand::Usage,
     }
 }
@@ -3476,8 +3559,8 @@ fn exit_command_arg(trimmed: &str) -> Option<(&'static str, &str)> {
 fn parse_exit_command(input: &str) -> ExitCommand {
     match normalize_help_command_arg(input).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" => ExitCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" | "preview --json" => ExitCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
+        | "preview --json" => ExitCommand::Json,
         _ => ExitCommand::Usage,
     }
 }
@@ -3585,9 +3668,7 @@ fn tree_json_request_arg(input: &str) -> Option<String> {
     let raw = input.trim();
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
-        "json" | "--json" | "status --json" | "state --json" | "show --json" => {
-            Some(String::new())
-        }
+        "json" | "--json" | "status --json" | "state --json" | "show --json" => Some(String::new()),
         _ if lower.starts_with("json ") => Some(raw[5..].trim().to_string()),
         _ if lower.starts_with("--json ") => Some(raw[7..].trim().to_string()),
         _ if lower.ends_with(" --json") => Some(raw[..raw.len() - 7].trim().to_string()),
@@ -3638,7 +3719,9 @@ fn render_project_tree(root: &Path, max_entries: usize) -> Result<String> {
     let mut remaining = max_entries;
     render_tree_children(root, "", &mut remaining, &mut out)?;
     if remaining == 0 {
-        out.push_str(&format!("{DIM}... truncated after {max_entries} entries{RESET}\n"));
+        out.push_str(&format!(
+            "{DIM}... truncated after {max_entries} entries{RESET}\n"
+        ));
     }
     Ok(out)
 }
@@ -3679,7 +3762,8 @@ fn collect_tree_json_entries(
     if *remaining == 0 {
         return Ok(());
     }
-    let meta = std::fs::symlink_metadata(path).with_context(|| format!("read {}", path.display()))?;
+    let meta =
+        std::fs::symlink_metadata(path).with_context(|| format!("read {}", path.display()))?;
     let file_type = meta.file_type();
     let name = if depth == 0 {
         path.file_name()
@@ -3696,7 +3780,13 @@ fn collect_tree_json_entries(
     let relative = path
         .strip_prefix(root)
         .ok()
-        .and_then(|p| if p.as_os_str().is_empty() { Some(".") } else { p.to_str() })
+        .and_then(|p| {
+            if p.as_os_str().is_empty() {
+                Some(".")
+            } else {
+                p.to_str()
+            }
+        })
         .unwrap_or(".");
     rows.push(json!({
         "name": name,
@@ -3711,7 +3801,11 @@ fn collect_tree_json_entries(
         entries.sort_by(|a, b| {
             b.is_dir
                 .cmp(&a.is_dir)
-                .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+                .then_with(|| {
+                    a.name
+                        .to_ascii_lowercase()
+                        .cmp(&b.name.to_ascii_lowercase())
+                })
                 .then_with(|| a.name.cmp(&b.name))
         });
         for entry in entries {
@@ -3737,7 +3831,11 @@ fn render_tree_children(
     entries.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
-            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+            .then_with(|| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            })
             .then_with(|| a.name.cmp(&b.name))
     });
     let len = entries.len();
@@ -3843,8 +3941,8 @@ fn changelog_json_request_arg(input: &str) -> Option<String> {
     let raw = input.trim();
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "list --json" | "recent --json" | "latest --json" => Some(String::new()),
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "list --json"
+        | "recent --json" | "latest --json" => Some(String::new()),
         _ => lower
             .strip_prefix("json ")
             .or_else(|| lower.strip_prefix("--json "))
@@ -3881,12 +3979,12 @@ fn changelog_json_payload(limit: usize, query: &str, lines: Vec<String>) -> serd
 
 fn print_changelog_json(limit: usize, query: &str) {
     match recent_git_commits(limit) {
-        Ok(lines) => match serde_json::to_string_pretty(&changelog_json_payload(
-            limit, query, lines,
-        )) {
-            Ok(raw) => println!("{raw}"),
-            Err(e) => eprintln!("{DIM}  /changelog json: {e:#}{RESET}"),
-        },
+        Ok(lines) => {
+            match serde_json::to_string_pretty(&changelog_json_payload(limit, query, lines)) {
+                Ok(raw) => println!("{raw}"),
+                Err(e) => eprintln!("{DIM}  /changelog json: {e:#}{RESET}"),
+            }
+        }
         Err(e) => eprintln!("{DIM}  /changelog: {e:#}{RESET}"),
     }
 }
@@ -3931,7 +4029,13 @@ fn sandbox_usage_text() -> &'static str {
 }
 
 fn sandbox_json_payload(profile: &StrictProfile, query: &str) -> serde_json::Value {
-    let count_kind = |kind| profile.binds.iter().filter(|bind| bind.kind == kind).count();
+    let count_kind = |kind| {
+        profile
+            .binds
+            .iter()
+            .filter(|bind| bind.kind == kind)
+            .count()
+    };
     json!({
         "command": "sandbox",
         "surface": "terminal",
@@ -4289,8 +4393,8 @@ fn history_json_request_arg(input: &str) -> Option<String> {
     let raw = input.trim();
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "list --json" | "recent --json" | "latest --json" => Some(String::new()),
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "list --json"
+        | "recent --json" | "latest --json" => Some(String::new()),
         _ => lower
             .strip_prefix("json ")
             .or_else(|| lower.strip_prefix("--json "))
@@ -4490,8 +4594,9 @@ fn detect_supported_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
 fn parse_permissions_command(input: &str) -> PermissionsCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "show" | "status" | "current" | "info" => PermissionsCommand::Show,
-        "json" | "--json" | "status --json" | "show --json" | "current --json"
-        | "info --json" => PermissionsCommand::Json,
+        "json" | "--json" | "status --json" | "show --json" | "current --json" | "info --json" => {
+            PermissionsCommand::Json
+        }
         "open" | "settings" | "edit" | "approvals" => PermissionsCommand::Open,
         "default" | "normal" => PermissionsCommand::Set(Mode::Normal),
         "acceptedits" | "accept-edits" | "accept_edits" => {
@@ -4517,9 +4622,7 @@ enum PlanCommand {
 fn parse_plan_command(input: &str) -> PlanCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "show" | "current" | "info" => PlanCommand::Status,
-        "on" | "enable" | "enabled" | "true" | "plan" | "readonly" | "read-only" => {
-            PlanCommand::On
-        }
+        "on" | "enable" | "enabled" | "true" | "plan" | "readonly" | "read-only" => PlanCommand::On,
         "off" | "disable" | "disabled" | "false" | "normal" | "default" => PlanCommand::Off,
         _ => PlanCommand::Usage,
     }
@@ -4579,11 +4682,7 @@ fn status_line_help() -> String {
     )
 }
 
-fn expand_status_line_template(
-    template: &str,
-    status: &BarStatus,
-    mode: Mode,
-) -> Option<String> {
+fn expand_status_line_template(template: &str, status: &BarStatus, mode: Mode) -> Option<String> {
     let template = normalize_status_line_template(template);
     if template.is_empty() {
         return None;
@@ -4610,7 +4709,10 @@ fn expand_status_line_template(
         .map(|(_, model)| model)
         .unwrap_or(status.model_label.as_str());
     let ctx = if status.context_window > 0 {
-        format!("{}%", context_percent(status.input_tokens, status.context_window))
+        format!(
+            "{}%",
+            context_percent(status.input_tokens, status.context_window)
+        )
     } else {
         "-".to_string()
     };
@@ -4690,8 +4792,12 @@ fn print_permissions_status(mode: Mode, approvals: &ApprovalState) {
     );
     println!("{DIM}  native bypassPermissions is intentionally unavailable.{RESET}");
     println!("{DIM}  use /permissions forget to clear saved allow rules.{RESET}");
-    println!("{DIM}  use /permissions open to show the approvals settings target and rule path.{RESET}");
-    println!("{DIM}  use /permissions bypassPermissions to explain the native safety stance.{RESET}");
+    println!(
+        "{DIM}  use /permissions open to show the approvals settings target and rule path.{RESET}"
+    );
+    println!(
+        "{DIM}  use /permissions bypassPermissions to explain the native safety stance.{RESET}"
+    );
 }
 
 fn permissions_json_payload(
@@ -5000,13 +5106,14 @@ fn login_key_state(cfg: &LibertaiConfig) -> String {
 
 fn print_provider_login_note(provider: &str, cfg: &LibertaiConfig) {
     println!("{BOLD}login{RESET}");
-    println!(
-        "{DIM}  provider `{provider}` is not stored in the terminal CLI config.{RESET}"
-    );
+    println!("{DIM}  provider `{provider}` is not stored in the terminal CLI config.{RESET}");
     println!(
         "{DIM}  use the desktop `/login {provider}` flow or Settings > Backends for provider-specific credentials.{RESET}"
     );
-    println!("{DIM}  terminal LibertAI API key:{RESET} {}", login_key_state(cfg));
+    println!(
+        "{DIM}  terminal LibertAI API key:{RESET} {}",
+        login_key_state(cfg)
+    );
 }
 
 fn provider_login_payload(
@@ -5072,7 +5179,10 @@ fn print_provider_login_details(provider: &str, cfg: &LibertaiConfig) {
     println!(
         "{DIM}  desktop state:{RESET} use desktop /login show {provider} or Settings > Backends for key/base URL/model-cache details."
     );
-    println!("{DIM}  terminal LibertAI API key:{RESET} {}", login_key_state(cfg));
+    println!(
+        "{DIM}  terminal LibertAI API key:{RESET} {}",
+        login_key_state(cfg)
+    );
 }
 
 fn print_provider_logout_details(provider: &str, cfg: &LibertaiConfig) {
@@ -5089,7 +5199,10 @@ fn print_provider_logout_details(provider: &str, cfg: &LibertaiConfig) {
     println!(
         "{DIM}  desktop action:{RESET} use desktop /logout {provider} to clear a desktop-stored provider API key."
     );
-    println!("{DIM}  terminal LibertAI API key:{RESET} {}", login_key_state(cfg));
+    println!(
+        "{DIM}  terminal LibertAI API key:{RESET} {}",
+        login_key_state(cfg)
+    );
 }
 
 fn parse_model_spec(current_provider: &str, input: &str) -> Result<(String, String)> {
@@ -5169,7 +5282,9 @@ fn handle_scoped_models_command(raw: &str, scoped_model_patterns: &mut Vec<Strin
         ScopedModelsCommand::Json => print_scoped_model_json(scoped_model_patterns, raw),
         ScopedModelsCommand::Clear => {
             scoped_model_patterns.clear();
-            println!("{DIM}  scoped models cleared; /model list shows all discovered models.{RESET}");
+            println!(
+                "{DIM}  scoped models cleared; /model list shows all discovered models.{RESET}"
+            );
         }
         ScopedModelsCommand::Set(patterns) => {
             *scoped_model_patterns = patterns;
@@ -5233,7 +5348,10 @@ fn print_model_status(
     if scoped_model_patterns.is_empty() {
         println!("{DIM}  scoped models:{RESET} (all models)");
     } else {
-        println!("{DIM}  scoped models:{RESET} {}", scoped_model_patterns.join(", "));
+        println!(
+            "{DIM}  scoped models:{RESET} {}",
+            scoped_model_patterns.join(", ")
+        );
     }
     println!("{DIM}  usage:{RESET} {}", model_usage_text());
 }
@@ -5355,7 +5473,9 @@ fn cycle_scoped_model(
     if scoped.len() < 2 {
         return None;
     }
-    let current_idx = scoped.iter().position(|candidate| candidate == current_model);
+    let current_idx = scoped
+        .iter()
+        .position(|candidate| candidate == current_model);
     let base = current_idx.unwrap_or_else(|| if direction < 0 { 0 } else { scoped.len() - 1 });
     let len = scoped.len() as isize;
     let next = (base as isize + direction).rem_euclid(len) as usize;
@@ -5485,13 +5605,19 @@ async fn export_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
     let markdown = render_markdown_transcript(&messages);
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("{DIM}  /export: could not create {}: {e}{RESET}", parent.display());
+            eprintln!(
+                "{DIM}  /export: could not create {}: {e}{RESET}",
+                parent.display()
+            );
             return;
         }
     }
     match std::fs::write(&path, markdown) {
         Ok(()) => println!("{DIM}  exported transcript: {}{RESET}", path.display()),
-        Err(e) => eprintln!("{DIM}  /export: could not write {}: {e}{RESET}", path.display()),
+        Err(e) => eprintln!(
+            "{DIM}  /export: could not write {}: {e}{RESET}",
+            path.display()
+        ),
     }
 }
 
@@ -5504,10 +5630,12 @@ fn is_export_json_arg(input: &str) -> bool {
 
 async fn print_export_json(handle: &AgentSessionHandle, query: &str) {
     match handle.messages().await {
-        Ok(messages) => match serde_json::to_string_pretty(&export_json_payload(query, &messages)) {
-            Ok(body) => println!("{body}"),
-            Err(e) => eprintln!("{DIM}  /export json failed: {e}{RESET}"),
-        },
+        Ok(messages) => {
+            match serde_json::to_string_pretty(&export_json_payload(query, &messages)) {
+                Ok(body) => println!("{body}"),
+                Err(e) => eprintln!("{DIM}  /export json failed: {e}{RESET}"),
+            }
+        }
         Err(e) => eprintln!("{DIM}  /export json: could not read transcript: {e:#}{RESET}"),
     }
 }
@@ -5562,16 +5690,14 @@ async fn share_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
             }
             match std::fs::write(&path, html) {
                 Ok(()) => println!("{DIM}  share HTML written: {}{RESET}", path.display()),
-                Err(e) => eprintln!("{DIM}  /share: could not write {}: {e}{RESET}", path.display()),
+                Err(e) => eprintln!(
+                    "{DIM}  /share: could not write {}: {e}{RESET}",
+                    path.display()
+                ),
             }
         }
         ShareTarget::Gist { public, filename } => {
-            match publish_gist(
-                &html,
-                public,
-                &filename,
-                "LibertAI Code shared transcript",
-            ) {
+            match publish_gist(&html, public, &filename, "LibertAI Code shared transcript") {
                 Ok(url) => println!("{DIM}  share gist created: {url}{RESET}"),
                 Err(e) => eprintln!("{DIM}  /share gist: {e:#}{RESET}"),
             }
@@ -5653,8 +5779,8 @@ fn compact_preview_arg(trimmed: &str) -> Option<&str> {
     let rest = trimmed.strip_prefix("/compact ")?.trim();
     match normalize_help_command_arg(rest).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" | "json" | "--json"
-        | "status --json" | "state --json" | "show --json" | "info --json"
-        | "preview --json" | "help" | "usage" => Some(rest),
+        | "status --json" | "state --json" | "show --json" | "info --json" | "preview --json"
+        | "help" | "usage" => Some(rest),
         _ => None,
     }
 }
@@ -5662,8 +5788,8 @@ fn compact_preview_arg(trimmed: &str) -> Option<&str> {
 fn parse_compact_preview_command(input: &str) -> CompactPreviewCommand {
     match normalize_help_command_arg(input).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" => CompactPreviewCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" | "preview --json" => CompactPreviewCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
+        | "preview --json" => CompactPreviewCommand::Json,
         _ => CompactPreviewCommand::Usage,
     }
 }
@@ -5742,7 +5868,9 @@ fn parse_share_target(path: Option<&str>) -> Result<ShareTarget> {
             "public" | "--public" => public = true,
             "secret" | "private" | "--secret" | "--private" => public = false,
             other if other.starts_with('-') => {
-                anyhow::bail!("unknown gist option `{part}`; use /share gist [public|secret] [filename.html]");
+                anyhow::bail!(
+                    "unknown gist option `{part}`; use /share gist [public|secret] [filename.html]"
+                );
             }
             _ => filename_parts.push(part),
         }
@@ -5945,8 +6073,9 @@ fn parse_theme_command(rest: &str) -> ThemeCommand {
     let requested = rest.trim();
     match requested.to_ascii_lowercase().as_str() {
         "" | "status" | "show" | "current" | "info" => ThemeCommand::Status,
-        "json" | "--json" | "status --json" | "show --json" | "current --json"
-        | "info --json" => ThemeCommand::Json,
+        "json" | "--json" | "status --json" | "show --json" | "current --json" | "info --json" => {
+            ThemeCommand::Json
+        }
         _ => ThemeCommand::Requested(requested.to_string()),
     }
 }
@@ -6087,9 +6216,7 @@ fn parse_mcp_command(input: &str) -> McpCommand {
         }
     }
     match normalized.as_str() {
-        "" | "status" | "list" | "state" | "diagnostics" | "diag" | "show" => {
-            McpCommand::Status
-        }
+        "" | "status" | "list" | "state" | "diagnostics" | "diag" | "show" => McpCommand::Status,
         "probe" | "probes" => McpCommand::Probe,
         "refresh" | "probe --save" | "probe save" | "probe --write" | "probe write" => {
             McpCommand::ProbeSave
@@ -6103,8 +6230,8 @@ fn parse_mcp_command(input: &str) -> McpCommand {
 fn parse_vim_command(input: &str) -> VimCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "state" | "show" | "current" | "info" => VimCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "current --json" | "info --json" => VimCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "current --json"
+        | "info --json" => VimCommand::Json,
         "on" | "enable" | "enabled" | "true" => VimCommand::Enable,
         "off" | "disable" | "disabled" | "false" => VimCommand::Disable,
         _ => VimCommand::Usage,
@@ -6114,9 +6241,7 @@ fn parse_vim_command(input: &str) -> VimCommand {
 fn parse_ide_command(input: &str) -> IdeCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "state" | "show" => IdeCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json" => {
-            IdeCommand::Json
-        }
+        "json" | "--json" | "status --json" | "state --json" | "show --json" => IdeCommand::Json,
         "open" | "settings" | "edit" => IdeCommand::Open,
         _ => IdeCommand::Usage,
     }
@@ -6137,9 +6262,7 @@ fn parse_copy_command(input: &str) -> CopyCommand {
             CopyCommand::LastAssistant
         }
         "status" | "show" | "info" => CopyCommand::Status,
-        "json" | "--json" | "status --json" | "show --json" | "info --json" => {
-            CopyCommand::Json
-        }
+        "json" | "--json" | "status --json" | "show --json" | "info --json" => CopyCommand::Json,
         _ => CopyCommand::Usage,
     }
 }
@@ -6163,19 +6286,18 @@ fn hotkeys_usage_text() -> &'static str {
 fn parse_reload_command(input: &str) -> ReloadCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "config" | "session" | "now" | "fresh" => ReloadCommand::Session,
-        "json" | "--json" | "config --json" | "session --json" | "now --json"
-        | "fresh --json" => ReloadCommand::Json,
+        "json" | "--json" | "config --json" | "session --json" | "now --json" | "fresh --json" => {
+            ReloadCommand::Json
+        }
         _ => ReloadCommand::Usage,
     }
 }
 
 fn parse_status_command(input: &str) -> StatusCommand {
     match input.trim().to_ascii_lowercase().as_str() {
-        "" | "status" | "state" | "show" | "info" | "current" | "session" => {
-            StatusCommand::Session
-        }
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" | "current --json" | "session --json" => StatusCommand::Json,
+        "" | "status" | "state" | "show" | "info" | "current" | "session" => StatusCommand::Session,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
+        | "current --json" | "session --json" => StatusCommand::Json,
         _ => StatusCommand::Usage,
     }
 }
@@ -6189,10 +6311,8 @@ fn parse_doctor_command(input: &str) -> DoctorCommand {
         "" | "status" | "state" | "show" | "info" | "health" | "diagnostics" | "diag" => {
             DoctorCommand::Run
         }
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" | "health --json" | "diagnostics --json" | "diag --json" => {
-            DoctorCommand::Json
-        }
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
+        | "health --json" | "diagnostics --json" | "diag --json" => DoctorCommand::Json,
         _ => DoctorCommand::Usage,
     }
 }
@@ -6206,8 +6326,9 @@ fn parse_abort_command(input: &str) -> AbortCommand {
         "" | "status" | "state" | "show" | "info" | "cancel" | "stop" | "interrupt" => {
             AbortCommand::Status
         }
-        "json" | "--json" | "status --json" | "state --json" | "show --json"
-        | "info --json" => AbortCommand::Json,
+        "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json" => {
+            AbortCommand::Json
+        }
         _ => AbortCommand::Usage,
     }
 }
@@ -6219,9 +6340,7 @@ fn abort_usage_text() -> &'static str {
 fn parse_notify_command(input: &str) -> NotifyCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "state" | "show" => NotifyCommand::Status,
-        "json" | "--json" | "status --json" | "state --json" | "show --json" => {
-            NotifyCommand::Json
-        }
+        "json" | "--json" | "status --json" | "state --json" | "show --json" => NotifyCommand::Json,
         "on" | "enable" | "enabled" => NotifyCommand::On,
         "off" | "disable" | "disabled" | "clear" => NotifyCommand::Off,
         "test" | "ping" => NotifyCommand::Test,
@@ -6268,9 +6387,7 @@ fn print_notify_status(cfg: &LibertaiConfig) {
             "off"
         }
     );
-    println!(
-        "{DIM}  agent push notifications:{RESET} terminal bell + visible notification block"
-    );
+    println!("{DIM}  agent push notifications:{RESET} terminal bell + visible notification block");
     println!("{DIM}  usage:{RESET} {}", notify_usage_text());
 }
 
@@ -6517,9 +6634,7 @@ fn print_vim_status(command: VimCommand, query: &str) {
         VimCommand::Json => print_vim_json(query),
         VimCommand::Enable => {
             VIM_INPUT_ENABLED.store(true, Ordering::SeqCst);
-            println!(
-                "{DIM}  /vim on:{RESET} enabled for this terminal session."
-            );
+            println!("{DIM}  /vim on:{RESET} enabled for this terminal session.");
             println!(
                 "{DIM}  terminal:{RESET} input starts in insert mode; press Esc for normal mode."
             );
@@ -6558,22 +6673,23 @@ fn print_vim_json(query: &str) {
 fn vim_normal_key_action(code: KeyCode, modifiers: KeyModifiers) -> VimNormalAction {
     match (code, modifiers) {
         (KeyCode::Enter, _) => VimNormalAction::Submit,
-        (KeyCode::Char('h'), KeyModifiers::NONE)
-        | (KeyCode::Left, _) => VimNormalAction::MoveLeft,
-        (KeyCode::Char('l'), KeyModifiers::NONE)
-        | (KeyCode::Right, _) => VimNormalAction::MoveRight,
-        (KeyCode::Char('0'), KeyModifiers::NONE)
-        | (KeyCode::Home, _) => VimNormalAction::Home,
-        (KeyCode::Char('$'), KeyModifiers::NONE | KeyModifiers::SHIFT)
-        | (KeyCode::End, _) => VimNormalAction::End,
-        (KeyCode::Char('x'), KeyModifiers::NONE)
-        | (KeyCode::Delete, _) => VimNormalAction::Delete,
+        (KeyCode::Char('h'), KeyModifiers::NONE) | (KeyCode::Left, _) => VimNormalAction::MoveLeft,
+        (KeyCode::Char('l'), KeyModifiers::NONE) | (KeyCode::Right, _) => {
+            VimNormalAction::MoveRight
+        }
+        (KeyCode::Char('0'), KeyModifiers::NONE) | (KeyCode::Home, _) => VimNormalAction::Home,
+        (KeyCode::Char('$'), KeyModifiers::NONE | KeyModifiers::SHIFT) | (KeyCode::End, _) => {
+            VimNormalAction::End
+        }
+        (KeyCode::Char('x'), KeyModifiers::NONE) | (KeyCode::Delete, _) => VimNormalAction::Delete,
         (KeyCode::Char('i'), KeyModifiers::NONE) => VimNormalAction::InsertBefore,
         (KeyCode::Char('a'), KeyModifiers::NONE) => VimNormalAction::InsertAfter,
-        (KeyCode::Char('I'), KeyModifiers::SHIFT)
-        | (KeyCode::Char('I'), KeyModifiers::NONE) => VimNormalAction::InsertHome,
-        (KeyCode::Char('A'), KeyModifiers::SHIFT)
-        | (KeyCode::Char('A'), KeyModifiers::NONE) => VimNormalAction::InsertEnd,
+        (KeyCode::Char('I'), KeyModifiers::SHIFT) | (KeyCode::Char('I'), KeyModifiers::NONE) => {
+            VimNormalAction::InsertHome
+        }
+        (KeyCode::Char('A'), KeyModifiers::SHIFT) | (KeyCode::Char('A'), KeyModifiers::NONE) => {
+            VimNormalAction::InsertEnd
+        }
         _ => VimNormalAction::None,
     }
 }
@@ -6906,10 +7022,7 @@ fn print_schedule_details(scheduled_runs: &[ScheduledRun], id: &str) {
     let remaining = run.due_at.saturating_duration_since(now);
     let state = if run.due_at <= now { "due" } else { "pending" };
     println!("{DIM}  state:{RESET} {state}");
-    println!(
-        "{DIM}  due in:{RESET} {}",
-        format_schedule_delay(remaining)
-    );
+    println!("{DIM}  due in:{RESET} {}", format_schedule_delay(remaining));
     println!("{DIM}  due epoch ms:{RESET} {}", run.due_epoch_ms);
     println!("{DIM}  prompt:{RESET} {}", run.prompt.replace('\n', " "));
 }
@@ -6986,7 +7099,11 @@ fn print_schedule_json(scheduled_runs: &[ScheduledRun], query: &str, id: Option<
         payload.runs.retain(|run| run.id == id);
         payload.total = payload.runs.len();
         payload.due = payload.runs.iter().filter(|run| run.state == "due").count();
-        payload.pending = payload.runs.iter().filter(|run| run.state == "pending").count();
+        payload.pending = payload
+            .runs
+            .iter()
+            .filter(|run| run.state == "pending")
+            .count();
     }
     match serde_json::to_string_pretty(&payload) {
         Ok(raw) => println!("{raw}"),
@@ -7022,7 +7139,10 @@ fn pop_due_scheduled_prompt(scheduled_runs: &mut Vec<ScheduledRun>) -> Option<St
         .min_by_key(|(_, run)| run.due_at)
         .map(|(idx, _)| idx)?;
     let run = scheduled_runs.remove(idx);
-    Some(format!("Scheduled follow-up ({}).\n\n{}", run.id, run.prompt))
+    Some(format!(
+        "Scheduled follow-up ({}).\n\n{}",
+        run.id, run.prompt
+    ))
 }
 
 #[cfg(test)]
@@ -7161,7 +7281,11 @@ fn print_auto_status(auto_run: Option<&AutoRun>) {
             run.completed,
             run.limit,
             run.limit.saturating_sub(run.completed),
-            if run.goal.is_empty() { "" } else { ", goal set" }
+            if run.goal.is_empty() {
+                ""
+            } else {
+                ", goal set"
+            }
         ),
         None => println!("{DIM}  /auto: continuous execution is off.{RESET}"),
     }
@@ -7322,7 +7446,9 @@ pre{background:#111827;color:#f9fafb;border-radius:6px;overflow:auto;padding:.75
                 out.push_str("</section>\n");
             }
             Message::Assistant(assistant) => {
-                out.push_str("<section class=\"turn assistant\"><div class=\"role\">Assistant</div>");
+                out.push_str(
+                    "<section class=\"turn assistant\"><div class=\"role\">Assistant</div>",
+                );
                 render_blocks_html(&mut out, &assistant.content);
                 out.push_str("</section>\n");
             }
@@ -7463,7 +7589,10 @@ fn print_init_project(notes: Option<&str>) {
         }
         Ok(result) => {
             println!("{BOLD}init{RESET}");
-            println!("{DIM}  AGENTS.md already exists: {}{RESET}", result.path.display());
+            println!(
+                "{DIM}  AGENTS.md already exists: {}{RESET}",
+                result.path.display()
+            );
             println!("{DIM}  left existing content unchanged.{RESET}");
             match crate::commands::code_init::agents_md_candidate(&cwd, notes) {
                 Ok(candidate) => {
@@ -7599,7 +7728,12 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
         Ok(messages) => messages,
         Err(e) => {
             if json_output {
-                print_init_from_agent_json(None, None, None, Some(&format!("could not read transcript: {e:#}")));
+                print_init_from_agent_json(
+                    None,
+                    None,
+                    None,
+                    Some(&format!("could not read transcript: {e:#}")),
+                );
             } else {
                 eprintln!("{DIM}  /init from-agent: could not read transcript: {e:#}{RESET}");
             }
@@ -7633,7 +7767,12 @@ async fn apply_init_from_agent(handle: &AgentSessionHandle, action: InitFromAgen
         Ok(cwd) => cwd,
         Err(e) => {
             if json_output {
-                print_init_from_agent_json(None, None, Some(&candidate), Some(&format!("could not resolve cwd: {e}")));
+                print_init_from_agent_json(
+                    None,
+                    None,
+                    Some(&candidate),
+                    Some(&format!("could not resolve cwd: {e}")),
+                );
             } else {
                 eprintln!("{DIM}  /init from-agent: could not resolve cwd: {e}{RESET}");
             }
@@ -7826,7 +7965,9 @@ fn selected_init_candidate_sections(candidate: &str, indexes: &[usize]) -> Resul
         return Err("assistant candidate has no selectable markdown sections".to_string());
     }
     if indexes.len() == 1 && indexes[0] == 0 {
-        return Ok(ensure_trailing_newline(&join_init_markdown_sections(&sections)));
+        return Ok(ensure_trailing_newline(&join_init_markdown_sections(
+            &sections,
+        )));
     }
     let mut selected = Vec::new();
     for index in indexes {
@@ -7839,7 +7980,9 @@ fn selected_init_candidate_sections(candidate: &str, indexes: &[usize]) -> Resul
         };
         selected.push(section.clone());
     }
-    Ok(ensure_trailing_newline(&join_init_markdown_sections(&selected)))
+    Ok(ensure_trailing_newline(&join_init_markdown_sections(
+        &selected,
+    )))
 }
 
 fn ensure_trailing_newline(value: &str) -> String {
@@ -8029,7 +8172,10 @@ fn write_onboarding_guide(path: Option<&str>) {
     };
     match target {
         OnboardingTarget::File(path) => {
-            if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
                 if let Err(e) = std::fs::create_dir_all(parent) {
                     eprintln!(
                         "{DIM}  /onboarding: could not create {}: {e}{RESET}",
@@ -8122,7 +8268,9 @@ fn parse_onboarding_target(path: Option<&str>) -> Result<OnboardingTarget> {
     let raw = path.unwrap_or("").trim();
     let raw = strip_save_action(raw);
     if raw.is_empty() {
-        return Ok(OnboardingTarget::File(PathBuf::from("libertai-onboarding.md")));
+        return Ok(OnboardingTarget::File(PathBuf::from(
+            "libertai-onboarding.md",
+        )));
     }
     let Some(rest) = raw.strip_prefix("gist") else {
         return Ok(OnboardingTarget::File(PathBuf::from(raw)));
@@ -8167,7 +8315,12 @@ fn init_candidate_preview(path: &str, existing: &str, candidate: &str) -> String
     if !sections.is_empty() {
         out.push_str("\n  candidate sections:\n");
         for (idx, section) in sections.iter().enumerate() {
-            out.push_str(&format!("  {}. {} — {}\n", idx + 1, section.title, section.status));
+            out.push_str(&format!(
+                "  {}. {} — {}\n",
+                idx + 1,
+                section.title,
+                section.status
+            ));
         }
     }
     out.push_str("\n  Review the candidate against the existing AGENTS.md and merge only verified repo facts.\n");
@@ -8297,7 +8450,10 @@ fn init_candidate_section_status(
         .filter(|line| !existing_lines.contains(&normalize_init_line(line)))
         .count();
     if additions > 0 {
-        return format!("adds {additions} line{}", if additions == 1 { "" } else { "s" });
+        return format!(
+            "adds {additions} line{}",
+            if additions == 1 { "" } else { "s" }
+        );
     }
     if normalize_init_line(&existing.content) == normalize_init_line(&candidate.content) {
         "unchanged".to_string()
@@ -8369,7 +8525,10 @@ fn print_memory(action: &str) {
                     result.imported_files, result.imported_bytes
                 );
                 if result.skipped_projects > 0 {
-                    println!("{DIM}  skipped projects:{RESET} {}", result.skipped_projects);
+                    println!(
+                        "{DIM}  skipped projects:{RESET} {}",
+                        result.skipped_projects
+                    );
                 }
                 if result.skipped_files > 0 {
                     println!("{DIM}  skipped files:{RESET} {}", result.skipped_files);
@@ -8400,7 +8559,10 @@ fn print_memory(action: &str) {
         }
         return;
     }
-    if matches!(action.to_ascii_lowercase().as_str(), "references" | "refs" | "verify") {
+    if matches!(
+        action.to_ascii_lowercase().as_str(),
+        "references" | "refs" | "verify"
+    ) {
         match crate::commands::code_memory::verify_memory_references(&cwd) {
             Ok(refs) => print_memory_references(&refs),
             Err(e) => eprintln!("{DIM}  /memory references: failed: {e:#}{RESET}"),
@@ -8468,17 +8630,26 @@ fn memory_import_source(action: &str) -> Option<&str> {
     if !command.eq_ignore_ascii_case("import") {
         return None;
     }
-    parts.next().map(str::trim).filter(|source| !source.is_empty())
+    parts
+        .next()
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
 }
 
 fn memory_file_selector(action: &str) -> Option<&str> {
     let trimmed = action.trim();
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let command = parts.next()?;
-    if !matches!(command.to_ascii_lowercase().as_str(), "file" | "read" | "show-file") {
+    if !matches!(
+        command.to_ascii_lowercase().as_str(),
+        "file" | "read" | "show-file"
+    ) {
         return None;
     }
-    parts.next().map(str::trim).filter(|source| !source.is_empty())
+    parts
+        .next()
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
 }
 
 fn is_memory_json_action(action: &str) -> bool {
@@ -8753,7 +8924,9 @@ fn print_agents() {
         }
         println!("{DIM}  run /agent <name> <task> to dispatch a focused task.{RESET}");
     }
-    println!("{DIM}  run /agents create <name> [description] to scaffold a project sub-agent.{RESET}");
+    println!(
+        "{DIM}  run /agents create <name> [description] to scaffold a project sub-agent.{RESET}"
+    );
     println!();
 }
 
@@ -9150,7 +9323,9 @@ fn print_agents_open_hint() {
             cwd.join(".claude/agents").display()
         );
     } else {
-        println!("{DIM}  terminal: edit .libertai/agents or .claude/agents in this project.{RESET}");
+        println!(
+            "{DIM}  terminal: edit .libertai/agents or .claude/agents in this project.{RESET}"
+        );
     }
     println!("{DIM}  user agents live under ~/.libertai/agents or ~/.claude/agents.{RESET}");
 }
@@ -9177,8 +9352,14 @@ fn create_agent_from_slash(input: &str) {
         parsed.worktree,
     ) {
         Ok(path) => {
-            println!("{DIM}  created project sub-agent: {}{RESET}", path.display());
-            println!("{DIM}  edit the prompt, then run /agent {} <task>{RESET}", parsed.name);
+            println!(
+                "{DIM}  created project sub-agent: {}{RESET}",
+                path.display()
+            );
+            println!(
+                "{DIM}  edit the prompt, then run /agent {} <task>{RESET}",
+                parsed.name
+            );
         }
         Err(e) => eprintln!("{DIM}  /agents: create failed: {e:#}{RESET}"),
     }
@@ -9247,7 +9428,9 @@ fn print_background_agents() {
             );
             println!("{DIM}  /agents background json prints machine-readable status.{RESET}");
             println!("{DIM}  /agents background kill [pid|run-id|latest] stops a running background agent.{RESET}");
-            println!("{DIM}  /agents background prune removes exited records from the list.{RESET}");
+            println!(
+                "{DIM}  /agents background prune removes exited records from the list.{RESET}"
+            );
         }
         Err(e) => eprintln!("{DIM}  /agents: could not read background agents: {e:#}{RESET}"),
     }
@@ -9275,9 +9458,9 @@ fn print_background_agents_json(query: &str) {
             };
             match serde_json::to_string_pretty(&payload) {
                 Ok(raw) => println!("{raw}"),
-                Err(e) => eprintln!(
-                    "{DIM}  /agents: could not serialize background agents: {e:#}{RESET}"
-                ),
+                Err(e) => {
+                    eprintln!("{DIM}  /agents: could not serialize background agents: {e:#}{RESET}")
+                }
             }
         }
         Err(e) => eprintln!("{DIM}  /agents: could not read background agents: {e:#}{RESET}"),
@@ -9318,9 +9501,9 @@ fn print_background_agent_details_json(input: &str) {
             };
             match serde_json::to_string_pretty(&payload) {
                 Ok(raw) => println!("{raw}"),
-                Err(e) => eprintln!(
-                    "{DIM}  /agents: could not serialize background agent: {e:#}{RESET}"
-                ),
+                Err(e) => {
+                    eprintln!("{DIM}  /agents: could not serialize background agent: {e:#}{RESET}")
+                }
             }
         }
         Ok(None) => {
@@ -9350,10 +9533,16 @@ fn format_background_agent_details(
 ) -> String {
     [
         format!("{BOLD}background agent: pid {}{RESET}", record.pid),
-        format!("{DIM}  run id:{RESET} {}", background_agent_record_id(record)),
+        format!(
+            "{DIM}  run id:{RESET} {}",
+            background_agent_record_id(record)
+        ),
         format!("{DIM}  status:{RESET} {}", status.label()),
         format!("{DIM}  name:{RESET} {}", record.name),
-        format!("{DIM}  provider:{RESET} {}", display_or_dash(&record.provider)),
+        format!(
+            "{DIM}  provider:{RESET} {}",
+            display_or_dash(&record.provider)
+        ),
         format!("{DIM}  model:{RESET} {}", display_or_dash(&record.model)),
         format!("{DIM}  mode:{RESET} {}", display_or_dash(&record.mode)),
         format!(
@@ -9503,7 +9692,9 @@ fn kill_background_agent(input: &str) {
 fn prune_background_agents() {
     match load_background_agent_records() {
         Ok(records) if records.is_empty() => {
-            println!("{DIM}  /agents background prune: no terminal background agents recorded.{RESET}");
+            println!(
+                "{DIM}  /agents background prune: no terminal background agents recorded.{RESET}"
+            );
         }
         Ok(records) => {
             let original = records.len();
@@ -9537,7 +9728,9 @@ fn print_templates() {
     println!("{BOLD}templates{RESET}");
     if templates.is_empty() {
         println!("{DIM}  no prompt templates found.{RESET}");
-        println!("{DIM}  create .claude/commands/<name>.md or .claude/skills/<name>/SKILL.md.{RESET}");
+        println!(
+            "{DIM}  create .claude/commands/<name>.md or .claude/skills/<name>/SKILL.md.{RESET}"
+        );
     } else {
         for t in templates {
             let base_desc = t.description.as_deref().unwrap_or(match t.source {
@@ -9983,9 +10176,7 @@ fn review_command_parts(trimmed: &str) -> Option<(&str, &str)> {
         .split_once(char::is_whitespace)
         .map_or((trimmed, ""), |(command, scope)| (command, scope.trim()));
     match command {
-        "/review" | "/security-review" | "/pr_comments" | "/pr-comments" => {
-            Some((command, scope))
-        }
+        "/review" | "/security-review" | "/pr_comments" | "/pr-comments" => Some((command, scope)),
         _ => None,
     }
 }
@@ -10383,9 +10574,8 @@ fn submit_pr_review(input: &str) {
             return;
         }
     };
-    let capture = crate::commands::code_pr_comments::submit_pull_request_review(
-        &cwd, "", event, body,
-    );
+    let capture =
+        crate::commands::code_pr_comments::submit_pull_request_review(&cwd, "", event, body);
     if capture.error.is_none() && capture.status == Some(0) {
         println!("{DIM}  submitted PR review: {event}{RESET}");
         return;
@@ -10442,7 +10632,11 @@ fn mark_pr_comment_file(input: &str, viewed: bool) {
             (!stdout.is_empty()).then_some(stdout)
         })
         .unwrap_or("unknown error");
-    let action = if viewed { "mark viewed" } else { "mark unviewed" };
+    let action = if viewed {
+        "mark viewed"
+    } else {
+        "mark unviewed"
+    };
     eprintln!("{DIM}  /pr_comments: {action} failed: {detail}{RESET}");
 }
 
@@ -10522,7 +10716,10 @@ fn print_pr_comment_drafts(drafts: &[PrCommentDraft]) {
         println!("{DIM}  /pr_comments drafts: no queued draft review threads.{RESET}");
         return;
     }
-    println!("{DIM}  /pr_comments drafts: {} queued thread(s):{RESET}", drafts.len());
+    println!(
+        "{DIM}  /pr_comments drafts: {} queued thread(s):{RESET}",
+        drafts.len()
+    );
     for (idx, draft) in drafts.iter().enumerate() {
         println!(
             "{DIM}    {}. {}:{} - {}{RESET}",
@@ -10581,9 +10778,7 @@ fn parse_pr_comments_draft_submit_review(input: &str) -> Result<Option<(&str, &s
             "approve" | "approved" | "approval"
         )
     {
-        anyhow::bail!(
-            "usage: /pr_comments drafts submit <approve|comment|request_changes> [body]"
-        );
+        anyhow::bail!("usage: /pr_comments drafts submit <approve|comment|request_changes> [body]");
     }
     Ok(Some((event, body)))
 }
@@ -10645,9 +10840,8 @@ fn submit_pr_comment_drafts(drafts: &mut Vec<PrCommentDraft>, review: Option<(&s
         );
         return;
     }
-    let capture = crate::commands::code_pr_comments::submit_pull_request_review(
-        &cwd, "", event, body,
-    );
+    let capture =
+        crate::commands::code_pr_comments::submit_pull_request_review(&cwd, "", event, body);
     if capture.error.is_none() && capture.status == Some(0) {
         println!("{DIM}  /pr_comments drafts: submitted PR review: {event}{RESET}");
         return;
@@ -10682,9 +10876,8 @@ fn create_pr_comment_thread(input: &str) {
             return;
         }
     };
-    let capture = crate::commands::code_pr_comments::create_review_thread(
-        &cwd, "", path, line, body,
-    );
+    let capture =
+        crate::commands::code_pr_comments::create_review_thread(&cwd, "", path, line, body);
     if capture.error.is_none() && capture.status == Some(0) {
         println!("{DIM}  created review thread: {path}:{line}{RESET}");
         return;
@@ -10719,7 +10912,9 @@ fn parse_direct_custom_slash(trimmed: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn custom_slash_invocation_name(cmd: &crate::commands::code_slash_registry::CustomCommand) -> String {
+fn custom_slash_invocation_name(
+    cmd: &crate::commands::code_slash_registry::CustomCommand,
+) -> String {
     cmd.namespace
         .as_deref()
         .filter(|namespace| !namespace.trim().is_empty())
@@ -10755,14 +10950,18 @@ async fn build_custom_slash_prompt(
     let Some(hit) = templates
         .iter()
         .find(|cmd| custom_slash_matches(cmd, &needle))
-        .or_else(|| templates.iter().find(|cmd| custom_slash_starts_with(cmd, &needle)))
+        .or_else(|| {
+            templates
+                .iter()
+                .find(|cmd| custom_slash_starts_with(cmd, &needle))
+        })
     else {
         return Ok(None);
     };
     let context = slash_expansion_context(handle).await;
-    Ok(Some(crate::commands::code_slash_registry::expand_with_context(
-        hit, args, &context,
-    )))
+    Ok(Some(
+        crate::commands::code_slash_registry::expand_with_context(hit, args, &context),
+    ))
 }
 
 async fn slash_expansion_context(
@@ -10889,8 +11088,7 @@ fn start_background_agent(launch: &BackgroundAgentLaunch) -> Result<StartedBackg
     let exe = std::env::current_exe().context("resolving current executable")?;
     let log_path = background_agent_log_path(&launch.name)?;
     if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     let log = fs::OpenOptions::new()
         .create(true)
@@ -11040,8 +11238,7 @@ fn background_agent_records_path() -> Result<PathBuf> {
 fn persist_background_agent_record(record: &BackgroundAgentRecord) -> Result<()> {
     let path = background_agent_records_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     let mut file = fs::OpenOptions::new()
         .create(true)
@@ -11057,8 +11254,7 @@ fn persist_background_agent_record(record: &BackgroundAgentRecord) -> Result<()>
 fn rewrite_background_agent_records(records: &[BackgroundAgentRecord]) -> Result<()> {
     let path = background_agent_records_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     if records.is_empty() {
         if path.exists() {
@@ -11219,11 +11415,9 @@ fn format_epoch_ms(epoch_ms: u64) -> String {
     if epoch_ms == 0 {
         return "unknown".to_string();
     }
-    chrono::DateTime::<chrono::Local>::from(
-        UNIX_EPOCH + Duration::from_millis(epoch_ms),
-    )
-    .format("%Y-%m-%d %H:%M:%S")
-    .to_string()
+    chrono::DateTime::<chrono::Local>::from(UNIX_EPOCH + Duration::from_millis(epoch_ms))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11284,7 +11478,9 @@ fn parse_agent_slash_query(query: &str) -> Result<AgentSlashQuery<'_>> {
     let mut rest = raw;
     loop {
         let Some((head, tail)) = split_first_word(rest) else {
-            anyhow::bail!("usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>");
+            anyhow::bail!(
+                "usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>"
+            );
         };
         match head {
             "--worktree" | "--isolation=worktree" => {
@@ -11303,12 +11499,16 @@ fn parse_agent_slash_query(query: &str) -> Result<AgentSlashQuery<'_>> {
         }
     }
     let Some((name, task)) = rest.split_once(char::is_whitespace) else {
-        anyhow::bail!("usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>");
+        anyhow::bail!(
+            "usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>"
+        );
     };
     let name = name.trim();
     let task = task.trim();
     if name.is_empty() || task.is_empty() {
-        anyhow::bail!("usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>");
+        anyhow::bail!(
+            "usage: /agent [--worktree|--same-cwd|--background|--detached] <name> <task>"
+        );
     }
     Ok(AgentSlashQuery {
         name,
@@ -11586,10 +11786,19 @@ fn print_session_status(
     println!("{DIM}  provider:{RESET} {provider}");
     println!("{DIM}  model:{RESET} {model}");
     println!("{DIM}  mode:{RESET} {}", mode_label(mode));
-    println!("{DIM}  output-style:{RESET} {}", output_style.unwrap_or("default"));
+    println!(
+        "{DIM}  output-style:{RESET} {}",
+        output_style.unwrap_or("default")
+    );
     println!("{DIM}  cwd:{RESET} {cwd}");
-    println!("{DIM}  default provider:{RESET} {}", cfg.default_code_provider);
-    println!("{DIM}  default code model:{RESET} {}", cfg.default_code_model);
+    println!(
+        "{DIM}  default provider:{RESET} {}",
+        cfg.default_code_provider
+    );
+    println!(
+        "{DIM}  default code model:{RESET} {}",
+        cfg.default_code_model
+    );
     if let Some(summary) = usage {
         println!(
             "{DIM}  usage:{RESET} {} turn(s), {} ctx high-water, {} output total",
@@ -11612,7 +11821,8 @@ fn print_session_status_json(
     cfg: &LibertaiConfig,
     usage: Option<UsageSummary>,
 ) {
-    let payload = session_status_json_payload(input, provider, model, mode, output_style, cfg, usage);
+    let payload =
+        session_status_json_payload(input, provider, model, mode, output_style, cfg, usage);
     match serde_json::to_string_pretty(&payload) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("{DIM}  /status json: {e:#}{RESET}"),
@@ -11737,7 +11947,10 @@ async fn print_doctor(
     println!("{DIM}  cwd:{RESET} {cwd_label}");
     println!("{DIM}  provider/model:{RESET} {provider}/{model}");
     println!("{DIM}  mode:{RESET} {}", mode_label(mode));
-    println!("{DIM}  output-style:{RESET} {}", output_style.unwrap_or("default"));
+    println!(
+        "{DIM}  output-style:{RESET} {}",
+        output_style.unwrap_or("default")
+    );
 
     match handle.state().await {
         Ok(state) => {
@@ -11754,12 +11967,20 @@ async fn print_doctor(
                 doctor_line(
                     state.save_enabled,
                     "session persistence",
-                    if state.save_enabled { "enabled" } else { "disabled" }
+                    if state.save_enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
                 )
             );
             println!(
                 "{}",
-                doctor_line(true, "transcript", format!("{} message(s)", state.message_count))
+                doctor_line(
+                    true,
+                    "transcript",
+                    format!("{} message(s)", state.message_count)
+                )
             );
             if let Some(level) = state.thinking_level {
                 println!("{}", doctor_line(true, "thinking", level.to_string()));
@@ -11810,11 +12031,7 @@ async fn print_doctor(
     );
     println!(
         "{}",
-        doctor_line(
-            true,
-            "hooks",
-            format_hook_event_breakdown(cfg)
-        )
+        doctor_line(true, "hooks", format_hook_event_breakdown(cfg))
     );
     println!(
         "{}",
@@ -11825,7 +12042,10 @@ async fn print_doctor(
         )
     );
     match crate::config::config_path() {
-        Ok(path) => println!("{}", doctor_line(true, "config path", path.display().to_string())),
+        Ok(path) => println!(
+            "{}",
+            doctor_line(true, "config path", path.display().to_string())
+        ),
         Err(e) => println!("{}", doctor_line(false, "config path", e.to_string())),
     }
 
@@ -11851,7 +12071,11 @@ async fn print_doctor(
         match crate::commands::code_memory::verify_memory_references(cwd) {
             Ok(refs) => println!(
                 "{}",
-                doctor_line(true, "memory references", format_memory_reference_summary(&refs))
+                doctor_line(
+                    true,
+                    "memory references",
+                    format_memory_reference_summary(&refs)
+                )
             ),
             Err(e) => println!("{}", doctor_line(false, "memory references", e.to_string())),
         }
@@ -11890,13 +12114,18 @@ async fn print_doctor(
             Err(e) => println!("{}", doctor_line(false, "skills", e.to_string())),
         }
         match git_status_short_in(cwd) {
-            Ok(lines) if lines.len() <= 1 => println!("{}", doctor_line(true, "git status", "clean")),
+            Ok(lines) if lines.len() <= 1 => {
+                println!("{}", doctor_line(true, "git status", "clean"))
+            }
             Ok(lines) => println!(
                 "{}",
                 doctor_line(
                     true,
                     "git status",
-                    format!("{} changed/untracked line(s)", lines.len().saturating_sub(1))
+                    format!(
+                        "{} changed/untracked line(s)",
+                        lines.len().saturating_sub(1)
+                    )
                 )
             ),
             Err(e) => println!("{}", doctor_line(false, "git status", e.to_string())),
@@ -12068,14 +12297,29 @@ fn doctor_line(ok: bool, label: &str, detail: impl AsRef<str>) -> String {
 
 fn format_hook_event_breakdown(cfg: &LibertaiConfig) -> String {
     let rows = [
-        ("UserPromptSubmit", count_runnable_hooks(&cfg.hooks.user_prompt_submit)),
+        (
+            "UserPromptSubmit",
+            count_runnable_hooks(&cfg.hooks.user_prompt_submit),
+        ),
         ("PreToolUse", count_runnable_hooks(&cfg.hooks.pre_tool_use)),
-        ("PostToolUse", count_runnable_hooks(&cfg.hooks.post_tool_use)),
-        ("SubagentStop", count_runnable_hooks(&cfg.hooks.subagent_stop)),
-        ("SessionStart", count_runnable_hooks(&cfg.hooks.session_start)),
+        (
+            "PostToolUse",
+            count_runnable_hooks(&cfg.hooks.post_tool_use),
+        ),
+        (
+            "SubagentStop",
+            count_runnable_hooks(&cfg.hooks.subagent_stop),
+        ),
+        (
+            "SessionStart",
+            count_runnable_hooks(&cfg.hooks.session_start),
+        ),
         ("Stop", count_runnable_hooks(&cfg.hooks.stop)),
         ("SessionEnd", count_runnable_hooks(&cfg.hooks.session_end)),
-        ("Notification", count_runnable_hooks(&cfg.hooks.notification)),
+        (
+            "Notification",
+            count_runnable_hooks(&cfg.hooks.notification),
+        ),
     ];
     let total: usize = rows.iter().map(|(_, count)| *count).sum();
     let events = rows
@@ -12086,9 +12330,7 @@ fn format_hook_event_breakdown(cfg: &LibertaiConfig) -> String {
     format!("{total} runnable hook(s); {events}")
 }
 
-fn format_agent_doctor_summary(
-    agents: &[crate::commands::code_agents::AgentDefinition],
-) -> String {
+fn format_agent_doctor_summary(agents: &[crate::commands::code_agents::AgentDefinition]) -> String {
     let worktree = agents.iter().filter(|agent| agent.worktree).count();
     format!("{} loaded ({worktree} worktree default)", agents.len())
 }
@@ -12187,7 +12429,10 @@ fn print_usage_summary(summary: Option<UsageSummary>, tool_activity: &[ToolActiv
     println!("{BOLD}usage{RESET}");
     match summary.as_ref() {
         Some(summary) => {
-            println!("{DIM}  provider/model:{RESET} {}/{}", summary.provider, summary.model);
+            println!(
+                "{DIM}  provider/model:{RESET} {}/{}",
+                summary.provider, summary.model
+            );
             println!("{DIM}  turns:{RESET} {}", summary.turns);
             println!(
                 "{DIM}  last turn:{RESET} {} in · {} out",
@@ -12199,8 +12444,7 @@ fn print_usage_summary(summary: Option<UsageSummary>, tool_activity: &[ToolActiv
                 human_tokens(summary.output_total)
             );
             if summary.context_window > 0 {
-                let pct = ((summary.context_high_water as f64
-                    / f64::from(summary.context_window))
+                let pct = ((summary.context_high_water as f64 / f64::from(summary.context_window))
                     * 100.0)
                     .round()
                     .min(100.0) as u32;
@@ -12237,8 +12481,8 @@ fn parse_usage_export_command(input: &str) -> Option<UsageExportFormat> {
         return None;
     }
     match rest.trim().to_ascii_lowercase().as_str() {
-        "json" | "--json" | "status --json" | "show --json" | "summary --json"
-        | "tools --json" | "export" | "export json" => Some(UsageExportFormat::Json),
+        "json" | "--json" | "status --json" | "show --json" | "summary --json" | "tools --json"
+        | "export" | "export json" => Some(UsageExportFormat::Json),
         "csv" | "export csv" => Some(UsageExportFormat::Csv),
         _ => None,
     }
@@ -12449,7 +12693,11 @@ fn print_tool_activity(tool_activity: &[ToolActivitySummary], usage: Option<&Usa
         for row in rows {
             let estimate = match row.estimated_cost {
                 Some(cost) if cost > 0.0 => {
-                    format!("{} est · ~{}", dollar(cost), human_tokens(row.estimated_tokens))
+                    format!(
+                        "{} est · ~{}",
+                        dollar(cost),
+                        human_tokens(row.estimated_tokens)
+                    )
                 }
                 _ => format!("~{}", human_tokens(row.estimated_tokens)),
             };
@@ -12480,7 +12728,9 @@ fn estimate_tool_attribution(
     summary: &UsageSummary,
     tool_activity: &[ToolActivitySummary],
 ) -> Vec<ToolAttribution> {
-    let estimated_tokens = summary.context_high_water.saturating_add(summary.output_total);
+    let estimated_tokens = summary
+        .context_high_water
+        .saturating_add(summary.output_total);
     if estimated_tokens == 0 || tool_activity.is_empty() {
         return Vec::new();
     }
@@ -12488,7 +12738,11 @@ fn estimate_tool_attribution(
         .iter()
         .map(|tool| {
             let millis = tool.total_duration.as_millis() as f64;
-            if millis > 0.0 { millis } else { tool.count.max(1) as f64 }
+            if millis > 0.0 {
+                millis
+            } else {
+                tool.count.max(1) as f64
+            }
         })
         .collect();
     let total_weight: f64 = weights.iter().sum();
@@ -12519,8 +12773,7 @@ fn estimate_tool_attribution(
 fn model_token_cost(model: &str, input_tokens: u64, output_tokens: u64) -> Option<f64> {
     let (input_per_million, output_per_million) = model_token_rates(model)?;
     Some(
-        ((input_tokens as f64) * input_per_million
-            + (output_tokens as f64) * output_per_million)
+        ((input_tokens as f64) * input_per_million + (output_tokens as f64) * output_per_million)
             / 1_000_000.0,
     )
 }
@@ -12614,10 +12867,22 @@ fn print_config_status(cfg: &LibertaiConfig) {
     if cfg.account_base != cfg.api_base {
         println!("{DIM}  account base:{RESET} {}", cfg.account_base);
     }
-    println!("{DIM}  default chat model:{RESET} {}", cfg.default_chat_model);
-    println!("{DIM}  default code provider:{RESET} {}", cfg.default_code_provider);
-    println!("{DIM}  default code model:{RESET} {}", cfg.default_code_model);
-    println!("{DIM}  default image model:{RESET} {}", cfg.default_image_model);
+    println!(
+        "{DIM}  default chat model:{RESET} {}",
+        cfg.default_chat_model
+    );
+    println!(
+        "{DIM}  default code provider:{RESET} {}",
+        cfg.default_code_provider
+    );
+    println!(
+        "{DIM}  default code model:{RESET} {}",
+        cfg.default_code_model
+    );
+    println!(
+        "{DIM}  default image model:{RESET} {}",
+        cfg.default_image_model
+    );
     if cfg.smart_approval_enabled {
         println!(
             "{DIM}  smart approvals:{RESET} enabled ({})",
@@ -12986,9 +13251,7 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     println!(
         "{DIM}  UserPromptSubmit hooks run before the prompt reaches the agent and may block it.{RESET}"
     );
-    println!(
-        "{DIM}  PreToolUse hooks may return permissionDecision allow|ask|defer|deny.{RESET}"
-    );
+    println!("{DIM}  PreToolUse hooks may return permissionDecision allow|ask|defer|deny.{RESET}");
     println!(
         "{DIM}  PostToolUse hooks run after tool execution and cannot alter the result.{RESET}"
     );
@@ -13028,7 +13291,11 @@ fn is_configured_hook(hook: &crate::config::HookCommandConfig) -> bool {
     }
 }
 
-fn hook_json_row(event: &str, index: usize, hook: &crate::config::HookCommandConfig) -> serde_json::Value {
+fn hook_json_row(
+    event: &str,
+    index: usize,
+    hook: &crate::config::HookCommandConfig,
+) -> serde_json::Value {
     let hook_type_key = normalized_hook_type(&hook.hook_type);
     let hook_type = if hook.hook_type.trim().is_empty() {
         "command"
@@ -13154,7 +13421,9 @@ fn normalize_hook_event(event: &str) -> Option<String> {
 
 fn print_hooks_open_hint() {
     println!("{BOLD}hooks{RESET}");
-    println!("{DIM}  /hooks open:{RESET} open Desktop Settings > Hooks for graphical hook management.");
+    println!(
+        "{DIM}  /hooks open:{RESET} open Desktop Settings > Hooks for graphical hook management."
+    );
     println!(
         "{DIM}  terminal:{RESET} edit hook rows in the LibertAI config file; /hooks status shows the active rows."
     );
@@ -13173,7 +13442,10 @@ fn print_mcp_status(query: &str, command: McpCommand) {
                 }
                 Ok(cfg) => {
                     let exposure = mcp_exposure_summary(&cfg);
-                    println!("{DIM}  configured servers:{RESET} {}", cfg.mcp_servers.len());
+                    println!(
+                        "{DIM}  configured servers:{RESET} {}",
+                        cfg.mcp_servers.len()
+                    );
                     println!(
                         "{DIM}  native exposure:{RESET} mcp_call {}, {} named MCP tool(s), mcp_read_resource {}, mcp_get_prompt {}, {} resource subscription candidate(s)",
                         if exposure.mcp_call { "on" } else { "off" },
@@ -13219,10 +13491,7 @@ fn print_mcp_status(query: &str, command: McpCommand) {
     println!();
 }
 
-fn mcp_server_json_row(
-    name: &str,
-    server: &crate::config::McpServerConfig,
-) -> serde_json::Value {
+fn mcp_server_json_row(name: &str, server: &crate::config::McpServerConfig) -> serde_json::Value {
     let transport = if server.transport.trim().is_empty() {
         "stdio"
     } else {
@@ -13418,10 +13687,16 @@ fn append_mcp_resource_details(out: &mut String, resources: &[crate::config::Mcp
         } else {
             format!(" ({})", resource.mime_type.trim())
         };
-        out.push_str(&format!("  - [{}] {}{} - {}\n", marker, label, mime, resource.uri));
+        out.push_str(&format!(
+            "  - [{}] {}{} - {}\n",
+            marker, label, mime, resource.uri
+        ));
     }
     if resources.len() > 12 {
-        out.push_str(&format!("  - ... {} more resource(s)\n", resources.len() - 12));
+        out.push_str(&format!(
+            "  - ... {} more resource(s)\n",
+            resources.len() - 12
+        ));
     }
     out.push('\n');
 }
@@ -13456,7 +13731,10 @@ fn append_mcp_prompt_details(out: &mut String, prompts: &[crate::config::McpProm
         } else {
             format!(" - {}", truncate_chars(prompt.description.trim(), 100))
         };
-        out.push_str(&format!("  - [{}] {}{}{}\n", marker, prompt.name, desc, args));
+        out.push_str(&format!(
+            "  - [{}] {}{}{}\n",
+            marker, prompt.name, desc, args
+        ));
     }
     if prompts.len() > 12 {
         out.push_str(&format!("  - ... {} more prompt(s)\n", prompts.len() - 12));
@@ -13863,10 +14141,16 @@ fn format_hook_event_details(event: &str, hooks: &[crate::config::HookCommandCon
             out.push_str(&format!("     flags: {}\n", flags.join(", ")));
         }
         if !hook.status_message.trim().is_empty() {
-            out.push_str(&format!("     statusMessage: {}\n", hook.status_message.trim()));
+            out.push_str(&format!(
+                "     statusMessage: {}\n",
+                hook.status_message.trim()
+            ));
         }
         if !hook.review_policy.trim().is_empty() {
-            out.push_str(&format!("     reviewPolicy: {}\n", hook.review_policy.trim()));
+            out.push_str(&format!(
+                "     reviewPolicy: {}\n",
+                hook.review_policy.trim()
+            ));
         }
         if hook_type_key == "http" {
             out.push_str(&format!(
@@ -13976,12 +14260,7 @@ fn status_line_usage_text() -> &'static str {
 fn is_status_line_json_action(action: &str) -> bool {
     matches!(
         action.trim().to_ascii_lowercase().as_str(),
-        "json"
-            | "--json"
-            | "status --json"
-            | "show --json"
-            | "template --json"
-            | "info --json"
+        "json" | "--json" | "status --json" | "show --json" | "template --json" | "info --json"
     )
 }
 
@@ -14067,11 +14346,7 @@ fn handle_status_line_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Resul
 
 fn handle_output_style(raw: &str, output_style: &mut Option<String>) {
     let value = raw.trim();
-    let key = if value.is_empty() {
-        "status"
-    } else {
-        value
-    };
+    let key = if value.is_empty() { "status" } else { value };
     if is_output_style_json_request(key) {
         print_output_style_status_json(output_style.as_deref(), key);
         return;
@@ -14103,8 +14378,13 @@ fn is_output_style_status_alias(value: &str) -> bool {
 fn is_output_style_json_request(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
-        "json" | "--json" | "status --json" | "show --json" | "current --json"
-            | "info --json" | "list --json"
+        "json"
+            | "--json"
+            | "status --json"
+            | "show --json"
+            | "current --json"
+            | "info --json"
+            | "list --json"
     )
 }
 
@@ -14116,7 +14396,10 @@ fn print_output_style_status(output_style: Option<&str>, unknown: Option<&str>) 
     let cwd = std::env::current_dir().ok();
     let styles = crate::commands::code_output_style::load_styles(cwd.as_deref());
     println!("{BOLD}output-style{RESET}");
-    println!("{DIM}  current:{RESET} {}", output_style.unwrap_or("default"));
+    println!(
+        "{DIM}  current:{RESET} {}",
+        output_style.unwrap_or("default")
+    );
     println!("{DIM}  available:{RESET}");
     for style in styles {
         println!("{DIM}    {:<12}{RESET} {}", style.name, style.description);
@@ -14314,10 +14597,10 @@ fn read_line(mode: Mode, history: &VecDeque<String>) -> Result<LineResult> {
 
     let mut buffer: Vec<char> = Vec::new();
     let mut cursor_pos: usize = 0; // index within `buffer`
-    // History cursor. `None` means "live buffer" (not walking history).
-    // A `Some(i)` points at `history[history.len() - 1 - i]` — Up
-    // increments, Down decrements, Enter/edit commits the recalled line
-    // back to the live buffer.
+                                   // History cursor. `None` means "live buffer" (not walking history).
+                                   // A `Some(i)` points at `history[history.len() - 1 - i]` — Up
+                                   // increments, Down decrements, Enter/edit commits the recalled line
+                                   // back to the live buffer.
     let mut hist_idx: Option<usize> = None;
     let mut stashed_live: Option<Vec<char>> = None;
     let vim_enabled = VIM_INPUT_ENABLED.load(Ordering::SeqCst);
@@ -14773,18 +15056,14 @@ mod tests {
         assert_eq!(payload["query"], "current --json");
         assert_eq!(payload["aliases"][0], "output-style");
         assert_eq!(payload["current"], "review");
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("show --json"))
-        );
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("info --json"))
-        );
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("info --json")));
     }
 
     #[test]
@@ -14869,7 +15148,10 @@ mod tests {
         );
         assert_eq!(
             parse_init_from_agent_action("from-agent preview append sections 1,3"),
-            Some(InitFromAgentAction::PreviewApplySections("append", vec![1, 3]))
+            Some(InitFromAgentAction::PreviewApplySections(
+                "append",
+                vec![1, 3]
+            ))
         );
         assert_eq!(
             parse_init_from_agent_action("from-agent preview merge sections 1"),
@@ -14877,7 +15159,10 @@ mod tests {
         );
         assert_eq!(
             parse_init_from_agent_action("from-agent preview merge-lines sections 2"),
-            Some(InitFromAgentAction::PreviewApplySections("merge-lines", vec![2]))
+            Some(InitFromAgentAction::PreviewApplySections(
+                "merge-lines",
+                vec![2]
+            ))
         );
         assert_eq!(
             parse_init_from_agent_action("from-agent sections 2"),
@@ -14900,15 +15185,26 @@ mod tests {
             Some(InitFromAgentAction::Replace)
         );
         assert_eq!(parse_init_from_agent_action("from-agent sections 0"), None);
-        assert_eq!(parse_init_from_agent_action("from-agent sections 3-1"), None);
-        assert_eq!(parse_init_from_agent_action("from-agent sections all,1"), None);
-        assert_eq!(parse_init_from_agent_action("from-agent sections 1 1"), None);
+        assert_eq!(
+            parse_init_from_agent_action("from-agent sections 3-1"),
+            None
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent sections all,1"),
+            None
+        );
+        assert_eq!(
+            parse_init_from_agent_action("from-agent sections 1 1"),
+            None
+        );
         assert_eq!(parse_init_from_agent_action("from-agent nope"), None);
 
         let hint = help_command_arg_hint("init");
         assert!(hint.contains("show --json|preview --json"));
         assert!(hint.contains("from-agent preview append|from-agent preview merge|from-agent preview merge-lines|from-agent preview replace"));
-        assert!(hint.contains("from-agent append|from-agent merge|from-agent merge-lines|from-agent replace"));
+        assert!(hint.contains(
+            "from-agent append|from-agent merge|from-agent merge-lines|from-agent replace"
+        ));
         assert!(hint.contains("from-agent preview sections N[,M]|N-M|all"));
         assert!(hint.contains("from-agent preview append sections N[,M]"));
         assert!(hint.contains("from-agent merge-lines sections N[,M]"));
@@ -14957,7 +15253,8 @@ mod tests {
 
     #[test]
     fn build_init_apply_content_merges_matching_sections() {
-        let existing = "# Demo\n\n## Build & test\n- test: cargo test\n\n## Conventions\n- keep scoped\n";
+        let existing =
+            "# Demo\n\n## Build & test\n- test: cargo test\n\n## Conventions\n- keep scoped\n";
         let candidate = "# Candidate\n\n## Build & test\n- test: cargo nextest run\n\n## Structure\n- src/ - code\n";
         let merged = build_init_apply_content(existing, candidate, "merge").unwrap();
         assert!(merged.starts_with("# Demo\n\n## Build & test\n- test: cargo nextest run"));
@@ -14968,20 +15265,21 @@ mod tests {
 
     #[test]
     fn build_init_apply_content_line_merges_matching_sections() {
-        let existing = "# Demo\n\n## Build & test\n- test: cargo test\n\n## Conventions\n- keep scoped\n";
+        let existing =
+            "# Demo\n\n## Build & test\n- test: cargo test\n\n## Conventions\n- keep scoped\n";
         let candidate =
             "# Candidate\n\n## Build & test\n- test: cargo test\n- lint: cargo clippy\n\n## Conventions\n- keep scoped\n- prefer small diffs\n";
         let merged = build_init_apply_content(existing, candidate, "merge-lines").unwrap();
-        assert!(
-            merged.starts_with("# Demo\n\n## Build & test\n- test: cargo test\n- lint: cargo clippy")
-        );
+        assert!(merged
+            .starts_with("# Demo\n\n## Build & test\n- test: cargo test\n- lint: cargo clippy"));
         assert!(merged.contains("## Conventions\n- keep scoped\n- prefer small diffs"));
         assert!(!merged.contains("# Candidate"));
     }
 
     #[test]
     fn selected_init_candidate_sections_returns_numbered_sections_only() {
-        let candidate = "# Candidate\n\n## Build & test\n- test: cargo test\n\n## Structure\n- src/ - code\n";
+        let candidate =
+            "# Candidate\n\n## Build & test\n- test: cargo test\n\n## Structure\n- src/ - code\n";
         let selected = selected_init_candidate_sections(candidate, &[3]).unwrap();
         assert!(!selected.contains("# Candidate"));
         assert!(!selected.contains("## Build & test"));
@@ -15172,7 +15470,10 @@ mod tests {
     #[test]
     fn memory_file_selector_parses_read_aliases() {
         assert_eq!(memory_file_selector("file 1"), Some("1"));
-        assert_eq!(memory_file_selector("read memory/project/foo.md"), Some("memory/project/foo.md"));
+        assert_eq!(
+            memory_file_selector("read memory/project/foo.md"),
+            Some("memory/project/foo.md")
+        );
         assert_eq!(memory_file_selector("show-file entry.md"), Some("entry.md"));
         assert_eq!(memory_file_selector("files"), None);
         assert_eq!(memory_file_selector("file"), None);
@@ -15256,10 +15557,26 @@ mod tests {
             path: PathBuf::from("/tmp/memory/project/entry.md"),
             title: "Important note".to_string(),
         }];
-        assert_eq!(select_memory_sidecar(&files, "1").unwrap().title, "Important note");
-        assert_eq!(select_memory_sidecar(&files, "/tmp/memory/project/entry.md").unwrap().title, "Important note");
-        assert_eq!(select_memory_sidecar(&files, "entry.md").unwrap().title, "Important note");
-        assert_eq!(select_memory_sidecar(&files, "important note").unwrap().title, "Important note");
+        assert_eq!(
+            select_memory_sidecar(&files, "1").unwrap().title,
+            "Important note"
+        );
+        assert_eq!(
+            select_memory_sidecar(&files, "/tmp/memory/project/entry.md")
+                .unwrap()
+                .title,
+            "Important note"
+        );
+        assert_eq!(
+            select_memory_sidecar(&files, "entry.md").unwrap().title,
+            "Important note"
+        );
+        assert_eq!(
+            select_memory_sidecar(&files, "important note")
+                .unwrap()
+                .title,
+            "Important note"
+        );
         assert!(select_memory_sidecar(&files, "2").is_none());
     }
 
@@ -15474,7 +15791,8 @@ mod tests {
             }],
         );
         assert!(report.starts_with("category,name,count"));
-        assert!(report.contains("pricing_match,input_usd_per_million,output_usd_per_million,pricing_source"));
+        assert!(report
+            .contains("pricing_match,input_usd_per_million,output_usd_per_million,pricing_source"));
         assert!(report.contains("\"local,dev/unknown\""));
         assert!(report.contains("estimated duration-weighted attribution"));
         let priced = usage_export_csv(
@@ -15512,8 +15830,7 @@ mod tests {
             status_line_command: String::new(),
         };
         let expanded =
-            expand_status_line_template(&status.status_line_template, &status, Mode::Plan)
-                .unwrap();
+            expand_status_line_template(&status.status_line_template, &status, Mode::Plan).unwrap();
         assert_eq!(expanded, "libertai/qwen plan review 2.0k 50% {unknown}");
     }
 
@@ -15536,7 +15853,10 @@ mod tests {
             status_line_command: String::new(),
         };
         assert!(expand_status_line_template("", &status, Mode::Normal).is_none());
-        assert_eq!(default_rule_text(&status), "50% · 512 / 1.0k · libertai/qwen");
+        assert_eq!(
+            default_rule_text(&status),
+            "50% · 512 / 1.0k · libertai/qwen"
+        );
     }
 
     #[test]
@@ -15603,27 +15923,32 @@ mod tests {
         assert_eq!(payload["will_write"], false);
         assert_eq!(payload["will_run_command"], false);
         assert_eq!(payload["tokens"][0], "project");
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("template --json"))
-        );
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("info --json"))
-        );
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("template --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("info --json")));
     }
 
     #[test]
     fn parse_history_limit_defaults_and_clamps() {
         assert_eq!(parse_history_limit("").unwrap(), HISTORY_DEFAULT_LIMIT);
         assert_eq!(parse_history_limit("list").unwrap(), HISTORY_DEFAULT_LIMIT);
-        assert_eq!(parse_history_limit("recent").unwrap(), HISTORY_DEFAULT_LIMIT);
-        assert_eq!(parse_history_limit("latest").unwrap(), HISTORY_DEFAULT_LIMIT);
-        assert_eq!(parse_history_limit("status").unwrap(), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(
+            parse_history_limit("recent").unwrap(),
+            HISTORY_DEFAULT_LIMIT
+        );
+        assert_eq!(
+            parse_history_limit("latest").unwrap(),
+            HISTORY_DEFAULT_LIMIT
+        );
+        assert_eq!(
+            parse_history_limit("status").unwrap(),
+            HISTORY_DEFAULT_LIMIT
+        );
         assert_eq!(parse_history_limit("state").unwrap(), HISTORY_DEFAULT_LIMIT);
         assert_eq!(parse_history_limit("show").unwrap(), HISTORY_DEFAULT_LIMIT);
         assert_eq!(parse_history_limit("3").unwrap(), 3);
@@ -15724,7 +16049,10 @@ mod tests {
         assert_eq!(tree_json_request_arg("show --json"), Some(String::new()));
         assert_eq!(tree_json_request_arg("json src"), Some("src".to_string()));
         assert_eq!(tree_json_request_arg("src --json"), Some("src".to_string()));
-        assert_eq!(tree_json_request_arg("MyDir --json"), Some("MyDir".to_string()));
+        assert_eq!(
+            tree_json_request_arg("MyDir --json"),
+            Some("MyDir".to_string())
+        );
         assert_eq!(tree_json_request_arg("src"), None);
         assert!(tree_usage_text().contains("json|--json|status --json"));
         assert!(tree_usage_text().contains("state --json|show --json|path --json"));
@@ -15737,19 +16065,20 @@ mod tests {
         assert_eq!(payload["supported_actions"][2], "status --json");
         assert_eq!(payload["supported_actions"][5], "path --json");
         assert_eq!(payload["entries"][0]["kind"], "dir");
-        assert!(
-            payload["entries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["name"] == "main.rs")
-        );
+        assert!(payload["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "main.rs"));
     }
 
     #[test]
     fn parse_changelog_limit_defaults_and_clamps() {
         assert_eq!(parse_changelog_limit("").unwrap(), CHANGELOG_DEFAULT_LIMIT);
-        assert_eq!(parse_changelog_limit("list").unwrap(), CHANGELOG_DEFAULT_LIMIT);
+        assert_eq!(
+            parse_changelog_limit("list").unwrap(),
+            CHANGELOG_DEFAULT_LIMIT
+        );
         assert_eq!(
             parse_changelog_limit("recent").unwrap(),
             CHANGELOG_DEFAULT_LIMIT
@@ -15781,9 +16110,18 @@ mod tests {
         assert!(changelog_usage_text().contains("list --json|recent --json|latest --json"));
         assert_eq!(changelog_json_request_arg("json"), Some(String::new()));
         assert_eq!(changelog_json_request_arg("--json"), Some(String::new()));
-        assert_eq!(changelog_json_request_arg("state --json"), Some(String::new()));
-        assert_eq!(changelog_json_request_arg("show --json"), Some(String::new()));
-        assert_eq!(changelog_json_request_arg("list --json"), Some(String::new()));
+        assert_eq!(
+            changelog_json_request_arg("state --json"),
+            Some(String::new())
+        );
+        assert_eq!(
+            changelog_json_request_arg("show --json"),
+            Some(String::new())
+        );
+        assert_eq!(
+            changelog_json_request_arg("list --json"),
+            Some(String::new())
+        );
         assert_eq!(changelog_json_request_arg("json 3"), Some("3".to_string()));
         assert_eq!(changelog_json_request_arg("status"), None);
         let payload = changelog_json_payload(
@@ -15803,7 +16141,10 @@ mod tests {
         assert_eq!(payload["supported_actions"][11], "show --json");
         assert_eq!(payload["supported_actions"][14], "latest --json");
         assert_eq!(payload["commits"][0]["hash"], "abc1234");
-        assert_eq!(payload["commits"][1]["summary"], "(HEAD -> main) second commit");
+        assert_eq!(
+            payload["commits"][1]["summary"],
+            "(HEAD -> main) second commit"
+        );
     }
 
     #[test]
@@ -15827,7 +16168,10 @@ mod tests {
         );
         assert_eq!(parse_sandbox_action("diag --json"), SandboxAction::Json);
         assert_eq!(parse_sandbox_action("reload"), SandboxAction::Reload);
-        assert_eq!(parse_sandbox_action("reset"), SandboxAction::Unknown("reset"));
+        assert_eq!(
+            parse_sandbox_action("reset"),
+            SandboxAction::Unknown("reset")
+        );
         assert!(sandbox_usage_text().contains("status|state|show"));
         assert!(sandbox_usage_text().contains("diagnostics|diag"));
         assert!(sandbox_usage_text().contains("json|--json|status --json|state --json"));
@@ -15837,9 +16181,9 @@ mod tests {
 
     #[test]
     fn sandbox_json_payload_reports_profile_counts() {
-        let profile = crate::commands::code_sandbox::detect_strict_profile(Path::new(
-            env!("CARGO_MANIFEST_DIR"),
-        ));
+        let profile = crate::commands::code_sandbox::detect_strict_profile(Path::new(env!(
+            "CARGO_MANIFEST_DIR"
+        )));
         let payload = sandbox_json_payload(&profile, "diagnostics --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "sandbox");
@@ -15868,12 +16212,10 @@ mod tests {
     fn recent_git_commits_reads_repo_history() {
         let lines = recent_git_commits_in(Path::new(env!("CARGO_MANIFEST_DIR")), 1).unwrap();
         assert_eq!(lines.len(), 1);
-        assert!(
-            lines[0]
-                .split_whitespace()
-                .next()
-                .is_some_and(|hash| hash.len() >= 7)
-        );
+        assert!(lines[0]
+            .split_whitespace()
+            .next()
+            .is_some_and(|hash| hash.len() >= 7));
     }
 
     #[test]
@@ -15895,37 +16237,49 @@ mod tests {
     #[test]
     fn doctor_hook_breakdown_counts_runnable_events() {
         let mut cfg = LibertaiConfig::default();
-        cfg.hooks.user_prompt_submit.push(crate::config::HookCommandConfig {
-            command: "scripts/prompt.sh".to_string(),
-            ..Default::default()
-        });
-        cfg.hooks.pre_tool_use.push(crate::config::HookCommandConfig {
-            command: "scripts/pre.sh".to_string(),
-            ..Default::default()
-        });
-        cfg.hooks.pre_tool_use.push(crate::config::HookCommandConfig {
-            hook_type: "http".to_string(),
-            url: "http://127.0.0.1/hook".to_string(),
-            ..Default::default()
-        });
-        cfg.hooks.post_tool_use.push(crate::config::HookCommandConfig {
-            hook_type: "prompt".to_string(),
-            prompt: "Summarize this hook.".to_string(),
-            ..Default::default()
-        });
-        cfg.hooks.pre_tool_use.push(crate::config::HookCommandConfig {
-            enabled: false,
-            command: "scripts/pre-disabled.sh".to_string(),
-            ..Default::default()
-        });
+        cfg.hooks
+            .user_prompt_submit
+            .push(crate::config::HookCommandConfig {
+                command: "scripts/prompt.sh".to_string(),
+                ..Default::default()
+            });
+        cfg.hooks
+            .pre_tool_use
+            .push(crate::config::HookCommandConfig {
+                command: "scripts/pre.sh".to_string(),
+                ..Default::default()
+            });
+        cfg.hooks
+            .pre_tool_use
+            .push(crate::config::HookCommandConfig {
+                hook_type: "http".to_string(),
+                url: "http://127.0.0.1/hook".to_string(),
+                ..Default::default()
+            });
+        cfg.hooks
+            .post_tool_use
+            .push(crate::config::HookCommandConfig {
+                hook_type: "prompt".to_string(),
+                prompt: "Summarize this hook.".to_string(),
+                ..Default::default()
+            });
+        cfg.hooks
+            .pre_tool_use
+            .push(crate::config::HookCommandConfig {
+                enabled: false,
+                command: "scripts/pre-disabled.sh".to_string(),
+                ..Default::default()
+            });
         cfg.hooks.stop.push(crate::config::HookCommandConfig {
             command: "   ".to_string(),
             ..Default::default()
         });
-        cfg.hooks.notification.push(crate::config::HookCommandConfig {
-            command: "scripts/notify.sh".to_string(),
-            ..Default::default()
-        });
+        cfg.hooks
+            .notification
+            .push(crate::config::HookCommandConfig {
+                command: "scripts/notify.sh".to_string(),
+                ..Default::default()
+            });
 
         let breakdown = format_hook_event_breakdown(&cfg);
         assert!(breakdown.contains("5 runnable hook(s)"));
@@ -16172,7 +16526,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("session.jsonl");
         std::fs::write(&path, "{}\n").unwrap();
-        assert_eq!(resolve_repl_resume_path(path.to_str().unwrap()).unwrap(), path);
+        assert_eq!(
+            resolve_repl_resume_path(path.to_str().unwrap()).unwrap(),
+            path
+        );
     }
 
     #[test]
@@ -16285,24 +16642,18 @@ mod tests {
         assert_eq!(payload["will_replace_current_repl_session"], true);
         assert_eq!(payload["accepts_path"], true);
         assert_eq!(payload["query_argument"], "/resume SESSION");
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("state --json"))
-        );
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("preview --json"))
-        );
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("session"))
-        );
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("state --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("preview --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("session")));
     }
 
     fn fork_messages_for_tests() -> Vec<RpcForkMessage> {
@@ -16386,7 +16737,10 @@ mod tests {
         assert!(is_thinking_json_arg("current --json"));
         assert!(is_thinking_json_arg("info --json"));
         assert!(!is_thinking_json_arg("high"));
-        assert!(parse_thinking_level("").unwrap_err().to_string().contains("--json"));
+        assert!(parse_thinking_level("")
+            .unwrap_err()
+            .to_string()
+            .contains("--json"));
         let payload = thinking_json_payload(ThinkingLevel::High, "current --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "thinking");
@@ -16420,7 +16774,10 @@ mod tests {
 
     #[test]
     fn name_command_arg_accepts_name_and_rename_alias() {
-        assert_eq!(name_command_arg("/name release work"), Some(("/name", "release work")));
+        assert_eq!(
+            name_command_arg("/name release work"),
+            Some(("/name", "release work"))
+        );
         assert_eq!(
             name_command_arg("/rename bug bash"),
             Some(("/rename", "bug bash"))
@@ -16463,7 +16820,10 @@ mod tests {
 
     #[test]
     fn compact_command_notes_accepts_only_compact_prefix() {
-        assert_eq!(compact_command_notes("/compact keep setup"), Some("keep setup"));
+        assert_eq!(
+            compact_command_notes("/compact keep setup"),
+            Some("keep setup")
+        );
         assert_eq!(compact_command_notes("/compact   "), Some(""));
         assert_eq!(compact_command_notes("/compact"), None);
         assert_eq!(compact_command_notes("/compactly keep"), None);
@@ -16631,7 +16991,10 @@ mod tests {
         assert_eq!(notify_command_arg("/notify"), Some(""));
         assert_eq!(notify_command_arg("/notify on"), Some("on"));
         assert_eq!(notify_command_arg("/notifications status"), Some("status"));
-        assert_eq!(notify_command_arg("/notifications status --json"), Some("status --json"));
+        assert_eq!(
+            notify_command_arg("/notifications status --json"),
+            Some("status --json")
+        );
         assert_eq!(notify_command_arg("/notifications clear"), Some("clear"));
         assert_eq!(notify_command_arg("/notifier"), None);
         assert_eq!(parse_notify_command(""), NotifyCommand::Status);
@@ -16789,7 +17152,10 @@ mod tests {
             Some(ConfigSettingsTarget::Advanced)
         );
         assert_eq!(parse_config_settings_target("path"), None);
-        assert_eq!(parse_config_settings_target("set code_turn_notifications true"), None);
+        assert_eq!(
+            parse_config_settings_target("set code_turn_notifications true"),
+            None
+        );
     }
 
     #[test]
@@ -16895,18 +17261,14 @@ mod tests {
         assert_eq!(payload["will_write"], false);
         assert_eq!(payload["aliases"][0], "hooks");
         assert_eq!(payload["aliases"][1], "hook");
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("show --json"))
-        );
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("inspect <event>"))
-        );
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("inspect <event>")));
         let raw = serde_json::to_string(&payload).unwrap();
         assert!(!raw.contains("secret-token"));
         assert!(!raw.contains("Authorization"));
@@ -16973,10 +17335,7 @@ mod tests {
         assert_eq!(parse_mcp_command("status --json"), McpCommand::Json);
         assert_eq!(parse_mcp_command("list --json"), McpCommand::Json);
         assert_eq!(parse_mcp_command("state --json"), McpCommand::Json);
-        assert_eq!(
-            parse_mcp_command("diagnostics --json"),
-            McpCommand::Json
-        );
+        assert_eq!(parse_mcp_command("diagnostics --json"), McpCommand::Json);
         assert_eq!(parse_mcp_command("show --json"), McpCommand::Json);
         assert_eq!(
             parse_mcp_command("show docs"),
@@ -17016,7 +17375,10 @@ mod tests {
                 crate::config::McpServerConfig {
                     transport: "stdio".to_string(),
                     command: "npx".to_string(),
-                    args: vec!["-y".to_string(), "@modelcontextprotocol/server-docs".to_string()],
+                    args: vec![
+                        "-y".to_string(),
+                        "@modelcontextprotocol/server-docs".to_string(),
+                    ],
                     env: std::collections::HashMap::from([(
                         "DOCS_TOKEN".to_string(),
                         "secret".to_string(),
@@ -17066,7 +17428,10 @@ mod tests {
         assert_eq!(payload["exposure"]["named_tools"], 1);
         assert_eq!(payload["exposure"]["resource_reader"], true);
         assert_eq!(payload["servers"][0]["name"], "docs");
-        assert_eq!(payload["servers"][0]["target"], "npx '-y' '@modelcontextprotocol/server-docs'");
+        assert_eq!(
+            payload["servers"][0]["target"],
+            "npx '-y' '@modelcontextprotocol/server-docs'"
+        );
         assert_eq!(payload["servers"][0]["env_vars"], 1);
         assert_eq!(payload["servers"][0]["headers"], 1);
         assert_eq!(payload["servers"][0]["enabled_tools"], 1);
@@ -17074,18 +17439,14 @@ mod tests {
         assert_eq!(payload["servers"][0]["enabled_prompts"], 1);
         assert_eq!(payload["will_write"], false);
         assert_eq!(payload["aliases"][0], "mcp");
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("probe write"))
-        );
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("settings"))
-        );
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("probe write")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("settings")));
     }
 
     #[test]
@@ -17093,7 +17454,10 @@ mod tests {
         let server = crate::config::McpServerConfig {
             transport: "stdio".to_string(),
             command: "npx".to_string(),
-            args: vec!["-y".to_string(), "@modelcontextprotocol/server-docs".to_string()],
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-docs".to_string(),
+            ],
             env: std::collections::HashMap::from([(
                 "DOCS_TOKEN".to_string(),
                 "secret".to_string(),
@@ -17363,10 +17727,7 @@ mod tests {
         assert_eq!(empty_payload["copy_mechanism"], "osc52");
         assert_eq!(empty_payload["supported_actions"][5], "status --json");
         assert_eq!(empty_payload["supported_actions"][7], "info --json");
-        assert_eq!(
-            empty_payload["supported_actions"][12],
-            "assistant-response"
-        );
+        assert_eq!(empty_payload["supported_actions"][12], "assistant-response");
 
         assert_eq!(hotkeys_command_arg("/hotkeys"), Some(""));
         assert_eq!(hotkeys_command_arg("/hotkeys status"), Some("status"));
@@ -17390,13 +17751,11 @@ mod tests {
         assert_eq!(payload["aliases"][0], "hotkeys");
         assert_eq!(payload["supported_actions"][6], "status --json");
         assert_eq!(payload["supported_actions"][8], "list --json");
-        assert!(
-            payload["shortcuts"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["key"] == "Shift+Tab")
-        );
+        assert!(payload["shortcuts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["key"] == "Shift+Tab"));
 
         assert_eq!(reload_command_arg("/reload"), Some(""));
         assert_eq!(reload_command_arg("/reload config"), Some("config"));
@@ -17496,7 +17855,10 @@ mod tests {
     fn doctor_command_arg_and_parser_capture_diagnostic_aliases() {
         assert_eq!(doctor_command_arg("/doctor"), Some(""));
         assert_eq!(doctor_command_arg("/doctor status"), Some("status"));
-        assert_eq!(doctor_command_arg("/doctor diagnostics"), Some("diagnostics"));
+        assert_eq!(
+            doctor_command_arg("/doctor diagnostics"),
+            Some("diagnostics")
+        );
         assert_eq!(doctor_command_arg("/doctors"), None);
         assert_eq!(parse_doctor_command(""), DoctorCommand::Run);
         assert_eq!(parse_doctor_command("status"), DoctorCommand::Run);
@@ -17512,7 +17874,10 @@ mod tests {
         assert_eq!(parse_doctor_command("show --json"), DoctorCommand::Json);
         assert_eq!(parse_doctor_command("info --json"), DoctorCommand::Json);
         assert_eq!(parse_doctor_command("health --json"), DoctorCommand::Json);
-        assert_eq!(parse_doctor_command("diagnostics --json"), DoctorCommand::Json);
+        assert_eq!(
+            parse_doctor_command("diagnostics --json"),
+            DoctorCommand::Json
+        );
         assert_eq!(parse_doctor_command("diag --json"), DoctorCommand::Json);
         assert_eq!(parse_doctor_command("open"), DoctorCommand::Usage);
         assert!(doctor_usage_text().contains("status|state|show|info"));
@@ -17562,7 +17927,10 @@ mod tests {
         assert_eq!(help_command_arg("/help"), Some(""));
         assert_eq!(help_command_arg("/help status"), Some("status"));
         assert_eq!(help_command_arg("/help json"), Some("json"));
-        assert_eq!(help_command_arg("/help status --json"), Some("status --json"));
+        assert_eq!(
+            help_command_arg("/help status --json"),
+            Some("status --json")
+        );
         assert_eq!(help_command_arg("/helper"), None);
         assert_eq!(parse_help_command(""), HelpCommand::Show);
         assert_eq!(parse_help_command("list"), HelpCommand::Show);
@@ -17587,36 +17955,29 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("list --json")));
-        assert!(
-            payload["commands"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|row| row["name"] == "model"
-                    && row["description"] == "show or change the active model"
-                    && row["arg_hint"]
-                        .as_str()
-                        .unwrap()
-                        .contains("list --json"))
-        );
-        assert!(
-            payload["commands"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|row| row["name"] == "remember"
-                    && row["arg_hint"]
-                        .as_str()
-                        .unwrap()
-                        .contains("preview --json"))
-        );
+        assert!(payload["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["name"] == "model"
+                && row["description"] == "show or change the active model"
+                && row["arg_hint"].as_str().unwrap().contains("list --json")));
+        assert!(payload["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["name"] == "remember"
+                && row["arg_hint"].as_str().unwrap().contains("preview --json")));
     }
 
     #[test]
     fn clear_command_arg_and_parser_capture_preview_aliases() {
         assert_eq!(clear_command_arg("/clear"), None);
         assert_eq!(clear_command_arg("/new"), None);
-        assert_eq!(clear_command_arg("/clear status"), Some(("/clear", "status")));
+        assert_eq!(
+            clear_command_arg("/clear status"),
+            Some(("/clear", "status"))
+        );
         assert_eq!(clear_command_arg("/new json"), Some(("/new", "json")));
         assert_eq!(
             clear_command_arg("/clear status --json"),
@@ -17939,9 +18300,18 @@ mod tests {
         assert_eq!(send_command_arg("/send list"), Some("list"));
         assert_eq!(send_command_arg("/send json"), Some("json"));
         assert_eq!(send_command_arg("/send show --json"), Some("show --json"));
-        assert_eq!(send_command_arg("/send queued --json"), Some("queued --json"));
-        assert_eq!(send_command_arg("/send pending --json"), Some("pending --json"));
-        assert_eq!(send_command_arg("/send worker finish tests"), Some("worker finish tests"));
+        assert_eq!(
+            send_command_arg("/send queued --json"),
+            Some("queued --json")
+        );
+        assert_eq!(
+            send_command_arg("/send pending --json"),
+            Some("pending --json")
+        );
+        assert_eq!(
+            send_command_arg("/send worker finish tests"),
+            Some("worker finish tests")
+        );
         assert_eq!(send_command_arg("/send-message"), Some(""));
         assert_eq!(
             send_command_arg("/send-message worker finish tests"),
@@ -18111,7 +18481,10 @@ mod tests {
                 prompt: "check tests".to_string()
             }
         );
-        assert!(matches!(parse_schedule_command("10m"), ScheduleCommand::Usage));
+        assert!(matches!(
+            parse_schedule_command("10m"),
+            ScheduleCommand::Usage
+        ));
         let hint = help_command_arg_hint("schedule");
         assert!(hint.contains("inspect"));
         assert!(hint.contains("show-json"));
@@ -18122,7 +18495,10 @@ mod tests {
 
     #[test]
     fn schedule_delay_formats_and_clamps() {
-        assert_eq!(parse_schedule_delay("250ms"), Some(Duration::from_millis(250)));
+        assert_eq!(
+            parse_schedule_delay("250ms"),
+            Some(Duration::from_millis(250))
+        );
         assert_eq!(parse_schedule_delay("2h"), Some(Duration::from_secs(7200)));
         assert_eq!(format_schedule_delay(Duration::from_millis(250)), "250ms");
         assert_eq!(format_schedule_delay(Duration::from_secs(90)), "2m");
@@ -18252,7 +18628,10 @@ mod tests {
         let first = schedule_store_path_for_project(&project).unwrap();
         let second = schedule_store_path_for_project(&project).unwrap();
         assert_eq!(first, second);
-        assert_eq!(first.extension().and_then(|value| value.to_str()), Some("json"));
+        assert_eq!(
+            first.extension().and_then(|value| value.to_str()),
+            Some("json")
+        );
         assert!(first.to_string_lossy().contains("code-schedules"));
     }
 
@@ -18341,9 +18720,15 @@ mod tests {
     #[test]
     fn parse_thinking_level_accepts_supported_levels() {
         assert_eq!(parse_thinking_level("off").unwrap(), ThinkingLevel::Off);
-        assert_eq!(parse_thinking_level("minimal").unwrap(), ThinkingLevel::Minimal);
+        assert_eq!(
+            parse_thinking_level("minimal").unwrap(),
+            ThinkingLevel::Minimal
+        );
         assert_eq!(parse_thinking_level("low").unwrap(), ThinkingLevel::Low);
-        assert_eq!(parse_thinking_level("medium").unwrap(), ThinkingLevel::Medium);
+        assert_eq!(
+            parse_thinking_level("medium").unwrap(),
+            ThinkingLevel::Medium
+        );
         assert_eq!(parse_thinking_level("high").unwrap(), ThinkingLevel::High);
         assert_eq!(parse_thinking_level("xhigh").unwrap(), ThinkingLevel::XHigh);
         assert!(parse_thinking_level("").is_err());
@@ -18381,12 +18766,21 @@ mod tests {
     #[test]
     fn parse_permissions_command_handles_management_actions() {
         assert_eq!(parse_permissions_command(""), PermissionsCommand::Show);
-        assert_eq!(parse_permissions_command("status"), PermissionsCommand::Show);
+        assert_eq!(
+            parse_permissions_command("status"),
+            PermissionsCommand::Show
+        );
         assert_eq!(parse_permissions_command("show"), PermissionsCommand::Show);
-        assert_eq!(parse_permissions_command("current"), PermissionsCommand::Show);
+        assert_eq!(
+            parse_permissions_command("current"),
+            PermissionsCommand::Show
+        );
         assert_eq!(parse_permissions_command("info"), PermissionsCommand::Show);
         assert_eq!(parse_permissions_command("json"), PermissionsCommand::Json);
-        assert_eq!(parse_permissions_command("--json"), PermissionsCommand::Json);
+        assert_eq!(
+            parse_permissions_command("--json"),
+            PermissionsCommand::Json
+        );
         assert_eq!(
             parse_permissions_command("status --json"),
             PermissionsCommand::Json
@@ -18404,15 +18798,27 @@ mod tests {
             PermissionsCommand::Json
         );
         assert_eq!(parse_permissions_command("open"), PermissionsCommand::Open);
-        assert_eq!(parse_permissions_command("settings"), PermissionsCommand::Open);
+        assert_eq!(
+            parse_permissions_command("settings"),
+            PermissionsCommand::Open
+        );
         assert_eq!(parse_permissions_command("edit"), PermissionsCommand::Open);
         assert_eq!(
             parse_permissions_command("approvals"),
             PermissionsCommand::Open
         );
-        assert_eq!(parse_permissions_command("forget"), PermissionsCommand::Forget);
-        assert_eq!(parse_permissions_command("clear"), PermissionsCommand::Forget);
-        assert_eq!(parse_permissions_command("reset"), PermissionsCommand::Forget);
+        assert_eq!(
+            parse_permissions_command("forget"),
+            PermissionsCommand::Forget
+        );
+        assert_eq!(
+            parse_permissions_command("clear"),
+            PermissionsCommand::Forget
+        );
+        assert_eq!(
+            parse_permissions_command("reset"),
+            PermissionsCommand::Forget
+        );
         assert_eq!(
             parse_permissions_command("bypassPermissions"),
             PermissionsCommand::UnsupportedBypass
@@ -18457,8 +18863,14 @@ mod tests {
         assert_eq!(parse_login_slash_target("status"), LoginSlashTarget::Status);
         assert_eq!(parse_login_slash_target("show"), LoginSlashTarget::Status);
         assert_eq!(parse_login_slash_target("info"), LoginSlashTarget::Status);
-        assert_eq!(parse_login_slash_target("json"), LoginSlashTarget::StatusJson);
-        assert_eq!(parse_login_slash_target("--json"), LoginSlashTarget::StatusJson);
+        assert_eq!(
+            parse_login_slash_target("json"),
+            LoginSlashTarget::StatusJson
+        );
+        assert_eq!(
+            parse_login_slash_target("--json"),
+            LoginSlashTarget::StatusJson
+        );
         assert_eq!(
             parse_login_slash_target("status --json"),
             LoginSlashTarget::StatusJson
@@ -18467,10 +18879,19 @@ mod tests {
             parse_login_slash_target("show json"),
             LoginSlashTarget::StatusJson
         );
-        assert_eq!(parse_login_slash_target("libertai"), LoginSlashTarget::Account);
-        assert_eq!(parse_login_slash_target("account"), LoginSlashTarget::Account);
+        assert_eq!(
+            parse_login_slash_target("libertai"),
+            LoginSlashTarget::Account
+        );
+        assert_eq!(
+            parse_login_slash_target("account"),
+            LoginSlashTarget::Account
+        );
         assert_eq!(parse_login_slash_target("key"), LoginSlashTarget::Account);
-        assert_eq!(parse_login_slash_target("api-key"), LoginSlashTarget::Account);
+        assert_eq!(
+            parse_login_slash_target("api-key"),
+            LoginSlashTarget::Account
+        );
         assert_eq!(parse_login_slash_target("api"), LoginSlashTarget::Account);
         assert_eq!(
             parse_login_slash_target("libertai --json"),
@@ -18525,12 +18946,8 @@ mod tests {
         assert_eq!(payload["supported_actions"][4], "--json");
         assert_eq!(payload["supported_actions"][5], "status --json");
         assert_eq!(payload["supported_actions"][15], "show provider --json");
-        let provider_payload = provider_login_payload(
-            "logout",
-            "show anthropic --json",
-            "anthropic",
-            &cfg,
-        );
+        let provider_payload =
+            provider_login_payload("logout", "show anthropic --json", "anthropic", &cfg);
         assert_eq!(provider_payload["command"], "logout");
         assert_eq!(provider_payload["query"], "show anthropic --json");
         assert_eq!(provider_payload["provider"], "anthropic");
@@ -18593,25 +19010,82 @@ mod tests {
             model_usage_text(),
             "/model [status|show|current|json|--json|status --json|show --json|current --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model]"
         );
-        assert!(matches!(parse_model_slash_command(""), ModelSlashCommand::Status));
-        assert!(matches!(parse_model_slash_command("status"), ModelSlashCommand::Status));
-        assert!(matches!(parse_model_slash_command("show"), ModelSlashCommand::Status));
-        assert!(matches!(parse_model_slash_command("current"), ModelSlashCommand::Status));
-        assert!(matches!(parse_model_slash_command("json"), ModelSlashCommand::Json));
-        assert!(matches!(parse_model_slash_command("--json"), ModelSlashCommand::Json));
-        assert!(matches!(parse_model_slash_command("status --json"), ModelSlashCommand::Json));
-        assert!(matches!(parse_model_slash_command("show --json"), ModelSlashCommand::Json));
-        assert!(matches!(parse_model_slash_command("current --json"), ModelSlashCommand::Json));
-        assert!(matches!(parse_model_slash_command("list"), ModelSlashCommand::List));
-        assert!(matches!(parse_model_slash_command("ls"), ModelSlashCommand::List));
-        assert!(matches!(parse_model_slash_command("list --json"), ModelSlashCommand::JsonList));
-        assert!(matches!(parse_model_slash_command("ls --json"), ModelSlashCommand::JsonList));
-        assert!(matches!(parse_model_slash_command("next"), ModelSlashCommand::Next));
-        assert!(matches!(parse_model_slash_command("cycle"), ModelSlashCommand::Next));
-        assert!(matches!(parse_model_slash_command("prev"), ModelSlashCommand::Previous));
-        assert!(matches!(parse_model_slash_command("previous"), ModelSlashCommand::Previous));
-        assert!(matches!(parse_model_slash_command("back"), ModelSlashCommand::Previous));
-        assert!(matches!(parse_model_slash_command("openai/gpt-5"), ModelSlashCommand::Set("openai/gpt-5")));
+        assert!(matches!(
+            parse_model_slash_command(""),
+            ModelSlashCommand::Status
+        ));
+        assert!(matches!(
+            parse_model_slash_command("status"),
+            ModelSlashCommand::Status
+        ));
+        assert!(matches!(
+            parse_model_slash_command("show"),
+            ModelSlashCommand::Status
+        ));
+        assert!(matches!(
+            parse_model_slash_command("current"),
+            ModelSlashCommand::Status
+        ));
+        assert!(matches!(
+            parse_model_slash_command("json"),
+            ModelSlashCommand::Json
+        ));
+        assert!(matches!(
+            parse_model_slash_command("--json"),
+            ModelSlashCommand::Json
+        ));
+        assert!(matches!(
+            parse_model_slash_command("status --json"),
+            ModelSlashCommand::Json
+        ));
+        assert!(matches!(
+            parse_model_slash_command("show --json"),
+            ModelSlashCommand::Json
+        ));
+        assert!(matches!(
+            parse_model_slash_command("current --json"),
+            ModelSlashCommand::Json
+        ));
+        assert!(matches!(
+            parse_model_slash_command("list"),
+            ModelSlashCommand::List
+        ));
+        assert!(matches!(
+            parse_model_slash_command("ls"),
+            ModelSlashCommand::List
+        ));
+        assert!(matches!(
+            parse_model_slash_command("list --json"),
+            ModelSlashCommand::JsonList
+        ));
+        assert!(matches!(
+            parse_model_slash_command("ls --json"),
+            ModelSlashCommand::JsonList
+        ));
+        assert!(matches!(
+            parse_model_slash_command("next"),
+            ModelSlashCommand::Next
+        ));
+        assert!(matches!(
+            parse_model_slash_command("cycle"),
+            ModelSlashCommand::Next
+        ));
+        assert!(matches!(
+            parse_model_slash_command("prev"),
+            ModelSlashCommand::Previous
+        ));
+        assert!(matches!(
+            parse_model_slash_command("previous"),
+            ModelSlashCommand::Previous
+        ));
+        assert!(matches!(
+            parse_model_slash_command("back"),
+            ModelSlashCommand::Previous
+        ));
+        assert!(matches!(
+            parse_model_slash_command("openai/gpt-5"),
+            ModelSlashCommand::Set("openai/gpt-5")
+        ));
 
         let cfg = LibertaiConfig::default();
         let payload = model_json_payload(
@@ -18681,7 +19155,10 @@ mod tests {
             parse_scoped_models_command("reset"),
             ScopedModelsCommand::Clear
         );
-        assert_eq!(parse_scoped_models_command("off"), ScopedModelsCommand::Clear);
+        assert_eq!(
+            parse_scoped_models_command("off"),
+            ScopedModelsCommand::Clear
+        );
         assert_eq!(
             parse_scoped_models_command("qwen*"),
             ScopedModelsCommand::Set(vec!["qwen*".to_string()])
@@ -18714,12 +19191,10 @@ mod tests {
         assert_eq!(payload["query"], "show --json");
         assert_eq!(payload["is_scoped"], true);
         assert_eq!(payload["patterns"][0], "qwen*");
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("show --json"))
-        );
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
     }
 
     #[test]
@@ -18951,18 +19426,14 @@ mod tests {
         assert_eq!(payload["will_write"], false);
         assert_eq!(payload["will_publish"], false);
         assert!(payload["guide"]["bytes"].as_u64().unwrap() > 0);
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("show --json"))
-        );
-        assert!(
-            payload["supported_actions"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("preview --json"))
-        );
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("preview --json")));
     }
 
     #[test]
@@ -19744,7 +20215,10 @@ mod tests {
         assert_eq!(payload["count"], 1);
         assert_eq!(payload["worktree_default_count"], 1);
         assert_eq!(payload["agents"][0]["name"], "reviewer");
-        assert_eq!(payload["agents"][0]["path"], "/tmp/project/.libertai/agents/reviewer.md");
+        assert_eq!(
+            payload["agents"][0]["path"],
+            "/tmp/project/.libertai/agents/reviewer.md"
+        );
         assert!(payload["supported_actions"]
             .as_array()
             .unwrap()
@@ -19814,7 +20288,10 @@ mod tests {
             detect_supported_image_mime_type(b"\xFF\xD8\xFF"),
             Some("image/jpeg")
         );
-        assert_eq!(detect_supported_image_mime_type(b"GIF89a"), Some("image/gif"));
+        assert_eq!(
+            detect_supported_image_mime_type(b"GIF89a"),
+            Some("image/gif")
+        );
         assert_eq!(
             detect_supported_image_mime_type(b"RIFFxxxxWEBPrest"),
             Some("image/webp")
@@ -19942,7 +20419,10 @@ mod tests {
 
     #[test]
     fn parse_template_query_splits_name_and_args() {
-        assert_eq!(parse_template_query("review src/lib.rs").unwrap(), ("review", "src/lib.rs"));
+        assert_eq!(
+            parse_template_query("review src/lib.rs").unwrap(),
+            ("review", "src/lib.rs")
+        );
         assert_eq!(
             parse_template_query("team/audit src/lib.rs").unwrap(),
             ("team/audit", "src/lib.rs")
@@ -20110,7 +20590,9 @@ mod tests {
                     body: "Review changes.".to_string(),
                     source: "project:/tmp/project/.libertai/skills/project-review".to_string(),
                     source_kind: "project".to_string(),
-                    path: Some(PathBuf::from("/tmp/project/.libertai/skills/project-review")),
+                    path: Some(PathBuf::from(
+                        "/tmp/project/.libertai/skills/project-review",
+                    )),
                     agent_created: true,
                     enabled: false,
                 },
@@ -20164,12 +20646,19 @@ mod tests {
         assert!(details.contains("agent-created: yes"));
         assert!(details.contains("Prefer focused findings.\nCite files."));
 
-        let payload = code_skill_detail_json_payload(Path::new("/tmp/project"), "project-review", Some(&skill));
+        let payload = code_skill_detail_json_payload(
+            Path::new("/tmp/project"),
+            "project-review",
+            Some(&skill),
+        );
         assert_eq!(payload["command"], "skills");
         assert_eq!(payload["query"], "show project-review --json");
         assert_eq!(payload["name"], "project-review");
         assert_eq!(payload["skill"]["name"], "project-review");
-        assert_eq!(payload["skill"]["instruction_preview"], "Prefer focused findings.\nCite files.");
+        assert_eq!(
+            payload["skill"]["instruction_preview"],
+            "Prefer focused findings.\nCite files."
+        );
         assert_eq!(payload["will_write"], false);
         assert!(payload["supported_actions"]
             .as_array()
@@ -20184,7 +20673,10 @@ mod tests {
 
     #[test]
     fn review_command_parts_accepts_review_aliases() {
-        assert_eq!(review_command_parts("/review src"), Some(("/review", "src")));
+        assert_eq!(
+            review_command_parts("/review src"),
+            Some(("/review", "src"))
+        );
         assert_eq!(
             review_command_parts("/security-review auth"),
             Some(("/security-review", "auth"))
@@ -20193,7 +20685,10 @@ mod tests {
             review_command_parts("/pr-comments 123"),
             Some(("/pr-comments", "123"))
         );
-        assert_eq!(review_command_parts("/pr_comments"), Some(("/pr_comments", "")));
+        assert_eq!(
+            review_command_parts("/pr_comments"),
+            Some(("/pr_comments", ""))
+        );
         assert_eq!(review_command_parts("/reviewer src"), None);
         assert_eq!(help_command_arg_hint("review"), "[scope]");
         assert_eq!(help_command_arg_hint("security-review"), "[scope]");
@@ -20262,7 +20757,10 @@ mod tests {
             pr_comments_unviewed_arg("/pr_comments unview js/app.js"),
             Some("js/app.js")
         );
-        assert_eq!(parse_pr_comments_file_path("src/lib.rs").unwrap(), "src/lib.rs");
+        assert_eq!(
+            parse_pr_comments_file_path("src/lib.rs").unwrap(),
+            "src/lib.rs"
+        );
         assert!(parse_pr_comments_file_path("").is_err());
         assert!(parse_pr_comments_all_files("--all"));
         assert!(parse_pr_comments_all_files("all"));
@@ -20347,7 +20845,10 @@ mod tests {
             parse_pr_comments_review("comment Summary only.").unwrap(),
             ("comment", "Summary only.")
         );
-        assert_eq!(parse_pr_comments_review("approve").unwrap(), ("approve", ""));
+        assert_eq!(
+            parse_pr_comments_review("approve").unwrap(),
+            ("approve", "")
+        );
     }
 
     #[test]
@@ -20368,7 +20869,10 @@ mod tests {
 
     #[test]
     fn parse_direct_custom_slash_parses_name_and_args() {
-        assert_eq!(parse_direct_custom_slash("/review src"), Some(("review", "src")));
+        assert_eq!(
+            parse_direct_custom_slash("/review src"),
+            Some(("review", "src"))
+        );
         assert_eq!(
             parse_direct_custom_slash("/team/review src"),
             Some(("team/review", "src"))

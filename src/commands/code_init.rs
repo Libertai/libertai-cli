@@ -197,14 +197,13 @@ fn build_agents_md(cwd: &Path, notes: Option<&str>) -> Result<String> {
     ];
     let facts = project_fact_lines(cwd);
     if facts.is_empty() {
-        lines.push("- Identify the project type and entry points before making changes.".to_string());
+        lines.push(
+            "- Identify the project type and entry points before making changes.".to_string(),
+        );
     } else {
         lines.extend(facts);
     }
-    lines.extend([
-        String::new(),
-        "## Build & test".to_string(),
-    ]);
+    lines.extend([String::new(), "## Build & test".to_string()]);
     for line in command_lines(cwd) {
         lines.push(line);
     }
@@ -283,7 +282,9 @@ fn command_lines(cwd: &Path) -> Vec<String> {
             lines.push(package_command_line(cwd, manager, "lint"));
         }
         if lines.len() == 1 {
-            lines.push(format!("- test: inspect `package.json` scripts before choosing a `{manager}` command"));
+            lines.push(format!(
+                "- test: inspect `package.json` scripts before choosing a `{manager}` command"
+            ));
         }
         return lines;
     }
@@ -333,7 +334,12 @@ fn project_fact_lines(cwd: &Path) -> Vec<String> {
             facts.push(format!("- Uses {label}: `{path}`."));
         }
     }
-    for path in ["CONTRIBUTING.md", ".editorconfig", "rust-toolchain.toml", "mise.toml"] {
+    for path in [
+        "CONTRIBUTING.md",
+        ".editorconfig",
+        "rust-toolchain.toml",
+        "mise.toml",
+    ] {
         if cwd.join(path).exists() {
             facts.push(format!("- Project guidance/config: `{path}`."));
         }
@@ -355,8 +361,8 @@ fn package_json_name(cwd: &Path) -> Option<String> {
 }
 
 fn package_scripts(cwd: &Path) -> Vec<String> {
-    let Some(obj) = package_json(cwd)
-        .and_then(|v| v.get("scripts").and_then(|s| s.as_object()).cloned())
+    let Some(obj) =
+        package_json(cwd).and_then(|v| v.get("scripts").and_then(|s| s.as_object()).cloned())
     else {
         return Vec::new();
     };
@@ -511,7 +517,10 @@ mod tests {
         assert!(result.content.contains("Rust project: `demo`"));
         assert!(result.content.contains("cargo check --locked"));
         assert!(result.content.contains("`src/`"));
-        assert_eq!(std::fs::read_to_string(result.path).unwrap(), result.content);
+        assert_eq!(
+            std::fs::read_to_string(result.path).unwrap(),
+            result.content
+        );
     }
 
     #[test]
@@ -553,11 +562,9 @@ mod tests {
         .unwrap();
 
         assert!(result.created);
-        assert!(
-            result
-                .content
-                .contains("User-provided project note: prefer snapshot tests and document public APIs")
-        );
+        assert!(result.content.contains(
+            "User-provided project note: prefer snapshot tests and document public APIs"
+        ));
     }
 
     #[test]
@@ -578,7 +585,9 @@ mod tests {
     fn init_agent_prompt_omits_empty_notes_section() {
         let prompt = init_agent_prompt(Some("   "));
 
-        assert!(prompt.contains("candidate block, merge plan, and\n   diff instead of making changes"));
+        assert!(
+            prompt.contains("candidate block, merge plan, and\n   diff instead of making changes")
+        );
         assert!(!prompt.contains("User-provided project notes"));
     }
 
@@ -602,9 +611,15 @@ mod tests {
         let result = init_project(temp.path()).unwrap();
 
         assert!(result.content.contains("JavaScript package: `web-app`"));
-        assert!(result.content.contains("build: `pnpm run build` (script: `vite build`)"));
-        assert!(result.content.contains("test: `pnpm test` (script: `vitest`)"));
-        assert!(result.content.contains("lint: `pnpm run lint` (script: `eslint .`)"));
+        assert!(result
+            .content
+            .contains("build: `pnpm run build` (script: `vite build`)"));
+        assert!(result
+            .content
+            .contains("test: `pnpm test` (script: `vitest`)"));
+        assert!(result
+            .content
+            .contains("lint: `pnpm run lint` (script: `eslint .`)"));
     }
 
     #[test]
@@ -634,7 +649,11 @@ Merge plan:
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
         std::fs::write(temp.path().join("README.md"), "# Demo\n\nA test project.\n").unwrap();
-        std::fs::write(temp.path().join("AGENTS.md"), "# Demo agents\n\nUse cargo test.\n").unwrap();
+        std::fs::write(
+            temp.path().join("AGENTS.md"),
+            "# Demo agents\n\nUse cargo test.\n",
+        )
+        .unwrap();
         std::fs::create_dir(temp.path().join("src")).unwrap();
 
         let guide = onboarding_guide(temp.path()).unwrap();
@@ -649,8 +668,11 @@ Merge plan:
     #[test]
     fn init_project_records_python_and_go_project_names() {
         let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("pyproject.toml"), "[project]\nname = 'worker'\n")
-            .unwrap();
+        std::fs::write(
+            temp.path().join("pyproject.toml"),
+            "[project]\nname = 'worker'\n",
+        )
+        .unwrap();
         std::fs::write(temp.path().join("go.mod"), "module example.com/service\n").unwrap();
         std::fs::write(temp.path().join("Dockerfile"), "FROM scratch\n").unwrap();
 
@@ -678,7 +700,9 @@ Merge plan:
 
         assert!(result.content.contains("README title: `Demo App`"));
         assert!(result.content.contains("README summary: A focused app"));
-        assert!(result.content.contains("Project guidance/config: `CONTRIBUTING.md`"));
+        assert!(result
+            .content
+            .contains("Project guidance/config: `CONTRIBUTING.md`"));
         assert!(result.content.contains("Read `CONTRIBUTING.md`"));
         assert!(result.content.contains("Respect `.editorconfig`"));
         assert!(result.content.contains("`scripts/` - project scripts"));

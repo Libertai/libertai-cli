@@ -98,7 +98,9 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
     };
     let choice = loop {
         match event::read() {
-            Ok(Event::Key(KeyEvent { code, modifiers, .. })) => match (code, modifiers) {
+            Ok(Event::Key(KeyEvent {
+                code, modifiers, ..
+            })) => match (code, modifiers) {
                 // `Char('a') + SHIFT` is unreachable on most terminals
                 // (Shift uppercases to `A`), but handle it defensively.
                 (KeyCode::Char('a'), _) => break PromptChoice::Allow,
@@ -156,8 +158,14 @@ mod tests {
 
     #[test]
     fn preview_line_styling_highlights_diff_lines() {
-        assert_eq!(style_preview_line("--- src/lib.rs"), "\x1b[36;1m--- src/lib.rs\x1b[0m");
-        assert_eq!(style_preview_line("+++ proposed/src/lib.rs"), "\x1b[36;1m+++ proposed/src/lib.rs\x1b[0m");
+        assert_eq!(
+            style_preview_line("--- src/lib.rs"),
+            "\x1b[36;1m--- src/lib.rs\x1b[0m"
+        );
+        assert_eq!(
+            style_preview_line("+++ proposed/src/lib.rs"),
+            "\x1b[36;1m+++ proposed/src/lib.rs\x1b[0m"
+        );
         assert_eq!(style_preview_line("+new"), "\x1b[32m+new\x1b[0m");
         assert_eq!(style_preview_line("-old"), "\x1b[31m-old\x1b[0m");
         assert_eq!(
@@ -169,7 +177,10 @@ mod tests {
 
     #[test]
     fn terminal_notifications_report_sent_for_non_empty_payloads() {
-        assert_eq!(notify_terminal("Done", "Agent turn complete"), NotifyOutcome::Sent);
+        assert_eq!(
+            notify_terminal("Done", "Agent turn complete"),
+            NotifyOutcome::Sent
+        );
         assert_eq!(
             notify_terminal(" ", "Agent turn complete"),
             NotifyOutcome::Skipped("EMPTY_NOTIFICATION".to_string())

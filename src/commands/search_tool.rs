@@ -53,14 +53,22 @@ pub struct SearchTool {
 }
 
 impl SearchTool {
-    pub fn new(cfg: Arc<Config>) -> Self { Self { cfg } }
+    pub fn new(cfg: Arc<Config>) -> Self {
+        Self { cfg }
+    }
 }
 
 #[async_trait]
 impl Tool for SearchTool {
-    fn name(&self) -> &str { NAME }
-    fn label(&self) -> &str { LABEL }
-    fn description(&self) -> &str { DESCRIPTION }
+    fn name(&self) -> &str {
+        NAME
+    }
+    fn label(&self) -> &str {
+        LABEL
+    }
+    fn description(&self) -> &str {
+        DESCRIPTION
+    }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
@@ -115,16 +123,26 @@ impl Tool for SearchTool {
         let mut cite = Vec::with_capacity(resp.results.len());
         let mut text = String::new();
         for (i, r) in resp.results.iter().enumerate() {
-            let title = r.title.clone().unwrap_or_else(|| format!("result {}", i + 1));
+            let title = r
+                .title
+                .clone()
+                .unwrap_or_else(|| format!("result {}", i + 1));
             let url = r.url.clone();
-            let snippet = r.snippet.as_deref()
-                .map(|s| {
-                    let trimmed: String = s.chars().take(200).collect();
-                    if s.len() > trimmed.len() { format!("{trimmed}…") } else { trimmed }
-                });
+            let snippet = r.snippet.as_deref().map(|s| {
+                let trimmed: String = s.chars().take(200).collect();
+                if s.len() > trimmed.len() {
+                    format!("{trimmed}…")
+                } else {
+                    trimmed
+                }
+            });
             text.push_str(&format!("[{}] {title}\n", i + 1));
-            if let Some(u) = &url { text.push_str(&format!("    {u}\n")); }
-            if let Some(s) = &snippet { text.push_str(&format!("    {s}\n")); }
+            if let Some(u) = &url {
+                text.push_str(&format!("    {u}\n"));
+            }
+            if let Some(s) = &snippet {
+                text.push_str(&format!("    {s}\n"));
+            }
             text.push('\n');
             cite.push(json!({ "title": title, "url": url, "snippet": snippet }));
         }
@@ -141,7 +159,9 @@ impl Tool for SearchTool {
         .into())
     }
 
-    fn is_read_only(&self) -> bool { true }
+    fn is_read_only(&self) -> bool {
+        true
+    }
 }
 
 fn err_output(msg: &str) -> ToolExecution {

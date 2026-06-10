@@ -176,16 +176,25 @@ fn save_then_load_preserves_fields() {
     );
     assert_eq!(round.hooks.pre_tool_use.len(), 1);
     assert_eq!(round.hooks.pre_tool_use[0].matcher, "bash|write");
-    assert_eq!(round.hooks.pre_tool_use[0].command, "scripts/pre-tool-use.sh");
+    assert_eq!(
+        round.hooks.pre_tool_use[0].command,
+        "scripts/pre-tool-use.sh"
+    );
     assert_eq!(round.hooks.pre_tool_use[0].timeout, Some(5));
     assert_eq!(round.hooks.post_tool_use.len(), 1);
     assert_eq!(round.hooks.post_tool_use[0].matcher, "bash");
-    assert_eq!(round.hooks.post_tool_use[0].command, "scripts/post-tool-use.sh");
+    assert_eq!(
+        round.hooks.post_tool_use[0].command,
+        "scripts/post-tool-use.sh"
+    );
     assert_eq!(round.hooks.post_tool_use[0].timeout, Some(3));
     assert!(round.hooks.post_tool_use[0].async_hook);
     assert_eq!(round.hooks.subagent_stop.len(), 1);
     assert_eq!(round.hooks.subagent_stop[0].matcher, "task");
-    assert_eq!(round.hooks.subagent_stop[0].command, "scripts/subagent-stop.sh");
+    assert_eq!(
+        round.hooks.subagent_stop[0].command,
+        "scripts/subagent-stop.sh"
+    );
     assert_eq!(round.hooks.session_start.len(), 1);
     assert_eq!(
         round.hooks.session_start[0].command,
@@ -196,7 +205,10 @@ fn save_then_load_preserves_fields() {
     assert_eq!(round.hooks.session_end.len(), 1);
     assert_eq!(round.hooks.session_end[0].command, "scripts/session-end.sh");
     assert_eq!(round.hooks.notification.len(), 1);
-    assert_eq!(round.hooks.notification[0].command, "scripts/notification.sh");
+    assert_eq!(
+        round.hooks.notification[0].command,
+        "scripts/notification.sh"
+    );
     let policy_server = round.mcp_servers.get("policy").unwrap();
     assert_eq!(policy_server.transport, "http");
     assert_eq!(policy_server.command, "node");
@@ -207,7 +219,10 @@ fn save_then_load_preserves_fields() {
     );
     assert_eq!(policy_server.url, "https://policy.example.test/mcp");
     assert_eq!(
-        policy_server.headers.get("Authorization").map(String::as_str),
+        policy_server
+            .headers
+            .get("Authorization")
+            .map(String::as_str),
         Some("Bearer test")
     );
 }
@@ -291,7 +306,10 @@ args = ["--mode", "strict mode"]
     let rendered = toml::to_string_pretty(&cfg).unwrap();
     assert!(rendered.contains(r#"command = "scripts/pre-tool-use.sh""#));
     let round: Config = toml::from_str(&rendered).unwrap();
-    assert_eq!(round.hooks.pre_tool_use[0].command, "scripts/pre-tool-use.sh");
+    assert_eq!(
+        round.hooks.pre_tool_use[0].command,
+        "scripts/pre-tool-use.sh"
+    );
     assert_eq!(round.hooks.pre_tool_use[0].args, hook.args);
 }
 

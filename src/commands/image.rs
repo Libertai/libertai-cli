@@ -40,7 +40,9 @@ pub fn run(
     let paths: Vec<String> = if resp.data.len() == 1 {
         vec![out.clone()]
     } else {
-        (0..resp.data.len()).map(|i| numbered_path(&out, i)).collect()
+        (0..resp.data.len())
+            .map(|i| numbered_path(&out, i))
+            .collect()
     };
 
     // Refuse to clobber existing files unless --force.
