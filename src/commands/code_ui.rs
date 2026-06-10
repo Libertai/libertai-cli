@@ -2978,6 +2978,15 @@ async fn resume_repl_session(
 
 fn resolve_repl_resume_path(input: &str) -> Result<PathBuf> {
     let raw = input.trim();
+    // An explicit existing path needs no session index — skip the
+    // index read entirely (it depends on HOME/PI_CODING_AGENT_DIR,
+    // which also makes this branch hermetic under parallel tests).
+    if !raw.is_empty() {
+        let path = PathBuf::from(raw);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let sessions = list_past_sessions(Some(&cwd))?;
     resolve_repl_resume_path_from_sessions(raw, &sessions)
