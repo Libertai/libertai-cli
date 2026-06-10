@@ -67,7 +67,7 @@ hex = "0.4"
 k256 = { version = "0.13", features = ["ecdsa"] }
 sha2 = "0.10"
 sha3 = "0.10"
-rand = "0.8"
+rand = "0.9"
 tiny_http = "0.12"
 zeroize = { version = "1", features = ["derive"] }
 
