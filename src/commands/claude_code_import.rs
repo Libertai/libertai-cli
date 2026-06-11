@@ -316,6 +316,34 @@ struct RawRecord {
     #[serde(rename = "gitBranch")]
     git_branch: Option<String>,
     message: Option<serde_json::Value>,
+    /// Claude Code flags harness-injected records (local-command
+    /// caveats etc.) with `isMeta: true`. They're user-role in API
+    /// terms but were never typed by the human.
+    #[serde(rename = "isMeta", default)]
+    is_meta: bool,
+    /// Provenance of synthetic user records, e.g.
+    /// `{"kind": "task-notification"}` for background-task completion
+    /// notices. Human-typed messages carry no `origin` field.
+    origin: Option<serde_json::Value>,
+}
+
+impl RawRecord {
+    /// True for user-role records the Claude Code harness injected
+    /// rather than the human typing them. These pollute a linearised
+    /// transcript ("you: Background command … completed") so both the
+    /// import summary and the desktop's resume hydration skip them.
+    fn is_harness_injected(&self) -> bool {
+        if self.is_meta {
+            return true;
+        }
+        matches!(
+            self.origin
+                .as_ref()
+                .and_then(|o| o.get("kind"))
+                .and_then(|k| k.as_str()),
+            Some("task-notification")
+        )
+    }
 }
 
 /// Read a Claude Code session JSONL, pick the live branch, and emit a
@@ -386,6 +414,9 @@ pub fn linearize(jsonl_path: &Path) -> Result<LinearizedSession> {
         let rec = &records[idx];
         let typ = rec.typ.as_deref().unwrap_or("");
         if typ == "summary" || typ == "system" {
+            continue;
+        }
+        if rec.is_harness_injected() {
             continue;
         }
         let timestamp = rec.timestamp.clone();
@@ -988,6 +1019,47 @@ mod tests {
             .collect();
         assert_eq!(texts, vec!["new reply"], "expected the latest-leaf branch");
         assert_eq!(lin.dropped_sidechain, 0);
+    }
+
+    #[test]
+    fn linearize_drops_harness_injected_user_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("s.jsonl");
+        let notification = serde_json::json!({
+            "type": "user", "uuid": "n1", "parentUuid": "u1",
+            "timestamp": "2026-05-21T10:00:10Z",
+            "origin": { "kind": "task-notification" },
+            "message": { "role": "user",
+                "content": "<task-notification>Background command done</task-notification>" },
+        });
+        let meta = serde_json::json!({
+            "type": "user", "uuid": "m1", "parentUuid": "n1",
+            "timestamp": "2026-05-21T10:00:20Z", "isMeta": true,
+            "message": { "role": "user", "content": "Caveat: local command output" },
+        });
+        write_records(
+            &path,
+            &[
+                user("u1", None, "2026-05-21T10:00:00Z", "real question"),
+                notification,
+                meta,
+                assistant_text("a1", "m1", "2026-05-21T10:01:00Z", "reply"),
+            ],
+        );
+        let lin = linearize(&path).unwrap();
+        let users: Vec<&str> = lin
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                LinearMessage::User { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            users,
+            vec!["real question"],
+            "task-notification / isMeta records must not surface as user turns"
+        );
     }
 
     #[test]
