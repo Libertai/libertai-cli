@@ -232,6 +232,14 @@ pub enum Command {
         args: Vec<String>,
     },
 
+    /// Run an MCP server exposing LibertAI web search and page fetch over stdio.
+    ///
+    /// Speaks the Model Context Protocol (line-delimited JSON-RPC 2.0 on
+    /// stdin/stdout) so MCP clients — Claude Code, Claude Desktop, Cursor,
+    /// Cline — can call LibertAI's search API as tools. Register it with
+    /// e.g. `claude mcp add libertai -- libertai mcp`.
+    Mcp,
+
     /// Config file operations.
     Config {
         #[command(subcommand)]
@@ -491,6 +499,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             print,
             args,
         ),
+        Command::Mcp => crate::commands::mcp::run(),
         Command::Config { action } => crate::commands::config_cmd::run(action),
         Command::Skills { action } => crate::commands::skills::run(action),
         Command::Sandbox { action } => crate::commands::code_sandbox_cli::run(action),
@@ -519,6 +528,7 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::Claw { .. } => "claw",
         Command::Hermes { .. } => "hermes",
         Command::Code { .. } => "code",
+        Command::Mcp => "mcp",
         Command::Config { .. } => "config",
         Command::Skills { .. } => "skills",
         Command::Sandbox { .. } => "sandbox",

@@ -73,7 +73,9 @@ fn should_check(cfg: &Config, subcommand: &str) -> bool {
     }
     // Skip on commands that own their own terminal flow — we don't want a
     // banner in the middle of a password prompt or a `config show` dump.
-    !matches!(subcommand, "login" | "logout" | "config" | "code")
+    // (`mcp` is a protocol server: stdout is reserved for MCP frames and
+    // it should not fire a background network check at startup.)
+    !matches!(subcommand, "login" | "logout" | "config" | "code" | "mcp")
 }
 
 fn spawn_refresh() {

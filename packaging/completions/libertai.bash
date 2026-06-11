@@ -67,6 +67,9 @@ _libertai() {
             libertai,man)
                 cmd="libertai__subcmd__man"
                 ;;
+            libertai,mcp)
+                cmd="libertai__subcmd__mcp"
+                ;;
             libertai,models)
                 cmd="libertai__subcmd__models"
                 ;;
@@ -168,6 +171,9 @@ _libertai() {
                 ;;
             libertai__subcmd__help,man)
                 cmd="libertai__subcmd__help__subcmd__man"
+                ;;
+            libertai__subcmd__help,mcp)
+                cmd="libertai__subcmd__help__subcmd__mcp"
                 ;;
             libertai__subcmd__help,models)
                 cmd="libertai__subcmd__help__subcmd__models"
@@ -359,7 +365,7 @@ _libertai() {
 
     case "${cmd}" in
         libertai)
-            opts="-h -V --help --version login logout status keys models ask chat search fetch image run claude opencode aider claw hermes code config skills sandbox import completions man help"
+            opts="-h -V --help --version login logout status keys models ask chat search fetch image run claude opencode aider claw hermes code mcp config skills sandbox import completions man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -691,7 +697,7 @@ _libertai() {
             return 0
             ;;
         libertai__subcmd__help)
-            opts="login logout status keys models ask chat search fetch image run claude opencode aider claw hermes code config skills sandbox import completions man help"
+            opts="login logout status keys models ask chat search fetch image run claude opencode aider claw hermes code mcp config skills sandbox import completions man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1097,6 +1103,20 @@ _libertai() {
             return 0
             ;;
         libertai__subcmd__help__subcmd__man)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__help__subcmd__mcp)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1757,6 +1777,20 @@ _libertai() {
             return 0
             ;;
         libertai__subcmd__man)
+            opts="-h -V --help --version"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__mcp)
             opts="-h -V --help --version"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

@@ -44,6 +44,7 @@ pub mod keys;
 pub mod launchers;
 pub mod login;
 pub mod logout;
+pub mod mcp;
 pub mod model_catalog;
 pub mod models;
 pub mod notebook_tool;

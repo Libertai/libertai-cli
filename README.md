@@ -136,6 +136,7 @@ Model and provider default to `default_code_model` /
 | `libertai code [prompt]` | The coding agent (see above). `--print/-p`, `--plan`, `--resume`, `--continue`, `--list-sessions` (`--json`), `--sandbox`, `--model`, `--provider`. Alias binary: `lcode`. |
 | `libertai search <query>` | Web search via `search.libertai.io`. `--max-results`, `--type web\|news\|images`, `--engines`, `--json`. |
 | `libertai fetch <url>` | Fetch a URL and return its cleaned article text (title, content, word count). `--json` for the raw response. |
+| `libertai mcp` | Run an MCP server over stdio exposing `web_search` + `fetch_page` to MCP clients (Claude Code, Cursor, Cline, …) — see [MCP server](#mcp-server). |
 | `libertai image <prompt>` | Generate and save images. `--n`, `--size`, `--out`, `--model`, `--force`. |
 | `libertai keys list\|create\|delete` | Manage your account's API keys. `list --json`. |
 | `libertai run -- <cmd>` | Exec any command with LibertAI env vars injected. |
@@ -179,6 +180,58 @@ The CLI is built to compose with pipes and scripts:
   | 3 | auth required or rejected — run `libertai login` |
   | 4 | network/connect failure (backend unreachable, DNS, timeout) |
   | 5 | server-side API error (non-401 4xx/5xx response) |
+
+## MCP server
+
+`libertai mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
+server over stdio, exposing two tools backed by LibertAI's search API:
+`web_search` (multi-engine web/news/images/academic search with snippets,
+URLs, and cross-engine consensus info) and `fetch_page` (fetch a URL as
+cleaned plain text). Any MCP client can use them — point it at the
+installed binary and you're done. Auth reuses your CLI credentials
+(`libertai login`) or a `LIBERTAI_API_KEY` env var; without a key the
+tools answer with setup instructions instead of failing.
+
+**Claude Code**
+
+```sh
+claude mcp add libertai -- libertai mcp
+```
+
+**Generic JSON config** (Claude Desktop `claude_desktop_config.json` and
+most other clients):
+
+```json
+{"mcpServers":{"libertai":{"command":"libertai","args":["mcp"]}}}
+```
+
+**Cursor** — add to `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project):
+
+```json
+{
+  "mcpServers": {
+    "libertai": { "command": "libertai", "args": ["mcp"] }
+  }
+}
+```
+
+**Cline** — Settings → MCP Servers → Configure, or edit
+`cline_mcp_settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "libertai": {
+      "command": "libertai",
+      "args": ["mcp"],
+      "env": { "LIBERTAI_API_KEY": "LTAI_..." }
+    }
+  }
+}
+```
+
+(The `env` block is only needed if you haven't run `libertai login` on
+that machine.)
 
 ## Config
 

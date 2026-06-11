@@ -286,6 +286,14 @@ _arguments "${_arguments_options[@]}" : \
 '*::args -- Initial prompt. When given, runs a single one-shot turn and exits (tool approvals still prompt on the terminal unless `--print` is also set). Without a prompt and without `--print`, starts the interactive REPL:_default' \
 && ret=0
 ;;
+(mcp)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
 (config)
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
@@ -803,6 +811,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(mcp)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (config)
 _arguments "${_arguments_options[@]}" : \
 ":: :_libertai__subcmd__help__subcmd__config_commands" \
@@ -972,6 +984,7 @@ _libertai_commands() {
 'claw:Launch Claw Code (ultraworkers/claw-code) against LibertAI' \
 'hermes:Launch Hermes Agent against LibertAI' \
 'code:LibertAI'\''s own coding agent, powered by pi_agent_rust' \
+'mcp:Run an MCP server exposing LibertAI web search and page fetch over stdio' \
 'config:Config file operations' \
 'skills:Install/list/uninstall the bundled agent skills (image gen etc)' \
 'sandbox:Inspect the bash-sandbox configuration' \
@@ -1109,6 +1122,7 @@ _libertai__subcmd__help_commands() {
 'claw:Launch Claw Code (ultraworkers/claw-code) against LibertAI' \
 'hermes:Launch Hermes Agent against LibertAI' \
 'code:LibertAI'\''s own coding agent, powered by pi_agent_rust' \
+'mcp:Run an MCP server exposing LibertAI web search and page fetch over stdio' \
 'config:Config file operations' \
 'skills:Install/list/uninstall the bundled agent skills (image gen etc)' \
 'sandbox:Inspect the bash-sandbox configuration' \
@@ -1279,6 +1293,11 @@ _libertai__subcmd__help__subcmd__logout_commands() {
 _libertai__subcmd__help__subcmd__man_commands() {
     local commands; commands=()
     _describe -t commands 'libertai help man commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__mcp_commands] )) ||
+_libertai__subcmd__help__subcmd__mcp_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help mcp commands' commands "$@"
 }
 (( $+functions[_libertai__subcmd__help__subcmd__models_commands] )) ||
 _libertai__subcmd__help__subcmd__models_commands() {
@@ -1538,6 +1557,11 @@ _libertai__subcmd__logout_commands() {
 _libertai__subcmd__man_commands() {
     local commands; commands=()
     _describe -t commands 'libertai man commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__mcp_commands] )) ||
+_libertai__subcmd__mcp_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai mcp commands' commands "$@"
 }
 (( $+functions[_libertai__subcmd__models_commands] )) ||
 _libertai__subcmd__models_commands() {
