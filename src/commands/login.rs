@@ -106,11 +106,11 @@ pub fn browser_sso_access_token(
 ) -> Result<String> {
     // PKCE: keep `verifier` secret; send only its SHA256 (the challenge).
     let mut vbytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut vbytes);
+    rand::rng().fill_bytes(&mut vbytes);
     let verifier = URL_SAFE_NO_PAD.encode(vbytes);
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     let mut sbytes = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut sbytes);
+    rand::rng().fill_bytes(&mut sbytes);
     let state = URL_SAFE_NO_PAD.encode(sbytes);
 
     // One-shot loopback server; OS picks a free port.
@@ -147,7 +147,7 @@ pub fn browser_sso_access_token(
 /// Random 8-hex-char id identifying this CLI install (not security-sensitive).
 fn new_device_id() -> String {
     let mut b = [0u8; 4];
-    rand::thread_rng().fill_bytes(&mut b);
+    rand::rng().fill_bytes(&mut b);
     hex::encode(b)
 }
 

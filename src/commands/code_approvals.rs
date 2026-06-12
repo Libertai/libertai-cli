@@ -403,8 +403,7 @@ pub fn wildcard_match(pattern: &str, text: &str) -> bool {
     } else {
         parts[0].len()
     };
-    for i in 1..last {
-        let seg = parts[i];
+    for &seg in &parts[1..last] {
         if seg.is_empty() {
             continue;
         }
