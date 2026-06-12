@@ -677,7 +677,7 @@ fn clean_reference_token(raw: &str) -> Option<String> {
         .trim_matches('`')
         .trim_matches('"')
         .trim_matches('\'');
-    let trimmed = trimmed.trim_end_matches(|c: char| matches!(c, ',' | '.' | ';' | ':'));
+    let trimmed = trimmed.trim_end_matches([',', '.', ';', ':']);
     if trimmed.is_empty() {
         None
     } else {

@@ -143,17 +143,16 @@ fn sensitive_path_reason(path: &Path) -> Option<String> {
         ));
     }
 
-    if components.iter().any(|part| part == ".ssh") {
-        if lower_name == "config"
+    if components.iter().any(|part| part == ".ssh")
+        && (lower_name == "config"
             || lower_name == "authorized_keys"
             || lower_name == "known_hosts"
-            || lower_name.starts_with("id_")
-        {
-            return Some(format!(
-                "write denied: `{}` is inside an SSH credential/config path",
-                path.display()
-            ));
-        }
+            || lower_name.starts_with("id_"))
+    {
+        return Some(format!(
+            "write denied: `{}` is inside an SSH credential/config path",
+            path.display()
+        ));
     }
 
     if contains_subpath(&components, &[".aws"])

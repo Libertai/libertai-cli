@@ -153,7 +153,7 @@ impl Tool for AskUserTool {
         // UI: a malformed payload should fail fast as a tool error so
         // the LLM can self-correct, not block the user with a broken
         // question card.
-        if !input.is_object() || !input.get("questions").map_or(false, |q| q.is_array()) {
+        if !input.is_object() || !input.get("questions").is_some_and(|q| q.is_array()) {
             return Ok(err_output(
                 "ask_user: input must be { questions: [{ header, question, options[, multiSelect] }, ...] }",
             )

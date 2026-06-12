@@ -142,10 +142,10 @@ fn run_nonblocking_event_hooks(
             continue;
         }
         if hook.async_hook {
-            spawn_async_hook(hook, &cwd, &payload, event_name);
+            spawn_async_hook(hook, cwd, payload, event_name);
             continue;
         }
-        let run = run_configured_hook(hook, &cwd, &payload, event_name);
+        let run = run_configured_hook(hook, cwd, payload, event_name);
         if run.status != 0 {
             let detail = first_non_empty(&run.stderr, &run.stdout)
                 .unwrap_or_else(|| format!("hook exited with status {}", run.status));
@@ -1493,7 +1493,7 @@ fn call_mcp_stdio_method(
 
 fn mcp_stdio_client_key(server_name: &str, server: &crate::config::McpServerConfig) -> String {
     let mut env = server.env.iter().collect::<Vec<_>>();
-    env.sort_by(|(left, _), (right, _)| left.cmp(right));
+    env.sort_by_key(|(left, _)| *left);
     json!({
         "name": server_name,
         "command": server.command,
@@ -1541,7 +1541,7 @@ fn call_mcp_http_method(
 
 fn mcp_http_client_key(server_name: &str, server: &crate::config::McpServerConfig) -> String {
     let mut headers = server.headers.iter().collect::<Vec<_>>();
-    headers.sort_by(|(left, _), (right, _)| left.cmp(right));
+    headers.sort_by_key(|(left, _)| *left);
     json!({
         "name": server_name,
         "url": server.url,
@@ -1589,7 +1589,7 @@ fn call_mcp_legacy_sse_method(
 
 fn mcp_sse_client_key(server_name: &str, server: &crate::config::McpServerConfig) -> String {
     let mut headers = server.headers.iter().collect::<Vec<_>>();
-    headers.sort_by(|(left, _), (right, _)| left.cmp(right));
+    headers.sort_by_key(|(left, _)| *left);
     json!({
         "name": server_name,
         "url": server.url,
@@ -2801,12 +2801,11 @@ fn run_prompt_hook(hook: &HookCommandConfig, payload: &serde_json::Value) -> Hoo
             };
         }
     };
-    let model = hook
-        .model
-        .trim()
-        .is_empty()
-        .then(|| cfg.default_code_model.clone())
-        .unwrap_or_else(|| hook.model.trim().to_string());
+    let model = if hook.model.trim().is_empty() {
+        cfg.default_code_model.clone()
+    } else {
+        hook.model.trim().to_string()
+    };
     let req = ChatRequest {
         model,
         messages: prompt_hook_messages(&hook.prompt, payload),
@@ -2923,12 +2922,11 @@ async fn run_agent_hook_async(
         };
     // Git context is injected once by pi (build_git_context); do not duplicate it here.
     let prompt = prompt_hook_user_content(&hook.prompt, &payload);
-    let model = hook
-        .model
-        .trim()
-        .is_empty()
-        .then(|| cfg.default_code_model.clone())
-        .unwrap_or_else(|| hook.model.trim().to_string());
+    let model = if hook.model.trim().is_empty() {
+        cfg.default_code_model.clone()
+    } else {
+        hook.model.trim().to_string()
+    };
     let approvals = Arc::new(ApprovalState::new());
     let ui = Arc::new(HookApprovalUi);
     let factory = Arc::new(LibertaiToolFactory::new_with_features(

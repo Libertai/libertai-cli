@@ -104,9 +104,11 @@ fn hashline_preview(args: &Value) -> Option<String> {
 
 fn task_preview(args: &Value) -> Option<String> {
     let prompt = str_arg(args, "prompt")?;
-    let isolation = task_worktree_requested(args)
-        .then_some("worktree")
-        .unwrap_or("same-cwd");
+    let isolation = if task_worktree_requested(args) {
+        "worktree"
+    } else {
+        "same-cwd"
+    };
     let head = match str_arg(args, "subagent_type") {
         Some(agent) if !agent.trim().is_empty() => format!("{agent} [{isolation}]"),
         _ => format!("[{isolation}]"),

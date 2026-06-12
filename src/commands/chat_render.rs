@@ -679,7 +679,7 @@ mod tests {
             let visible = strip_ansi(line);
             let body = visible.trim_start();
             assert!(
-                !body.starts_with(|c: char| c == ',' || c == '.'),
+                !body.starts_with([',', '.']),
                 "break landed mid-token: {visible:?}"
             );
         }

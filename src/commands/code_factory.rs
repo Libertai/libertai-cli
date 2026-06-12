@@ -260,127 +260,6 @@ impl LibertaiToolFactory {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use async_trait::async_trait;
-
-    struct AllowingUi;
-
-    #[async_trait]
-    impl ApprovalUi for AllowingUi {
-        async fn decide(
-            &self,
-            _tool_name: &str,
-            _preview: &str,
-            _always_rule: &str,
-        ) -> crate::commands::code_approvals::PromptChoice {
-            crate::commands::code_approvals::PromptChoice::Allow
-        }
-    }
-
-    #[test]
-    fn factory_registers_mcp_call_when_servers_are_configured() {
-        let temp = tempfile::tempdir().unwrap();
-        let cfg = Arc::new(LibertaiConfig {
-            mcp_servers: std::collections::HashMap::from([(
-                "github".to_string(),
-                crate::config::McpServerConfig {
-                    command: "server".to_string(),
-                    ..crate::config::McpServerConfig::default()
-                },
-            )]),
-            ..LibertaiConfig::default()
-        });
-        let factory = LibertaiToolFactory::new_with_features(
-            ModeFlag::new(Mode::Normal),
-            Arc::new(ApprovalState::new()),
-            Arc::new(AllowingUi),
-            FactoryFeatures::cli_defaults(),
-            Some(cfg),
-        );
-        let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
-        assert!(registry.get("mcp_call").is_some());
-    }
-
-    #[test]
-    fn factory_registers_named_mcp_tools_from_cached_config() {
-        let temp = tempfile::tempdir().unwrap();
-        let cfg = Arc::new(LibertaiConfig {
-            mcp_servers: std::collections::HashMap::from([(
-                "github".to_string(),
-                crate::config::McpServerConfig {
-                    command: "server".to_string(),
-                    tools: vec![crate::config::McpToolConfig {
-                        name: "search".to_string(),
-                        ..crate::config::McpToolConfig::default()
-                    }],
-                    ..crate::config::McpServerConfig::default()
-                },
-            )]),
-            ..LibertaiConfig::default()
-        });
-        let factory = LibertaiToolFactory::new_with_features(
-            ModeFlag::new(Mode::Normal),
-            Arc::new(ApprovalState::new()),
-            Arc::new(AllowingUi),
-            FactoryFeatures::cli_defaults(),
-            Some(cfg),
-        );
-        let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
-        assert!(registry.get("mcp_call").is_some());
-        assert!(registry.get("mcp__github__search").is_some());
-    }
-
-    #[test]
-    fn factory_registers_cached_mcp_resource_and_prompt_tools() {
-        let temp = tempfile::tempdir().unwrap();
-        let cfg = Arc::new(LibertaiConfig {
-            mcp_servers: std::collections::HashMap::from([(
-                "docs".to_string(),
-                crate::config::McpServerConfig {
-                    command: "server".to_string(),
-                    resources: vec![crate::config::McpResourceConfig {
-                        uri: "file:///repo/README.md".to_string(),
-                        ..crate::config::McpResourceConfig::default()
-                    }],
-                    prompts: vec![crate::config::McpPromptConfig {
-                        name: "summarize".to_string(),
-                        ..crate::config::McpPromptConfig::default()
-                    }],
-                    ..crate::config::McpServerConfig::default()
-                },
-            )]),
-            ..LibertaiConfig::default()
-        });
-        let factory = LibertaiToolFactory::new_with_features(
-            ModeFlag::new(Mode::Normal),
-            Arc::new(ApprovalState::new()),
-            Arc::new(AllowingUi),
-            FactoryFeatures::cli_defaults(),
-            Some(cfg),
-        );
-        let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
-        assert!(registry.get("mcp_read_resource").is_some());
-        assert!(registry.get("mcp_get_prompt").is_some());
-    }
-
-    #[test]
-    fn factory_skips_mcp_call_without_servers() {
-        let temp = tempfile::tempdir().unwrap();
-        let cfg = Arc::new(LibertaiConfig::default());
-        let factory = LibertaiToolFactory::new_with_features(
-            ModeFlag::new(Mode::Normal),
-            Arc::new(ApprovalState::new()),
-            Arc::new(AllowingUi),
-            FactoryFeatures::cli_defaults(),
-            Some(cfg),
-        );
-        let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
-        assert!(registry.get("mcp_call").is_none());
-    }
-}
-
 impl ToolFactory for LibertaiToolFactory {
     fn create_tool_registry(
         &self,
@@ -570,5 +449,126 @@ impl LibertaiToolFactory {
         } else {
             tool
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct AllowingUi;
+
+    #[async_trait]
+    impl ApprovalUi for AllowingUi {
+        async fn decide(
+            &self,
+            _tool_name: &str,
+            _preview: &str,
+            _always_rule: &str,
+        ) -> crate::commands::code_approvals::PromptChoice {
+            crate::commands::code_approvals::PromptChoice::Allow
+        }
+    }
+
+    #[test]
+    fn factory_registers_mcp_call_when_servers_are_configured() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(LibertaiConfig {
+            mcp_servers: std::collections::HashMap::from([(
+                "github".to_string(),
+                crate::config::McpServerConfig {
+                    command: "server".to_string(),
+                    ..crate::config::McpServerConfig::default()
+                },
+            )]),
+            ..LibertaiConfig::default()
+        });
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            Some(cfg),
+        );
+        let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
+        assert!(registry.get("mcp_call").is_some());
+    }
+
+    #[test]
+    fn factory_registers_named_mcp_tools_from_cached_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(LibertaiConfig {
+            mcp_servers: std::collections::HashMap::from([(
+                "github".to_string(),
+                crate::config::McpServerConfig {
+                    command: "server".to_string(),
+                    tools: vec![crate::config::McpToolConfig {
+                        name: "search".to_string(),
+                        ..crate::config::McpToolConfig::default()
+                    }],
+                    ..crate::config::McpServerConfig::default()
+                },
+            )]),
+            ..LibertaiConfig::default()
+        });
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            Some(cfg),
+        );
+        let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
+        assert!(registry.get("mcp_call").is_some());
+        assert!(registry.get("mcp__github__search").is_some());
+    }
+
+    #[test]
+    fn factory_registers_cached_mcp_resource_and_prompt_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(LibertaiConfig {
+            mcp_servers: std::collections::HashMap::from([(
+                "docs".to_string(),
+                crate::config::McpServerConfig {
+                    command: "server".to_string(),
+                    resources: vec![crate::config::McpResourceConfig {
+                        uri: "file:///repo/README.md".to_string(),
+                        ..crate::config::McpResourceConfig::default()
+                    }],
+                    prompts: vec![crate::config::McpPromptConfig {
+                        name: "summarize".to_string(),
+                        ..crate::config::McpPromptConfig::default()
+                    }],
+                    ..crate::config::McpServerConfig::default()
+                },
+            )]),
+            ..LibertaiConfig::default()
+        });
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            Some(cfg),
+        );
+        let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
+        assert!(registry.get("mcp_read_resource").is_some());
+        assert!(registry.get("mcp_get_prompt").is_some());
+    }
+
+    #[test]
+    fn factory_skips_mcp_call_without_servers() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(LibertaiConfig::default());
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            Some(cfg),
+        );
+        let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
+        assert!(registry.get("mcp_call").is_none());
     }
 }

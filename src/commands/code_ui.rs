@@ -4058,7 +4058,7 @@ fn print_hotkeys() {
 
 fn hotkeys_json_payload(query: &str) -> serde_json::Value {
     let shortcuts: Vec<serde_json::Value> = hotkey_lines()
-        .into_iter()
+        .iter()
         .map(|line| {
             let (key, action) = line.split_once(" — ").unwrap_or((line, ""));
             json!({
@@ -5186,7 +5186,7 @@ fn replace_status_line_tokens(
         }
         let mut name = String::new();
         let mut closed = false;
-        while let Some(next) = chars.next() {
+        for next in chars.by_ref() {
             if next == '}' {
                 closed = true;
                 break;
@@ -8541,7 +8541,7 @@ fn is_init_candidate_preamble(content: &str) -> bool {
 
 fn normalize_init_line(line: &str) -> String {
     line.trim()
-        .trim_start_matches(|ch| ch == '-' || ch == '*')
+        .trim_start_matches(['-', '*'])
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -11804,11 +11804,11 @@ fn background_agent_status(pid: u32) -> BackgroundAgentStatus {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        return match status {
+        match status {
             Ok(status) if status.success() => BackgroundAgentStatus::Running,
             Ok(_) => BackgroundAgentStatus::Exited,
             Err(_) => BackgroundAgentStatus::Unknown,
-        };
+        }
     }
     #[cfg(not(unix))]
     {
@@ -13732,9 +13732,9 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     println!();
 }
 
-fn hook_event_rows<'a>(
-    cfg: &'a LibertaiConfig,
-) -> [(&'static str, &'a [crate::config::HookCommandConfig]); 8] {
+fn hook_event_rows(
+    cfg: &LibertaiConfig,
+) -> [(&'static str, &[crate::config::HookCommandConfig]); 8] {
     [
         ("UserPromptSubmit", &cfg.hooks.user_prompt_submit),
         ("PreToolUse", &cfg.hooks.pre_tool_use),

@@ -548,11 +548,8 @@ mod tests {
     fn detect_marks_present_and_disabled_correctly() {
         let p = detect_strict_profile(&PathBuf::from("/work"));
         // Every default entry should appear once.
-        assert!(p.binds.iter().any(|b| b.path == PathBuf::from("/usr/bin")));
-        assert!(p
-            .binds
-            .iter()
-            .any(|b| b.path == PathBuf::from("/etc/passwd")));
+        assert!(p.binds.iter().any(|b| b.path == *"/usr/bin"));
+        assert!(p.binds.iter().any(|b| b.path == *"/etc/passwd"));
         // All defaults start enabled.
         assert!(p.binds.iter().all(|b| b.enabled));
     }
@@ -565,11 +562,7 @@ mod tests {
             custom: vec![],
         };
         apply_policy_override(&mut p, &policy);
-        let entry = p
-            .binds
-            .iter()
-            .find(|b| b.path == PathBuf::from("/usr/bin"))
-            .unwrap();
+        let entry = p.binds.iter().find(|b| b.path == *"/usr/bin").unwrap();
         assert!(!entry.enabled);
     }
 
@@ -587,7 +580,7 @@ mod tests {
         let entry = p
             .binds
             .iter()
-            .find(|b| b.path == PathBuf::from("/opt/extra/bin"))
+            .find(|b| b.path == *"/opt/extra/bin")
             .unwrap();
         assert_eq!(entry.kind, BindKind::Bin);
         assert_eq!(entry.source, BindSource::Custom);

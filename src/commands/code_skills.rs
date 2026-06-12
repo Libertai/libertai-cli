@@ -463,7 +463,7 @@ fn skill_matches_pillar(skill: &AgentSkill, pillar: SkillPillar) -> bool {
         return false;
     };
     pillars
-        .split(|c: char| c == ',' || c == ' ' || c == ';')
+        .split([',', ' ', ';'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .any(|p| p == "any" || p == pillar.as_str())

@@ -951,7 +951,7 @@ mod tests {
     fn discover_returns_empty_when_no_root() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path().join("nowhere");
-        let _ = std::env::set_var("HOME", tmp.path()); // unsafe in parallel
+        std::env::set_var("HOME", tmp.path()); // unsafe in parallel
         let sessions = discover(&cwd, false).unwrap();
         assert!(sessions.is_empty());
     }
