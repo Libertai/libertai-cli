@@ -436,6 +436,12 @@ pub trait ApprovalUi: Send + Sync {
 ///   keyed by tool+pattern [`AllowRule`].
 pub struct ApprovalState {
     always_allow: Mutex<Vec<AllowRule>>,
+    /// Session-scoped rules: consulted like `always_allow` but never
+    /// persisted. Used for broad in-session passes (e.g. the desktop's
+    /// "trust this directory" granting bash a session-wide pass) that
+    /// shouldn't survive into every future session. Cleared by
+    /// [`ApprovalState::forget`].
+    session_allow: Mutex<Vec<AllowRule>>,
     auto_allow: HashSet<String>,
     persistent_path: Option<PathBuf>,
 }
@@ -450,6 +456,7 @@ impl ApprovalState {
     pub fn new() -> Self {
         Self {
             always_allow: Mutex::new(Vec::new()),
+            session_allow: Mutex::new(Vec::new()),
             auto_allow: ["read", "grep", "find", "ls", "bash_output"]
                 .into_iter()
                 .map(String::from)
@@ -462,6 +469,7 @@ impl ApprovalState {
         let rules = load_allow_rules(&path)?;
         Ok(Self {
             always_allow: Mutex::new(rules),
+            session_allow: Mutex::new(Vec::new()),
             auto_allow: ["read", "grep", "find", "ls", "bash_output"]
                 .into_iter()
                 .map(String::from)
@@ -478,6 +486,15 @@ impl ApprovalState {
         if self.auto_allow.contains(tool_name) {
             return true;
         }
+        if self
+            .session_allow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|rule| rule.matches(tool_name, value))
+        {
+            return true;
+        }
         self.always_allow
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -486,7 +503,11 @@ impl ApprovalState {
     }
 
     /// Record a rule. Deduplicates identical rules and persists the
-    /// updated set when this state has an on-disk store.
+    /// updated set when this state has an on-disk store. Persisting
+    /// merges with whatever is on disk first: several live sessions
+    /// share the store file, and a wholesale write of this session's
+    /// list used to erase rules other sessions had recorded since this
+    /// one loaded.
     pub fn record_always(&self, rule: AllowRule) {
         let mut list = self
             .always_allow
@@ -494,7 +515,31 @@ impl ApprovalState {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !list.contains(&rule) {
             list.push(rule);
+            if let Some(path) = self.persistent_path.as_ref() {
+                if let Ok(on_disk) = load_allow_rules(path) {
+                    for r in on_disk {
+                        if !list.contains(&r) {
+                            list.push(r);
+                        }
+                    }
+                }
+            }
             self.persist_locked_rules(&list);
+        }
+    }
+
+    /// Record a rule for THIS session only — consulted like a normal
+    /// always rule but never written to the persistent store. Used for
+    /// broad passes the user grants while working (the desktop's
+    /// "trust this directory" giving bash a session-wide pass) where
+    /// persisting globally would be far more than they asked for.
+    pub fn record_session(&self, rule: AllowRule) {
+        let mut list = self
+            .session_allow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !list.contains(&rule) {
+            list.push(rule);
         }
     }
 
@@ -532,6 +577,10 @@ impl ApprovalState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         list.clear();
+        self.session_allow
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         self.persist_locked_rules(&[]);
     }
 
@@ -1777,6 +1826,45 @@ mod tests {
         assert!(state.is_pre_allowed("bash", "echo hi"));
         state.forget();
         assert!(!state.is_pre_allowed("bash", "echo hi"));
+    }
+
+    #[test]
+    fn session_rules_allow_but_never_persist() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("allow-rules.toml");
+        let state = ApprovalState::with_persistent_store(path.clone()).unwrap();
+
+        state.record_session(AllowRule::tool_all("bash"));
+        assert!(state.is_pre_allowed("bash", "literally anything"));
+
+        // A persisted write (triggered by a regular always rule) must
+        // not carry the session rule onto disk.
+        state.record_always(AllowRule::exact("edit", "/tmp/a.rs"));
+        let reloaded = ApprovalState::with_persistent_store(path).unwrap();
+        assert!(reloaded.is_pre_allowed("edit", "/tmp/a.rs"));
+        assert!(!reloaded.is_pre_allowed("bash", "literally anything"));
+
+        // forget() clears session rules too.
+        state.forget();
+        assert!(!state.is_pre_allowed("bash", "literally anything"));
+    }
+
+    #[test]
+    fn record_always_merges_with_disk_instead_of_clobbering() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("allow-rules.toml");
+        // Two live sessions share the same store file.
+        let a = ApprovalState::with_persistent_store(path.clone()).unwrap();
+        let b = ApprovalState::with_persistent_store(path.clone()).unwrap();
+
+        a.record_always(AllowRule::exact("bash", "cargo test"));
+        // b loaded BEFORE a's rule existed; recording from b used to
+        // overwrite the file with b's list only, losing a's rule.
+        b.record_always(AllowRule::exact("bash", "npm run dev"));
+
+        let reloaded = ApprovalState::with_persistent_store(path).unwrap();
+        assert!(reloaded.is_pre_allowed("bash", "cargo test"), "a's rule survived");
+        assert!(reloaded.is_pre_allowed("bash", "npm run dev"), "b's rule survived");
     }
 
     #[test]
