@@ -409,6 +409,10 @@ impl ToolFactory for LibertaiToolFactory {
                 self.mode.clone(),
                 Arc::clone(&self.ui),
             )
+            // Session cwd so relative tool paths absolutize before rule
+            // matching — a trusted-directory wildcard must match
+            // `src/foo.ts` the same as `/project/src/foo.ts`.
+            .with_base_dir(Some(cwd.to_path_buf()))
             .with_policy(self.tool_policy.clone())
             .with_smart_approval(self.smart_approval.clone());
             wrapped.push(Box::new(approval_tool));
@@ -498,6 +502,7 @@ impl ToolFactory for LibertaiToolFactory {
                 self.mode.clone(),
                 Arc::clone(&self.ui),
             )
+            .with_base_dir(Some(cwd.to_path_buf()))
             .with_policy(self.tool_policy.clone())
             .with_smart_approval(self.smart_approval.clone());
             wrapped.push(Box::new(notebook_edit));
@@ -511,6 +516,7 @@ impl ToolFactory for LibertaiToolFactory {
                 self.mode.clone(),
                 Arc::clone(&self.ui),
             )
+            .with_base_dir(Some(cwd.to_path_buf()))
             .with_policy(self.tool_policy.clone())
             .with_smart_approval(self.smart_approval.clone());
             wrapped.push(Box::new(notebook_execute));

@@ -222,6 +222,23 @@ fn always_scope() -> String {
 /// resulting rule matches exactly what the model produced. The caller
 /// should sanitize separately for UI display (see [`preview_call`]).
 pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubject {
+    approval_subject_with_base(tool, input, None)
+}
+
+/// Like [`approval_subject`], but path-tool subjects (write / edit /
+/// hashline_edit / notebook_*) are absolutized against `base` when the
+/// model supplied a relative path. Without this, a directory-trust
+/// rule recorded as `/project/**` never matches a call whose `path` is
+/// `src/foo.ts`, and the user keeps getting prompted inside a
+/// directory they explicitly trusted. Matching AND the suggested
+/// always-rule both use the absolutized form so recorded rules stay
+/// consistent regardless of how the model spelled the path.
+pub fn approval_subject_with_base(
+    tool: &str,
+    input: &serde_json::Value,
+    base: Option<&Path>,
+) -> ApprovalSubject {
+    let abs = |p: &str| absolutize_for_match(p, base);
     let (value, rule, label) = match tool {
         "bash" => {
             let cmd = input
@@ -264,7 +281,7 @@ pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubjec
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<missing path>");
-            let s = path.to_string();
+            let s = abs(path);
             (
                 s.clone(),
                 AllowRule::exact(tool, s.clone()),
@@ -276,7 +293,7 @@ pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubjec
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<missing path>");
-            let s = path.to_string();
+            let s = abs(path);
             (
                 s.clone(),
                 AllowRule::exact(tool, s.clone()),
@@ -288,7 +305,7 @@ pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubjec
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<missing path>");
-            let s = path.to_string();
+            let s = abs(path);
             (
                 s.clone(),
                 AllowRule::exact(tool, s.clone()),
@@ -300,7 +317,7 @@ pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubjec
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<missing path>");
-            let s = path.to_string();
+            let s = abs(path);
             (
                 s.clone(),
                 AllowRule::exact(tool, s.clone()),
@@ -323,6 +340,33 @@ pub fn approval_subject(tool: &str, input: &serde_json::Value) -> ApprovalSubjec
         suggested_rule: rule,
         suggested_label: label,
     }
+}
+
+/// Join a possibly-relative tool path onto `base` and normalize `.` /
+/// `..` segments lexically (no filesystem access — the target usually
+/// doesn't exist yet for `write`). Absolute paths and missing bases
+/// pass through unchanged, as does the `<missing path>` placeholder.
+fn absolutize_for_match(path: &str, base: Option<&Path>) -> String {
+    let Some(base) = base else {
+        return path.to_string();
+    };
+    if path.is_empty() || path.starts_with('/') || path.starts_with('<') {
+        return path.to_string();
+    }
+    let mut parts: Vec<&str> = base
+        .to_str()
+        .map(|b| b.split('/').filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    format!("/{}", parts.join("/"))
 }
 
 /// Match `text` against a `*`-wildcard pattern.
@@ -631,6 +675,9 @@ fn save_allow_rules(path: &Path, rules: &[AllowRule]) -> AnyhowResult<()> {
 pub struct ApprovalTool {
     inner: Box<dyn Tool>,
     state: Arc<ApprovalState>,
+    /// Session working directory used to absolutize relative path
+    /// subjects before rule matching (see `approval_subject_with_base`).
+    base_dir: Option<PathBuf>,
     mode: ModeFlag,
     ui: Arc<dyn ApprovalUi>,
     policy: Option<Arc<dyn ToolPolicy>>,
@@ -647,11 +694,17 @@ impl ApprovalTool {
         Self {
             inner,
             state,
+            base_dir: None,
             mode,
             ui,
             policy: None,
             smart_approval: None,
         }
+    }
+
+    pub fn with_base_dir(mut self, base_dir: Option<PathBuf>) -> Self {
+        self.base_dir = base_dir;
+        self
     }
 
     pub fn with_policy(mut self, policy: Option<Arc<dyn ToolPolicy>>) -> Self {
@@ -737,7 +790,7 @@ impl Tool for ApprovalTool {
                 &policy_decision,
             );
         }
-        let subject = approval_subject(name, &effective_input);
+        let subject = approval_subject_with_base(name, &effective_input, self.base_dir.as_deref());
         if !matches!(policy_decision, ToolPolicyDecision::Ask { .. })
             && self.state.is_pre_allowed(name, &subject.value)
         {
@@ -825,7 +878,11 @@ impl Tool for ApprovalTool {
         match self.ui.resume_decide(request_id, ui_payload).await {
             PromptChoice::Allow => self.execute_inner(tool_call_id, tool_input, None).await,
             PromptChoice::AlwaysAllow => {
-                let subject = approval_subject(self.inner.name(), &tool_input);
+                let subject = approval_subject_with_base(
+                    self.inner.name(),
+                    &tool_input,
+                    self.base_dir.as_deref(),
+                );
                 self.state.record_always(subject.suggested_rule);
                 self.execute_inner(tool_call_id, tool_input, None).await
             }
@@ -1826,6 +1883,38 @@ mod tests {
         assert!(state.is_pre_allowed("bash", "echo hi"));
         state.forget();
         assert!(!state.is_pre_allowed("bash", "echo hi"));
+    }
+
+    #[test]
+    fn relative_path_subject_matches_directory_trust_rule() {
+        // The exact bug from the field: user clicks "trust this
+        // directory" (rule = /project/**), the model then calls write
+        // with a RELATIVE path — without absolutization the rule never
+        // matches and the prompt keeps coming back.
+        let state = ApprovalState::new();
+        state.record_always(AllowRule::wildcard(
+            "write",
+            "/home/jon/repos/experiments/**",
+        ));
+        let base = Path::new("/home/jon/repos/experiments");
+        let input = serde_json::json!({ "path": "bicycle-race/src/imports.ts" });
+        let subject = approval_subject_with_base("write", &input, Some(base));
+        assert_eq!(
+            subject.value,
+            "/home/jon/repos/experiments/bicycle-race/src/imports.ts"
+        );
+        assert!(state.is_pre_allowed("write", &subject.value));
+        // The suggested exact rule records the absolute form too.
+        assert_eq!(subject.suggested_rule.pattern, subject.value);
+        // Traversal does not escape lexically: ../../etc resolves.
+        let sneaky = serde_json::json!({ "path": "../outside.txt" });
+        let s2 = approval_subject_with_base("write", &sneaky, Some(base));
+        assert_eq!(s2.value, "/home/jon/repos/outside.txt");
+        assert!(!state.is_pre_allowed("write", &s2.value));
+        // Absolute paths pass through untouched; no base = no change.
+        let abs = serde_json::json!({ "path": "/tmp/x.rs" });
+        assert_eq!(approval_subject_with_base("write", &abs, Some(base)).value, "/tmp/x.rs");
+        assert_eq!(approval_subject("write", &sneaky).value, "../outside.txt");
     }
 
     #[test]
