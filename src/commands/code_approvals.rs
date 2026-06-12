@@ -1913,7 +1913,10 @@ mod tests {
         assert!(!state.is_pre_allowed("write", &s2.value));
         // Absolute paths pass through untouched; no base = no change.
         let abs = serde_json::json!({ "path": "/tmp/x.rs" });
-        assert_eq!(approval_subject_with_base("write", &abs, Some(base)).value, "/tmp/x.rs");
+        assert_eq!(
+            approval_subject_with_base("write", &abs, Some(base)).value,
+            "/tmp/x.rs"
+        );
         assert_eq!(approval_subject("write", &sneaky).value, "../outside.txt");
     }
 
@@ -1952,8 +1955,14 @@ mod tests {
         b.record_always(AllowRule::exact("bash", "npm run dev"));
 
         let reloaded = ApprovalState::with_persistent_store(path).unwrap();
-        assert!(reloaded.is_pre_allowed("bash", "cargo test"), "a's rule survived");
-        assert!(reloaded.is_pre_allowed("bash", "npm run dev"), "b's rule survived");
+        assert!(
+            reloaded.is_pre_allowed("bash", "cargo test"),
+            "a's rule survived"
+        );
+        assert!(
+            reloaded.is_pre_allowed("bash", "npm run dev"),
+            "b's rule survived"
+        );
     }
 
     #[test]
