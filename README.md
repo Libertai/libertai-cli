@@ -13,7 +13,7 @@ Pick the channel that fits your OS — they all land on the same released binary
 
 ```sh
 # One-liner (Linux / macOS / WSL — no sudo, installs to ~/.local/bin)
-curl -fsSL https://raw.githubusercontent.com/Libertai/libertai-cli/main/packaging/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Libertai/libertai-cli/master/packaging/install.sh | sh
 
 # Debian / Ubuntu (system-wide, auto-updates via apt)
 curl -fsSL https://apt.libertai.io/install.sh | sudo bash

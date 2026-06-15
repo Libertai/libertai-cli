@@ -140,7 +140,7 @@ Once all prerequisites are done:
    - After you approve: `publish-crates` — ~1 min
 5. Confirm:
    - GH Release has 4 raw binaries + 4 `.sha256` sidecars + one `.deb`
-   - `curl -fsSL https://raw.githubusercontent.com/Libertai/libertai-cli/main/packaging/install.sh | sh` in a clean Docker container
+   - `curl -fsSL https://raw.githubusercontent.com/Libertai/libertai-cli/master/packaging/install.sh | sh` in a clean Docker container
    - `curl -fsSL https://apt.libertai.io/install.sh | sudo bash` in a clean Debian container
    - `brew install Libertai/tap/libertai` on a Mac
    - `cargo install libertai-cli` anywhere with a Rust toolchain

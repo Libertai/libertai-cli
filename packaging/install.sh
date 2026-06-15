@@ -2,7 +2,7 @@
 # LibertAI CLI — universal installer (Linux, macOS, WSL)
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Libertai/libertai-cli/main/packaging/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Libertai/libertai-cli/master/packaging/install.sh | sh
 #
 # Environment overrides:
 #   LIBERTAI_VERSION      — pin to a specific tag (e.g. v0.3.0). Default: latest.

@@ -16,7 +16,7 @@ Pick the first method that fits the platform:
 
 ```sh
 # Linux / macOS / WSL — no sudo, installs to ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/Libertai/libertai-cli/main/packaging/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Libertai/libertai-cli/master/packaging/install.sh | sh
 
 # Debian / Ubuntu (system-wide)
 curl -fsSL https://apt.libertai.io/install.sh | sudo bash
