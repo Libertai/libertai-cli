@@ -25,7 +25,7 @@ curl -fsSL https://apt.libertai.io/install.sh | sudo bash
 brew install Libertai/tap/libertai
 
 # Any platform with a Rust toolchain
-cargo install libertai-cli
+cargo install --git https://github.com/Libertai/libertai-cli --branch master --locked
 ```
 
 Windows: download `libertai-windows-x86_64.exe` from

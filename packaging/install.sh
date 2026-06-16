@@ -39,7 +39,7 @@ case "$(uname -m)" in
         if [ "$OS" = "macos" ]; then
             ARCH="aarch64"
         else
-            err "linux-aarch64 builds are not published yet. Install with 'cargo install libertai-cli' instead."
+            err "linux-aarch64 builds are not published yet. Install from source with 'cargo install --git https://github.com/Libertai/libertai-cli --branch master --locked' instead."
         fi
         ;;
     *) err "unsupported architecture: $(uname -m)." ;;

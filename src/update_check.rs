@@ -148,7 +148,7 @@ fn upgrade_hint() -> String {
     let exe = env::current_exe().ok();
     let p = exe.as_ref().and_then(|p| p.to_str()).unwrap_or("");
     if p.contains("/.cargo/bin/") {
-        "Run: cargo install libertai-cli --force".into()
+        "Run: cargo install --git https://github.com/Libertai/libertai-cli --branch master --locked --force".into()
     } else if p.contains("/Cellar/") || p.contains("/opt/homebrew/") {
         "Run: brew upgrade libertai".into()
     } else if p.starts_with("/usr/bin/") {

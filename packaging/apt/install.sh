@@ -1,29 +1,55 @@
-#!/bin/bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
-# LibertAI CLI — APT repository setup (Debian / Ubuntu)
-# Usage: curl -fsSL https://apt.libertai.io/install.sh | sudo bash
+# LibertAI CLI - Debian / Ubuntu bootstrap.
+# Usage: curl -fsSL https://apt.libertai.io/install.sh | sudo sh
+#
+# This intentionally installs the latest GitHub Release .deb directly. The
+# signed APT repository can replace this script once apt.libertai.io has a
+# valid Pages certificate, GPG key, and package index.
 
-KEYRING_PATH="/usr/share/keyrings/libertai.gpg"
-SOURCES_PATH="/etc/apt/sources.list.d/libertai.sources"
+REPO="Libertai/libertai-cli"
+API_URL="https://api.github.com/repos/${REPO}/releases/latest"
 
-echo "Adding LibertAI APT repository..."
+err() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
 
-# Download and install the signing key
-curl -fsSL https://apt.libertai.io/gpg.key | gpg --dearmor -o "$KEYRING_PATH"
+need() {
+    command -v "$1" >/dev/null 2>&1 || err "missing required tool: $1"
+}
 
-# Add the repository (deb822 format, GitHub Pages as fallback)
-cat > "$SOURCES_PATH" <<EOF
-Types: deb
-URIs: https://apt.libertai.io https://libertai.github.io/apt
-Suites: stable
-Components: main
-Signed-By: $KEYRING_PATH
-Architectures: amd64
-EOF
+[ "$(id -u)" -eq 0 ] || err "run this installer as root, for example: curl -fsSL https://apt.libertai.io/install.sh | sudo sh"
 
-# Update and install
-apt-get update -o Dir::Etc::sourcelist="$SOURCES_PATH" -o Dir::Etc::sourceparts="-"
-apt-get install -y libertai-cli
+need apt-get
+need curl
+need mktemp
+need sed
+need uname
 
-echo "LibertAI CLI installed. Run 'libertai --help' to get started."
+case "$(uname -m)" in
+    x86_64|amd64) ;;
+    *) err "only amd64 Debian/Ubuntu packages are published today. Use the universal installer or build from source." ;;
+esac
+
+tmp_json="$(mktemp)"
+tmp_deb="$(mktemp)"
+trap 'rm -f "$tmp_json" "$tmp_deb"' EXIT
+
+printf 'Resolving latest LibertAI CLI release...\n'
+curl -fsSL "$API_URL" -o "$tmp_json"
+
+deb_url="$(
+    sed -n 's/.*"browser_download_url": "\(https:[^"]*libertai-cli_[^"]*_amd64\.deb\)".*/\1/p' "$tmp_json" | head -n 1
+)"
+[ -n "$deb_url" ] || err "could not find an amd64 .deb asset in the latest GitHub Release"
+
+printf 'Downloading %s...\n' "$deb_url"
+curl -fL --progress-bar -o "$tmp_deb" "$deb_url"
+
+printf 'Installing LibertAI CLI...\n'
+apt-get update
+apt-get install -y "$tmp_deb"
+
+printf 'LibertAI CLI installed. Run '\''libertai --help'\'' to get started.\n'

@@ -1,12 +1,12 @@
 # Distribution + update system
 
 This doc describes how `libertai-cli` is distributed, what's already in the
-repo, what still needs manual GitHub/DNS/crates.io setup, and how to cut a
+repo, what still needs manual GitHub/DNS/package setup, and how to cut a
 release once everything is wired up. The overall design mirrors the Aleph
 Rust CLI (`github.com/aleph-im/aleph-rs`) per CTO direction — hand-rolled, no
 third-party release tooling (cargo-dist, axoupdater, etc.).
 
-## Status (2026-06-01)
+## Status (2026-06-16)
 
 ### In the repo and ready
 
@@ -14,8 +14,12 @@ third-party release tooling (cargo-dist, axoupdater, etc.).
   `categories`, `rust-version`, `exclude`, `[package.metadata.deb]`).
 - `rust-toolchain.toml` pinned to `stable` channel.
 - `packaging/install.sh` — universal one-liner for Linux / macOS / WSL.
-- `packaging/apt/install.sh` — APT-repo bootstrap for Debian/Ubuntu.
-- `packaging/brew/formula.rb.tmpl` — Homebrew formula template.
+- `packaging/apt/install.sh` — Debian/Ubuntu bootstrap. It installs the
+  latest release `.deb` directly until the signed APT repository is fully
+  enabled.
+- `packaging/brew/formula.rb.tmpl` — Homebrew formula template. The
+  `homebrew-tap` repo also has a v0.3.0 formula so `brew install
+  Libertai/tap/libertai` resolves before the next release workflow run.
 - `.github/workflows/release.yml` — 8-job pipeline (verify →
   check-version → check-release → build-binaries → [publish-apt,
   publish-brew] → request-publish-approval → publish-crates).
@@ -25,9 +29,10 @@ third-party release tooling (cargo-dist, axoupdater, etc.).
 ### Blocked on manual setup (see below)
 
 Before a stable release, confirm every item in
-[Prerequisites](#prerequisites) exists in GitHub/crates.io and then push a
-`v*.*.*` tag. The workflow does the binary build, package publication, and
-crates.io publish gate from that tag.
+[Prerequisites](#prerequisites) exists in GitHub and then push a `v*.*.*`
+tag. The workflow does the binary build and package publication from that
+tag. crates.io publishing is deferred while `pi_agent_rust` is still a git
+dependency; use the documented `cargo install --git ...` command instead.
 
 ---
 
@@ -35,7 +40,7 @@ crates.io publish gate from that tag.
 
 All human-only, one-time. Do them in any order except where noted.
 
-### 1. Reserve the crate name on crates.io
+### 1. crates.io publishing (deferred)
 
 ```sh
 cargo publish --dry-run
@@ -43,9 +48,9 @@ cargo publish
 ```
 
 Needs `~/.cargo/credentials.toml` from
-[crates.io/me](https://crates.io/settings/tokens). This publishes `0.1.0` so
-no one else squats `libertai-cli`. The release workflow will publish future
-versions automatically.
+[crates.io/me](https://crates.io/settings/tokens). Do this only after
+`pi_agent_rust` is available as a registry dependency; crates.io rejects
+packages with git dependencies. Until then, Cargo users install from git.
 
 ### 2. Create `github.com/Libertai/homebrew-tap`
 
@@ -137,20 +142,23 @@ Once all prerequisites are done:
    - `build-binaries` (matrix, 4 targets) — ~4 min
    - `publish-apt`, `publish-brew` — ~2 min each, in parallel
    - `request-publish-approval` — **waits for your click**
-   - After you approve: `publish-crates` — ~1 min
+   - After you approve: `publish-crates` — ~1 min, or a clean skip while
+     `pi_agent_rust` remains a git dependency
 5. Confirm:
    - GH Release has 4 raw binaries + 4 `.sha256` sidecars + one `.deb`
    - `curl -fsSL https://raw.githubusercontent.com/Libertai/libertai-cli/master/packaging/install.sh | sh` in a clean Docker container
    - `curl -fsSL https://apt.libertai.io/install.sh | sudo bash` in a clean Debian container
    - `brew install Libertai/tap/libertai` on a Mac
-   - `cargo install libertai-cli` anywhere with a Rust toolchain
+   - `cargo install --git https://github.com/Libertai/libertai-cli --branch master --locked` anywhere with a Rust toolchain
 
 ### Dry run before the real thing
 
 Cut `v0.3.0-rc1` first. The workflow treats any version with a `-` as a
 prerelease: `publish-apt` and `publish-brew` are **skipped**, but
-`build-binaries` and (after approval) `publish-crates` still run. Lets you
-exercise the full pipeline without polluting the apt repo or the brew tap.
+`build-binaries` and the crates.io gate still run. The crates.io step skips
+cleanly until the git dependency is replaced by a registry dependency. This
+lets you exercise the full binary pipeline without polluting the apt repo or
+the brew tap.
 
 ---
 
@@ -167,7 +175,7 @@ git push
 # draft the release on GitHub web UI with notes, then:
 git tag v0.3.1 && git push origin v0.3.1
 
-# wait, approve crates-io-publish when prompted
+# wait, approve crates-io-publish when prompted if registry publishing is enabled
 ```
 
 `cargo publish` respects `Cargo.lock` via `--locked`, so the CI build is
@@ -231,7 +239,7 @@ binary lives:
 
 | `current_exe()` contains | Hint |
 | --- | --- |
-| `/.cargo/bin/` | `cargo install libertai-cli --force` |
+| `/.cargo/bin/` | `cargo install --git https://github.com/Libertai/libertai-cli --branch master --locked --force` |
 | `/Cellar/` or `/opt/homebrew/` | `brew upgrade libertai` |
 | starts with `/usr/bin/` | `sudo apt upgrade libertai-cli` |
 | anything else | release-page URL |

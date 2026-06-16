@@ -9,20 +9,22 @@ LibertAI.
 
 ## Install
 
-Pick the channel that fits your OS — they all land on the same released binary.
+Pick the channel that fits your OS. The one-liner, Debian bootstrap, and
+Homebrew install the released binary; the Rust command builds the same source
+from the release branch.
 
 ```sh
 # One-liner (Linux / macOS / WSL — no sudo, installs to ~/.local/bin)
 curl -fsSL https://raw.githubusercontent.com/Libertai/libertai-cli/master/packaging/install.sh | sh
 
-# Debian / Ubuntu (system-wide, auto-updates via apt)
+# Debian / Ubuntu (system-wide)
 curl -fsSL https://apt.libertai.io/install.sh | sudo bash
 
 # macOS (Homebrew)
 brew install Libertai/tap/libertai
 
 # Any platform with a Rust toolchain
-cargo install libertai-cli
+cargo install --git https://github.com/Libertai/libertai-cli --branch master --locked
 
 # From source (dev)
 git clone https://github.com/Libertai/libertai-cli
@@ -42,9 +44,9 @@ install dir).
 
 `libertai` pings GitHub once every 24h in a background thread and prints a
 one-line banner on the next startup if a newer release exists, pointing to
-the upgrade command that matches how you installed it (apt / brew / cargo
-install / re-run install.sh). No self-replacing `libertai update` subcommand
-— updates flow through your system package manager.
+the upgrade command that matches how you installed it (Debian bootstrap /
+brew / Cargo-from-git / re-run install.sh). No self-replacing `libertai
+update` subcommand.
 
 Silence the banner with `NO_UPDATE_CHECK=1` or
 `libertai config set check_for_updates false`. The check is also skipped
