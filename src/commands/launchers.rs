@@ -46,6 +46,32 @@ pub fn claude(
         ("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), haiku_model),
     ]);
 
+    // The tier vars above only remap the `opus`/`sonnet`/`haiku` *aliases*.
+    // They do not control how subagents (the Task/Agent tool) pick a model:
+    // Claude Code resolves a subagent's model as
+    //   CLAUDE_CODE_SUBAGENT_MODEL → per-invocation `model` → the subagent
+    //   definition's `model` frontmatter → the main conversation's model.
+    // Some agent definitions pin a tier alias we don't remap (`fable`), or a
+    // hardcoded Anthropic id like `claude-opus-4-8`, and the Fable-5
+    // safety-classifier fallback reruns flagged requests on "Opus 4.8". Any of
+    // those emits a model id the LibertAI backend doesn't know, so the
+    // subagent fails with "model … doesn't exist" — the "sometimes" failure
+    // when `--model` is passed.
+    //
+    // When the user asks for a single uniform model, force every subagent onto
+    // it via CLAUDE_CODE_SUBAGENT_MODEL (precedence 1, above frontmatter and
+    // the per-invocation `model` param). We deliberately do NOT set
+    // ANTHROPIC_DEFAULT_FABLE_MODEL: that would make Claude Code treat our
+    // model as Fable 5 and *activate* the Opus-4.8 fallback machinery. Leaving
+    // it unset keeps the fable alias from being recognized, and
+    // CLAUDE_CODE_SUBAGENT_MODEL overrides any `model: fable` frontmatter
+    // anyway. We only force subagents when `--model` is given; without it the
+    // tier defaults (gemma/qwen) are all valid LibertAI ids and subagents keep
+    // their tier differentiation.
+    if let Some(m) = &model {
+        env.push(("CLAUDE_CODE_SUBAGENT_MODEL".into(), m.clone()));
+    }
+
     exec_with_env("claude", &args, env)
 }
 
