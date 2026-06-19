@@ -242,14 +242,14 @@ that machine.)
 ```toml
 api_base           = "https://api.libertai.io"
 account_base       = "https://api.libertai.io"
-default_chat_model  = "qwen3.5-122b-a10b"
-default_code_model  = "qwen3.6-35b-a3b"
+default_chat_model  = "glm-5.2"
+default_code_model  = "glm-5.2-thinking"
 default_code_provider = "libertai"
 default_image_model = "z-image-turbo"
 
 [launcher_defaults]
-opus_model   = "gemma-4-31b-it"
-sonnet_model = "qwen3.6-35b-a3b"
+opus_model   = "glm-5.2"
+sonnet_model = "glm-5.2"
 haiku_model  = "qwen3.6-35b-a3b"
 
 # MCP servers for `libertai code` — stdio (command) or HTTP/SSE (url).
@@ -341,8 +341,8 @@ once reset they track future upgrades.
 env \
   ANTHROPIC_BASE_URL=https://api.libertai.io \
   ANTHROPIC_AUTH_TOKEN=$LTAI_API_KEY \
-  ANTHROPIC_DEFAULT_OPUS_MODEL=gemma-4-31b-it \
-  ANTHROPIC_DEFAULT_SONNET_MODEL=qwen3.6-35b-a3b \
+  ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2 \
+  ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.2 \
   ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen3.6-35b-a3b \
   CLAUDE_CODE_ATTRIBUTION_HEADER=0 \
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \

@@ -13301,6 +13301,10 @@ fn model_token_rate_match(model: &str) -> Option<(&'static str, f64, f64)> {
         (&["qwen3-coder-480b"], 1.00, 3.00),
         (&["qwen3-coder"], 0.22, 0.95),
         (&["deepseek-v3"], 0.50, 1.50),
+        // Matches "glm-5.2" and "glm-5.2-thinking" (substring match); the
+        // live catalog supplies exact rates at runtime, this is the
+        // offline fallback.
+        (&["glm-5.2"], 1.40, 4.40),
         (&["glm-4.6"], 0.40, 1.20),
         (&["llama-3.3", "llama 3.3"], 0.30, 0.90),
         (&["mixtral"], 0.50, 1.50),
@@ -17465,11 +17469,11 @@ mod tests {
     fn model_token_rates_cover_current_libertai_defaults() {
         assert_eq!(
             model_token_rates(crate::config::DEFAULT_CODE_MODEL),
-            Some((0.15, 1.00))
+            Some((1.40, 4.40))
         );
         assert_eq!(
             model_token_rates(crate::config::DEFAULT_CHAT_MODEL),
-            Some((0.40, 2.00))
+            Some((1.40, 4.40))
         );
         assert_eq!(model_token_rates("qwen3-coder-480b"), Some((1.00, 3.00)));
         assert_eq!(model_token_rates("qwen3-coder"), Some((0.22, 0.95)));

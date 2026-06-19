@@ -15,12 +15,22 @@ pub const DEFAULT_SEARCH_BASE: &str = "https://search.libertai.io";
 pub const MODEL_CATALOG_AGGREGATE_ADDRESS: &str = "0xe1F7220D201C64871Cefb25320a8a588393eE508";
 pub const DEFAULT_MODEL_CATALOG_URL: &str =
     "https://api2.aleph.im/api/v0/aggregates/0xe1F7220D201C64871Cefb25320a8a588393eE508.json?keys=LTAI_PRICING";
-pub const DEFAULT_CHAT_MODEL: &str = "qwen3.5-122b-a10b";
-pub const DEFAULT_CODE_MODEL: &str = "qwen3.6-35b-a3b";
+pub const DEFAULT_CHAT_MODEL: &str = "glm-5.2";
+// `libertai code` runs on the OpenAI-completions path, where the
+// `-thinking` variant is available — use it so the coding agent reasons
+// before acting. The thinking id is served by `/v1/models` and
+// auto-seeded into pi's catalog by `ensure_libertai_registered`.
+pub const DEFAULT_CODE_MODEL: &str = "glm-5.2-thinking";
 pub const DEFAULT_CODE_PROVIDER: &str = "libertai";
 pub const DEFAULT_IMAGE_MODEL: &str = "z-image-turbo";
-pub const DEFAULT_OPUS_MODEL: &str = "gemma-4-31b-it";
-pub const DEFAULT_FAST_MODEL: &str = "qwen3.6-35b-a3b";
+pub const DEFAULT_OPUS_MODEL: &str = "glm-5.2";
+// Backs the launcher `sonnet` alias and the smart-approval ("fast")
+// model. The Claude-alias launchers speak the Anthropic API, which has
+// no `-thinking` variant, so this stays the plain model.
+pub const DEFAULT_FAST_MODEL: &str = "glm-5.2";
+// The launcher `haiku` alias keeps a small, cheap model for the
+// fast/cheap Claude tier.
+pub const DEFAULT_HAIKU_MODEL: &str = "qwen3.6-35b-a3b";
 /// Idle timeout (seconds) for HTTP requests, including SSE token streams.
 /// Pi's http client uses this as a per-chunk idle deadline — a brief
 /// pause from the model (or a tool-execution gap) of more than this
@@ -145,7 +155,7 @@ pub struct LauncherDefaults {
     )]
     pub sonnet_model: String,
     #[serde(
-        default = "default_fast_model_s",
+        default = "default_haiku_model_s",
         skip_serializing_if = "is_default_haiku_model"
     )]
     pub haiku_model: String,
@@ -187,7 +197,7 @@ fn is_default_sonnet_model(s: &str) -> bool {
     s == DEFAULT_FAST_MODEL
 }
 fn is_default_haiku_model(s: &str) -> bool {
-    s == DEFAULT_FAST_MODEL
+    s == DEFAULT_HAIKU_MODEL
 }
 fn is_default_http_timeout_secs(v: &u64) -> bool {
     *v == DEFAULT_HTTP_TIMEOUT_SECS
@@ -219,7 +229,7 @@ impl Default for LauncherDefaults {
         Self {
             opus_model: DEFAULT_OPUS_MODEL.into(),
             sonnet_model: DEFAULT_FAST_MODEL.into(),
-            haiku_model: DEFAULT_FAST_MODEL.into(),
+            haiku_model: DEFAULT_HAIKU_MODEL.into(),
         }
     }
 }
@@ -1005,6 +1015,9 @@ fn default_opus_model_s() -> String {
 }
 fn default_fast_model_s() -> String {
     DEFAULT_FAST_MODEL.into()
+}
+fn default_haiku_model_s() -> String {
+    DEFAULT_HAIKU_MODEL.into()
 }
 fn default_http_timeout_secs() -> u64 {
     DEFAULT_HTTP_TIMEOUT_SECS
