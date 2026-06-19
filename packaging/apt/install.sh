@@ -33,8 +33,8 @@ case "$(uname -m)" in
     *) err "only amd64 Debian/Ubuntu packages are published today. Use the universal installer or build from source." ;;
 esac
 
-tmp_json="$(mktemp)"
-tmp_deb="$(mktemp)"
+tmp_json="$(mktemp -t libertaiXXXXXX.json)"
+tmp_deb="$(mktemp -t libertaiXXXXXX.deb)"
 trap 'rm -f "$tmp_json" "$tmp_deb"' EXIT
 
 printf 'Resolving latest LibertAI CLI release...\n'
