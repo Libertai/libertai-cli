@@ -20,6 +20,7 @@ use std::io::{IsTerminal, Write};
 use pi::tui::PiConsole;
 use rich_rust::cells::{cell_len, get_character_cell_size};
 use rich_rust::renderables::Markdown;
+use rich_rust::style::Style;
 use rich_rust::Console;
 
 /// True when `NO_COLOR` is set to a non-empty value (https://no-color.org).
@@ -224,7 +225,12 @@ fn render_markdown_ansi(block: &str, width: usize) -> String {
         .width(width)
         .file(Box::new(std::io::sink()))
         .build();
-    let markdown = Markdown::new(block);
+    // rich_rust's default inline-code style paints text bright_magenta
+    // on a bright_black (grey) background — pink-on-grey. Drop the
+    // background and use plain yellow text so inline code reads as a
+    // colored highlight, not a chip.
+    let code_style = Style::new().color_str("yellow").unwrap_or_default();
+    let markdown = Markdown::new(block).code_style(code_style);
     let segments = markdown.render(width);
     let mut buf: Vec<u8> = Vec::new();
     let _ = console.print_segments_to(&mut buf, &segments);
@@ -451,6 +457,26 @@ fn complete_block_end(buf: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_code_renders_yellow_without_background() {
+        // rich_rust's default inline-code style is bright_magenta on a
+        // grey (bright_black) chip — pink-on-grey. Our render path should
+        // use plain yellow text with no background color.
+        let rendered = render_markdown_ansi("see `foo` here", 80);
+        assert!(
+            rendered.contains("\x1b[33m"),
+            "inline code should be yellow (\\x1b[33m): {rendered:?}"
+        );
+        assert!(
+            !rendered.contains(";100m") && !rendered.contains("\x1b[100m"),
+            "inline code should not carry a bright_black (100) background: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("\x1b[95m"),
+            "inline code should not be bright_magenta: {rendered:?}"
+        );
+    }
 
     #[test]
     fn no_boundary_in_single_partial_paragraph() {

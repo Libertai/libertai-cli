@@ -15948,6 +15948,13 @@ impl TurnRenderer {
                 self.spinner.hide();
                 if !self.turn_text_open {
                     self.turn_text_open = true;
+                    // Blank line above every reply block: separates the
+                    // `❯` user prompt from the first reply, and separates
+                    // tool output from the reply that follows it. The
+                    // renderer is fresh per prompt and `turn_text_open`
+                    // is reset by the tool path, so this fires once per
+                    // text block without doubling up.
+                    self.chrome_line("");
                     if self.md.renders_markdown() {
                         // Markdown mode: the marker rides inline with
                         // the first rendered line ("● Two active…"),
@@ -16094,8 +16101,18 @@ impl TurnRenderer {
             return;
         }
         self.spinner.hide();
+        // Capture before reset: if assistant prose just flushed, its
+        // markdown block already ends with a trailing blank line, so the
+        // marker must not add another (that doubled the gap between a
+        // reply and the tool call after it). Coming from the user
+        // prompt or a prior tool result there's no trailing blank, so
+        // the marker emits one.
+        let prose_just_open = self.turn_text_open;
         self.turn_text_open = false;
         self.md.flush_pending();
+        if !prose_just_open {
+            self.chrome_line("");
+        }
         let planned = self.planned_tools.get(tool_call_id);
         let marker_name = planned.map(|(name, _)| name.as_str()).unwrap_or(tool_name);
         let marker_args = args
