@@ -270,7 +270,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--model=[Model override (defaults to \`default_code_model\` from config)]:MODEL:_default' \
 '--provider=[Provider override (defaults to \`default_code_provider\` from config, or "libertai")]:PROVIDER:_default' \
-'(--continue --list-sessions)--resume=[Resume a specific saved session by JSONL path (see \`--list-sessions\` to find one)]:PATH:_files' \
+'--mode=[Initial permission mode (\`normal\`, \`accept-edits\`, or \`plan\`)]:MODE:_default' \
+'(--continue --list-sessions)--resume=[Resume a saved session. With a path, resume that specific JSONL file (see \`--list-sessions\` to find one). Bare \`--resume\` (no path) opens an interactive picker of recent sessions for the current cwd; in headless/non-TTY contexts it falls back to the most recent session]::PATH:_default' \
 '--sandbox=[Sandbox the bash tool. \`off\` (default) runs bash with the user'\''s full host privileges. \`strict\` wraps it in \`bwrap\` (Linux only today) with no network, read-only system dirs, and a tmpfs \`/tmp\` — useful for untrusted models or reviewing third-party agent scripts. \`auto\` resolves per pillar; on the CLI that'\''s currently the same as \`off\`. Also honours the \`LIBERTAI_SANDBOX\` env var]:SANDBOX:(off strict auto)' \
 '--plan[Start in plan mode\: the agent can read/grep/find/ls but cannot run bash, write, or edit files until you toggle back to normal (Shift+Tab or /plan)]' \
 '(--resume --list-sessions)--continue[Resume the most recent session for the current working directory]' \

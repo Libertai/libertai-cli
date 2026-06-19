@@ -6,10 +6,13 @@
 //! raw-mode input, crossterm) lives in a separate task — this renderer
 //! stays stream-only so it composes with pipes, tests, and redirection.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
+use dialoguer::console::Term;
+use dialoguer::Select;
 
 use pi::model::AssistantMessageEvent;
 use pi::sdk::{create_agent_session, AgentEvent};
@@ -32,7 +35,7 @@ pub fn run(
     provider: Option<String>,
     plan: bool,
     mode: Option<String>,
-    resume: Option<PathBuf>,
+    resume: Option<String>,
     continue_recent: bool,
     list_sessions: bool,
     all: bool,
@@ -63,7 +66,7 @@ pub fn run(
     };
 
     // Resolve --resume / --continue into an explicit session path, if any.
-    let resume_path = resolve_resume_path(resume, continue_recent)?;
+    let resume_path = resolve_resume_path(resume, continue_recent, print)?;
 
     // Resolve `--sandbox=auto` to a concrete mode. The CLI only runs
     // the code pillar today, which we treat as "trusted" (user runs
@@ -430,8 +433,20 @@ impl ApprovalUi for PrintModeApprovalUi {
 /// Returns `Ok(None)` for "no resume requested". `--resume` and
 /// `--continue` are mutually exclusive at the clap layer so we never see
 /// both set here.
-fn resolve_resume_path(resume: Option<PathBuf>, continue_recent: bool) -> Result<Option<PathBuf>> {
-    if let Some(p) = resume {
+fn resolve_resume_path(
+    resume: Option<String>,
+    continue_recent: bool,
+    print: bool,
+) -> Result<Option<PathBuf>> {
+    if let Some(raw) = resume {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            // Bare `--resume` (no path) — open the interactive picker,
+            // falling back to the most recent session in headless/non-TTY
+            // contexts so scripts and `--print` don't block.
+            return pick_session_path(print);
+        }
+        let p = PathBuf::from(raw);
         if !p.exists() {
             bail!("--resume: session file not found: {}", p.display());
         }
@@ -444,6 +459,45 @@ fn resolve_resume_path(resume: Option<PathBuf>, continue_recent: bool) -> Result
         return Ok(Some(PathBuf::from(recent.path)));
     }
     Ok(None)
+}
+
+/// Bare `--resume` session picker. Lists recent sessions for the current
+/// cwd and prompts the user to choose one. In headless mode (`--print`) or
+/// when stderr isn't a TTY, resumes the most recent session instead of
+/// blocking on a prompt that can't render.
+fn pick_session_path(headless: bool) -> Result<Option<PathBuf>> {
+    let cwd = std::env::current_dir()?;
+    let metas = list_past_sessions(Some(&cwd))?;
+    if metas.is_empty() {
+        bail!(
+            "no past sessions for {} — pass a path to `--resume <PATH>`",
+            cwd.display()
+        );
+    }
+    if headless || !std::io::stderr().is_terminal() {
+        return Ok(Some(PathBuf::from(metas[0].path.clone())));
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let labels: Vec<String> = metas
+        .iter()
+        .map(|m| {
+            let when = format_relative_age(now_ms - m.last_modified_ms);
+            let short_id: String = m.id.chars().take(8).collect();
+            let name = m.name.as_deref().filter(|n| !n.is_empty()).unwrap_or(&short_id);
+            format!("{when}  {} msgs  {name}  {}", m.message_count, m.path)
+        })
+        .collect();
+    let term = Term::stderr();
+    let choice = Select::new()
+        .with_prompt("Pick a session to resume")
+        .items(&labels)
+        .default(0)
+        .interact_on(&term)
+        .map_err(|e| anyhow::anyhow!("session picker: {e}"))?;
+    Ok(Some(PathBuf::from(metas[choice].path.clone())))
 }
 
 /// Print recent session metadata sorted recency-desc, then exit.

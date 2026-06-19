@@ -26,9 +26,11 @@ struct LcodeCli {
     /// Initial permission mode (`normal`, `accept-edits`, or `plan`).
     #[arg(long)]
     mode: Option<String>,
-    /// Resume a saved session by JSONL path.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["continue_recent", "list_sessions"])]
-    resume: Option<std::path::PathBuf>,
+    /// Resume a saved session. With a path, resume that JSONL file;
+    /// bare `--resume` opens an interactive picker (or resumes the most
+    /// recent session when non-interactive).
+    #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "", conflicts_with_all = ["continue_recent", "list_sessions"])]
+    resume: Option<String>,
     /// Resume the most recent session for the current cwd.
     #[arg(long = "continue", conflicts_with_all = ["resume", "list_sessions"])]
     continue_recent: bool,

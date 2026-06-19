@@ -126,7 +126,8 @@ complete -c libertai -n "__fish_libertai_using_subcommand hermes" -s h -l help -
 complete -c libertai -n "__fish_libertai_using_subcommand hermes" -s V -l version -d 'Print version'
 complete -c libertai -n "__fish_libertai_using_subcommand code" -l model -d 'Model override (defaults to `default_code_model` from config)' -r
 complete -c libertai -n "__fish_libertai_using_subcommand code" -l provider -d 'Provider override (defaults to `default_code_provider` from config, or "libertai")' -r
-complete -c libertai -n "__fish_libertai_using_subcommand code" -l resume -d 'Resume a specific saved session by JSONL path (see `--list-sessions` to find one)' -r -F
+complete -c libertai -n "__fish_libertai_using_subcommand code" -l mode -d 'Initial permission mode (`normal`, `accept-edits`, or `plan`)' -r
+complete -c libertai -n "__fish_libertai_using_subcommand code" -l resume -d 'Resume a saved session. With a path, resume that specific JSONL file (see `--list-sessions` to find one). Bare `--resume` (no path) opens an interactive picker of recent sessions for the current cwd; in headless/non-TTY contexts it falls back to the most recent session' -r
 complete -c libertai -n "__fish_libertai_using_subcommand code" -l sandbox -d 'Sandbox the bash tool. `off` (default) runs bash with the user\'s full host privileges. `strict` wraps it in `bwrap` (Linux only today) with no network, read-only system dirs, and a tmpfs `/tmp` — useful for untrusted models or reviewing third-party agent scripts. `auto` resolves per pillar; on the CLI that\'s currently the same as `off`. Also honours the `LIBERTAI_SANDBOX` env var' -r -f -a "off\t''
 strict\t''
 auto\t''"

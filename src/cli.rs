@@ -188,10 +188,13 @@ pub enum Command {
         /// Initial permission mode (`normal`, `accept-edits`, or `plan`).
         #[arg(long)]
         mode: Option<String>,
-        /// Resume a specific saved session by JSONL path
-        /// (see `--list-sessions` to find one).
-        #[arg(long, value_name = "PATH", conflicts_with_all = ["continue_recent", "list_sessions"])]
-        resume: Option<std::path::PathBuf>,
+        /// Resume a saved session. With a path, resume that specific
+        /// JSONL file (see `--list-sessions` to find one). Bare
+        /// `--resume` (no path) opens an interactive picker of recent
+        /// sessions for the current cwd; in headless/non-TTY contexts
+        /// it falls back to the most recent session.
+        #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "", conflicts_with_all = ["continue_recent", "list_sessions"])]
+        resume: Option<String>,
         /// Resume the most recent session for the current working directory.
         #[arg(long = "continue", conflicts_with_all = ["resume", "list_sessions"])]
         continue_recent: bool,
