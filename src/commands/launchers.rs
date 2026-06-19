@@ -10,7 +10,7 @@ pub fn claude(
     opus: Option<String>,
     sonnet: Option<String>,
     haiku: Option<String>,
-    args: Vec<String>,
+    mut args: Vec<String>,
 ) -> Result<()> {
     let cfg = config::load()?;
     let mut env = base_env(&cfg, model.as_deref())?;
@@ -70,6 +70,24 @@ pub fn claude(
     // their tier differentiation.
     if let Some(m) = &model {
         env.push(("CLAUDE_CODE_SUBAGENT_MODEL".into(), m.clone()));
+    }
+
+    // Pin the main-conversation model. The tier env vars above only remap the
+    // opus/sonnet/haiku *aliases*; they don't set which model the session
+    // starts on. Claude Code resolves that from the `--model` flag, then
+    // ~/.claude/settings.json. Since that settings file is shared with the
+    // user's real Claude Code, it often pins a real-Anthropic id like
+    // "opus[1m]" that the LibertAI backend rejects with "model may not exist".
+    // Forward a valid LibertAI model (the user's --model, else the opus tier)
+    // unless the user already passed their own --model in the trailing args.
+    // /model still switches it mid-session.
+    let has_model_flag = args.iter().any(|a| a == "--model" || a == "-m");
+    if !has_model_flag {
+        let main_model = model
+            .clone()
+            .unwrap_or_else(|| cfg.launcher_defaults.opus_model.clone());
+        args.push("--model".into());
+        args.push(main_model);
     }
 
     exec_with_env("claude", &args, env)
