@@ -17,7 +17,7 @@ use crossterm::{
     execute, terminal,
 };
 
-use crate::commands::code_approvals::{ApprovalUi, NotifyOutcome, PromptChoice};
+use crate::commands::code_approvals::{ApprovalUi, AskOutcome, NotifyOutcome, PromptChoice};
 use crate::commands::code_ui::clip_chars;
 
 /// RAII guard that enables raw mode on construction and disables it
@@ -77,6 +77,10 @@ pub struct TerminalApprovalUi;
 impl ApprovalUi for TerminalApprovalUi {
     async fn decide(&self, tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
         prompt(tool_name, preview, always_rule)
+    }
+
+    async fn ask(&self, payload: serde_json::Value) -> AskOutcome {
+        ask_user(&payload)
     }
 
     async fn notify(&self, title: &str, body: &str) -> NotifyOutcome {
@@ -184,6 +188,10 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
     let _gate = terminal_event_gate()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Pause the live spinner footer so its ticker thread can't repaint
+    // over this menu. Without this the menu was overwritten and the
+    // agent looked hung while it waited for an unseen keystroke.
+    crate::commands::code_ui::suspend_active_footer();
     let mut stderr = std::io::stderr();
     let width = prompt_width();
 
@@ -210,6 +218,7 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
                 "  \x1b[2m{}\x1b[0m",
                 clipped_resolution_line(&choice, always_rule, width)
             );
+            crate::commands::code_ui::resume_active_footer();
             return choice;
         }
     };
@@ -242,6 +251,7 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
         "  \x1b[2m{}\x1b[0m",
         clipped_resolution_line(&choice, always_rule, width)
     );
+    crate::commands::code_ui::resume_active_footer();
     choice
 }
 
@@ -267,6 +277,309 @@ fn style_preview_line(line: &str) -> String {
         return format!("\x1b[2m{line}\x1b[0m");
     }
     line.to_string()
+}
+
+/// Build the `{ cancelled: true, reason }` envelope the `ask_user` tool
+/// turns into a tool result the LLM can adapt to.
+fn ask_cancelled(reason: &str) -> AskOutcome {
+    AskOutcome::Answer(serde_json::json!({
+        "cancelled": true,
+        "reason": reason,
+    }))
+}
+
+/// One parsed option: a short label and optional clarifying text.
+struct AskOption {
+    label: String,
+    description: Option<String>,
+}
+
+/// Parse the `options` array of a single question into [`AskOption`]s,
+/// dropping any entry without a string `label`.
+fn parse_ask_options(question: &serde_json::Value) -> Vec<AskOption> {
+    question
+        .get("options")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|o| {
+                    let label = o.get("label").and_then(|v| v.as_str())?.to_string();
+                    let description = o
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.trim().is_empty())
+                        .map(str::to_string);
+                    Some(AskOption { label, description })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Assemble the per-question answer object documented in
+/// `code_ask_user`: `{ header, selected: [labels], other: text|null }`.
+fn ask_answer(header: &str, selected: Vec<String>, other: Option<String>) -> serde_json::Value {
+    serde_json::json!({
+        "header": header,
+        "selected": selected,
+        "other": other,
+    })
+}
+
+/// Interactive terminal implementation of the `ask_user` tool: renders
+/// each question's options as a single-key/arrow-navigable chooser and
+/// returns the structured answers. Blocks the runtime thread for the
+/// duration (pi awaits `Tool::execute` sequentially, same contract as
+/// the approval prompt). Esc / Ctrl-C cancels the whole stack.
+fn ask_user(payload: &serde_json::Value) -> AskOutcome {
+    let Some(questions) = payload.get("questions").and_then(|q| q.as_array()) else {
+        return ask_cancelled("USER_DECLINED");
+    };
+    if questions.is_empty() {
+        return ask_cancelled("USER_DECLINED");
+    }
+
+    // Own the keyboard for the whole exchange and pause the spinner
+    // footer so it can't repaint over the cards (same hang-avoidance as
+    // the approval prompt).
+    let _gate = terminal_event_gate()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    crate::commands::code_ui::suspend_active_footer();
+
+    eprintln!();
+    eprintln!("  \x1b[36;1m⎯ a question for you ⎯\x1b[0m");
+
+    let mut answers = Vec::with_capacity(questions.len());
+    for question in questions {
+        match ask_one(question) {
+            Some(answer) => answers.push(answer),
+            None => {
+                crate::commands::code_ui::resume_active_footer();
+                return ask_cancelled("USER_DECLINED");
+            }
+        }
+    }
+
+    crate::commands::code_ui::resume_active_footer();
+    AskOutcome::Answer(serde_json::json!({ "answers": answers }))
+}
+
+/// Render and resolve one question. Returns `None` if the user cancels.
+fn ask_one(question: &serde_json::Value) -> Option<serde_json::Value> {
+    let header = question
+        .get("header")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let text = question
+        .get("question")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let multi = question
+        .get("multiSelect")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let options = parse_ask_options(question);
+
+    eprintln!();
+    if !header.is_empty() {
+        eprintln!("  \x1b[1m{header}\x1b[0m");
+    }
+    if !text.is_empty() {
+        let width = prompt_width();
+        for line in text.lines() {
+            eprintln!("  {}", clip_chars(line, width.saturating_sub(2).max(8)));
+        }
+    }
+
+    // No options → free-form only.
+    if options.is_empty() {
+        let answer = ask_free_text()?;
+        return Some(ask_answer(header, Vec::new(), Some(answer)));
+    }
+
+    if multi {
+        eprintln!(
+            "  \x1b[2m↑/↓ move · space toggle · enter confirm · esc cancel\x1b[0m"
+        );
+    } else {
+        eprintln!("  \x1b[2m↑/↓ move · 1-9 / enter pick · esc cancel\x1b[0m");
+    }
+
+    let selection = select_options(&options, multi)?;
+
+    let mut selected = Vec::new();
+    let mut other = None;
+    for idx in selection {
+        let label = &options[idx].label;
+        if label.eq_ignore_ascii_case("other") {
+            // The "Other" option means the user wants to type a custom
+            // answer; collect it as free-form text.
+            other = Some(ask_free_text()?);
+        } else {
+            selected.push(label.clone());
+        }
+    }
+    Some(ask_answer(header, selected, other))
+}
+
+/// Render the option list for [`select_options`] as one terminal-ready
+/// string (lines joined by `\r\n`, no trailing newline so the caller can
+/// erase exactly `rows` rows). `cursor` is highlighted; in multi-select
+/// mode `checked` rows show a filled box.
+fn render_ask_options(options: &[AskOption], cursor: usize, checked: &[bool], multi: bool) -> String {
+    let width = prompt_width();
+    let mut lines = Vec::with_capacity(options.len());
+    for (i, opt) in options.iter().enumerate() {
+        let pointer = if i == cursor { "›" } else { " " };
+        let mark = if multi {
+            if checked.get(i).copied().unwrap_or(false) {
+                "[x] "
+            } else {
+                "[ ] "
+            }
+        } else {
+            ""
+        };
+        let mut label = format!("{}. {}", i + 1, opt.label);
+        if let Some(desc) = &opt.description {
+            label.push_str(&format!(" — {desc}"));
+        }
+        let body = format!("  {pointer} {mark}{label}");
+        let body = clip_chars(&body, width);
+        // Bold the row under the cursor; dim the rest.
+        let styled = if i == cursor {
+            format!("\x1b[1m{body}\x1b[0m")
+        } else {
+            format!("\x1b[2m{body}\x1b[0m")
+        };
+        lines.push(styled);
+    }
+    lines.join("\r\n")
+}
+
+/// Drive the option chooser. Returns the chosen option indices (one for
+/// single-select, zero or more for multi-select) or `None` on cancel.
+/// Falls back to a cooked numbered read when raw mode is unavailable
+/// (non-TTY stdin, e.g. piped tests).
+fn select_options(options: &[AskOption], multi: bool) -> Option<Vec<usize>> {
+    let n = options.len();
+    let _guard = match RawModeGuard::enter() {
+        Ok(g) => g,
+        Err(_) => return select_options_cooked(options, multi),
+    };
+
+    let mut cursor = 0usize;
+    let mut checked = vec![false; n];
+    let mut prev_rows = 0usize;
+
+    let chosen = loop {
+        let block = render_ask_options(options, cursor, &checked, multi);
+        let rows = block.matches("\r\n").count() + 1;
+        let mut out = String::new();
+        if prev_rows > 0 {
+            // Move to the top of the previous block and clear downward.
+            if prev_rows > 1 {
+                out.push_str(&format!("\x1b[{}A", prev_rows - 1));
+            }
+            out.push_str("\r\x1b[0J");
+        }
+        out.push_str(&block);
+        eprint!("{out}");
+        let _ = std::io::stderr().flush();
+        prev_rows = rows;
+
+        match event::read() {
+            Ok(Event::Key(KeyEvent {
+                code, modifiers, ..
+            })) => match (code, modifiers) {
+                (KeyCode::Up | KeyCode::Char('k'), _) => {
+                    cursor = if cursor == 0 { n - 1 } else { cursor - 1 };
+                }
+                (KeyCode::Down | KeyCode::Char('j'), _) => {
+                    cursor = (cursor + 1) % n;
+                }
+                (KeyCode::Char(c), _) if c.is_ascii_digit() && c != '0' => {
+                    let idx = c as usize - '1' as usize;
+                    if idx < n {
+                        if multi {
+                            checked[idx] = !checked[idx];
+                            cursor = idx;
+                        } else {
+                            break Some(vec![idx]);
+                        }
+                    }
+                }
+                (KeyCode::Char(' '), _) if multi => {
+                    checked[cursor] = !checked[cursor];
+                }
+                (KeyCode::Enter, _) => {
+                    if multi {
+                        break Some((0..n).filter(|i| checked[*i]).collect());
+                    }
+                    break Some(vec![cursor]);
+                }
+                (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => break None,
+                _ => {}
+            },
+            Ok(_) => {}
+            Err(_) => break None,
+        }
+    };
+    // Leave the resolved list on screen and move past it.
+    eprintln!();
+    chosen
+}
+
+/// Cooked fallback for [`select_options`]: prints a numbered list and
+/// reads 1-based indices from a line (comma/space separated for
+/// multi-select). Empty / EOF input cancels.
+fn select_options_cooked(options: &[AskOption], multi: bool) -> Option<Vec<usize>> {
+    for (i, opt) in options.iter().enumerate() {
+        match &opt.description {
+            Some(desc) => eprintln!("  {}. {} — {desc}", i + 1, opt.label),
+            None => eprintln!("  {}. {}", i + 1, opt.label),
+        }
+    }
+    if multi {
+        eprint!("  pick (e.g. 1,3): ");
+    } else {
+        eprint!("  pick (1-{}): ", options.len());
+    }
+    let _ = std::io::stderr().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).ok()? == 0 {
+        return None;
+    }
+    let picks: Vec<usize> = line
+        .split([',', ' ', '\t'])
+        .filter_map(|tok| tok.trim().parse::<usize>().ok())
+        .filter(|n| *n >= 1 && *n <= options.len())
+        .map(|n| n - 1)
+        .collect();
+    if picks.is_empty() {
+        return None;
+    }
+    if multi {
+        Some(picks)
+    } else {
+        Some(vec![picks[0]])
+    }
+}
+
+/// Read a single free-form answer line in cooked mode. Returns `None` on
+/// EOF (the user closed the input) so the caller can treat it as cancel.
+fn ask_free_text() -> Option<String> {
+    eprint!("  \x1b[2myour answer:\x1b[0m ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).ok()? == 0 {
+        return None;
+    }
+    Some(line.trim().to_string())
 }
 
 #[cfg(test)]
@@ -382,5 +695,72 @@ mod tests {
             notify_terminal(" ", "Agent turn complete"),
             NotifyOutcome::Skipped("EMPTY_NOTIFICATION".to_string())
         );
+    }
+
+    fn ask_answer_envelope(outcome: &AskOutcome) -> serde_json::Value {
+        match outcome {
+            AskOutcome::Answer(v) => v.clone(),
+            AskOutcome::Paused { .. } => panic!("terminal ask never pauses"),
+        }
+    }
+
+    #[test]
+    fn ask_user_cancels_on_missing_or_empty_questions() {
+        let no_questions = ask_answer_envelope(&ask_user(&serde_json::json!({})));
+        assert_eq!(no_questions["cancelled"], serde_json::json!(true));
+        assert_eq!(no_questions["reason"], serde_json::json!("USER_DECLINED"));
+
+        let empty = ask_answer_envelope(&ask_user(&serde_json::json!({ "questions": [] })));
+        assert_eq!(empty["cancelled"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn parse_ask_options_keeps_labels_and_drops_blank_descriptions() {
+        let q = serde_json::json!({
+            "options": [
+                { "label": "Keep", "description": "leave it in" },
+                { "label": "Strip", "description": "   " },
+                { "description": "no label" },
+            ]
+        });
+        let opts = parse_ask_options(&q);
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].label, "Keep");
+        assert_eq!(opts[0].description.as_deref(), Some("leave it in"));
+        assert_eq!(opts[1].label, "Strip");
+        assert_eq!(opts[1].description, None);
+    }
+
+    #[test]
+    fn ask_answer_shapes_the_documented_envelope() {
+        let answer = ask_answer("Cleanup", vec!["Strip".to_string()], None);
+        assert_eq!(answer["header"], serde_json::json!("Cleanup"));
+        assert_eq!(answer["selected"], serde_json::json!(["Strip"]));
+        assert_eq!(answer["other"], serde_json::json!(null));
+
+        let custom = ask_answer("Name", Vec::new(), Some("widget".to_string()));
+        assert_eq!(custom["selected"], serde_json::json!([]));
+        assert_eq!(custom["other"], serde_json::json!("widget"));
+    }
+
+    #[test]
+    fn rendered_options_mark_cursor_and_checks() {
+        let options = vec![
+            AskOption {
+                label: "Alpha".to_string(),
+                description: None,
+            },
+            AskOption {
+                label: "Beta".to_string(),
+                description: Some("second".to_string()),
+            },
+        ];
+        let checked = vec![false, true];
+        let block = render_ask_options(&options, 1, &checked, true);
+        let plain = strip_ansi(&block);
+        let lines: Vec<&str> = plain.split("\r\n").collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("[ ] 1. Alpha"));
+        assert!(lines[1].contains("› [x] 2. Beta — second"));
     }
 }

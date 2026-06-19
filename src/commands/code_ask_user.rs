@@ -7,10 +7,10 @@
 //!
 //! Suspend/resume happens via [`ApprovalUi::ask`]: the desktop UI
 //! emits a Tauri event, awaits the user's response on a `oneshot`,
-//! and returns the answers as JSON. The terminal UI gets the default
-//! "cancelled" impl since interactive multi-choice prompts in a TUI
-//! is its own can of worms; the LLM sees `cancelled: true` and can
-//! adapt.
+//! and returns the answers as JSON. The terminal UI renders an
+//! arrow/number-navigable chooser inline (see `code_term::ask_user`)
+//! and returns the answers synchronously; if the user hits Esc it
+//! sends `cancelled: true` so the LLM can adapt.
 //!
 //! Tool input shape (matches `AskUserQuestion`):
 //!

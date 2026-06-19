@@ -15188,6 +15188,51 @@ fn spinner_line_text(label: &str, elapsed_secs: u64, output_chars: u64) -> Strin
     line
 }
 
+/// The spinner footer that currently owns the bottom of the terminal,
+/// if any. Registered by [`Spinner::start`] and cleared by
+/// [`Spinner::stop`] so an interactive prompt running on the runtime
+/// thread (the approval micro-prompt and the `ask_user` chooser in
+/// `code_term`) can erase and pause it before painting. Without this,
+/// the ticker thread kept repainting over the menu and the agent looked
+/// hung while it was really blocked waiting for an invisible keystroke.
+static ACTIVE_SPINNER: Mutex<Option<Arc<Mutex<SpinnerCore>>>> = Mutex::new(None);
+
+fn set_active_spinner(core: Option<Arc<Mutex<SpinnerCore>>>) {
+    if let Ok(mut g) = ACTIVE_SPINNER.lock() {
+        *g = core;
+    }
+}
+
+/// Erase and hide the live spinner footer so an interactive prompt can
+/// paint without the ticker thread clobbering it. No-op when no spinner
+/// is active (non-TTY, or between turns). Pair every call with
+/// [`resume_active_footer`] once the prompt is done.
+///
+/// Acquires `ACTIVE_SPINNER` then the inner `SpinnerCore`; callers hold
+/// the terminal event gate, so the lock order is gate → ACTIVE_SPINNER →
+/// core. Nothing acquires those in the opposite order, so this is
+/// deadlock-free.
+pub(crate) fn suspend_active_footer() {
+    let core = ACTIVE_SPINNER.lock().ok().and_then(|g| g.clone());
+    if let Some(core) = core {
+        if let Ok(mut c) = core.lock() {
+            c.visible = false;
+            c.erase();
+        }
+    }
+}
+
+/// Re-show the footer suspended by [`suspend_active_footer`]; the ticker
+/// repaints it on its next tick. No-op when no spinner is active.
+pub(crate) fn resume_active_footer() {
+    let core = ACTIVE_SPINNER.lock().ok().and_then(|g| g.clone());
+    if let Some(core) = core {
+        if let Ok(mut c) = core.lock() {
+            c.visible = true;
+        }
+    }
+}
+
 /// Bottom-line activity spinner. Lives on its own ticker thread so the
 /// elapsed counter advances while the runtime thread is blocked on the
 /// model stream; every write is serialized through [`SpinnerCore`]'s
@@ -15230,6 +15275,9 @@ impl Spinner {
                 }
             })
         };
+        // Register so an interactive prompt on another code path can
+        // erase/pause this footer before painting over the same stream.
+        set_active_spinner(Some(Arc::clone(&core)));
         Self {
             core: Some(core),
             ticker: Some(ticker),
@@ -15282,6 +15330,11 @@ impl Spinner {
 
     /// Erase, stop the ticker, and join it. Idempotent.
     fn stop(&mut self) {
+        // Deregister before tearing down so a late suspend/resume from
+        // another thread can't touch a stopped core. Done without the
+        // core lock held to preserve the gate → ACTIVE_SPINNER → core
+        // order.
+        set_active_spinner(None);
         if let Some(core) = &self.core {
             if let Ok(mut c) = core.lock() {
                 c.stopped = true;
