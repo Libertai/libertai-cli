@@ -15949,9 +15949,13 @@ impl TurnRenderer {
             AgentEvent::ToolExecutionStart {
                 tool_name, args, ..
             } => {
-                // Keep the spinner away while a tool owns the terminal —
-                // its approval prompt or own output must not race a
-                // repaint. Re-shown on ToolExecutionEnd.
+                // Clear any existing footer before printing the marker.
+                // Then keep a live activity footer visible while the
+                // tool runs; otherwise a slow edit or an approval prompt
+                // that has not painted yet leaves the UI apparently
+                // frozen at `● edit(path)`. Interactive prompts call
+                // `suspend_active_footer()` before painting, so this
+                // footer will not overwrite approval/ask menus.
                 self.spinner.hide();
                 self.turn_text_open = false;
                 // Flush buffered prose before ANY tool output reaches
@@ -15971,6 +15975,8 @@ impl TurnRenderer {
                         crate::commands::code_term::auto_allowed_line(&label)
                     ));
                 }
+                self.spinner.set_label(tool_running_label(tool_name));
+                self.spinner.show();
             }
             AgentEvent::ToolExecutionEnd {
                 tool_name,
@@ -15978,6 +15984,7 @@ impl TurnRenderer {
                 is_error,
                 ..
             } => {
+                self.spinner.hide();
                 if tool_name != "todo" {
                     let text = tool_output_text(result);
                     for line in tool_result_preview(
@@ -16088,6 +16095,15 @@ impl TurnRenderer {
 /// Tools `ApprovalState` auto-allows by name (read-only built-ins).
 /// Mirrors the `auto_allow` set in `code_approvals.rs`.
 const READ_ONLY_AUTO_ALLOW_TOOLS: &[&str] = &["read", "grep", "find", "ls", "bash_output"];
+
+fn tool_running_label(tool_name: &str) -> &'static str {
+    match tool_name {
+        "edit" | "hashline_edit" | "write" | "notebook_edit" => "editing…",
+        "bash" | "shell" => "running command…",
+        "task" => "running agent…",
+        _ => "running tool…",
+    }
+}
 
 pub(crate) fn smart_approval_audit_line(output: &pi::sdk::ToolOutput) -> Option<String> {
     let details = output.details.as_ref()?;
@@ -18565,6 +18581,18 @@ mod tests {
             spinner_line_text("writing…", 23, 4_800),
             "✳ writing… 23s · 1.2k tokens"
         );
+    }
+
+    #[test]
+    fn tool_running_label_names_slow_tool_phases() {
+        assert_eq!(tool_running_label("edit"), "editing…");
+        assert_eq!(tool_running_label("hashline_edit"), "editing…");
+        assert_eq!(tool_running_label("write"), "editing…");
+        assert_eq!(tool_running_label("notebook_edit"), "editing…");
+        assert_eq!(tool_running_label("bash"), "running command…");
+        assert_eq!(tool_running_label("shell"), "running command…");
+        assert_eq!(tool_running_label("task"), "running agent…");
+        assert_eq!(tool_running_label("grep"), "running tool…");
     }
 
     #[test]
