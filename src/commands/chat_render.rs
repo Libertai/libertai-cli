@@ -69,6 +69,10 @@ pub struct MarkdownStream {
     pending: String,
     /// Total characters pushed (used by callers to detect empty replies).
     received: bool,
+    /// A prose block has been rendered since the last tool marker. Such a
+    /// block always ends with a trailing blank line, so the next tool
+    /// marker can suppress its own separator to avoid doubling it.
+    prose_emitted: bool,
     /// Claude-Code-style turn decoration (`libertai code` only): the
     /// first rendered line of a turn carries an inline marker ("● "),
     /// every later line a two-space hanging indent. `None` for
@@ -96,6 +100,7 @@ impl MarkdownStream {
             console: if render { Some(PiConsole::new()) } else { None },
             pending: String::new(),
             received: false,
+            prose_emitted: false,
             decor: None,
         }
     }
@@ -168,18 +173,30 @@ impl MarkdownStream {
         }
     }
 
+    /// Read and clear [`prose_emitted`](Self::prose_emitted). A tool
+    /// marker calls this to decide whether to emit its own leading blank.
+    pub fn take_prose_emitted(&mut self) -> bool {
+        std::mem::take(&mut self.prose_emitted)
+    }
+
     /// Render any buffered partial block *now*, without ending the
     /// stream. Used by `libertai code` to flush assistant prose before
     /// out-of-band chrome (tool markers, approval prompts) prints, so
     /// the text always appears above the event that interrupted it.
     /// Raw mode is a no-op — deltas were already printed verbatim.
-    pub fn flush_pending(&mut self) {
+    /// Returns `true` when a block was actually rendered (which always
+    /// ends with a trailing blank line), so callers can avoid stacking
+    /// their own separator on top of it.
+    pub fn flush_pending(&mut self) -> bool {
         if !self.render {
-            return;
+            return false;
         }
         let rest = std::mem::take(&mut self.pending);
         if !rest.trim().is_empty() {
             self.render_block(&rest);
+            true
+        } else {
+            false
         }
     }
 
@@ -187,6 +204,8 @@ impl MarkdownStream {
         if block.trim().is_empty() {
             return;
         }
+        // Every path below ends the block with a trailing blank line.
+        self.prose_emitted = true;
         if let Some(decor) = &mut self.decor {
             // Decorated path (`libertai code`): render to a string at a
             // width reduced by the indent, then re-emit each line with
@@ -574,6 +593,29 @@ mod tests {
         // After a flush the stream keeps accepting deltas.
         s.push("more\n\n");
         assert!(s.pending.is_empty()); // complete block rendered immediately
+    }
+
+    #[test]
+    fn prose_emitted_flags_rendered_blocks_for_marker_dedup() {
+        // A prose block ends with a trailing blank line; the next tool
+        // marker must suppress its own separator to avoid doubling it.
+        // The flag is sticky across streamed-then-flushed prose (the
+        // reply→tool case where the model finishes before requesting
+        // the tool) and is cleared once the marker reads it.
+        let mut s = MarkdownStream::new(true);
+        assert!(
+            !s.take_prose_emitted(),
+            "no block rendered yet — marker should emit its own blank"
+        );
+        s.push("reply text\n\n"); // complete block renders immediately
+        assert!(
+            s.take_prose_emitted(),
+            "a block was rendered — marker should suppress its blank"
+        );
+        assert!(
+            !s.take_prose_emitted(),
+            "flag is read-once — a second marker after no new prose emits its own blank"
+        );
     }
 
     // -- turn marker / hanging indent (the captured render path) --------

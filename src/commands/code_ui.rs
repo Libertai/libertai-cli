@@ -16101,16 +16101,16 @@ impl TurnRenderer {
             return;
         }
         self.spinner.hide();
-        // Capture before reset: if assistant prose just flushed, its
-        // markdown block already ends with a trailing blank line, so the
-        // marker must not add another (that doubled the gap between a
-        // reply and the tool call after it). Coming from the user
-        // prompt or a prior tool result there's no trailing blank, so
-        // the marker emits one.
-        let prose_just_open = self.turn_text_open;
         self.turn_text_open = false;
+        // Flush any prose that arrived after the start event (or that the
+        // start event never flushed, on the end-event fallback path).
         self.md.flush_pending();
-        if !prose_just_open {
+        // A prose block (streamed earlier or just flushed) always ends
+        // with a trailing blank line — suppress the marker's own
+        // separator in that case so reply→tool gets one blank, not two.
+        // Coming from the user prompt or a prior tool result there's no
+        // trailing blank, so the marker emits one.
+        if !self.md.take_prose_emitted() {
             self.chrome_line("");
         }
         let planned = self.planned_tools.get(tool_call_id);
