@@ -16799,9 +16799,10 @@ impl Drop for TurnInputPump {
     }
 }
 
-/// Pump thread body. Every iteration briefly holds the terminal event
-/// gate around `poll`+`read`; the approval prompt acquires the same
-/// gate for its whole menu, pausing the pump within one poll interval.
+/// Pump thread body. It waits for key readiness outside the terminal
+/// event gate, then briefly takes the gate only to drain an already
+/// ready event. Approval and ask-user prompts claim the keyboard before
+/// locking the same gate, so the pump yields before those menus paint.
 #[cfg(unix)]
 fn pump_loop(
     stop: &AtomicBool,
@@ -16811,14 +16812,29 @@ fn pump_loop(
     abort: &AbortHandle,
 ) {
     while !stop.load(Ordering::SeqCst) {
+        if crate::commands::code_term::terminal_prompt_pending() {
+            std::thread::sleep(TurnInputPump::POLL);
+            continue;
+        }
+        match event::poll(TurnInputPump::POLL) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(_) => return,
+        }
+        if crate::commands::code_term::terminal_prompt_pending() {
+            continue;
+        }
         let ev = {
-            let _gate = crate::commands::code_term::terminal_event_gate()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Ok(_gate) = crate::commands::code_term::terminal_event_gate().try_lock() else {
+                continue;
+            };
             if stop.load(Ordering::SeqCst) {
                 return;
             }
-            match event::poll(TurnInputPump::POLL) {
+            if crate::commands::code_term::terminal_prompt_pending() {
+                continue;
+            }
+            match event::poll(Duration::ZERO) {
                 Ok(true) => match event::read() {
                     Ok(ev) => ev,
                     Err(_) => return,

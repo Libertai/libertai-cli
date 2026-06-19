@@ -7,6 +7,7 @@
 //! broken.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -120,6 +121,7 @@ pub(crate) fn notify_terminal(title: &str, body: &str) -> NotifyOutcome {
     if title.is_empty() || body.is_empty() {
         return NotifyOutcome::Skipped("EMPTY_NOTIFICATION".to_string());
     }
+    let _claim = TerminalPromptClaim::new();
     let _gate = terminal_event_gate()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -160,13 +162,34 @@ fn resolution_line(choice: &PromptChoice, always_rule: &str) -> String {
 /// queue messages while the agent streams) and this module's approval
 /// micro-prompt. crossterm's event queue is process-global: two threads
 /// reading it would steal each other's keys. The approval prompt holds
-/// this lock for its whole single-key read; the pump holds it only
-/// around each short `poll`+`read`, so an approval acquires ownership
-/// within one poll interval and every keystroke after the menu paints
-/// answers the menu — never the queue editor.
+/// this lock for its whole single-key read; the pump waits for readiness
+/// outside the lock, then takes it only for a nonblocking drain. Prompt
+/// claims make the pump yield before menus paint, so every keystroke
+/// after the menu is visible answers the menu — never the queue editor.
 pub(crate) fn terminal_event_gate() -> &'static std::sync::Mutex<()> {
     static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     &GATE
+}
+
+static TERMINAL_PROMPT_CLAIMS: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn terminal_prompt_pending() -> bool {
+    TERMINAL_PROMPT_CLAIMS.load(Ordering::SeqCst) > 0
+}
+
+struct TerminalPromptClaim;
+
+impl TerminalPromptClaim {
+    fn new() -> Self {
+        TERMINAL_PROMPT_CLAIMS.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for TerminalPromptClaim {
+    fn drop(&mut self) {
+        TERMINAL_PROMPT_CLAIMS.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Width budget when the terminal size is unknown (non-TTY stderr).
@@ -213,6 +236,7 @@ fn clipped_resolution_line(choice: &PromptChoice, always_rule: &str, width: usiz
 
 /// Block until the user picks allow/always/deny.
 fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
+    let _claim = TerminalPromptClaim::new();
     // Take keyboard ownership BEFORE the menu paints: any keystroke
     // typed after the menu is visible must answer the menu, not leak
     // into the mid-turn queue editor.
@@ -382,6 +406,7 @@ fn ask_user(payload: &serde_json::Value) -> AskOutcome {
     // Own the keyboard for the whole exchange and pause the spinner
     // footer so it can't repaint over the cards (same hang-avoidance as
     // the approval prompt).
+    let _claim = TerminalPromptClaim::new();
     let _gate = terminal_event_gate()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -683,6 +708,16 @@ fn ask_free_text_raw() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_prompt_claim_marks_pending_until_dropped() {
+        let before = TERMINAL_PROMPT_CLAIMS.load(Ordering::SeqCst);
+        let claim = TerminalPromptClaim::new();
+        assert!(terminal_prompt_pending());
+        assert!(TERMINAL_PROMPT_CLAIMS.load(Ordering::SeqCst) >= before + 1);
+        drop(claim);
+        assert!(TERMINAL_PROMPT_CLAIMS.load(Ordering::SeqCst) >= before);
+    }
 
     #[test]
     fn preview_line_styling_highlights_diff_lines() {

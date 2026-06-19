@@ -728,6 +728,7 @@ impl ApprovalTool {
         input: serde_json::Value,
         on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> PiResult<ToolExecution> {
+        emit_tool_started_update(on_update.as_deref(), self.inner.name());
         let snapshot = std::env::current_dir().ok().and_then(|cwd| {
             crate::commands::code_diff::file_snapshot_before_tool(self.inner.name(), &input, &cwd)
         });
@@ -761,7 +762,6 @@ impl Tool for ApprovalTool {
         on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> PiResult<ToolExecution> {
         let name = self.inner.name();
-        emit_tool_started_update(on_update.as_deref(), name);
         let policy_decision = self
             .policy
             .as_ref()
@@ -1637,13 +1637,14 @@ mod tests {
         assert!(matches!(execution, ToolExecution::Done(_)));
         let updates = updates.lock().unwrap();
         assert_eq!(updates.len(), 2);
-        assert_eq!(update_kind(&updates[0]), Some("tool_started"));
-        assert!(update_text(&updates[1]).contains("smart approval auto-approved `bash`"));
+        assert_eq!(update_kind(&updates[0]), Some("smart_approval"));
+        assert!(update_text(&updates[0]).contains("smart approval auto-approved `bash`"));
         assert_eq!(
-            updates[1].details.as_ref().unwrap()["kind"],
+            updates[0].details.as_ref().unwrap()["kind"],
             "smart_approval"
         );
-        assert_eq!(updates[1].details.as_ref().unwrap()["decision"], "approved");
+        assert_eq!(updates[0].details.as_ref().unwrap()["decision"], "approved");
+        assert_eq!(update_kind(&updates[1]), Some("tool_started"));
         assert_eq!(ui_calls.load(Ordering::Relaxed), 0);
     }
 
@@ -1804,17 +1805,16 @@ mod tests {
 
         assert!(matches!(execution, ToolExecution::Done(_)));
         let updates = updates.lock().unwrap();
-        assert_eq!(updates.len(), 2);
-        assert_eq!(update_kind(&updates[0]), Some("tool_started"));
-        assert!(update_text(&updates[1])
+        assert_eq!(updates.len(), 1);
+        assert!(update_text(&updates[0])
             .contains("smart approval auto-denied `bash`: dangerous command"));
         assert_eq!(
-            updates[1].details.as_ref().unwrap()["kind"],
+            updates[0].details.as_ref().unwrap()["kind"],
             "smart_approval"
         );
-        assert_eq!(updates[1].details.as_ref().unwrap()["decision"], "denied");
+        assert_eq!(updates[0].details.as_ref().unwrap()["decision"], "denied");
         assert_eq!(
-            updates[1].details.as_ref().unwrap()["reason"],
+            updates[0].details.as_ref().unwrap()["reason"],
             "dangerous command"
         );
         assert_eq!(ui_calls.load(Ordering::Relaxed), 0);
