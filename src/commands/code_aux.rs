@@ -61,10 +61,7 @@ impl LlmSmartApproval {
         input: &serde_json::Value,
     ) -> Result<SmartApprovalVerdict> {
         let mut cfg = self.cfg.as_ref().clone();
-        cfg.http_timeout_secs = cfg
-            .http_timeout_secs
-            .min(SMART_APPROVAL_TIMEOUT_SECS)
-            .max(1);
+        cfg.http_timeout_secs = cfg.http_timeout_secs.clamp(1, SMART_APPROVAL_TIMEOUT_SECS);
         let req = ChatRequest {
             model: cfg.smart_approval_model.clone(),
             messages: build_smart_approval_messages(tool_name, preview, input),

@@ -516,8 +516,10 @@ fn install_ctrlc_handler() {
         if let Ok(guard) = CURRENT_ABORT.lock() {
             if let Some(h) = guard.as_ref() {
                 h.abort();
+                return;
             }
         }
+        std::process::exit(130);
     });
 }
 
@@ -1632,31 +1634,11 @@ async fn repl_loop(
             "/logout" => {
                 match crate::commands::logout::run() {
                     Ok(()) => {
-                        match reload_repl_session(
-                            "logged out",
-                            &mut provider,
-                            &mut model,
-                            &mut cfg,
-                            mode.clone(),
-                            Arc::clone(&approvals),
-                            bash_command_wrapper.clone(),
-                        )
-                        .await
-                        {
-                            Ok(next) => {
-                                drop(session_hooks);
-                                handle = next;
-                                session_hooks =
-                                    crate::commands::code_hooks::SessionHookGuard::start(
-                                        Arc::clone(&cfg),
-                                    );
-                                usage_history.clear();
-                                update_bar_status(|status| {
-                                    status.output_style = output_style.clone()
-                                });
-                            }
-                            Err(e) => eprintln!("{DIM}  /logout reload: {e:#}{RESET}"),
-                        }
+                        crate::commands::code_models::clear_registered_api_key_env();
+                        println!(
+                            "{DIM}  → logged out; ending this code session so no stale credentials stay live.{RESET}"
+                        );
+                        return Ok(());
                     }
                     Err(e) => eprintln!("{DIM}  /logout: {e:#}{RESET}"),
                 }
@@ -1762,7 +1744,7 @@ async fn repl_loop(
                 // so /clear is now the explicit "start over" verb.)
                 let _ = std::io::stdout().write_all(b"\x1b[2J\x1b[H");
                 let _ = std::io::stdout().flush();
-                handle = build_handle(
+                let next = build_handle(
                     &provider,
                     &model,
                     mode.clone(),
@@ -1772,6 +1754,10 @@ async fn repl_loop(
                     Arc::clone(&cfg),
                 )
                 .await?;
+                drop(session_hooks);
+                handle = next;
+                session_hooks =
+                    crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(&cfg));
                 history.clear();
                 usage_history.clear();
                 println!("{DIM}  → fresh session.{RESET}");
@@ -2616,12 +2602,6 @@ async fn repl_loop(
                         "Agent turn complete",
                     );
                 }
-                if matches!(mode.get(), Mode::Plan) && prompt_plan_exit_handoff()? {
-                    mode.set(Mode::Normal);
-                    println!(
-                        "{DIM}  → plan approved. normal mode is active; mutating tools are back online.{RESET}"
-                    );
-                }
                 if let Some(run) = auto_run.as_ref() {
                     let messages = handle.messages().await.unwrap_or_default();
                     let text = last_assistant_text(&messages).unwrap_or_default();
@@ -2863,50 +2843,6 @@ fn parse_init_section_indexes(input: &str) -> Option<Vec<usize>> {
     (!indexes.is_empty()).then_some(indexes)
 }
 
-fn prompt_plan_exit_handoff() -> Result<bool> {
-    let mut stderr = io::stderr();
-    eprintln!();
-    eprintln!("  \x1b[36;1m⎯ plan ready for approval ⎯\x1b[0m");
-    eprint!("  \x1b[2m[a]\x1b[0m approve plan and switch to normal mode  ");
-    eprint!("\x1b[2m[d]\x1b[0m keep planning: ");
-    let _ = stderr.flush();
-
-    let _guard = match RawModeGuard::enter() {
-        Ok(g) => g,
-        Err(_) => {
-            let mut line = String::new();
-            let _ = io::stdin().read_line(&mut line);
-            eprintln!();
-            return Ok(parse_plan_exit_choice(&line));
-        }
-    };
-    let approved = loop {
-        match event::read() {
-            Ok(Event::Key(KeyEvent { code, .. })) => match code {
-                KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Enter => break true,
-                KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc => break false,
-                _ => continue,
-            },
-            Ok(_) => continue,
-            Err(e) => return Err(anyhow::anyhow!("read plan approval: {e}")),
-        }
-    };
-    drop(_guard);
-    eprintln!(
-        "\x1b[2m{}\x1b[0m",
-        if approved {
-            "approved"
-        } else {
-            "kept in plan mode"
-        }
-    );
-    Ok(approved)
-}
-
-fn parse_plan_exit_choice(line: &str) -> bool {
-    matches!(line.trim().chars().next(), Some('a') | Some('A') | None)
-}
-
 async fn build_handle(
     provider: &str,
     model: &str,
@@ -2978,6 +2914,8 @@ async fn reload_repl_session(
     bash_command_wrapper: Option<Vec<String>>,
 ) -> Result<AgentSessionHandle> {
     let next_cfg = crate::config::load().context("reload config")?;
+    crate::commands::code_models::ensure_libertai_registered(&next_cfg)
+        .context("refresh LibertAI provider")?;
     let (next_provider, next_model) =
         reload_model_selection(cfg.as_ref(), &next_cfg, provider, model);
     *cfg = Arc::new(next_cfg);
@@ -4777,12 +4715,14 @@ fn persist_input_history_if_configured(
 
 fn persist_input_history(path: &Path, history: &VecDeque<String>) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
+        crate::config::create_dir_secure(parent)
             .with_context(|| format!("creating history dir {}", parent.display()))?;
+        crate::config::tighten_dir_mode_700(parent)
+            .with_context(|| format!("tightening history dir {}", parent.display()))?;
     }
     let items: Vec<&str> = history.iter().map(String::as_str).collect();
     let raw = serde_json::to_string_pretty(&items).context("serializing history")?;
-    fs::write(path, format!("{raw}\n"))
+    crate::config::write_file_secure(path, format!("{raw}\n").as_bytes())
         .with_context(|| format!("writing history {}", path.display()))?;
     Ok(())
 }
@@ -7403,8 +7343,10 @@ fn persist_scheduled_runs_if_configured(
 
 fn persist_scheduled_runs(path: &Path, scheduled_runs: &[ScheduledRun]) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
+        crate::config::create_dir_secure(parent)
             .with_context(|| format!("creating schedule store dir {}", parent.display()))?;
+        crate::config::tighten_dir_mode_700(parent)
+            .with_context(|| format!("tightening schedule store dir {}", parent.display()))?;
     }
     let stored: Vec<StoredScheduledRun> = scheduled_runs
         .iter()
@@ -7415,7 +7357,7 @@ fn persist_scheduled_runs(path: &Path, scheduled_runs: &[ScheduledRun]) -> Resul
         })
         .collect();
     let raw = serde_json::to_string_pretty(&stored).context("serializing schedule store")?;
-    fs::write(path, format!("{raw}\n"))
+    crate::config::write_file_secure(path, format!("{raw}\n").as_bytes())
         .with_context(|| format!("writing schedule store {}", path.display()))?;
     Ok(())
 }
@@ -11528,12 +11470,12 @@ fn start_background_agent(launch: &BackgroundAgentLaunch) -> Result<StartedBackg
     let exe = std::env::current_exe().context("resolving current executable")?;
     let log_path = background_agent_log_path(&launch.name)?;
     if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        crate::config::create_dir_secure(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+        crate::config::tighten_dir_mode_700(parent)
+            .with_context(|| format!("tightening {}", parent.display()))?;
     }
-    let log = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
+    let log = crate::config::open_append_secure(&log_path)
         .with_context(|| format!("opening {}", log_path.display()))?;
     let err_log = log
         .try_clone()
@@ -11678,12 +11620,12 @@ fn background_agent_records_path() -> Result<PathBuf> {
 fn persist_background_agent_record(record: &BackgroundAgentRecord) -> Result<()> {
     let path = background_agent_records_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        crate::config::create_dir_secure(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+        crate::config::tighten_dir_mode_700(parent)
+            .with_context(|| format!("tightening {}", parent.display()))?;
     }
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
+    let mut file = crate::config::open_append_secure(&path)
         .with_context(|| format!("opening {}", path.display()))?;
     serde_json::to_writer(&mut file, record)
         .with_context(|| format!("writing {}", path.display()))?;
@@ -11694,11 +11636,15 @@ fn persist_background_agent_record(record: &BackgroundAgentRecord) -> Result<()>
 fn rewrite_background_agent_records(records: &[BackgroundAgentRecord]) -> Result<()> {
     let path = background_agent_records_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        crate::config::create_dir_secure(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+        crate::config::tighten_dir_mode_700(parent)
+            .with_context(|| format!("tightening {}", parent.display()))?;
     }
     if records.is_empty() {
         if path.exists() {
-            fs::write(&path, "").with_context(|| format!("writing {}", path.display()))?;
+            crate::config::write_file_secure(&path, b"")
+                .with_context(|| format!("writing {}", path.display()))?;
         }
         return Ok(());
     }
@@ -11710,7 +11656,8 @@ fn rewrite_background_agent_records(records: &[BackgroundAgentRecord]) -> Result
         );
         raw.push('\n');
     }
-    fs::write(&path, raw).with_context(|| format!("writing {}", path.display()))?;
+    crate::config::write_file_secure(&path, raw.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
@@ -12366,6 +12313,7 @@ fn reload_preview_json_payload(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn print_doctor(
     handle: &AgentSessionHandle,
     provider: &str,
@@ -12599,6 +12547,7 @@ async fn print_doctor(
     println!();
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn print_doctor_json(
     handle: &AgentSessionHandle,
     provider: &str,
@@ -18988,11 +18937,15 @@ mod tests {
 
     #[test]
     fn reload_model_selection_tracks_changed_defaults_only_when_user_is_on_defaults() {
-        let mut old_cfg = LibertaiConfig::default();
-        old_cfg.default_code_provider = "libertai".to_string();
-        old_cfg.default_code_model = "old-default".to_string();
-        let mut next_cfg = old_cfg.clone();
-        next_cfg.default_code_model = "new-default".to_string();
+        let old_cfg = LibertaiConfig {
+            default_code_provider: "libertai".to_string(),
+            default_code_model: "old-default".to_string(),
+            ..LibertaiConfig::default()
+        };
+        let next_cfg = LibertaiConfig {
+            default_code_model: "new-default".to_string(),
+            ..old_cfg.clone()
+        };
 
         assert_eq!(
             reload_model_selection(&old_cfg, &next_cfg, "libertai", "old-default"),
@@ -21436,16 +21389,6 @@ mod tests {
         assert_eq!(provider_payload["provider"], "anthropic");
         assert_eq!(provider_payload["managed_by_desktop_settings"], true);
         assert_eq!(provider_payload["supported_actions"][22], "provider --json");
-    }
-
-    #[test]
-    fn parse_plan_exit_choice_accepts_approve_and_enter() {
-        assert!(parse_plan_exit_choice("a"));
-        assert!(parse_plan_exit_choice("A"));
-        assert!(parse_plan_exit_choice(""));
-        assert!(parse_plan_exit_choice("\n"));
-        assert!(!parse_plan_exit_choice("d"));
-        assert!(!parse_plan_exit_choice("no"));
     }
 
     #[test]

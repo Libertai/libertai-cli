@@ -1173,10 +1173,30 @@ pub(crate) fn write_file_secure(path: &std::path::Path, data: &[u8]) -> Result<(
     Ok(())
 }
 
+#[cfg(unix)]
+pub(crate) fn open_append_secure(path: &std::path::Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    set_file_mode_600(path)?;
+    Ok(file)
+}
+
 #[cfg(not(unix))]
 pub(crate) fn write_file_secure(path: &std::path::Path, data: &[u8]) -> Result<()> {
     std::fs::write(path, data)?;
     Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn open_append_secure(path: &std::path::Path) -> Result<std::fs::File> {
+    Ok(std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?)
 }
 
 #[cfg(unix)]

@@ -1742,6 +1742,7 @@ fn post_mcp_http_message(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn post_mcp_http_message_with_notifications(
     client: &reqwest::blocking::Client,
     server: &crate::config::McpServerConfig,
@@ -1834,6 +1835,7 @@ fn send_mcp_http_request(
     request.send()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_mcp_http_sse_response_with_roots_and_notifications(
     client: &reqwest::blocking::Client,
     server: &crate::config::McpServerConfig,

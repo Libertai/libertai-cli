@@ -872,18 +872,17 @@ impl Tool for ApprovalTool {
         payload: serde_json::Value,
     ) -> PiResult<ToolExecution> {
         // Unwrap our own pause envelope: { ui_payload, tool_input }.
-        // We need tool_input to re-run the inner tool on Allow.
+        // We need tool_input to re-run the regular non-UI gates and
+        // then the inner tool on Allow.
         let (ui_payload, tool_input) = unwrap_paused_approval(payload);
         match self.ui.resume_decide(request_id, ui_payload).await {
-            PromptChoice::Allow => self.execute_inner(tool_call_id, tool_input, None).await,
+            PromptChoice::Allow => {
+                self.execute_resumed_approval(tool_call_id, tool_input, false)
+                    .await
+            }
             PromptChoice::AlwaysAllow => {
-                let subject = approval_subject_with_base(
-                    self.inner.name(),
-                    &tool_input,
-                    self.base_dir.as_deref(),
-                );
-                self.state.record_always(subject.suggested_rule);
-                self.execute_inner(tool_call_id, tool_input, None).await
+                self.execute_resumed_approval(tool_call_id, tool_input, true)
+                    .await
             }
             PromptChoice::Deny => Ok(denial_output(None).into()),
             PromptChoice::Paused {
@@ -891,6 +890,55 @@ impl Tool for ApprovalTool {
                 payload,
             } => Ok(wrap_paused_approval(request_id, payload, &tool_input)),
         }
+    }
+}
+
+impl ApprovalTool {
+    async fn execute_resumed_approval(
+        &self,
+        tool_call_id: &str,
+        tool_input: serde_json::Value,
+        record_always: bool,
+    ) -> PiResult<ToolExecution> {
+        let name = self.inner.name();
+        let policy_decision = self
+            .policy
+            .as_ref()
+            .map(|policy| policy.decide(tool_call_id, name, &tool_input))
+            .unwrap_or(ToolPolicyDecision::NoDecision);
+        if let ToolPolicyDecision::Deny { reason } = policy_decision.clone() {
+            return Ok(denial_output(reason).into());
+        }
+        if matches!(policy_decision, ToolPolicyDecision::Defer) {
+            return Ok(defer_output(tool_call_id, name, &tool_input));
+        }
+        let effective_input = policy_updated_input(&policy_decision, &tool_input);
+
+        if matches!(self.mode.get(), Mode::Plan) && !self.inner.is_read_only() {
+            return Ok(plan_denial_output(self.inner.name()).into());
+        }
+
+        let subject = approval_subject_with_base(name, &effective_input, self.base_dir.as_deref());
+        if record_always {
+            self.state.record_always(subject.suggested_rule);
+        }
+
+        if !matches!(policy_decision, ToolPolicyDecision::Ask { .. }) {
+            if let Some(smart) = self.smart_approval.as_ref() {
+                let preview = preview_call(name, &effective_input);
+                if let SmartApprovalVerdict::Deny { reason } =
+                    smart.decide(name, &preview, &effective_input).await
+                {
+                    return Ok(denial_output(smart_denial_reason(reason)).into());
+                }
+            }
+        }
+
+        with_policy_context(
+            self.execute_inner(tool_call_id, effective_input, None)
+                .await,
+            &policy_decision,
+        )
     }
 }
 

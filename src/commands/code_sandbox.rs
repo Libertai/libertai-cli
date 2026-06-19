@@ -30,6 +30,8 @@
 //! detection-row UI works on every OS.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -57,7 +59,59 @@ pub fn binary_on_path(name: &str) -> Option<PathBuf> {
 /// but the binary is missing".
 #[must_use]
 pub fn is_strict_supported() -> bool {
-    cfg!(target_os = "linux") && binary_on_path("bwrap").is_some()
+    strict_support_error().is_none()
+}
+
+/// User-facing reason strict sandboxing cannot currently run, if any.
+#[must_use]
+pub fn strict_support_error() -> Option<String> {
+    static SUPPORT_ERROR: OnceLock<Option<String>> = OnceLock::new();
+    SUPPORT_ERROR
+        .get_or_init(detect_strict_support_error)
+        .clone()
+}
+
+#[cfg(target_os = "linux")]
+fn detect_strict_support_error() -> Option<String> {
+    let Some(bwrap) = binary_on_path("bwrap") else {
+        return Some("`bwrap` was not found on PATH. Install bubblewrap and re-run.".to_string());
+    };
+    let true_path = binary_on_path("true").or_else(|| {
+        ["/bin/true", "/usr/bin/true"]
+            .iter()
+            .map(PathBuf::from)
+            .find(|p| p.exists())
+    });
+    let Some(true_path) = true_path else {
+        return Some("could not find `true` for sandbox smoke test".to_string());
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let profile = detect_strict_profile(&cwd);
+    let argv = profile_to_argv(&profile);
+    let mut args = argv.into_iter().skip(1).collect::<Vec<_>>();
+    args.push(true_path.to_string_lossy().into_owned());
+    match Command::new(&bwrap).args(args).output() {
+        Ok(output) if output.status.success() => None,
+        Ok(output) => {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let detail = if detail.is_empty() {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            } else {
+                detail
+            };
+            Some(if detail.is_empty() {
+                format!("`{}` exited with {}", bwrap.display(), output.status)
+            } else {
+                format!("`{}` smoke test failed: {detail}", bwrap.display())
+            })
+        }
+        Err(err) => Some(format!("failed to run `{}`: {err}", bwrap.display())),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detect_strict_support_error() -> Option<String> {
+    Some("strict sandboxing is Linux-only today".to_string())
 }
 
 /// User-facing `--sandbox=<mode>` choice.
@@ -437,7 +491,7 @@ pub fn build_command_wrapper(
     match mode {
         SandboxMode::Off | SandboxMode::Auto => None,
         SandboxMode::Strict => {
-            if !cfg!(target_os = "linux") {
+            if strict_support_error().is_some() {
                 return None;
             }
             let mut profile = detect_strict_profile(cwd);

@@ -51,6 +51,15 @@ pub const LIBERTAI_API_KEY_ENV: &str = "LIBERTAI_API_KEY";
 /// environment-variable lookup at registry load, so no secret hits disk.
 pub const MODELS_JSON_API_KEY_REF: &str = "env:LIBERTAI_API_KEY";
 
+/// Clear the process-local key used by pi's `env:` model indirection.
+///
+/// `logout` removes the on-disk source of truth, but a live REPL can
+/// keep running inside the same process. Dropping the env var prevents
+/// an already-started harness from accidentally reusing a stale key.
+pub fn clear_registered_api_key_env() {
+    std::env::remove_var(LIBERTAI_API_KEY_ENV);
+}
+
 /// Ensure `<pi_global_dir>/models.json` has an up-to-date `libertai` provider
 /// entry wired to the current libertai-cli config. Creates the file (and
 /// parent directory) if missing; merges with existing providers otherwise.

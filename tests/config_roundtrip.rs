@@ -2,6 +2,8 @@
 
 use libertai_cli::config::{
     mask_key, Auth, Config, HookCommandConfig, HooksConfig, LauncherDefaults, McpServerConfig,
+    DEFAULT_API_BASE, DEFAULT_CHAT_MODEL, DEFAULT_CODE_MODEL, DEFAULT_FAST_MODEL,
+    DEFAULT_HAIKU_MODEL, DEFAULT_IMAGE_MODEL, DEFAULT_OPUS_MODEL,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -9,13 +11,13 @@ use std::collections::BTreeMap;
 #[test]
 fn empty_toml_parses_as_defaults() {
     let cfg: Config = toml::from_str("").unwrap();
-    assert_eq!(cfg.api_base, "https://api.libertai.io");
-    assert_eq!(cfg.default_chat_model, "qwen3.5-122b-a10b");
-    assert_eq!(cfg.default_code_model, "qwen3.6-35b-a3b");
-    assert_eq!(cfg.default_image_model, "z-image-turbo");
-    assert_eq!(cfg.launcher_defaults.opus_model, "gemma-4-31b-it");
-    assert_eq!(cfg.launcher_defaults.sonnet_model, "qwen3.6-35b-a3b");
-    assert_eq!(cfg.launcher_defaults.haiku_model, "qwen3.6-35b-a3b");
+    assert_eq!(cfg.api_base, DEFAULT_API_BASE);
+    assert_eq!(cfg.default_chat_model, DEFAULT_CHAT_MODEL);
+    assert_eq!(cfg.default_code_model, DEFAULT_CODE_MODEL);
+    assert_eq!(cfg.default_image_model, DEFAULT_IMAGE_MODEL);
+    assert_eq!(cfg.launcher_defaults.opus_model, DEFAULT_OPUS_MODEL);
+    assert_eq!(cfg.launcher_defaults.sonnet_model, DEFAULT_FAST_MODEL);
+    assert_eq!(cfg.launcher_defaults.haiku_model, DEFAULT_HAIKU_MODEL);
     assert!(cfg.status_line_template.is_empty());
     assert!(cfg.hooks.user_prompt_submit.is_empty());
     assert!(cfg.hooks.pre_tool_use.is_empty());

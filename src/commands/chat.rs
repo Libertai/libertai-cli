@@ -180,7 +180,8 @@ fn chat_history_path() -> Result<PathBuf> {
 
 fn persist_history(rl: &mut DefaultEditor, path: &std::path::Path) {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = crate::config::create_dir_secure(parent);
+        let _ = crate::config::tighten_dir_mode_700(parent);
     }
     // Appends only the new entries; falls back to a full save when the
     // file does not exist yet. History persistence is best-effort — a
@@ -188,6 +189,7 @@ fn persist_history(rl: &mut DefaultEditor, path: &std::path::Path) {
     if rl.append_history(path).is_err() {
         let _ = rl.save_history(path);
     }
+    let _ = crate::config::set_file_mode_600(path);
 }
 
 // ── slash commands ──────────────────────────────────────────────────────────

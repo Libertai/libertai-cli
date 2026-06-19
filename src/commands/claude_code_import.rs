@@ -108,7 +108,7 @@ pub fn discover(cwd: &Path, all_projects: bool) -> Result<Vec<DiscoveredSession>
         }
     }
 
-    sessions.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.mtime));
     Ok(sessions)
 }
 

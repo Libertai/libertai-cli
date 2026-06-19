@@ -37,7 +37,7 @@ pub struct ClassifiedError {
 }
 
 impl ClassifiedError {
-    pub fn new(class: ErrorClass, message: impl Into<String>) -> anyhow::Error {
+    pub fn classified(class: ErrorClass, message: impl Into<String>) -> anyhow::Error {
         anyhow::Error::new(Self {
             class,
             message: message.into(),
@@ -120,7 +120,7 @@ fn annotate_send_err(
         let bump = timeout_secs
             .map(|s| s.saturating_mul(2).max(300))
             .unwrap_or(300);
-        return ClassifiedError::new(
+        return ClassifiedError::classified(
             ErrorClass::Network,
             format!(
                 "{ctx}: request timed out{after} — the model may still be generating. \
@@ -152,7 +152,7 @@ pub fn http_stream() -> Result<Client> {
 
 pub fn require_api_key(cfg: &Config) -> Result<&str> {
     cfg.auth.api_key.as_deref().ok_or_else(|| {
-        ClassifiedError::new(
+        ClassifiedError::classified(
             ErrorClass::Auth,
             "not logged in — run `libertai login` first",
         )
@@ -534,7 +534,7 @@ fn check_status(
     // A 401 on an authenticated call almost always means the stored key is invalid,
     // revoked, or (for CLI keys) expired — point the user at a fresh login.
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(ClassifiedError::new(
+        return Err(ClassifiedError::classified(
             ErrorClass::Auth,
             format!(
                 "{url} → {status}: {truncated}\n\
@@ -542,7 +542,7 @@ fn check_status(
             ),
         ));
     }
-    Err(ClassifiedError::new(
+    Err(ClassifiedError::classified(
         ErrorClass::Api,
         format!("{url} → {status}: {truncated}"),
     ))
@@ -554,7 +554,7 @@ mod tests {
 
     #[test]
     fn error_class_found_through_context_layers() {
-        let err = ClassifiedError::new(ErrorClass::Auth, "no key")
+        let err = ClassifiedError::classified(ErrorClass::Auth, "no key")
             .context("loading models")
             .context("outermost");
         assert_eq!(error_class(&err), Some(ErrorClass::Auth));

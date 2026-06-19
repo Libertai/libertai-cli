@@ -16,7 +16,7 @@ use pi::sdk::{create_agent_session, AgentEvent};
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi, NotifyOutcome, PromptChoice};
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
-use crate::commands::code_sandbox::{build_command_wrapper, is_strict_supported, SandboxMode};
+use crate::commands::code_sandbox::{build_command_wrapper, strict_support_error, SandboxMode};
 use crate::commands::code_session::{
     build_session_options, list_past_sessions, most_recent_session, CodeSessionConfig,
     SessionPersistence,
@@ -46,14 +46,6 @@ pub fn run(
     // configured idle timeout (cfg.http_timeout_secs, default 600s)
     // wins over pi's baked-in 60s.
     crate::commands::code_session::ensure_pi_http_timeout(cfg.http_timeout_secs);
-    // Make sure pi's models.json knows about libertai before any pi-side
-    // code looks it up. Runs first so auth / FS errors surface before we
-    // spin up the async runtime.
-    code_models::ensure_libertai_registered(&cfg)?;
-    // Point pi's MEMORY.md loader at our per-project memory root so
-    // /remember-stored notes reach the system prompt.
-    crate::commands::code_memory::ensure_memory_env()?;
-
     let model = model.unwrap_or_else(|| cfg.default_code_model.clone());
     let provider = provider.unwrap_or_else(|| cfg.default_code_provider.clone());
     let mode = if plan { Mode::Plan } else { Mode::Normal };
@@ -62,6 +54,12 @@ pub fn run(
     if list_sessions {
         return print_session_list(all, json);
     }
+
+    let oneshot_prompt = if args.is_empty() && !print {
+        None
+    } else {
+        Some(build_oneshot_prompt(&args, print)?)
+    };
 
     // Resolve --resume / --continue into an explicit session path, if any.
     let resume_path = resolve_resume_path(resume, continue_recent)?;
@@ -75,21 +73,11 @@ pub fn run(
     // When the user explicitly asked for strict, bail loudly if the
     // platform/distro can't deliver it — silently running unsandboxed
     // when the user opted in is worse than refusing to start.
-    if matches!(sandbox, SandboxMode::Strict) && !is_strict_supported() {
-        if cfg!(target_os = "linux") {
+    if matches!(sandbox, SandboxMode::Strict) {
+        if let Some(reason) = strict_support_error() {
             anyhow::bail!(
-                "--sandbox=strict requires `bwrap` on PATH but it wasn't found. \
-                 Install it (Debian/Ubuntu: `apt install bubblewrap`; \
-                 Fedora/RHEL: `dnf install bubblewrap`; \
-                 Arch: `pacman -S bubblewrap`; \
-                 NixOS: add `bubblewrap` to your shell or system packages) \
-                 and re-run, or drop `--sandbox=strict`.",
-            );
-        } else {
-            anyhow::bail!(
-                "--sandbox=strict is Linux-only today (macOS and Windows \
-                 backends are tracked as follow-ups). Re-run without \
-                 `--sandbox=strict` to use the default unsandboxed bash.",
+                "--sandbox=strict is unavailable: {reason}\n\
+                 Re-run without `--sandbox=strict` or fix the host sandbox support first.",
             );
         }
     }
@@ -102,75 +90,87 @@ pub fn run(
         None,
     );
 
-    if args.is_empty() && !print {
+    if let Some(prompt) = oneshot_prompt {
+        prepare_agent_environment(&cfg)?;
+
+        // pi uses asupersync as its async runtime (not tokio).
+        let reactor = asupersync::runtime::reactor::create_reactor()
+            .map_err(|e| anyhow::anyhow!("asupersync reactor: {e}"))?;
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
+            .build()
+            .map_err(|e| anyhow::anyhow!("asupersync runtime: {e}"))?;
+
+        // Non-interactive path honours --plan too, in case someone wants a
+        // one-shot planning run: `libertai code --plan "refactor src/foo"`.
+        // The flag is created here even though it can't be toggled from a
+        // one-shot — it's part of the factory's contract now.
+        let approvals = Arc::new(ApprovalState::with_persistent_store(
+            crate::config::allow_rules_path()?,
+        )?);
+        // --print never blocks on the terminal: anything that would need an
+        // interactive approval is auto-denied instead. Without it, one-shot
+        // runs keep the terminal micro-prompt (the user is still at a TTY).
+        let ui: Arc<dyn ApprovalUi> = if print {
+            Arc::new(PrintModeApprovalUi)
+        } else {
+            Arc::new(TerminalApprovalUi)
+        };
+        let cfg = Arc::new(cfg);
+        let mode_flag = ModeFlag::new(mode);
+        let factory = Arc::new(
+            LibertaiToolFactory::new_with_features(
+                mode_flag.clone(),
+                Arc::clone(&approvals),
+                ui,
+                FactoryFeatures::cli_defaults(),
+                Some(Arc::clone(&cfg)),
+            )
+            .with_tool_policy(crate::commands::code_hooks::tool_policy_from_config(
+                Arc::clone(&cfg),
+            )),
+        );
+
+        runtime.block_on(async move {
+            run_async(
+                provider,
+                model,
+                prompt,
+                factory,
+                resume_path,
+                bash_command_wrapper,
+                mode,
+                cfg,
+                print,
+                approvals,
+                mode_flag,
+            )
+            .await
+        })
+    } else {
+        prepare_agent_environment(&cfg)?;
         // No prompt on the command line → interactive REPL.
         // Raw-mode UI + input bar + agent session reuse live in code_ui.
-        return code_ui::run_interactive(
+        code_ui::run_interactive(
             provider,
             model,
             mode,
             resume_path,
             bash_command_wrapper,
             Arc::new(cfg),
-        );
+        )
     }
+}
 
-    let prompt = build_oneshot_prompt(&args, print)?;
-
-    // pi uses asupersync as its async runtime (not tokio).
-    let reactor = asupersync::runtime::reactor::create_reactor()
-        .map_err(|e| anyhow::anyhow!("asupersync reactor: {e}"))?;
-    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
-        .with_reactor(reactor)
-        .build()
-        .map_err(|e| anyhow::anyhow!("asupersync runtime: {e}"))?;
-
-    // Non-interactive path honours --plan too, in case someone wants a
-    // one-shot planning run: `libertai code --plan "refactor src/foo"`.
-    // The flag is created here even though it can't be toggled from a
-    // one-shot — it's part of the factory's contract now.
-    let approvals = Arc::new(ApprovalState::with_persistent_store(
-        crate::config::allow_rules_path()?,
-    )?);
-    // --print never blocks on the terminal: anything that would need an
-    // interactive approval is auto-denied instead. Without it, one-shot
-    // runs keep the terminal micro-prompt (the user is still at a TTY).
-    let ui: Arc<dyn ApprovalUi> = if print {
-        Arc::new(PrintModeApprovalUi)
-    } else {
-        Arc::new(TerminalApprovalUi)
-    };
-    let cfg = Arc::new(cfg);
-    let mode_flag = ModeFlag::new(mode);
-    let factory = Arc::new(
-        LibertaiToolFactory::new_with_features(
-            mode_flag.clone(),
-            Arc::clone(&approvals),
-            ui,
-            FactoryFeatures::cli_defaults(),
-            Some(Arc::clone(&cfg)),
-        )
-        .with_tool_policy(crate::commands::code_hooks::tool_policy_from_config(
-            Arc::clone(&cfg),
-        )),
-    );
-
-    runtime.block_on(async move {
-        run_async(
-            provider,
-            model,
-            prompt,
-            factory,
-            resume_path,
-            bash_command_wrapper,
-            mode,
-            cfg,
-            print,
-            approvals,
-            mode_flag,
-        )
-        .await
-    })
+fn prepare_agent_environment(cfg: &LibertaiConfig) -> Result<()> {
+    // Make sure pi's models.json knows about libertai before any pi-side
+    // code looks it up. Deliberately runs after local short-circuits and
+    // prompt validation so auth errors don't hide command-usage problems.
+    code_models::ensure_libertai_registered(cfg)?;
+    // Point pi's MEMORY.md loader at our per-project memory root so
+    // /remember-stored notes reach the system prompt.
+    crate::commands::code_memory::ensure_memory_env()?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -367,8 +367,7 @@ fn read_piped_stdin() -> Option<String> {
     }
     let mut buf = String::new();
     stdin.read_to_string(&mut buf).ok()?;
-    let trimmed = buf.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
+    (!buf.trim().is_empty()).then_some(buf)
 }
 
 /// `--print` approval UI: never blocks on the terminal.

@@ -401,9 +401,7 @@ fn ask_one(question: &serde_json::Value) -> Option<serde_json::Value> {
     }
 
     if multi {
-        eprintln!(
-            "  \x1b[2m↑/↓ move · space toggle · enter confirm · esc cancel\x1b[0m"
-        );
+        eprintln!("  \x1b[2m↑/↓ move · space toggle · enter confirm · esc cancel\x1b[0m");
     } else {
         eprintln!("  \x1b[2m↑/↓ move · 1-9 / enter pick · esc cancel\x1b[0m");
     }
@@ -429,7 +427,12 @@ fn ask_one(question: &serde_json::Value) -> Option<serde_json::Value> {
 /// string (lines joined by `\r\n`, no trailing newline so the caller can
 /// erase exactly `rows` rows). `cursor` is highlighted; in multi-select
 /// mode `checked` rows show a filled box.
-fn render_ask_options(options: &[AskOption], cursor: usize, checked: &[bool], multi: bool) -> String {
+fn render_ask_options(
+    options: &[AskOption],
+    cursor: usize,
+    checked: &[bool],
+    multi: bool,
+) -> String {
     let width = prompt_width();
     let mut lines = Vec::with_capacity(options.len());
     for (i, opt) in options.iter().enumerate() {
