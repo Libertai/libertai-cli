@@ -79,8 +79,34 @@ impl ApprovalUi for TerminalApprovalUi {
         prompt(tool_name, preview, always_rule)
     }
 
+    async fn resume_decide(&self, _request_id: &str, payload: serde_json::Value) -> PromptChoice {
+        let Some(tool_name) = payload
+            .get("tool_name")
+            .or_else(|| payload.get("name"))
+            .and_then(|v| v.as_str())
+        else {
+            return PromptChoice::Deny;
+        };
+        let preview = payload
+            .get("preview")
+            .or_else(|| payload.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let always_rule = payload
+            .get("always_rule")
+            .or_else(|| payload.get("rule"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(tool_name);
+        prompt(tool_name, preview, always_rule)
+    }
+
     async fn ask(&self, payload: serde_json::Value) -> AskOutcome {
         ask_user(&payload)
+    }
+
+    async fn resume_ask(&self, _request_id: &str, payload: serde_json::Value) -> AskOutcome {
+        let payload = payload.get("questions").unwrap_or(&payload);
+        ask_user(payload)
     }
 
     async fn notify(&self, title: &str, body: &str) -> NotifyOutcome {
@@ -94,12 +120,17 @@ pub(crate) fn notify_terminal(title: &str, body: &str) -> NotifyOutcome {
     if title.is_empty() || body.is_empty() {
         return NotifyOutcome::Skipped("EMPTY_NOTIFICATION".to_string());
     }
+    let _gate = terminal_event_gate()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    crate::commands::code_ui::suspend_active_footer();
     eprint!("\x07");
     eprintln!();
     eprintln!("  \x1b[35;1mnotification\x1b[0m \x1b[1m{}\x1b[0m", title);
     for line in body.lines() {
         eprintln!("  \x1b[2m│\x1b[0m {}", line);
     }
+    crate::commands::code_ui::resume_active_footer();
     NotifyOutcome::Sent
 }
 
@@ -586,16 +617,67 @@ fn select_options_cooked(options: &[AskOption], multi: bool) -> Option<Vec<usize
     }
 }
 
-/// Read a single free-form answer line in cooked mode. Returns `None` on
-/// EOF (the user closed the input) so the caller can treat it as cancel.
+/// Read a single free-form answer line. Prefer raw key handling because
+/// this can run while the mid-turn input pump has stdin in cbreak/no-echo
+/// mode; cooked `read_line` would not echo or edit correctly there.
 fn ask_free_text() -> Option<String> {
     eprint!("  \x1b[2myour answer:\x1b[0m ");
     let _ = std::io::stderr().flush();
+    if let Ok(_guard) = RawModeGuard::enter() {
+        return ask_free_text_raw();
+    }
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).ok()? == 0 {
         return None;
     }
     Some(line.trim().to_string())
+}
+
+fn ask_free_text_raw() -> Option<String> {
+    let mut answer = String::new();
+    loop {
+        match event::read() {
+            Ok(Event::Key(KeyEvent {
+                code, modifiers, ..
+            })) => match (code, modifiers) {
+                (KeyCode::Enter, _) => {
+                    eprintln!();
+                    return Some(answer.trim().to_string());
+                }
+                (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                    eprintln!();
+                    return None;
+                }
+                (KeyCode::Backspace, _) => {
+                    if answer.pop().is_some() {
+                        eprint!("\x08 \x08");
+                        let _ = std::io::stderr().flush();
+                    }
+                }
+                (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                    if !c.is_control() {
+                        answer.push(c);
+                        eprint!("{c}");
+                        let _ = std::io::stderr().flush();
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::Paste(data)) => {
+                let safe = sanitize_terminal_preview_text(&data)
+                    .replace(['\n', '\t'], " ")
+                    .trim()
+                    .to_string();
+                if !safe.is_empty() {
+                    answer.push_str(&safe);
+                    eprint!("{safe}");
+                    let _ = std::io::stderr().flush();
+                }
+            }
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+    }
 }
 
 #[cfg(test)]

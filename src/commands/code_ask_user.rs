@@ -185,8 +185,11 @@ impl Tool for AskUserTool {
         // round-trip them. UIs can ignore `ui_payload` and just use
         // questions, or use ui_payload to recover any in-flight state
         // (e.g. partial answers).
-        let _ = ui_payload; // currently UIs re-render from questions only
-        match self.ui.resume_ask(request_id, questions.clone()).await {
+        let resume_payload = serde_json::json!({
+            "ui_payload": ui_payload,
+            "questions": questions,
+        });
+        match self.ui.resume_ask(request_id, resume_payload).await {
             AskOutcome::Answer(response) => Ok(answer_output(response).into()),
             AskOutcome::Paused {
                 request_id,

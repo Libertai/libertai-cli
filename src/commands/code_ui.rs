@@ -21,6 +21,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::fmt::Write as _;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
@@ -556,12 +557,16 @@ fn rule_chip(cols: usize, mode: Mode) -> String {
             let text = status_line_command_text(&s.status_line_command)
                 .or_else(|| expand_status_line_template(&s.status_line_template, &s, mode))
                 .unwrap_or_else(|| default_rule_text(&s, mode));
-            format!(" {text} ")
+            let budget = cols.saturating_sub(4);
+            format!(
+                " {} ",
+                clip_chars(&sanitize_terminal_preview_text(&text), budget)
+            )
         }
         None => String::new(),
     };
     // Pad with ─ so the whole line fills the terminal width.
-    let chip_len = inner.chars().count();
+    let chip_len = rich_rust::cells::cell_len(&inner);
     if chip_len + 4 >= cols || cols == 0 {
         return "\u{2500}".repeat(cols.max(1));
     }
@@ -1054,6 +1059,14 @@ fn resume_session_meta(path: &Path) -> Option<SessionMeta> {
     })
 }
 
+fn session_name_for_path(path: &Path) -> Option<String> {
+    resume_session_meta(path).and_then(|meta| {
+        meta.name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+    })
+}
+
 /// One-line `--continue`/`--resume` summary: which session came back,
 /// how old it is, and how many messages it carries.
 fn resume_summary_text(meta: &SessionMeta, now_ms: i64) -> String {
@@ -1144,7 +1157,7 @@ async fn repl_loop(
     let mut output_style: Option<String> = None;
     let mut usage_history: Vec<UsageRecord> = Vec::new();
     let tool_activity = Arc::new(Mutex::new(ToolActivityTracker::default()));
-    let mut session_name: Option<String> = None;
+    let mut session_name: Option<String> = resume_path.as_deref().and_then(session_name_for_path);
     let mut active_session_path = resume_path.clone();
     let mut autonomous_queue: VecDeque<String> = VecDeque::new();
     let mut auto_run: Option<AutoRun> = None;
@@ -1374,6 +1387,7 @@ async fn repl_loop(
                             );
                             usage_history.clear();
                             active_session_path = None;
+                            session_name = None;
                             update_bar_status(|status| status.output_style = output_style.clone());
                         }
                         Err(e) => eprintln!("{DIM}  /reload: {e:#}{RESET}"),
@@ -1627,6 +1641,7 @@ async fn repl_loop(
                                     );
                                 usage_history.clear();
                                 active_session_path = None;
+                                session_name = None;
                                 update_bar_status(|status| {
                                     status.output_style = output_style.clone()
                                 });
@@ -1668,6 +1683,7 @@ async fn repl_loop(
                                     );
                                 usage_history.clear();
                                 active_session_path = Some(path.clone());
+                                session_name = session_name_for_path(&path);
                                 update_bar_status(|status| {
                                     status.output_style = output_style.clone()
                                 });
@@ -1762,6 +1778,7 @@ async fn repl_loop(
                     crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(&cfg));
                 usage_history.clear();
                 active_session_path = None;
+                session_name = None;
                 println!("{DIM}  → fresh session.{RESET}");
                 println!();
                 continue;
@@ -1866,6 +1883,7 @@ async fn repl_loop(
                             );
                             usage_history.clear();
                             active_session_path = Some(path.clone());
+                            session_name = session_name_for_path(&path);
                             update_bar_status(|status| status.output_style = output_style.clone());
                         }
                         Err(e) => eprintln!("{DIM}  /resume: {e:#}{RESET}"),
@@ -2113,9 +2131,7 @@ async fn repl_loop(
                 ModelSlashCommand::JsonList => {
                     print_model_json(&handle, &cfg, &scoped_model_patterns, rest, true)
                 }
-                ModelSlashCommand::List => {
-                    print_model_list(&cfg, &provider, &scoped_model_patterns)
-                }
+                ModelSlashCommand::List => print_model_list(&cfg, &scoped_model_patterns),
                 ModelSlashCommand::Next | ModelSlashCommand::Previous => {
                     let direction = if matches!(model_command, ModelSlashCommand::Previous) {
                         -1
@@ -3441,11 +3457,19 @@ fn print_thinking_json(handle: &AgentSessionHandle, query: &str) {
 /// out via the same `print!` path; here we just paint each prior turn at
 /// once, with no animation.
 fn print_rehydrated_transcript(messages: &[Message]) {
-    println!("{DIM}  ── resuming session ──{RESET}");
+    print!("{}", render_rehydrated_transcript(messages));
+    let _ = io::stdout().flush();
+}
+
+fn render_rehydrated_transcript(messages: &[Message]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "{DIM}  ── resuming session ──{RESET}");
     for msg in messages {
         match msg {
             Message::User(u) => match &u.content {
-                UserContent::Text(t) => println!("{BOLD}you{RESET}  {t}"),
+                UserContent::Text(t) => {
+                    let _ = writeln!(out, "{BOLD}you{RESET}  {t}");
+                }
                 UserContent::Blocks(blocks) => {
                     let mut buf = String::new();
                     for b in blocks {
@@ -3454,36 +3478,48 @@ fn print_rehydrated_transcript(messages: &[Message]) {
                         }
                     }
                     if !buf.is_empty() {
-                        println!("{BOLD}you{RESET}  {buf}");
+                        let _ = writeln!(out, "{BOLD}you{RESET}  {buf}");
                     }
                 }
             },
             Message::Assistant(a) => {
-                let mut text = String::new();
-                let mut tool_calls = Vec::new();
                 for b in &a.content {
                     match b {
-                        ContentBlock::Text(tc) => text.push_str(&tc.text),
-                        ContentBlock::ToolCall(tc) => tool_calls.push(tc.name.clone()),
+                        ContentBlock::Text(tc) if !tc.text.is_empty() => {
+                            let _ = writeln!(out, "{}", tc.text);
+                        }
+                        ContentBlock::ToolCall(tc) if tc.name != "todo" => {
+                            let name = sanitize_terminal_preview_text(&tc.name);
+                            let _ = writeln!(out, "  {DIM}[tool] {name}{RESET}");
+                        }
                         _ => {}
                     }
                 }
-                if !text.is_empty() {
-                    println!("{text}");
-                }
-                for name in tool_calls {
-                    if name != "todo" {
-                        println!("  {DIM}[tool] {name}{RESET}");
-                    }
+            }
+            Message::ToolResult(result) => {
+                let marker = if result.is_error {
+                    "[tool-error]"
+                } else {
+                    "[tool-result]"
+                };
+                let name = sanitize_terminal_preview_text(&result.tool_name);
+                let _ = writeln!(out, "  {DIM}{marker} {name}{RESET}");
+                if let Some(preview) = rehydrated_tool_result_preview(result) {
+                    let _ = writeln!(out, "  {DIM}│{RESET} {preview}");
                 }
             }
-            // Tool results were already shown inline last time; replaying
-            // them verbatim would be noisy. Skip.
-            Message::ToolResult(_) | Message::Custom(_) => {}
+            Message::Custom(_) => {}
         }
     }
-    println!("{DIM}  ── end of saved transcript ──{RESET}");
-    println!();
+    let _ = writeln!(out, "{DIM}  ── end of saved transcript ──{RESET}");
+    out.push('\n');
+    out
+}
+
+fn rehydrated_tool_result_preview(result: &pi::model::ToolResultMessage) -> Option<String> {
+    let text = sanitize_terminal_preview_text(&blocks_text(&result.content));
+    let preview = preview_text(&text, 240);
+    (!preview.is_empty()).then_some(preview)
 }
 
 /// One `/help` category: a scannable header plus its command lines.
@@ -3872,7 +3908,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "config" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|path|open|settings|backends|defaults|agents|skills|hooks|mcp|approvals|appearance|sandbox|advanced|set <key> <value>|unset <key>|reset <key>",
         "copy" => "status|show|info|json|--json|status --json|show --json|info --json|last|latest|response|assistant|assistant-response",
         "doctor" => "status|state|show|info|health|diagnostics|diag|json|--json|status --json|state --json|show --json|info --json|health --json|diagnostics --json|diag --json",
-        "export" => "copy|save|path|json|--json|status --json|show --json|preview --json|[path]",
+        "export" => "save|path|json|--json|status --json|show --json|preview --json|[path]",
         "fork" => "list|index|id",
         "help" => "status|show|list|commands|json|--json|status --json|show --json|list --json|commands --json",
         "hooks" => "status|list|state|diagnostics|diag|json|--json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|show|event|inspect <event>|open|settings|edit",
@@ -3885,7 +3921,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "memory" => "show|status|edit|open|list|files|file <number|path>|read <number|path>|show-file <number|path>|references|refs|verify|import <path>|import-claude|migrate-claude|claude|import-claude-all|migrate-claude-all|claude-all|clear|path|json|--json|status --json|show --json",
         "mention" => "<path> [prompt]",
         "mode" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only",
-        "model" => "status|show|current|json|--json|status --json|show --json|current --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model",
+        "model" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model",
         "name" => "<name>|status|state|show|current|info|json|--json|status --json|state --json|show --json|current --json|info --json",
         "notify" => "on|enable|enabled|off|disable|disabled|clear|status|state|show|json|--json|status --json|state --json|show --json|test|ping",
         "onboarding" => "show|preview|save|path|gist|json|--json|status --json|show --json|preview --json",
@@ -3901,7 +3937,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "schedule" => "in <delay> <prompt>|list|status|state|json|--json|list --json|show|inspect|show-json|run|now|trigger|cancel|delete|rm|clear|stop",
         "scoped-models" => "status|show|json|--json|status --json|show --json|patterns|clear|reset|off",
         "send" => "status|targets|list|json|--json|status --json|state --json|show --json|list --json|targets --json|queued|queue --json|queued --json|pending --json|clear <id|target|all>|session message",
-        "share" => "copy|save|path|gist|json|--json|status --json|show --json|preview --json|[path]",
+        "share" => "save|path|gist|json|--json|status --json|show --json|preview --json|[path]",
         "skills" => "list|status|show|json|--json|status --json|list --json|show --json|show <name>|show <name> --json|open|settings|edit|enable|on <name>|disable|off <name>",
         "status" => "status|state|show|info|current|session|json|--json|status --json|state --json|show --json|info --json|current --json|session --json",
         "statusline" => "status|show|json|--json|status --json|show --json|template --json|info --json|template|command <shell>|command-clear|command reset|command clear|reset|clear",
@@ -4147,7 +4183,7 @@ fn print_exit_json(command: &str, query: &str) {
 }
 
 fn model_usage_text() -> &'static str {
-    "/model [status|show|current|json|--json|status --json|show --json|current --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model]"
+    "/model [status|show|current|info|json|--json|status --json|show --json|current --json|info --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model]"
 }
 
 fn scoped_models_usage_text() -> &'static str {
@@ -4158,8 +4194,11 @@ fn hotkey_lines() -> &'static [&'static str] {
     &[
         "Shift+Tab — cycle normal / accept-edits / plan modes",
         "Up / Down — move between draft lines, then walk submitted prompt history",
-        "Left / Right — move cursor in the current line",
+        "Left / Right / Ctrl+B / Ctrl+F — move cursor in the current line",
+        "Ctrl+Left / Ctrl+Right / Alt+B / Alt+F — move by word",
         "Backspace / Delete — edit the current line",
+        "Ctrl+W / Alt+Backspace — delete the previous word",
+        "Alt+D / Ctrl+Delete — delete the next word",
         "Home / End — jump to start or end of the current line",
         "Enter — submit the current prompt",
         "Alt+Enter / Ctrl+J — insert a newline (Shift+Enter on terminals that report it)",
@@ -5878,8 +5917,8 @@ fn parse_model_spec(current_provider: &str, input: &str) -> Result<(String, Stri
 fn parse_model_slash_command(input: &str) -> ModelSlashCommand<'_> {
     let raw = input.trim();
     match raw.to_ascii_lowercase().as_str() {
-        "" | "status" | "show" | "current" => ModelSlashCommand::Status,
-        "json" | "--json" | "status --json" | "show --json" | "current --json" => {
+        "" | "status" | "show" | "current" | "info" => ModelSlashCommand::Status,
+        "json" | "--json" | "status --json" | "show --json" | "current --json" | "info --json" => {
             ModelSlashCommand::Json
         }
         "list --json" | "ls --json" => ModelSlashCommand::JsonList,
@@ -6041,7 +6080,7 @@ fn model_json_payload(
         "available_models": available_models,
         "available_models_source": available_models_source,
         "aliases": ["model"],
-        "supported_actions": ["status", "show", "current", "json", "--json", "status --json", "show --json", "current --json", "list", "ls", "list --json", "ls --json", "next", "cycle", "prev", "previous", "back", "set <model>", "set <provider/model>"],
+        "supported_actions": ["status", "show", "current", "info", "json", "--json", "status --json", "show --json", "current --json", "info --json", "list", "ls", "list --json", "ls --json", "next", "cycle", "prev", "previous", "back", "set <model>", "set <provider/model>"],
     })
 }
 
@@ -6057,8 +6096,9 @@ fn print_model_json(
         match crate::client::list_models(cfg) {
             Ok(list) => {
                 let ids: Vec<String> = list.data.into_iter().map(|entry| entry.id).collect();
+                let list_provider = model_list_provider();
                 (
-                    Some(scoped_model_ids(&provider, &ids, scoped_model_patterns)),
+                    Some(scoped_model_ids(list_provider, &ids, scoped_model_patterns)),
                     Some(model_list_source(cfg)),
                 )
             }
@@ -6084,9 +6124,10 @@ fn print_model_json(
     }
 }
 
-fn print_model_list(cfg: &LibertaiConfig, provider: &str, scoped_model_patterns: &[String]) {
+fn print_model_list(cfg: &LibertaiConfig, scoped_model_patterns: &[String]) {
     match crate::client::list_models(cfg) {
         Ok(list) => {
+            let provider = model_list_provider();
             let ids: Vec<String> = list.data.into_iter().map(|entry| entry.id).collect();
             let scoped = scoped_model_ids(provider, &ids, scoped_model_patterns);
             println!("{BOLD}models{RESET}");
@@ -6105,6 +6146,10 @@ fn print_model_list(cfg: &LibertaiConfig, provider: &str, scoped_model_patterns:
 
 fn model_list_source(cfg: &LibertaiConfig) -> String {
     format!("{}/v1/models", cfg.api_base.trim_end_matches('/'))
+}
+
+fn model_list_provider() -> &'static str {
+    "libertai"
 }
 
 fn next_scoped_model(
@@ -6323,7 +6368,7 @@ fn export_json_payload(query: &str, messages: &[Message]) -> serde_json::Value {
         },
         "will_write": false,
         "will_copy": false,
-        "supported_actions": ["copy", "save", "path", "json", "--json", "status --json", "show --json", "preview --json"],
+        "supported_actions": ["save", "path", "json", "--json", "status --json", "show --json", "preview --json"],
     })
 }
 
@@ -15515,6 +15560,7 @@ struct SpinnerCore {
     drawn_rows: u16,
     stopped: bool,
     stream: ChromeStream,
+    styled: bool,
     /// Messages queued for the next turn (full texts; previews are
     /// recomputed per draw so a resize re-clips correctly).
     queued_texts: Vec<String>,
@@ -15559,15 +15605,27 @@ impl SpinnerCore {
             ),
             width,
         );
-        let mut block = format!("{DIM}{spinner}{RESET}");
+        let mut block = if self.styled {
+            format!("{DIM}{spinner}{RESET}")
+        } else {
+            spinner
+        };
         let mut rows: u16 = 1;
         for line in queued_preview_lines(&self.queued_texts, width) {
-            block.push_str(&format!("\r\n\x1b[2K{DIM}{line}{RESET}"));
+            if self.styled {
+                block.push_str(&format!("\r\n\x1b[2K{DIM}{line}{RESET}"));
+            } else {
+                block.push_str(&format!("\r\n\x1b[2K{line}"));
+            }
             rows = rows.saturating_add(1);
         }
         if !self.typed.is_empty() {
             let line = typed_preview_line(&self.typed, width);
-            block.push_str(&format!("\r\n\x1b[2K{BOLD}{line}{RESET}"));
+            if self.styled {
+                block.push_str(&format!("\r\n\x1b[2K{BOLD}{line}{RESET}"));
+            } else {
+                block.push_str(&format!("\r\n\x1b[2K{line}"));
+            }
             rows = rows.saturating_add(1);
         }
         // Erase + repaint as one write so the ticker never shows a
@@ -15650,7 +15708,7 @@ struct Spinner {
 }
 
 impl Spinner {
-    fn start(enabled: bool, stream: ChromeStream) -> Self {
+    fn start(enabled: bool, stream: ChromeStream, styled: bool) -> Self {
         if !enabled {
             return Self {
                 core: None,
@@ -15665,6 +15723,7 @@ impl Spinner {
             drawn_rows: 0,
             stopped: false,
             stream,
+            styled,
             queued_texts: Vec::new(),
             typed: String::new(),
         }));
@@ -15809,7 +15868,7 @@ impl TurnRenderer {
                 crate::commands::chat_render::markdown_enabled_stdout(),
                 marker,
             ),
-            spinner: Spinner::start(styled, chrome),
+            spinner: Spinner::start(chrome_tty, chrome, styled),
             styled,
             chrome,
             started: Instant::now(),
@@ -15830,7 +15889,7 @@ impl TurnRenderer {
     }
 
     /// Spinner core handle for the mid-turn input pump. `None` when the
-    /// spinner is inert (unstyled / non-TTY), which keeps queueing off.
+    /// chrome stream is not a TTY, which keeps invisible queueing off.
     fn spinner_core(&self) -> Option<Arc<Mutex<SpinnerCore>>> {
         self.spinner.core_handle()
     }
@@ -16602,7 +16661,15 @@ fn pump_loop(
                         if !t.is_empty() {
                             t.clear();
                             dirty = true;
+                        } else if queue.lock().map(|mut q| q.discard()).unwrap_or(0) > 0 {
+                            dirty = true;
                         }
+                    }
+                }
+                (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                    let empty = typed.lock().map(|t| t.is_empty()).unwrap_or(false);
+                    if empty && queue.lock().map(|mut q| q.discard()).unwrap_or(0) > 0 {
+                        dirty = true;
                     }
                 }
                 (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
@@ -16729,18 +16796,23 @@ fn read_line(
             Event::Key(KeyEvent {
                 code, modifiers, ..
             }) => match (code, modifiers) {
-                (KeyCode::Esc, _) if vim_enabled => {
-                    vim_input_mode = Some(VimInputMode::Normal);
-                }
                 // Esc on an empty buffer with a queued stack: discard
-                // it (vim's Esc-to-normal wins above when enabled).
-                (KeyCode::Esc, _) if buffer.is_empty() && !queued.is_empty() => {
+                // it. In vim insert mode, Esc first enters normal mode;
+                // a second Esc in normal mode drops the queued stack.
+                (KeyCode::Esc, _)
+                    if buffer.is_empty()
+                        && !queued.is_empty()
+                        && (!vim_enabled || vim_input_mode == Some(VimInputMode::Normal)) =>
+                {
                     let n = queue
                         .lock()
                         .map(|mut q| q.discard())
                         .unwrap_or_else(|poisoned| poisoned.into_inner().discard());
                     clear_bar(&mut stdout, rows_above)?;
                     return Ok(LineResult::QueueCleared(n));
+                }
+                (KeyCode::Esc, _) if vim_enabled => {
+                    vim_input_mode = Some(VimInputMode::Normal);
                 }
                 // Deliberate newline — Alt+Enter / Ctrl+J everywhere,
                 // Shift+Enter where the terminal reports it (kitty
@@ -16786,11 +16858,32 @@ fn read_line(
                     clear_bar(&mut stdout, rows_above)?;
                     return Ok(LineResult::Interrupted);
                 }
+                // Ctrl+D on an empty buffer with queued work drops the
+                // queue first, mirroring Ctrl+C/Esc and preventing an
+                // accidental REPL exit while staged prompts are visible.
+                (KeyCode::Char('d'), KeyModifiers::CONTROL)
+                    if buffer.is_empty() && !queued.is_empty() =>
+                {
+                    let n = queue
+                        .lock()
+                        .map(|mut q| q.discard())
+                        .unwrap_or_else(|poisoned| poisoned.into_inner().discard());
+                    clear_bar(&mut stdout, rows_above)?;
+                    return Ok(LineResult::QueueCleared(n));
+                }
                 // Ctrl+D on an empty buffer → EOF. In the middle of a line
-                // it's a no-op (matches most readline implementations).
+                // it deletes the character under the cursor, matching the
+                // common readline behaviour.
                 (KeyCode::Char('d'), KeyModifiers::CONTROL) if buffer.is_empty() => {
                     clear_bar(&mut stdout, rows_above)?;
                     return Ok(LineResult::Eof);
+                }
+                (KeyCode::Char('d'), KeyModifiers::CONTROL) if cursor_pos < buffer.len() => {
+                    if hist_idx.is_some() {
+                        hist_idx = None;
+                        stashed_live = None;
+                    }
+                    buffer.remove(cursor_pos);
                 }
                 // Shift+Tab → toggle Normal ↔ Plan. crossterm surfaces it
                 // as BackTab regardless of whether Shift is in modifiers
@@ -16798,6 +16891,99 @@ fn read_line(
                 (KeyCode::BackTab, _) => {
                     clear_bar(&mut stdout, rows_above)?;
                     return Ok(LineResult::ToggleMode);
+                }
+                (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
+                    cursor_pos = line_bounds(&buffer, cursor_pos).0;
+                }
+                (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
+                    cursor_pos = line_bounds(&buffer, cursor_pos).1;
+                }
+                (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                    if hist_idx.is_some() {
+                        hist_idx = None;
+                        stashed_live = None;
+                    }
+                    let start = line_bounds(&buffer, cursor_pos).0;
+                    if start < cursor_pos {
+                        buffer.drain(start..cursor_pos);
+                        cursor_pos = start;
+                    }
+                }
+                (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+                    if hist_idx.is_some() {
+                        hist_idx = None;
+                        stashed_live = None;
+                    }
+                    let end = line_bounds(&buffer, cursor_pos).1;
+                    if cursor_pos < end {
+                        buffer.drain(cursor_pos..end);
+                    }
+                }
+                (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
+                    if hist_idx.is_some() {
+                        hist_idx = None;
+                        stashed_live = None;
+                    }
+                    let start = previous_word_boundary(&buffer, cursor_pos);
+                    if start < cursor_pos {
+                        buffer.drain(start..cursor_pos);
+                        cursor_pos = start;
+                    }
+                }
+                (KeyCode::Backspace, mods)
+                    if cursor_pos > 0
+                        && mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    if hist_idx.is_some() {
+                        hist_idx = None;
+                        stashed_live = None;
+                    }
+                    let start = previous_word_boundary(&buffer, cursor_pos);
+                    if start < cursor_pos {
+                        buffer.drain(start..cursor_pos);
+                        cursor_pos = start;
+                    }
+                }
+                (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+                    cursor_pos = cursor_pos.saturating_sub(1);
+                }
+                (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
+                    cursor_pos = (cursor_pos + 1).min(buffer.len());
+                }
+                (KeyCode::Left, mods) if mods.contains(KeyModifiers::CONTROL) => {
+                    cursor_pos = previous_word_boundary(&buffer, cursor_pos);
+                }
+                (KeyCode::Right, mods) if mods.contains(KeyModifiers::CONTROL) => {
+                    cursor_pos = next_word_boundary(&buffer, cursor_pos);
+                }
+                (KeyCode::Char('b'), mods) if mods.contains(KeyModifiers::ALT) => {
+                    cursor_pos = previous_word_boundary(&buffer, cursor_pos);
+                }
+                (KeyCode::Char('f'), mods) if mods.contains(KeyModifiers::ALT) => {
+                    cursor_pos = next_word_boundary(&buffer, cursor_pos);
+                }
+                (KeyCode::Char('d'), mods) if mods.contains(KeyModifiers::ALT) => {
+                    if hist_idx.is_some() {
+                        hist_idx = None;
+                        stashed_live = None;
+                    }
+                    let end = next_word_boundary(&buffer, cursor_pos);
+                    if cursor_pos < end {
+                        buffer.drain(cursor_pos..end);
+                    }
+                }
+                (KeyCode::Delete, mods)
+                    if cursor_pos < buffer.len()
+                        && mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    if hist_idx.is_some() {
+                        hist_idx = None;
+                        stashed_live = None;
+                    }
+                    let end = next_word_boundary(&buffer, cursor_pos);
+                    if cursor_pos < end {
+                        buffer.drain(cursor_pos..end);
+                    }
                 }
                 (code, modifiers) if vim_input_mode == Some(VimInputMode::Normal) => {
                     match vim_normal_key_action(code, modifiers) {
@@ -16952,8 +17138,8 @@ fn read_line(
             Event::Resize(_, _) => {
                 // Don't try to MoveToPreviousLine onto a row that may
                 // no longer exist after a shrink — treat as a fresh
-                // paint. The previous bar position is left as-is in
-                // scrollback rather than risk drifting into row 0.
+                // paint after clearing the previous block.
+                clear_bar(&mut stdout, rows_above)?;
                 rows_above = None;
             }
             _ => continue,
@@ -17065,7 +17251,7 @@ fn repaint(
     // terminal onto an extra row — which breaks the row arithmetic the
     // in-place overwrite relies on. Slide a window over each line so the
     // cursor is always visible and no row ever wraps.
-    let prefix_cols_usize = chip_text.chars().count() + 2;
+    let prefix_cols_usize = rich_rust::cells::cell_len(&chip_text) + 2;
     let avail = cols.saturating_sub(prefix_cols_usize).max(1);
 
     if let Some(rows_above) = prev_rows_above.filter(|n| *n > 0) {
@@ -17233,6 +17419,28 @@ fn line_bounds(buffer: &[char], cursor_pos: usize) -> (usize, usize) {
     (start, end)
 }
 
+fn previous_word_boundary(buffer: &[char], cursor_pos: usize) -> usize {
+    let mut pos = cursor_pos.min(buffer.len());
+    while pos > 0 && buffer[pos - 1].is_whitespace() {
+        pos -= 1;
+    }
+    while pos > 0 && !buffer[pos - 1].is_whitespace() {
+        pos -= 1;
+    }
+    pos
+}
+
+fn next_word_boundary(buffer: &[char], cursor_pos: usize) -> usize {
+    let mut pos = cursor_pos.min(buffer.len());
+    while pos < buffer.len() && buffer[pos].is_whitespace() {
+        pos += 1;
+    }
+    while pos < buffer.len() && !buffer[pos].is_whitespace() {
+        pos += 1;
+    }
+    pos
+}
+
 /// True when the key event should insert a newline instead of
 /// submitting: Alt+Enter, Shift+Enter (only terminals speaking an
 /// enhanced keyboard protocol such as kitty's report the modifier — on
@@ -17273,26 +17481,56 @@ fn insert_paste(buffer: &mut Vec<char>, cursor_pos: usize, data: &str) -> usize 
 /// at either end a `…` marker replaces the off-screen cell. Returns
 /// `(display_text, cursor_column_within_display)`.
 fn slide_window(buffer: &[char], cursor_pos: usize, avail: usize) -> (String, usize) {
-    if buffer.len() <= avail {
-        return (buffer.iter().collect(), cursor_pos);
+    let full: String = buffer.iter().collect();
+    if rich_rust::cells::cell_len(&full) <= avail {
+        let before_cursor: String = buffer.iter().take(cursor_pos.min(buffer.len())).collect();
+        return (full, rich_rust::cells::cell_len(&before_cursor));
     }
-    // Keep the cursor at least one cell from each edge so there's
-    // always room for a `…` indicator.
-    let start = cursor_pos.saturating_sub(avail.saturating_sub(1));
-    let end = (start + avail).min(buffer.len());
-    let mut out = String::with_capacity(avail);
+    if avail <= 1 {
+        return ("\u{2026}".to_string(), 0);
+    }
+    if cursor_pos == 0 {
+        return (clip_chars(&full, avail), 0);
+    }
+
+    let cursor_pos = cursor_pos.min(buffer.len());
+    let before_budget = avail.saturating_sub(2);
+    let mut start = cursor_pos;
+    let mut before_cells = 0usize;
+    while start > 0 {
+        let w = rich_rust::cells::get_character_cell_size(buffer[start - 1]);
+        if before_cells + w > before_budget {
+            break;
+        }
+        start -= 1;
+        before_cells += w;
+    }
+
+    let mut out = String::new();
     if start > 0 {
         out.push('\u{2026}');
-        out.extend(buffer[start + 1..end].iter());
-    } else {
-        out.extend(buffer[start..end].iter());
+    }
+    out.extend(buffer[start..cursor_pos].iter());
+    let cursor_col = rich_rust::cells::cell_len(&out);
+
+    let mut end = cursor_pos;
+    while end < buffer.len() {
+        let w = rich_rust::cells::get_character_cell_size(buffer[end]);
+        if rich_rust::cells::cell_len(&out) + w >= avail {
+            break;
+        }
+        out.push(buffer[end]);
+        end += 1;
     }
     if end < buffer.len() {
-        // Replace the last visible cell with `…`.
-        out.pop();
+        while rich_rust::cells::cell_len(&out) + 1 > avail {
+            if out.pop().is_none() {
+                break;
+            }
+        }
         out.push('\u{2026}');
     }
-    (out, cursor_pos - start)
+    (out, cursor_col.min(avail.saturating_sub(1)))
 }
 
 /// Wipe the whole bar (rule + every buffer row) and leave the cursor at
@@ -18959,6 +19197,8 @@ mod tests {
         let joined = hotkey_lines().join("\n");
         assert!(joined.contains("Shift+Tab"));
         assert!(joined.contains("Up / Down"));
+        assert!(joined.contains("Ctrl+Left / Ctrl+Right"));
+        assert!(joined.contains("Alt+D / Ctrl+Delete"));
         assert!(joined.contains("Ctrl+C"));
         assert!(joined.contains("Ctrl+D"));
         assert!(joined.contains("Alt+Enter / Ctrl+J"));
@@ -19038,6 +19278,17 @@ mod tests {
     }
 
     #[test]
+    fn word_boundaries_skip_whitespace_and_words() {
+        let buffer: Vec<char> = "alpha beta  gamma".chars().collect();
+        assert_eq!(previous_word_boundary(&buffer, buffer.len()), 12);
+        assert_eq!(previous_word_boundary(&buffer, 11), 6);
+        assert_eq!(previous_word_boundary(&buffer, 6), 0);
+        assert_eq!(next_word_boundary(&buffer, 0), 5);
+        assert_eq!(next_word_boundary(&buffer, 5), 10);
+        assert_eq!(next_word_boundary(&buffer, 10), buffer.len());
+    }
+
+    #[test]
     fn vertical_window_keeps_cursor_visible_and_clamps_to_last_page() {
         // Everything fits: window pinned to the top.
         assert_eq!(vertical_window(3, 2, 3), 0);
@@ -19072,6 +19323,21 @@ mod tests {
         // visible, with a leading … marking the clipped prefix.
         let (text, cur) = slide_window(&line, 8, 5);
         assert_eq!((text.as_str(), cur), ("\u{2026}fgh", 4));
+
+        let wide: Vec<char> = "a中bcdef".chars().collect();
+        let (text, cur) = slide_window(&wide, 2, 5);
+        assert!(
+            rich_rust::cells::cell_len(&text) <= 5,
+            "wide window overflowed: {text:?}"
+        );
+        assert_eq!(cur, 3);
+        let (text, cur) = slide_window(&wide, wide.len(), 5);
+        assert!(
+            rich_rust::cells::cell_len(&text) <= 5,
+            "wide tail overflowed: {text:?}"
+        );
+        assert!(text.starts_with('\u{2026}'));
+        assert!(cur <= 4);
     }
 
     #[test]
@@ -22162,7 +22428,7 @@ mod tests {
     fn parse_model_slash_command_accepts_status_and_cycle_aliases() {
         assert_eq!(
             model_usage_text(),
-            "/model [status|show|current|json|--json|status --json|show --json|current --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model]"
+            "/model [status|show|current|info|json|--json|status --json|show --json|current --json|info --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model]"
         );
         assert!(matches!(
             parse_model_slash_command(""),
@@ -22178,6 +22444,10 @@ mod tests {
         ));
         assert!(matches!(
             parse_model_slash_command("current"),
+            ModelSlashCommand::Status
+        ));
+        assert!(matches!(
+            parse_model_slash_command("info"),
             ModelSlashCommand::Status
         ));
         assert!(matches!(
@@ -22198,6 +22468,10 @@ mod tests {
         ));
         assert!(matches!(
             parse_model_slash_command("current --json"),
+            ModelSlashCommand::Json
+        ));
+        assert!(matches!(
+            parse_model_slash_command("info --json"),
             ModelSlashCommand::Json
         ));
         assert!(matches!(
@@ -22261,9 +22535,10 @@ mod tests {
             payload["available_models_source"],
             format!("{}/v1/models", cfg.api_base.trim_end_matches('/'))
         );
-        assert_eq!(payload["supported_actions"][4], "--json");
-        assert_eq!(payload["supported_actions"][5], "status --json");
-        assert_eq!(payload["supported_actions"][10], "list --json");
+        let actions = payload["supported_actions"].as_array().unwrap();
+        assert!(actions.contains(&json!("info")));
+        assert!(actions.contains(&json!("info --json")));
+        assert!(actions.contains(&json!("list --json")));
     }
 
     #[test]
@@ -22360,7 +22635,7 @@ mod tests {
     fn model_slash_command_cycles_scoped_models() {
         assert_eq!(
             model_usage_text(),
-            "/model [status|show|current|json|--json|status --json|show --json|current --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model]"
+            "/model [status|show|current|info|json|--json|status --json|show --json|current --json|info --json|list|ls|list --json|ls --json|next|cycle|prev|previous|back|model|provider/model]"
         );
         assert_eq!(parse_model_slash_command(""), ModelSlashCommand::Status);
         assert_eq!(parse_model_slash_command("list"), ModelSlashCommand::List);
@@ -22460,6 +22735,16 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("show --json")));
+        assert!(!payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("copy")));
+        assert!(!help_command_arg_hint("export")
+            .split('|')
+            .any(|part| part == "copy"));
+        assert!(!help_command_arg_hint("share")
+            .split('|')
+            .any(|part| part == "copy"));
     }
 
     #[test]
@@ -22674,6 +22959,50 @@ mod tests {
         assert!(rendered.contains("\"path\": \"src/lib.rs\""));
         assert!(rendered.contains("## Tool Result: read"));
         assert!(rendered.contains("contents"));
+    }
+
+    #[test]
+    fn rehydrated_transcript_preserves_tool_order_and_results() {
+        let messages = vec![
+            Message::assistant(pi::model::AssistantMessage {
+                content: vec![
+                    ContentBlock::Text(pi::model::TextContent::new("before")),
+                    ContentBlock::ToolCall(pi::model::ToolCall {
+                        id: "tool-1".to_string(),
+                        name: "read".to_string(),
+                        arguments: serde_json::json!({"path":"src/lib.rs"}),
+                        thought_signature: None,
+                    }),
+                    ContentBlock::Text(pi::model::TextContent::new("after")),
+                ],
+                api: "openai".to_string(),
+                provider: "libertai".to_string(),
+                model: "fast".to_string(),
+                usage: pi::model::Usage::default(),
+                stop_reason: pi::model::StopReason::Stop,
+                error_message: None,
+                timestamp: 1,
+            }),
+            Message::tool_result(pi::model::ToolResultMessage {
+                tool_call_id: "tool-1".to_string(),
+                tool_name: "read".to_string(),
+                content: vec![ContentBlock::Text(pi::model::TextContent::new("contents"))],
+                details: None,
+                is_error: false,
+                paused: None,
+                timestamp: 2,
+            }),
+        ];
+        let rendered = render_rehydrated_transcript(&messages);
+        let before = rendered.find("before").unwrap();
+        let tool = rendered.find("[tool] read").unwrap();
+        let after = rendered.find("after").unwrap();
+        let result = rendered.find("[tool-result] read").unwrap();
+        let contents = rendered.find("contents").unwrap();
+        assert!(before < tool);
+        assert!(tool < after);
+        assert!(after < result);
+        assert!(result < contents);
     }
 
     #[test]
