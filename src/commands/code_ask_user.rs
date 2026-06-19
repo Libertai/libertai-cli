@@ -147,7 +147,7 @@ impl Tool for AskUserTool {
         &self,
         _tool_call_id: &str,
         input: serde_json::Value,
-        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+        on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> PiResult<ToolExecution> {
         // Validate the input shape before suspending the agent on the
         // UI: a malformed payload should fail fast as a tool error so
@@ -159,6 +159,7 @@ impl Tool for AskUserTool {
             )
             .into());
         }
+        emit_tool_started_update(on_update.as_deref());
 
         // We pass the same `input` to the UI so it has the questions
         // payload to render. On Paused we wrap the UI's payload with
@@ -199,10 +200,24 @@ impl Tool for AskUserTool {
     }
 
     fn is_read_only(&self) -> bool {
-        // No filesystem or network writes; preserves pi's parallelism
-        // allowances. The "side effect" is purely user-interactive.
-        true
+        // This is interactive and must be an execution barrier: the
+        // user prompt should appear exactly where the model placed it,
+        // not in a parallel read-only batch after unrelated tools.
+        false
     }
+}
+
+fn emit_tool_started_update(on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>) {
+    let Some(on_update) = on_update else {
+        return;
+    };
+    on_update(ToolUpdate {
+        content: Vec::new(),
+        details: Some(serde_json::json!({
+            "kind": "tool_started",
+            "tool": NAME,
+        })),
+    });
 }
 
 /// Build the LLM-facing tool result content from an answer envelope.
@@ -248,5 +263,67 @@ fn err_output(msg: &str) -> ToolOutput {
         content: vec![ContentBlock::Text(TextContent::new(msg))],
         details: None,
         is_error: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct AnswerUi;
+
+    #[async_trait]
+    impl ApprovalUi for AnswerUi {
+        async fn decide(
+            &self,
+            _tool_name: &str,
+            _preview: &str,
+            _always_rule: &str,
+        ) -> crate::commands::code_approvals::PromptChoice {
+            crate::commands::code_approvals::PromptChoice::Deny
+        }
+
+        async fn ask(&self, _payload: serde_json::Value) -> AskOutcome {
+            AskOutcome::Answer(serde_json::json!({
+                "answers": [{"header": "Scope", "selected": ["Here"]}]
+            }))
+        }
+    }
+
+    fn valid_input() -> serde_json::Value {
+        serde_json::json!({
+            "questions": [{
+                "header": "Scope",
+                "question": "Where?",
+                "options": [{"label": "Here"}],
+            }]
+        })
+    }
+
+    #[test]
+    fn ask_user_is_an_interactive_execution_barrier() {
+        let tool = AskUserTool::new(Arc::new(AnswerUi));
+        assert!(!tool.is_read_only());
+    }
+
+    #[test]
+    fn ask_user_emits_actual_start_update_before_prompting() {
+        let tool = AskUserTool::new(Arc::new(AnswerUi));
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&updates);
+        let execution = futures::executor::block_on(tool.execute(
+            "ask-1",
+            valid_input(),
+            Some(Box::new(move |update| {
+                seen.lock().unwrap().push(update);
+            })),
+        ))
+        .unwrap();
+        assert!(matches!(execution, ToolExecution::Done(_)));
+        let updates = updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].details.as_ref().unwrap()["kind"], "tool_started");
+        assert_eq!(updates[0].details.as_ref().unwrap()["tool"], NAME);
     }
 }

@@ -761,6 +761,7 @@ impl Tool for ApprovalTool {
         on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> PiResult<ToolExecution> {
         let name = self.inner.name();
+        emit_tool_started_update(on_update.as_deref(), name);
         let policy_decision = self
             .policy
             .as_ref()
@@ -1120,6 +1121,22 @@ fn emit_smart_approval_update(
     });
 }
 
+fn emit_tool_started_update(
+    on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>,
+    tool_name: &str,
+) {
+    let Some(on_update) = on_update else {
+        return;
+    };
+    on_update(ToolUpdate {
+        content: Vec::new(),
+        details: Some(serde_json::json!({
+            "kind": "tool_started",
+            "tool": tool_name,
+        })),
+    });
+}
+
 fn plan_denial_output(tool_name: &str) -> ToolOutput {
     let text = format!(
         "session is in plan mode: `{tool_name}` is unavailable. \
@@ -1427,6 +1444,14 @@ mod tests {
             .join("\n")
     }
 
+    fn update_kind(update: &ToolUpdate) -> Option<&str> {
+        update
+            .details
+            .as_ref()
+            .and_then(|details| details.get("kind"))
+            .and_then(|kind| kind.as_str())
+    }
+
     #[test]
     fn sanitize_strips_clear_screen_spoof() {
         let evil = "\x1b[2J\x1b[H FAKE PROMPT [a]llow: echo hi\nrm -rf ~/";
@@ -1611,13 +1636,14 @@ mod tests {
 
         assert!(matches!(execution, ToolExecution::Done(_)));
         let updates = updates.lock().unwrap();
-        assert_eq!(updates.len(), 1);
-        assert!(update_text(&updates[0]).contains("smart approval auto-approved `bash`"));
+        assert_eq!(updates.len(), 2);
+        assert_eq!(update_kind(&updates[0]), Some("tool_started"));
+        assert!(update_text(&updates[1]).contains("smart approval auto-approved `bash`"));
         assert_eq!(
-            updates[0].details.as_ref().unwrap()["kind"],
+            updates[1].details.as_ref().unwrap()["kind"],
             "smart_approval"
         );
-        assert_eq!(updates[0].details.as_ref().unwrap()["decision"], "approved");
+        assert_eq!(updates[1].details.as_ref().unwrap()["decision"], "approved");
         assert_eq!(ui_calls.load(Ordering::Relaxed), 0);
     }
 
@@ -1778,16 +1804,17 @@ mod tests {
 
         assert!(matches!(execution, ToolExecution::Done(_)));
         let updates = updates.lock().unwrap();
-        assert_eq!(updates.len(), 1);
-        assert!(update_text(&updates[0])
+        assert_eq!(updates.len(), 2);
+        assert_eq!(update_kind(&updates[0]), Some("tool_started"));
+        assert!(update_text(&updates[1])
             .contains("smart approval auto-denied `bash`: dangerous command"));
         assert_eq!(
-            updates[0].details.as_ref().unwrap()["kind"],
+            updates[1].details.as_ref().unwrap()["kind"],
             "smart_approval"
         );
-        assert_eq!(updates[0].details.as_ref().unwrap()["decision"], "denied");
+        assert_eq!(updates[1].details.as_ref().unwrap()["decision"], "denied");
         assert_eq!(
-            updates[0].details.as_ref().unwrap()["reason"],
+            updates[1].details.as_ref().unwrap()["reason"],
             "dangerous command"
         );
         assert_eq!(ui_calls.load(Ordering::Relaxed), 0);

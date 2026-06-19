@@ -3,7 +3,8 @@
 //! Smart approvals are intentionally opt-in and conservative: only a
 //! well-formed first-line verdict bypasses the normal approval UI.
 
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -11,7 +12,7 @@ use async_trait::async_trait;
 use crate::client::{post_chat_blocking, ChatMessage, ChatRequest};
 use crate::config::Config as LibertaiConfig;
 
-const SMART_APPROVAL_TIMEOUT_SECS: u64 = 10;
+const SMART_APPROVAL_TIMEOUT_SECS: u64 = 4;
 const SMART_APPROVAL_MAX_TOKENS: u32 = 16;
 const SMART_APPROVAL_INPUT_MAX_CHARS: usize = 4_000;
 
@@ -91,10 +92,31 @@ impl SmartApproval for LlmSmartApproval {
         preview: &str,
         input: &serde_json::Value,
     ) -> SmartApprovalVerdict {
-        self.decide_blocking(tool_name, preview, input)
-            .unwrap_or_else(|err| SmartApprovalVerdict::Escalate {
-                reason: Some(format!("smart approval unavailable: {err:#}")),
-            })
+        let cfg = Arc::clone(&self.cfg);
+        let tool_name = tool_name.to_string();
+        let preview = preview.to_string();
+        let input = input.clone();
+        let (tx, rx) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let smart = LlmSmartApproval { cfg };
+            let verdict = smart
+                .decide_blocking(&tool_name, &preview, &input)
+                .unwrap_or_else(|err| SmartApprovalVerdict::Escalate {
+                    reason: Some(format!("smart approval unavailable: {err:#}")),
+                });
+            let _ = tx.send(verdict);
+        });
+        match rx.recv_timeout(Duration::from_secs(SMART_APPROVAL_TIMEOUT_SECS)) {
+            Ok(verdict) => verdict,
+            Err(mpsc::RecvTimeoutError::Timeout) => SmartApprovalVerdict::Escalate {
+                reason: Some(format!(
+                    "smart approval timed out after {SMART_APPROVAL_TIMEOUT_SECS}s"
+                )),
+            },
+            Err(mpsc::RecvTimeoutError::Disconnected) => SmartApprovalVerdict::Escalate {
+                reason: Some("smart approval worker stopped before returning".to_string()),
+            },
+        }
     }
 }
 

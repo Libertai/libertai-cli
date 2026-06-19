@@ -20,7 +20,7 @@
 //! the cursor visible.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -15840,6 +15840,12 @@ pub(crate) struct TurnRenderer {
     finished: bool,
     approvals: Option<Arc<ApprovalState>>,
     mode: Option<ModeFlag>,
+    /// SDK `ToolExecutionStart` means "model requested this tool",
+    /// not necessarily "this tool is executing now". Keep the args so
+    /// actual-start updates and fallback end rendering can print the
+    /// right marker without misleading the user during queued delays.
+    planned_tools: HashMap<String, (String, serde_json::Value)>,
+    rendered_tool_markers: HashSet<String>,
 }
 
 impl TurnRenderer {
@@ -15876,6 +15882,8 @@ impl TurnRenderer {
             finished: false,
             approvals,
             mode,
+            planned_tools: HashMap::new(),
+            rendered_tool_markers: HashSet::new(),
         }
     }
 
@@ -15941,21 +15949,25 @@ impl TurnRenderer {
             }
             AgentEvent::TurnStart { .. } => {
                 self.turn_text_open = false;
+                self.planned_tools.clear();
+                self.rendered_tool_markers.clear();
                 // Belt-and-braces: a turn boundary must never arm the
                 // next marker while older prose is still buffered (the
                 // marker would attach to the previous turn's text).
                 self.md.flush_pending();
             }
             AgentEvent::ToolExecutionStart {
-                tool_name, args, ..
+                tool_call_id,
+                tool_name,
+                args,
             } => {
-                // Clear any existing footer before printing the marker.
-                // Then keep a live activity footer visible while the
-                // tool runs; otherwise a slow edit or an approval prompt
-                // that has not painted yet leaves the UI apparently
-                // frozen at `● edit(path)`. Interactive prompts call
-                // `suspend_active_footer()` before painting, so this
-                // footer will not overwrite approval/ask menus.
+                self.planned_tools
+                    .insert(tool_call_id.clone(), (tool_name.clone(), args.clone()));
+                // pi emits start events for the whole tool batch before
+                // execution begins. Do not render `● edit(...)` or
+                // `● ask_user(...)` here: a previous tool can still be
+                // running, which made the TUI look hung on a queued
+                // later call. Actual-start updates render the marker.
                 self.spinner.hide();
                 self.turn_text_open = false;
                 // Flush buffered prose before ANY tool output reaches
@@ -15968,24 +15980,20 @@ impl TurnRenderer {
                     // The todo tool renders its own formatted output.
                     return;
                 }
-                self.chrome_line(&self.tool_marker_line(tool_name, args));
-                if let Some(label) = self.auto_allowed_rule_label(tool_name, args) {
-                    self.dim_chrome_line(&format!(
-                        "  {}",
-                        crate::commands::code_term::auto_allowed_line(&label)
-                    ));
-                }
-                self.spinner.set_label(tool_running_label(tool_name));
+                self.spinner.set_label("preparing tools…");
                 self.spinner.show();
             }
             AgentEvent::ToolExecutionEnd {
+                tool_call_id,
                 tool_name,
                 result,
                 is_error,
-                ..
             } => {
                 self.spinner.hide();
                 if tool_name != "todo" {
+                    if !self.rendered_tool_markers.contains(tool_call_id) {
+                        self.render_tool_marker(tool_call_id, tool_name, None);
+                    }
                     let text = tool_output_text(result);
                     for line in tool_result_preview(
                         &text,
@@ -15996,10 +16004,23 @@ impl TurnRenderer {
                         self.dim_chrome_line(&line);
                     }
                 }
+                self.planned_tools.remove(tool_call_id);
+                self.rendered_tool_markers.remove(tool_call_id);
                 self.spinner.set_label("thinking…");
                 self.spinner.show();
             }
-            AgentEvent::ToolExecutionUpdate { partial_result, .. } => {
+            AgentEvent::ToolExecutionUpdate {
+                tool_call_id,
+                tool_name,
+                args,
+                partial_result,
+            } => {
+                if is_tool_started_update(partial_result) {
+                    self.render_tool_marker(tool_call_id, tool_name, Some(args));
+                    self.spinner.set_label(tool_running_label(tool_name));
+                    self.spinner.show();
+                    return;
+                }
                 if let Some(line) = smart_approval_audit_line(partial_result) {
                     self.spinner.hide();
                     self.dim_chrome_line(&format!("  {line}"));
@@ -16041,6 +16062,33 @@ impl TurnRenderer {
         if self.md.saw_output() {
             self.md.finish();
         }
+    }
+
+    fn render_tool_marker(
+        &mut self,
+        tool_call_id: &str,
+        tool_name: &str,
+        args: Option<&serde_json::Value>,
+    ) {
+        if self.rendered_tool_markers.contains(tool_call_id) || tool_name == "todo" {
+            return;
+        }
+        self.spinner.hide();
+        self.turn_text_open = false;
+        self.md.flush_pending();
+        let planned = self.planned_tools.get(tool_call_id);
+        let marker_name = planned.map(|(name, _)| name.as_str()).unwrap_or(tool_name);
+        let marker_args = args
+            .or_else(|| planned.map(|(_, planned_args)| planned_args))
+            .unwrap_or(&serde_json::Value::Null);
+        self.chrome_line(&self.tool_marker_line(marker_name, marker_args));
+        if let Some(label) = self.auto_allowed_rule_label(marker_name, marker_args) {
+            self.dim_chrome_line(&format!(
+                "  {}",
+                crate::commands::code_term::auto_allowed_line(&label)
+            ));
+        }
+        self.rendered_tool_markers.insert(tool_call_id.to_string());
     }
 
     fn tool_marker_line(&self, tool_name: &str, args: &serde_json::Value) -> String {
@@ -16098,11 +16146,23 @@ const READ_ONLY_AUTO_ALLOW_TOOLS: &[&str] = &["read", "grep", "find", "ls", "bas
 
 fn tool_running_label(tool_name: &str) -> &'static str {
     match tool_name {
+        "ask_user" => "waiting for answer…",
         "edit" | "hashline_edit" | "write" | "notebook_edit" => "editing…",
         "bash" | "shell" => "running command…",
+        "fetch" => "fetching…",
+        "search" => "searching…",
         "task" => "running agent…",
         _ => "running tool…",
     }
+}
+
+fn is_tool_started_update(output: &pi::sdk::ToolOutput) -> bool {
+    output
+        .details
+        .as_ref()
+        .and_then(|details| details.get("kind"))
+        .and_then(|kind| kind.as_str())
+        == Some("tool_started")
 }
 
 pub(crate) fn smart_approval_audit_line(output: &pi::sdk::ToolOutput) -> Option<String> {
@@ -18585,6 +18645,7 @@ mod tests {
 
     #[test]
     fn tool_running_label_names_slow_tool_phases() {
+        assert_eq!(tool_running_label("ask_user"), "waiting for answer…");
         assert_eq!(tool_running_label("edit"), "editing…");
         assert_eq!(tool_running_label("hashline_edit"), "editing…");
         assert_eq!(tool_running_label("write"), "editing…");
@@ -18593,6 +18654,20 @@ mod tests {
         assert_eq!(tool_running_label("shell"), "running command…");
         assert_eq!(tool_running_label("task"), "running agent…");
         assert_eq!(tool_running_label("grep"), "running tool…");
+    }
+
+    #[test]
+    fn tool_started_update_is_structured_not_textual() {
+        let started = pi::sdk::ToolOutput {
+            content: vec![],
+            details: Some(serde_json::json!({
+                "kind": "tool_started",
+                "tool": "ask_user",
+            })),
+            is_error: false,
+        };
+        assert!(is_tool_started_update(&started));
+        assert!(!is_tool_started_update(&empty_tool_output()));
     }
 
     #[test]
