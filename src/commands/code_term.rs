@@ -18,7 +18,7 @@ use crossterm::{
 };
 
 use crate::commands::code_approvals::{ApprovalUi, AskOutcome, NotifyOutcome, PromptChoice};
-use crate::commands::code_ui::clip_chars;
+use crate::commands::code_ui::{clip_chars, sanitize_terminal_preview_text};
 
 /// RAII guard that enables raw mode on construction and disables it
 /// on drop (including the panic-unwind path).
@@ -198,6 +198,7 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
     eprintln!();
     eprintln!("  \x1b[33;1m⎯ tool approval ⎯\x1b[0m");
     eprintln!("  \x1b[1m{tool_name}\x1b[0m");
+    let preview = sanitize_terminal_preview_text(preview);
     for line in preview.lines() {
         eprintln!("  \x1b[2m│\x1b[0m {}", style_preview_line(line));
     }
@@ -226,16 +227,9 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
         match event::read() {
             Ok(Event::Key(KeyEvent {
                 code, modifiers, ..
-            })) => match (code, modifiers) {
-                // `Char('a') + SHIFT` is unreachable on most terminals
-                // (Shift uppercases to `A`), but handle it defensively.
-                (KeyCode::Char('a'), _) => break PromptChoice::Allow,
-                (KeyCode::Char('A'), _) => break PromptChoice::AlwaysAllow,
-                (KeyCode::Char('d') | KeyCode::Char('D'), _) => break PromptChoice::Deny,
-                (KeyCode::Enter, _) => break PromptChoice::Allow,
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) => break PromptChoice::Deny,
-                (KeyCode::Esc, _) => break PromptChoice::Deny,
-                _ => continue,
+            })) => match prompt_choice_for_key(code, modifiers) {
+                Some(choice) => break choice,
+                None => continue,
             },
             Ok(_) => continue,
             Err(_) => break PromptChoice::Deny,
@@ -263,7 +257,21 @@ fn parse_cooked_choice(line: &str) -> PromptChoice {
     }
 }
 
+fn prompt_choice_for_key(code: KeyCode, modifiers: KeyModifiers) -> Option<PromptChoice> {
+    match (code, modifiers) {
+        // `Char('a') + SHIFT` is unreachable on most terminals
+        // (Shift uppercases to `A`), but handle it defensively.
+        (KeyCode::Char('a'), _) => Some(PromptChoice::Allow),
+        (KeyCode::Char('A'), _) => Some(PromptChoice::AlwaysAllow),
+        (KeyCode::Char('d') | KeyCode::Char('D'), _) => Some(PromptChoice::Deny),
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(PromptChoice::Deny),
+        (KeyCode::Esc, _) => Some(PromptChoice::Deny),
+        _ => None,
+    }
+}
+
 fn style_preview_line(line: &str) -> String {
+    let line = sanitize_terminal_preview_text(line);
     if line.starts_with("--- ") || line.starts_with("+++ ") {
         return format!("\x1b[36;1m{line}\x1b[0m");
     }
@@ -276,7 +284,7 @@ fn style_preview_line(line: &str) -> String {
     if line.starts_with("... ") && line.ends_with(" lines omitted") {
         return format!("\x1b[2m{line}\x1b[0m");
     }
-    line.to_string()
+    line
 }
 
 /// Build the `{ cancelled: true, reason }` envelope the `ask_user` tool
@@ -303,12 +311,13 @@ fn parse_ask_options(question: &serde_json::Value) -> Vec<AskOption> {
         .map(|arr| {
             arr.iter()
                 .filter_map(|o| {
-                    let label = o.get("label").and_then(|v| v.as_str())?.to_string();
+                    let label =
+                        sanitize_terminal_preview_text(o.get("label").and_then(|v| v.as_str())?);
                     let description = o
                         .get("description")
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.trim().is_empty())
-                        .map(str::to_string);
+                        .map(sanitize_terminal_preview_text);
                     Some(AskOption { label, description })
                 })
                 .collect()
@@ -372,11 +381,13 @@ fn ask_one(question: &serde_json::Value) -> Option<serde_json::Value> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
+    let header = sanitize_terminal_preview_text(header);
     let text = question
         .get("question")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
+    let text = sanitize_terminal_preview_text(text);
     let multi = question
         .get("multiSelect")
         .and_then(|v| v.as_bool())
@@ -397,7 +408,7 @@ fn ask_one(question: &serde_json::Value) -> Option<serde_json::Value> {
     // No options → free-form only.
     if options.is_empty() {
         let answer = ask_free_text()?;
-        return Some(ask_answer(header, Vec::new(), Some(answer)));
+        return Some(ask_answer(&header, Vec::new(), Some(answer)));
     }
 
     if multi {
@@ -420,7 +431,7 @@ fn ask_one(question: &serde_json::Value) -> Option<serde_json::Value> {
             selected.push(label.clone());
         }
     }
-    Some(ask_answer(header, selected, other))
+    Some(ask_answer(&header, selected, other))
 }
 
 /// Render the option list for [`select_options`] as one terminal-ready
@@ -446,8 +457,10 @@ fn render_ask_options(
         } else {
             ""
         };
-        let mut label = format!("{}. {}", i + 1, opt.label);
+        let opt_label = sanitize_terminal_preview_text(&opt.label);
+        let mut label = format!("{}. {}", i + 1, opt_label);
         if let Some(desc) = &opt.description {
+            let desc = sanitize_terminal_preview_text(desc);
             label.push_str(&format!(" — {desc}"));
         }
         let body = format!("  {pointer} {mark}{label}");
@@ -608,6 +621,35 @@ mod tests {
         assert_eq!(style_preview_line(" context"), " context");
     }
 
+    #[test]
+    fn preview_line_styling_strips_terminal_sequences_before_styling() {
+        assert_eq!(
+            style_preview_line("\x1b[31m+new\x1b[0m\x1b]0;title\x07"),
+            "\x1b[32m+new\x1b[0m"
+        );
+        assert_eq!(style_preview_line("plain\x07\x7f"), "plain");
+    }
+
+    #[test]
+    fn approval_prompt_keys_require_explicit_choice() {
+        assert_eq!(
+            prompt_choice_for_key(KeyCode::Char('a'), KeyModifiers::NONE),
+            Some(PromptChoice::Allow)
+        );
+        assert_eq!(
+            prompt_choice_for_key(KeyCode::Char('A'), KeyModifiers::SHIFT),
+            Some(PromptChoice::AlwaysAllow)
+        );
+        assert_eq!(
+            prompt_choice_for_key(KeyCode::Char('d'), KeyModifiers::NONE),
+            Some(PromptChoice::Deny)
+        );
+        assert_eq!(
+            prompt_choice_for_key(KeyCode::Enter, KeyModifiers::NONE),
+            None
+        );
+    }
+
     use crate::commands::chat_render::strip_ansi;
 
     #[test]
@@ -732,6 +774,30 @@ mod tests {
         assert_eq!(opts[0].description.as_deref(), Some("leave it in"));
         assert_eq!(opts[1].label, "Strip");
         assert_eq!(opts[1].description, None);
+    }
+
+    #[test]
+    fn parse_ask_options_sanitizes_display_text() {
+        let q = serde_json::json!({
+            "options": [
+                { "label": "\u{1b}[31mKeep\u{1b}[0m", "description": "desc\u{7}\u{1b}]0;x\u{7}" },
+            ]
+        });
+        let opts = parse_ask_options(&q);
+        assert_eq!(opts[0].label, "Keep");
+        assert_eq!(opts[0].description.as_deref(), Some("desc"));
+    }
+
+    #[test]
+    fn render_ask_options_outputs_sanitized_text() {
+        let options = vec![AskOption {
+            label: "\x1b[31mAlpha\x1b[0m".to_string(),
+            description: Some("Beta\x1b]0;x\x07".to_string()),
+        }];
+        let block = render_ask_options(&options, 0, &[false], false);
+        let plain = strip_ansi(&block);
+        assert!(plain.contains("Alpha — Beta"));
+        assert!(!plain.contains('\x1b'));
     }
 
     #[test]

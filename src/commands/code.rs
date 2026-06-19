@@ -31,6 +31,7 @@ pub fn run(
     model: Option<String>,
     provider: Option<String>,
     plan: bool,
+    mode: Option<String>,
     resume: Option<PathBuf>,
     continue_recent: bool,
     list_sessions: bool,
@@ -48,7 +49,7 @@ pub fn run(
     crate::commands::code_session::ensure_pi_http_timeout(cfg.http_timeout_secs);
     let model = model.unwrap_or_else(|| cfg.default_code_model.clone());
     let provider = provider.unwrap_or_else(|| cfg.default_code_provider.clone());
-    let mode = if plan { Mode::Plan } else { Mode::Normal };
+    let mode = parse_initial_mode(plan, mode.as_deref())?;
 
     // --list-sessions short-circuits before any agent setup.
     if list_sessions {
@@ -162,6 +163,22 @@ pub fn run(
     }
 }
 
+fn parse_initial_mode(plan: bool, mode: Option<&str>) -> Result<Mode> {
+    let parsed = match mode.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("normal" | "default") => Mode::Normal,
+        Some("accept-edits" | "accept_edits" | "accept" | "edits") => Mode::AcceptEdits,
+        Some("plan" | "readonly" | "read-only") => Mode::Plan,
+        Some(other) => bail!("unknown --mode `{other}` (expected normal, accept-edits, or plan)"),
+        None => {
+            return Ok(if plan { Mode::Plan } else { Mode::Normal });
+        }
+    };
+    if plan && parsed != Mode::Plan {
+        bail!("--plan conflicts with --mode {}", mode.unwrap_or_default());
+    }
+    Ok(parsed)
+}
+
 fn prepare_agent_environment(cfg: &LibertaiConfig) -> Result<()> {
     // Make sure pi's models.json knows about libertai before any pi-side
     // code looks it up. Deliberately runs after local short-circuits and
@@ -227,6 +244,7 @@ async fn run_async(
 
     let _session_hooks = crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(&cfg));
     let hook_cfg = Arc::clone(&cfg);
+    let prompt = crate::commands::code_mode_prompt::apply_turn_guidance(prompt, mode);
     let prompt = crate::commands::code_hooks::run_user_prompt_submit_hooks(cfg.as_ref(), &prompt)?;
 
     if print {
@@ -324,6 +342,12 @@ fn render(event: AgentEvent) {
             let (dim, reset) = crate::commands::output::stderr_dim_pair();
             eprintln!("  {dim}[tool] {preview}{reset}");
         }
+        AgentEvent::ToolExecutionUpdate { partial_result, .. } => {
+            if let Some(line) = code_ui::smart_approval_audit_line(&partial_result) {
+                let (dim, reset) = crate::commands::output::stderr_dim_pair();
+                eprintln!("  {dim}[approval] {line}{reset}");
+            }
+        }
         AgentEvent::AgentEnd { .. } => {
             // AgentEnd fires at the tail of the agent loop; a newline here
             // flushes any trailing delta line so the usage-stats eprintln
@@ -381,6 +405,10 @@ struct PrintModeApprovalUi;
 
 #[async_trait::async_trait]
 impl ApprovalUi for PrintModeApprovalUi {
+    fn allows_smart_approval(&self) -> bool {
+        false
+    }
+
     async fn decide(&self, tool_name: &str, _preview: &str, always_rule: &str) -> PromptChoice {
         let (dim, reset) = crate::commands::output::stderr_dim_pair();
         eprintln!(

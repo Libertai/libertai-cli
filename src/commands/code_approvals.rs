@@ -439,6 +439,12 @@ pub fn wildcard_match(pattern: &str, text: &str) -> bool {
 #[async_trait]
 pub trait ApprovalUi: Send + Sync {
     async fn decide(&self, tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice;
+    /// Whether this UI may use smart approval as a substitute for a
+    /// manual approval prompt. Headless UIs return false so fresh
+    /// mutating calls still require an explicit remembered rule.
+    fn allows_smart_approval(&self) -> bool {
+        true
+    }
     async fn ask(&self, _payload: serde_json::Value) -> AskOutcome {
         AskOutcome::Answer(serde_json::json!({
             "cancelled": true,
@@ -818,7 +824,9 @@ impl Tool for ApprovalTool {
         {
             preview = format!("{preview}\n\nPreToolUse hook requested confirmation: {reason}");
         }
-        if !matches!(policy_decision, ToolPolicyDecision::Ask { .. }) {
+        if !matches!(policy_decision, ToolPolicyDecision::Ask { .. })
+            && self.ui.allows_smart_approval()
+        {
             if let Some(smart) = self.smart_approval.as_ref() {
                 match smart.decide(name, &preview, &effective_input).await {
                     SmartApprovalVerdict::Approve => {
@@ -919,11 +927,10 @@ impl ApprovalTool {
         }
 
         let subject = approval_subject_with_base(name, &effective_input, self.base_dir.as_deref());
-        if record_always {
-            self.state.record_always(subject.suggested_rule);
-        }
 
-        if !matches!(policy_decision, ToolPolicyDecision::Ask { .. }) {
+        if !matches!(policy_decision, ToolPolicyDecision::Ask { .. })
+            && self.ui.allows_smart_approval()
+        {
             if let Some(smart) = self.smart_approval.as_ref() {
                 let preview = preview_call(name, &effective_input);
                 if let SmartApprovalVerdict::Deny { reason } =
@@ -932,6 +939,10 @@ impl ApprovalTool {
                     return Ok(denial_output(smart_denial_reason(reason)).into());
                 }
             }
+        }
+
+        if record_always {
+            self.state.record_always(subject.suggested_rule);
         }
 
         with_policy_context(
@@ -1357,6 +1368,27 @@ mod tests {
         }
     }
 
+    struct HeadlessCountingUi {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ApprovalUi for HeadlessCountingUi {
+        fn allows_smart_approval(&self) -> bool {
+            false
+        }
+
+        async fn decide(
+            &self,
+            _tool_name: &str,
+            _preview: &str,
+            _always_rule: &str,
+        ) -> PromptChoice {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            PromptChoice::Deny
+        }
+    }
+
     struct StaticSmartApproval(SmartApprovalVerdict);
 
     #[async_trait]
@@ -1590,6 +1622,70 @@ mod tests {
     }
 
     #[test]
+    fn ui_can_disable_smart_approval_for_unremembered_mutating_call() {
+        let ui_calls = Arc::new(AtomicUsize::new(0));
+        let tool = ApprovalTool::new(
+            Box::new(FakeTool),
+            Arc::new(ApprovalState::new()),
+            ModeFlag::new(Mode::Normal),
+            Arc::new(HeadlessCountingUi {
+                calls: Arc::clone(&ui_calls),
+            }),
+        )
+        .with_smart_approval(Some(Arc::new(StaticSmartApproval(
+            SmartApprovalVerdict::Approve,
+        ))));
+
+        let execution = futures::executor::block_on(tool.execute(
+            "call-1",
+            serde_json::json!({"command":"cargo test"}),
+            None,
+        ))
+        .unwrap();
+
+        let ToolExecution::Done(output) = execution else {
+            panic!("expected done output");
+        };
+        assert!(output.is_error);
+        assert!(approval_text(output).contains("user denied execution"));
+        assert_eq!(ui_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn ui_smart_approval_disable_still_honors_remembered_rules() {
+        let ui_calls = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(ApprovalState::new());
+        state.record_always(AllowRule::exact("bash", "cargo test"));
+        let tool = ApprovalTool::new(
+            Box::new(FakeTool),
+            Arc::clone(&state),
+            ModeFlag::new(Mode::Normal),
+            Arc::new(HeadlessCountingUi {
+                calls: Arc::clone(&ui_calls),
+            }),
+        )
+        .with_smart_approval(Some(Arc::new(StaticSmartApproval(
+            SmartApprovalVerdict::Deny {
+                reason: Some("would deny if consulted".to_string()),
+            },
+        ))));
+
+        let execution = futures::executor::block_on(tool.execute(
+            "call-1",
+            serde_json::json!({"command":"cargo test"}),
+            None,
+        ))
+        .unwrap();
+
+        let ToolExecution::Done(output) = execution else {
+            panic!("expected done output");
+        };
+        assert!(!output.is_error);
+        assert_eq!(approval_text(output), "ran");
+        assert_eq!(ui_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn smart_approval_deny_returns_tool_error_without_prompt() {
         let ui_calls = Arc::new(AtomicUsize::new(0));
         let tool = ApprovalTool::new(
@@ -1619,6 +1715,37 @@ mod tests {
         assert!(output.is_error);
         assert!(approval_text(output).contains("smart approval denied"));
         assert_eq!(ui_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn resumed_always_allow_records_after_smart_veto() {
+        let state = Arc::new(ApprovalState::new());
+        let tool = ApprovalTool::new(
+            Box::new(FakeTool),
+            Arc::clone(&state),
+            ModeFlag::new(Mode::Normal),
+            Arc::new(CountingUi {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        )
+        .with_smart_approval(Some(Arc::new(StaticSmartApproval(
+            SmartApprovalVerdict::Deny {
+                reason: Some("nope".to_string()),
+            },
+        ))));
+
+        let execution = futures::executor::block_on(tool.execute_resumed_approval(
+            "call-1",
+            serde_json::json!({"command":"cargo test"}),
+            true,
+        ))
+        .unwrap();
+
+        let ToolExecution::Done(output) = execution else {
+            panic!("expected done output");
+        };
+        assert!(output.is_error);
+        assert!(!state.is_pre_allowed("bash", "cargo test"));
     }
 
     #[test]

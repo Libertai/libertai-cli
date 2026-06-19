@@ -7,10 +7,10 @@
 //! `ApprovalTool` layer; this block is the **prompt** side of plan
 //! mode, separate from the tool-gating side.
 //!
-//! Limitation: the addendum is added once at session creation. Toggling
-//! plan mode mid-session via Shift+Tab changes tool behavior but does
-//! NOT re-revise the system prompt — pi doesn't currently expose a way
-//! to rewrite the prompt of a live session.
+//! The addendum is added at session creation when the session starts in
+//! plan mode, and the REPL also prefixes each submitted turn with the
+//! active-mode guidance so runtime toggles are visible to the model even
+//! though pi does not expose live system-prompt rewriting.
 
 use crate::commands::code_factory::Mode;
 
@@ -29,6 +29,18 @@ session for execution.\n\
 shorter and present 2-3 alternatives with tradeoffs rather than one \
 sequence.\n";
 
+pub const NORMAL_MODE_TURN_GUIDANCE: &str = "\
+Active mode: normal. Mutating tools are available subject to the normal \
+approval flow.\n\n";
+
+pub const ACCEPT_EDITS_MODE_TURN_GUIDANCE: &str = "\
+Active mode: accept-edits. File edit tools may be auto-approved; bash and \
+other broad mutations still follow the normal approval flow.\n\n";
+
+pub const PLAN_MODE_TURN_GUIDANCE: &str = "\
+Active mode: plan. Produce a clear, actionable plan and do not attempt \
+mutating tools such as bash, write, edit, or hashline_edit.\n\n";
+
 /// Prepend the plan-mode addendum to the existing `append_system_prompt`
 /// when the session starts under `Mode::Plan`. Leaves it untouched in
 /// other modes.
@@ -41,4 +53,34 @@ pub fn apply(append: Option<String>, mode: Mode) -> Option<String> {
         out.push_str(&existing);
     }
     Some(out)
+}
+
+/// Prefix a user turn with the current runtime mode. This keeps Shift+Tab
+/// and `/plan` changes visible to the model on the next prompt without
+/// rebuilding the session or mutating pi's system prompt.
+pub fn apply_turn_guidance(prompt: String, mode: Mode) -> String {
+    let guidance = match mode {
+        Mode::Normal => NORMAL_MODE_TURN_GUIDANCE,
+        Mode::AcceptEdits => ACCEPT_EDITS_MODE_TURN_GUIDANCE,
+        Mode::Plan => PLAN_MODE_TURN_GUIDANCE,
+    };
+    format!("{guidance}{prompt}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_guidance_reflects_runtime_mode() {
+        assert!(apply_turn_guidance("do work".to_string(), Mode::Normal)
+            .starts_with("Active mode: normal."));
+        assert!(
+            apply_turn_guidance("do work".to_string(), Mode::AcceptEdits)
+                .starts_with("Active mode: accept-edits.")
+        );
+        let plan = apply_turn_guidance("make a plan".to_string(), Mode::Plan);
+        assert!(plan.starts_with("Active mode: plan."));
+        assert!(plan.ends_with("make a plan"));
+    }
 }

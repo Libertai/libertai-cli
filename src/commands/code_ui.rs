@@ -943,7 +943,7 @@ struct WelcomeInfo {
 fn welcome_lines(info: &WelcomeInfo, styled: bool) -> Vec<String> {
     let identity = format!("{}/{}", info.provider, info.model);
     let mode = format!("{} mode", mode_label(info.mode));
-    let hint_keys = "/help commands · Shift+Tab plan mode · /model switch · /resume sessions";
+    let hint_keys = "/help commands · Shift+Tab mode cycle · /model switch · /resume sessions";
     let hint_input = "/mention <file> attach · Alt+Enter newline · Ctrl+C interrupt · Ctrl+D quit";
     let hint_queue = "type while the agent works — Enter queues for the next turn · ↑ edits queued";
     if styled {
@@ -1114,7 +1114,7 @@ async fn repl_loop(
         &model,
         mode.clone(),
         Arc::clone(&approvals),
-        resume_path,
+        resume_path.clone(),
         bash_command_wrapper.clone(),
         Arc::clone(&cfg),
     )
@@ -1145,6 +1145,7 @@ async fn repl_loop(
     let mut usage_history: Vec<UsageRecord> = Vec::new();
     let tool_activity = Arc::new(Mutex::new(ToolActivityTracker::default()));
     let mut session_name: Option<String> = None;
+    let mut active_session_path = resume_path.clone();
     let mut autonomous_queue: VecDeque<String> = VecDeque::new();
     let mut auto_run: Option<AutoRun> = None;
     let mut scoped_model_patterns: Vec<String> = Vec::new();
@@ -1372,6 +1373,7 @@ async fn repl_loop(
                                 Arc::clone(&cfg),
                             );
                             usage_history.clear();
+                            active_session_path = None;
                             update_bar_status(|status| status.output_style = output_style.clone());
                         }
                         Err(e) => eprintln!("{DIM}  /reload: {e:#}{RESET}"),
@@ -1404,6 +1406,7 @@ async fn repl_loop(
                         mode.get(),
                         output_style.as_deref(),
                         &cfg,
+                        active_session_path.as_deref(),
                         usage_summary(&usage_history),
                     );
                 }
@@ -1415,6 +1418,7 @@ async fn repl_loop(
                         mode.get(),
                         output_style.as_deref(),
                         &cfg,
+                        active_session_path.as_deref(),
                         usage_summary(&usage_history),
                     );
                 }
@@ -1474,6 +1478,8 @@ async fn repl_loop(
             match parse_help_command(rest) {
                 HelpCommand::Show => print_help(),
                 HelpCommand::Json => print_help_json(rest),
+                HelpCommand::Command(command) => print_help_command(&command),
+                HelpCommand::CommandJson(command) => print_help_command_json(&command, rest),
                 HelpCommand::Usage => println!("{DIM}  usage:{RESET} {}", help_usage_text()),
             }
             continue;
@@ -1530,7 +1536,7 @@ async fn repl_loop(
                 return Ok(());
             }
             "/plan" => {
-                let new_mode = flip(mode.get());
+                let new_mode = toggle_plan_mode(mode.get());
                 mode.set(new_mode);
                 announce_mode_change(new_mode);
                 continue;
@@ -1557,7 +1563,7 @@ async fn repl_loop(
                 continue;
             }
             "/sandbox" => {
-                print_sandbox_status("info");
+                print_sandbox_status("info", bash_command_wrapper.as_deref());
                 continue;
             }
             "/usage" | "/cost" => {
@@ -1620,6 +1626,7 @@ async fn repl_loop(
                                         Arc::clone(&cfg),
                                     );
                                 usage_history.clear();
+                                active_session_path = None;
                                 update_bar_status(|status| {
                                     status.output_style = output_style.clone()
                                 });
@@ -1632,14 +1639,8 @@ async fn repl_loop(
                 continue;
             }
             "/logout" => {
-                match crate::commands::logout::run() {
-                    Ok(()) => {
-                        crate::commands::code_models::clear_registered_api_key_env();
-                        println!(
-                            "{DIM}  → logged out; ending this code session so no stale credentials stay live.{RESET}"
-                        );
-                        return Ok(());
-                    }
+                match run_terminal_logout_command() {
+                    Ok(()) => return Ok(()),
                     Err(e) => eprintln!("{DIM}  /logout: {e:#}{RESET}"),
                 }
                 continue;
@@ -1666,6 +1667,7 @@ async fn repl_loop(
                                         Arc::clone(&cfg),
                                     );
                                 usage_history.clear();
+                                active_session_path = Some(path.clone());
                                 update_bar_status(|status| {
                                     status.output_style = output_style.clone()
                                 });
@@ -1758,8 +1760,8 @@ async fn repl_loop(
                 handle = next;
                 session_hooks =
                     crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(&cfg));
-                history.clear();
                 usage_history.clear();
+                active_session_path = None;
                 println!("{DIM}  → fresh session.{RESET}");
                 println!();
                 continue;
@@ -1863,6 +1865,7 @@ async fn repl_loop(
                                 Arc::clone(&cfg),
                             );
                             usage_history.clear();
+                            active_session_path = Some(path.clone());
                             update_bar_status(|status| status.output_style = output_style.clone());
                         }
                         Err(e) => eprintln!("{DIM}  /resume: {e:#}{RESET}"),
@@ -2079,6 +2082,11 @@ async fn repl_loop(
         if let Some(rest) = trimmed.strip_prefix("/plan ") {
             match parse_plan_command(rest) {
                 PlanCommand::Status => print_plan_status(mode.get()),
+                PlanCommand::Toggle => {
+                    let new_mode = toggle_plan_mode(mode.get());
+                    mode.set(new_mode);
+                    announce_mode_change(new_mode);
+                }
                 PlanCommand::On => {
                     mode.set(Mode::Plan);
                     announce_mode_change(Mode::Plan);
@@ -2087,7 +2095,9 @@ async fn repl_loop(
                     mode.set(Mode::Normal);
                     announce_mode_change(Mode::Normal);
                 }
-                PlanCommand::Usage => eprintln!("{DIM}  usage: /plan [on|off|status]{RESET}"),
+                PlanCommand::Usage => {
+                    eprintln!("{DIM}  usage: /plan [toggle|on|off|status]{RESET}")
+                }
             }
             continue;
         }
@@ -2167,6 +2177,13 @@ async fn repl_loop(
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/logout ") {
+            if is_terminal_logout_target(rest.trim()) {
+                match run_terminal_logout_command() {
+                    Ok(()) => return Ok(()),
+                    Err(e) => eprintln!("{DIM}  /logout: {e:#}{RESET}"),
+                }
+                continue;
+            }
             handle_logout_slash(rest.trim(), &cfg);
             continue;
         }
@@ -2286,8 +2303,12 @@ async fn repl_loop(
                 }
             }
         }
+        if trimmed == "/sandbox" {
+            print_sandbox_status("", bash_command_wrapper.as_deref());
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix("/sandbox ") {
-            print_sandbox_status(rest.trim());
+            print_sandbox_status(rest.trim(), bash_command_wrapper.as_deref());
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("/agents ") {
@@ -2525,6 +2546,8 @@ async fn repl_loop(
         } else {
             let agent_line = apply_output_style(output_style.as_deref(), &line);
             let agent_line = apply_pending_shell_context(&pending_shell_context, &agent_line);
+            let agent_line =
+                crate::commands::code_mode_prompt::apply_turn_guidance(agent_line, mode.get());
             match crate::commands::code_hooks::run_user_prompt_submit_hooks(
                 cfg.as_ref(),
                 &agent_line,
@@ -2656,6 +2679,13 @@ fn flip(m: Mode) -> Mode {
         Mode::Normal => Mode::AcceptEdits,
         Mode::AcceptEdits => Mode::Plan,
         Mode::Plan => Mode::Normal,
+    }
+}
+
+fn toggle_plan_mode(m: Mode) -> Mode {
+    match m {
+        Mode::Plan => Mode::Normal,
+        Mode::Normal | Mode::AcceptEdits => Mode::Plan,
     }
 }
 
@@ -3016,23 +3046,76 @@ fn resolve_repl_resume_path_from_sessions(
             .ok_or_else(|| anyhow::anyhow!("no past sessions for this project"))?;
         return Ok(PathBuf::from(recent.path.clone()));
     }
+    if let Ok(index) = raw.parse::<usize>() {
+        if index == 0 {
+            anyhow::bail!("session number must be 1 or greater");
+        }
+        let Some(session) = sessions.get(index - 1) else {
+            anyhow::bail!(
+                "session number {index} is out of range; {} saved session(s) available",
+                sessions.len()
+            );
+        };
+        return Ok(PathBuf::from(&session.path));
+    }
     let path = PathBuf::from(raw);
     if path.exists() {
         return Ok(path);
     }
-    if let Some(session) = sessions.iter().find(|session| {
-        session.id == raw
-            || session.name.as_deref() == Some(raw)
-            || Path::new(&session.path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                == Some(raw)
-    }) {
-        return Ok(PathBuf::from(&session.path));
+    let matches = matching_resume_sessions(raw, sessions);
+    match matches.as_slice() {
+        [session] => return Ok(PathBuf::from(&session.path)),
+        [] => {}
+        _ => {
+            anyhow::bail!(
+                "ambiguous session target: {raw}\n{}",
+                format_resume_candidates(&matches)
+            );
+        }
     }
     anyhow::bail!(
         "session target not found: {raw} (expected saved session id, name, filename, or path)"
     )
+}
+
+fn matching_resume_sessions<'a>(
+    raw: &str,
+    sessions: &'a [crate::commands::code_session::SessionMeta],
+) -> Vec<&'a crate::commands::code_session::SessionMeta> {
+    sessions
+        .iter()
+        .filter(|session| {
+            session.id == raw
+                || session.name.as_deref() == Some(raw)
+                || Path::new(&session.path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    == Some(raw)
+        })
+        .collect()
+}
+
+fn format_resume_candidates(sessions: &[&crate::commands::code_session::SessionMeta]) -> String {
+    sessions
+        .iter()
+        .enumerate()
+        .map(|(idx, session)| {
+            let label = session
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&session.id);
+            format!(
+                "  {}. {}  {}  {} message(s)",
+                idx + 1,
+                label,
+                session.path,
+                session.message_count
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3069,8 +3152,10 @@ fn resume_session_rows(cwd: &Path) -> Result<Vec<serde_json::Value>> {
     let sessions = list_past_sessions(Some(cwd))?;
     Ok(sessions
         .into_iter()
-        .map(|session| {
+        .enumerate()
+        .map(|(idx, session)| {
             json!({
+                "number": idx + 1,
                 "id": session.id,
                 "name": session.name,
                 "path": session.path,
@@ -3115,14 +3200,31 @@ fn resume_json_payload(query: &str) -> Result<serde_json::Value> {
 }
 
 fn print_resume_status() -> Result<()> {
-    let payload = resume_json_payload("status")?;
-    let count = payload["candidate_count"].as_u64().unwrap_or(0);
-    let default_path = payload["default_target"]["path"]
-        .as_str()
+    let cwd = std::env::current_dir().context("resolve current directory")?;
+    let sessions = list_past_sessions(Some(&cwd))?;
+    let count = sessions.len();
+    let default_path = sessions
+        .first()
+        .map(|session| session.path.as_str())
         .unwrap_or("(none)");
     println!(
         "{DIM}  /resume: {count} saved session(s) for this cwd. Running `/resume` resumes the most recent target: {default_path}.{RESET}"
     );
+    for (idx, session) in sessions.iter().take(10).enumerate() {
+        let label = session
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&session.id);
+        println!(
+            "{DIM}  {:>2}.{RESET} {}  {}  {} message(s)",
+            idx + 1,
+            label,
+            session.path,
+            session.message_count
+        );
+    }
     Ok(())
 }
 
@@ -3413,7 +3515,7 @@ fn help_sections() -> Vec<HelpSection> {
         HelpSection {
             title: "modes & permissions",
             lines: vec![
-                "/plan — toggle plan mode (also Shift+Tab)".to_string(),
+                "/plan — toggle normal/plan; Shift+Tab cycles modes".to_string(),
                 permissions_usage_text().to_string(),
                 format!("{} — alias for /permissions", mode_usage_text()),
                 "/forget — clear saved allow rules".to_string(),
@@ -3525,15 +3627,17 @@ fn print_help() {
     println!();
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum HelpCommand {
     Show,
     Json,
+    Command(String),
+    CommandJson(String),
     Usage,
 }
 
 fn help_usage_text() -> &'static str {
-    "/help [status|show|list|commands|json|--json|status --json|show --json|list --json|commands --json]"
+    "/help [show|list|commands|json|--json|show --json|list --json|commands --json|<command>|<command> --json]"
 }
 
 fn help_command_arg(trimmed: &str) -> Option<&str> {
@@ -3544,12 +3648,21 @@ fn help_command_arg(trimmed: &str) -> Option<&str> {
 }
 
 fn parse_help_command(input: &str) -> HelpCommand {
-    match normalize_help_command_arg(input).as_str() {
-        "" | "status" | "show" | "list" | "commands" => HelpCommand::Show,
-        "json" | "--json" | "status --json" | "show --json" | "list --json" | "commands --json" => {
-            HelpCommand::Json
+    let normalized = normalize_help_command_arg(input);
+    match normalized.as_str() {
+        "" | "show" | "list" | "commands" => HelpCommand::Show,
+        "json" | "--json" | "show --json" | "list --json" | "commands --json" => HelpCommand::Json,
+        _ => {
+            if let Some(command) = normalized.strip_suffix(" --json").map(str::trim) {
+                if let Some(row) = find_help_command_row(command) {
+                    return HelpCommand::CommandJson(row.0.to_string());
+                }
+            }
+            if let Some(row) = find_help_command_row(&normalized) {
+                return HelpCommand::Command(row.0.to_string());
+            }
+            HelpCommand::Usage
         }
-        _ => HelpCommand::Usage,
     }
 }
 
@@ -3679,15 +3792,26 @@ fn help_command_rows() -> &'static [(&'static str, &'static [&'static str], &'st
     ]
 }
 
+fn find_help_command_row(
+    command: &str,
+) -> Option<&'static (&'static str, &'static [&'static str], &'static str)> {
+    let command = command.trim().trim_start_matches('/').to_ascii_lowercase();
+    help_command_rows().iter().find(|(name, aliases, _)| {
+        *name == command || aliases.iter().any(|alias| *alias == command)
+    })
+}
+
 fn help_json_payload(query: &str) -> serde_json::Value {
     let commands: Vec<serde_json::Value> = help_command_rows()
         .iter()
         .map(|(name, aliases, description)| {
+            let arg_hint = help_command_arg_hint(name);
             json!({
                 "name": name,
                 "aliases": aliases,
                 "description": description,
-                "arg_hint": help_command_arg_hint(name),
+                "arg_hint": arg_hint,
+                "usage": slash_usage_for_command(name, arg_hint),
             })
         })
         .collect();
@@ -3697,7 +3821,40 @@ fn help_json_payload(query: &str) -> serde_json::Value {
         "aliases": ["help"],
         "query": query.trim(),
         "commands": commands,
-        "supported_actions": ["status", "show", "list", "commands", "json", "--json", "status --json", "show --json", "list --json", "commands --json"],
+        "supported_actions": ["show", "list", "commands", "json", "--json", "show --json", "list --json", "commands --json", "<command>", "<command> --json"],
+    })
+}
+
+fn slash_usage_for_command(name: &str, arg_hint: &str) -> String {
+    if arg_hint.is_empty() {
+        format!("/{name}")
+    } else {
+        format!("/{name} {arg_hint}")
+    }
+}
+
+fn help_command_json_payload(command: &str, query: &str) -> serde_json::Value {
+    let Some((name, aliases, description)) = find_help_command_row(command).copied() else {
+        return json!({
+            "surface": "terminal",
+            "command": "help",
+            "query": query.trim(),
+            "name": command.trim().trim_start_matches('/'),
+            "error": "not_found",
+            "supported_actions": ["show", "list", "commands", "json", "--json", "show --json", "list --json", "commands --json", "<command>", "<command> --json"],
+        });
+    };
+    let arg_hint = help_command_arg_hint(name);
+    json!({
+        "surface": "terminal",
+        "command": "help",
+        "query": query.trim(),
+        "name": name,
+        "aliases": aliases,
+        "description": description,
+        "arg_hint": arg_hint,
+        "usage": slash_usage_for_command(name, arg_hint),
+        "supported_actions": ["show", "list", "commands", "json", "--json", "show --json", "list --json", "commands --json", "<command>", "<command> --json"],
     })
 }
 
@@ -3734,7 +3891,7 @@ fn help_command_arg_hint(command: &str) -> &'static str {
         "onboarding" => "show|preview|save|path|gist|json|--json|status --json|show --json|preview --json",
         "output-style" => "style|status|show|current|info|list|json|--json|status --json|show --json|current --json|info --json|list --json",
         "permissions" => "status|show|current|info|json|--json|status --json|show --json|current --json|info --json|default|normal|acceptEdits|accept-edits|accept_edits|plan|readonly|read-only|open|settings|edit|approvals|forget|clear|reset|bypassPermissions|bypass|danger",
-        "plan" => "on|off|status",
+        "plan" => "toggle|on|off|status",
         "pr_comments" | "pr-comments" => "scope|send|resolve <thread_id>|unresolve <thread_id>|reopen <thread_id>|viewed <path>|view <path>|viewed --all|unviewed <path>|unview <path>|unviewed --all|thread <path>:<line> <body>|comment <path>:<line> <body>|draft <path>:<line> <body>|drafts|drafts submit|drafts submit comment <body>|drafts submit request_changes <body>|drafts submit approve [body]|drafts clear|reply <thread_id> <body>|edit <comment_id> <body>|review <approve|comment|request_changes> [body]|submit <approve|comment|request_changes> [body]",
         "review" | "security-review" => "[scope]",
         "reload" => "config|session|now|fresh|json|--json|config --json|session --json|now --json|fresh --json",
@@ -3760,6 +3917,31 @@ fn help_command_arg_hint(command: &str) -> &'static str {
 
 fn print_help_json(query: &str) {
     match serde_json::to_string_pretty(&help_json_payload(query)) {
+        Ok(raw) => println!("{raw}"),
+        Err(err) => eprintln!("{DIM}  failed to render help JSON: {err}{RESET}"),
+    }
+}
+
+fn print_help_command(command: &str) {
+    let Some((name, aliases, description)) = find_help_command_row(command).copied() else {
+        println!("{DIM}  usage:{RESET} {}", help_usage_text());
+        return;
+    };
+    let arg_hint = help_command_arg_hint(name);
+    println!("{BOLD}/{name}{RESET}");
+    println!("{DIM}  {description}{RESET}");
+    if !aliases.is_empty() {
+        println!("{DIM}  aliases:{RESET} {}", aliases.join(", "));
+    }
+    println!(
+        "{DIM}  usage:{RESET} {}",
+        slash_usage_for_command(name, arg_hint)
+    );
+    println!();
+}
+
+fn print_help_command_json(command: &str, query: &str) {
+    match serde_json::to_string_pretty(&help_command_json_payload(command, query)) {
         Ok(raw) => println!("{raw}"),
         Err(err) => eprintln!("{DIM}  failed to render help JSON: {err}{RESET}"),
     }
@@ -3974,7 +4156,7 @@ fn scoped_models_usage_text() -> &'static str {
 
 fn hotkey_lines() -> &'static [&'static str] {
     &[
-        "Shift+Tab — cycle default / acceptEdits / plan modes",
+        "Shift+Tab — cycle normal / accept-edits / plan modes",
         "Up / Down — move between draft lines, then walk submitted prompt history",
         "Left / Right — move cursor in the current line",
         "Backspace / Delete — edit the current line",
@@ -4361,7 +4543,35 @@ fn print_changelog_json(limit: usize, query: &str) {
     }
 }
 
-fn print_sandbox_status(action: &str) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EffectiveSandboxState {
+    contained: bool,
+    mode: &'static str,
+    wrapper: Option<String>,
+}
+
+fn effective_sandbox_state(wrapper: Option<&[String]>) -> EffectiveSandboxState {
+    let wrapper_name = wrapper.and_then(|argv| argv.first()).map(|cmd| {
+        Path::new(cmd)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(cmd)
+            .to_string()
+    });
+    let mode = match wrapper_name.as_deref() {
+        Some("bwrap") | Some("bubblewrap") => "strict",
+        Some(_) => "custom",
+        None => "off",
+    };
+    EffectiveSandboxState {
+        contained: wrapper_name.is_some(),
+        mode,
+        wrapper: wrapper_name,
+    }
+}
+
+fn print_sandbox_status(action: &str, wrapper: Option<&[String]>) {
+    let effective = effective_sandbox_state(wrapper);
     match parse_sandbox_action(action) {
         SandboxAction::Info => {
             let cwd = match std::env::current_dir() {
@@ -4372,6 +4582,18 @@ fn print_sandbox_status(action: &str) {
                 }
             };
             let profile = detect_strict_profile(&cwd);
+            println!(
+                "{DIM}  effective sandbox:{RESET} {} ({})",
+                if effective.contained {
+                    "contained"
+                } else {
+                    "not contained"
+                },
+                effective.mode
+            );
+            if let Some(wrapper) = effective.wrapper.as_deref() {
+                println!("{DIM}  wrapper:{RESET} {wrapper}");
+            }
             print!("{}", format_profile_text(&profile));
         }
         SandboxAction::Json => {
@@ -4383,7 +4605,7 @@ fn print_sandbox_status(action: &str) {
                 }
             };
             let profile = detect_strict_profile(&cwd);
-            print_sandbox_json(&profile, action);
+            print_sandbox_json(&profile, action, &effective);
         }
         SandboxAction::Reload => {
             println!(
@@ -4400,7 +4622,11 @@ fn sandbox_usage_text() -> &'static str {
     "/sandbox [info|status|state|show|diagnostics|diag|json|--json|status --json|state --json|show --json|info --json|diagnostics --json|diag --json|reload]"
 }
 
-fn sandbox_json_payload(profile: &StrictProfile, query: &str) -> serde_json::Value {
+fn sandbox_json_payload(
+    profile: &StrictProfile,
+    query: &str,
+    effective: &EffectiveSandboxState,
+) -> serde_json::Value {
     let count_kind = |kind| {
         profile
             .binds
@@ -4413,6 +4639,11 @@ fn sandbox_json_payload(profile: &StrictProfile, query: &str) -> serde_json::Val
         "surface": "terminal",
         "query": query.trim(),
         "aliases": ["sandbox"],
+        "effective": {
+            "contained": effective.contained,
+            "mode": effective.mode,
+            "wrapper": effective.wrapper,
+        },
         "cwd": profile.cwd,
         "network_allowed": profile.network_allowed,
         "bwrap_path": binary_on_path("bwrap"),
@@ -4432,8 +4663,8 @@ fn sandbox_json_payload(profile: &StrictProfile, query: &str) -> serde_json::Val
     })
 }
 
-fn print_sandbox_json(profile: &StrictProfile, query: &str) {
-    match serde_json::to_string_pretty(&sandbox_json_payload(profile, query)) {
+fn print_sandbox_json(profile: &StrictProfile, query: &str, effective: &EffectiveSandboxState) {
+    match serde_json::to_string_pretty(&sandbox_json_payload(profile, query, effective)) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("{DIM}  /sandbox json failed: {e}{RESET}"),
     }
@@ -4987,6 +5218,7 @@ fn parse_permissions_command(input: &str) -> PermissionsCommand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanCommand {
+    Toggle,
     Status,
     On,
     Off,
@@ -4995,7 +5227,8 @@ enum PlanCommand {
 
 fn parse_plan_command(input: &str) -> PlanCommand {
     match input.trim().to_ascii_lowercase().as_str() {
-        "" | "status" | "show" | "current" | "info" => PlanCommand::Status,
+        "" | "toggle" | "switch" => PlanCommand::Toggle,
+        "status" | "show" | "current" | "info" => PlanCommand::Status,
         "on" | "enable" | "enabled" | "true" | "plan" | "readonly" | "read-only" => PlanCommand::On,
         "off" | "disable" | "disabled" | "false" | "normal" | "default" => PlanCommand::Off,
         _ => PlanCommand::Usage,
@@ -5009,7 +5242,7 @@ fn print_plan_status(mode: Mode) {
         if active { "on" } else { "off" },
         mode_label(mode)
     );
-    println!("{DIM}  use /plan on, /plan off, or bare /plan to cycle modes.{RESET}");
+    println!("{DIM}  use bare /plan to toggle normal/plan, or /plan on|off|status.{RESET}");
 }
 
 fn status_line_command_arg(input: &str) -> Option<&str> {
@@ -5301,6 +5534,7 @@ fn parse_login_slash_target(query: &str) -> LoginSlashTarget<'_> {
         ) {
             let provider = tail.trim();
             if !provider.is_empty() && provider.split_whitespace().count() == 1 {
+                let provider = canonical_provider_alias(provider);
                 return if wants_json {
                     LoginSlashTarget::ProviderStatusJson(provider)
                 } else {
@@ -5331,12 +5565,26 @@ fn parse_login_slash_target(query: &str) -> LoginSlashTarget<'_> {
             }
         }
         _ => {
+            let provider = canonical_provider_alias(raw);
             if wants_json {
-                LoginSlashTarget::ProviderStatusJson(raw)
+                LoginSlashTarget::ProviderStatusJson(provider)
             } else {
-                LoginSlashTarget::Provider(raw)
+                LoginSlashTarget::Provider(provider)
             }
         }
+    }
+}
+
+fn canonical_provider_alias(provider: &str) -> &str {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "ltai" | "libertai-api" | "libertai_api" => "libertai",
+        "claude" | "anthropic-claude" | "anthropic_claude" => "anthropic",
+        "gpt" | "chatgpt" | "open-ai" | "open_ai" => "openai",
+        "gemini" | "google-ai" | "google_ai" => "google",
+        "copilot" | "github-copilot" | "github_copilot" => "github-copilot",
+        "gitlab-duo" | "gitlab_duo" | "duo" => "gitlab",
+        "vertexai" | "vertex-ai" | "vertex_ai" => "vertex",
+        _ => provider.trim(),
     }
 }
 
@@ -5399,6 +5647,33 @@ fn handle_logout_slash(query: &str, cfg: &LibertaiConfig) {
             );
         }
     }
+}
+
+fn is_terminal_logout_target(query: &str) -> bool {
+    let (raw, wants_json) = strip_login_json_suffix(query);
+    if wants_json {
+        return false;
+    }
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "libertai"
+            | "ltai"
+            | "libertai-api"
+            | "libertai_api"
+            | "account"
+            | "key"
+            | "api-key"
+            | "api"
+    )
+}
+
+fn run_terminal_logout_command() -> Result<()> {
+    crate::commands::logout::run()?;
+    crate::commands::code_models::clear_registered_api_key_env();
+    println!(
+        "{DIM}  → logged out; ending this code session so no stale credentials stay live.{RESET}"
+    );
+    Ok(())
 }
 
 fn print_login_status(cfg: &LibertaiConfig) {
@@ -5743,6 +6018,7 @@ fn model_json_payload(
     scoped_model_patterns: &[String],
     query: &str,
     available_models: Option<Vec<String>>,
+    available_models_source: Option<String>,
 ) -> serde_json::Value {
     json!({
         "surface": "terminal",
@@ -5763,6 +6039,7 @@ fn model_json_payload(
             "is_scoped": !scoped_model_patterns.is_empty(),
         },
         "available_models": available_models,
+        "available_models_source": available_models_source,
         "aliases": ["model"],
         "supported_actions": ["status", "show", "current", "json", "--json", "status --json", "show --json", "current --json", "list", "ls", "list --json", "ls --json", "next", "cycle", "prev", "previous", "back", "set <model>", "set <provider/model>"],
     })
@@ -5776,11 +6053,14 @@ fn print_model_json(
     include_list: bool,
 ) {
     let (provider, model) = handle.model();
-    let available_models = if include_list {
+    let (available_models, available_models_source) = if include_list {
         match crate::client::list_models(cfg) {
             Ok(list) => {
                 let ids: Vec<String> = list.data.into_iter().map(|entry| entry.id).collect();
-                Some(scoped_model_ids(&provider, &ids, scoped_model_patterns))
+                (
+                    Some(scoped_model_ids(&provider, &ids, scoped_model_patterns)),
+                    Some(model_list_source(cfg)),
+                )
             }
             Err(e) => {
                 eprintln!("{DIM}  /model list --json: {e:#}{RESET}");
@@ -5788,7 +6068,7 @@ fn print_model_json(
             }
         }
     } else {
-        None
+        (None, None)
     };
     match serde_json::to_string_pretty(&model_json_payload(
         &provider,
@@ -5797,6 +6077,7 @@ fn print_model_json(
         scoped_model_patterns,
         query,
         available_models,
+        available_models_source,
     )) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("{DIM}  /model json failed: {e}{RESET}"),
@@ -5812,6 +6093,7 @@ fn print_model_list(cfg: &LibertaiConfig, provider: &str, scoped_model_patterns:
             if !scoped_model_patterns.is_empty() {
                 println!("{DIM}  scope:{RESET} {}", scoped_model_patterns.join(", "));
             }
+            println!("{DIM}  source:{RESET} {}", model_list_source(cfg));
             for id in scoped {
                 println!("{DIM}  -{RESET} {provider}/{id}");
             }
@@ -5819,6 +6101,10 @@ fn print_model_list(cfg: &LibertaiConfig, provider: &str, scoped_model_patterns:
         }
         Err(e) => eprintln!("{DIM}  /model list: {e:#}{RESET}"),
     }
+}
+
+fn model_list_source(cfg: &LibertaiConfig) -> String {
+    format!("{}/v1/models", cfg.api_base.trim_end_matches('/'))
 }
 
 fn next_scoped_model(
@@ -6042,8 +6328,8 @@ fn export_json_payload(query: &str, messages: &[Message]) -> serde_json::Value {
 }
 
 async fn share_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
-    let target = match parse_share_target(path) {
-        Ok(target) => target,
+    let options = match parse_share_options(path) {
+        Ok(options) => options,
         Err(e) => {
             eprintln!("{DIM}  /share: {e:#}{RESET}");
             return;
@@ -6056,8 +6342,8 @@ async fn share_transcript(handle: &AgentSessionHandle, path: Option<&str>) {
             return;
         }
     };
-    let html = render_html_transcript(&messages);
-    match target {
+    let html = render_html_transcript_with_options(&messages, options.redacted);
+    match options.target {
         ShareTarget::File(path) => {
             if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
                 if let Err(e) = std::fs::create_dir_all(parent) {
@@ -6103,7 +6389,7 @@ async fn print_share_json(handle: &AgentSessionHandle, query: &str) {
 }
 
 fn share_json_payload(query: &str, messages: &[Message]) -> serde_json::Value {
-    let html = render_html_transcript(messages);
+    let html = render_html_transcript_with_options(messages, true);
     json!({
         "surface": "terminal",
         "command": "share",
@@ -6118,10 +6404,12 @@ fn share_json_payload(query: &str, messages: &[Message]) -> serde_json::Value {
             "bytes": html.len(),
             "lines": html.lines().count(),
         },
+        "redacted_by_default": true,
+        "redaction": "tool call arguments and tool result bodies are omitted unless /share --full or /share --raw is used",
         "will_write": false,
         "will_publish": false,
         "will_copy": false,
-        "supported_actions": ["copy", "save", "path", "gist", "json", "--json", "status --json", "show --json", "preview --json"],
+        "supported_actions": ["save", "path", "gist", "full", "raw", "json", "--json", "status --json", "show --json", "preview --json"],
     })
 }
 
@@ -6229,9 +6517,37 @@ enum ShareTarget {
     Gist { public: bool, filename: String },
 }
 
-fn parse_share_target(path: Option<&str>) -> Result<ShareTarget> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShareOptions {
+    target: ShareTarget,
+    redacted: bool,
+}
+
+fn parse_share_options(path: Option<&str>) -> Result<ShareOptions> {
     let raw = path.unwrap_or("").trim();
     let raw = strip_save_action(raw);
+    let mut redacted = true;
+    let mut rest = Vec::new();
+    for part in raw.split_whitespace() {
+        match part.to_ascii_lowercase().as_str() {
+            "--full" | "full" | "--raw" | "raw" => redacted = false,
+            "--redacted" | "redacted" => redacted = true,
+            _ => rest.push(part),
+        }
+    }
+    Ok(ShareOptions {
+        target: parse_share_target_from_raw(&rest.join(" "))?,
+        redacted,
+    })
+}
+
+#[cfg(test)]
+fn parse_share_target(path: Option<&str>) -> Result<ShareTarget> {
+    let raw = path.unwrap_or("").trim();
+    parse_share_target_from_raw(strip_save_action(raw))
+}
+
+fn parse_share_target_from_raw(raw: &str) -> Result<ShareTarget> {
     if raw.is_empty() {
         return Ok(ShareTarget::File(PathBuf::from("libertai-share.html")));
     }
@@ -7812,7 +8128,12 @@ fn render_markdown_transcript(messages: &[Message]) -> String {
     out
 }
 
+#[cfg(test)]
 fn render_html_transcript(messages: &[Message]) -> String {
+    render_html_transcript_with_options(messages, false)
+}
+
+fn render_html_transcript_with_options(messages: &[Message], redacted: bool) -> String {
     let mut out = String::from(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>LibertAI Code Transcript</title><style>\
 body{font-family:system-ui,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;line-height:1.5;margin:2rem auto;max-width:920px;padding:0 1rem;background:#fafafa;color:#161616}\
@@ -7831,7 +8152,7 @@ pre{background:#111827;color:#f9fafb;border-radius:6px;overflow:auto;padding:.75
                 out.push_str(
                     "<section class=\"turn assistant\"><div class=\"role\">Assistant</div>",
                 );
-                render_blocks_html(&mut out, &assistant.content);
+                render_blocks_html(&mut out, &assistant.content, redacted);
                 out.push_str("</section>\n");
             }
             Message::ToolResult(result) => {
@@ -7841,7 +8162,11 @@ pre{background:#111827;color:#f9fafb;border-radius:6px;overflow:auto;padding:.75
                 if result.is_error {
                     out.push_str("<p class=\"error\">Error</p>");
                 }
-                render_blocks_html(&mut out, &result.content);
+                if redacted {
+                    out.push_str("<p><em>Redacted in share output.</em></p>");
+                } else {
+                    render_blocks_html(&mut out, &result.content, false);
+                }
                 out.push_str("</section>\n");
             }
             Message::Custom(custom) => {
@@ -7887,18 +8212,40 @@ fn render_blocks_markdown(out: &mut String, blocks: &[ContentBlock]) {
             }
             ContentBlock::ToolCall(tool) => {
                 out.push_str(&format!("### Tool Call: {}\n\n", tool.name));
-                out.push_str("```json\n");
-                out.push_str(
-                    &serde_json::to_string_pretty(&tool.arguments)
-                        .unwrap_or_else(|_| tool.arguments.to_string()),
-                );
-                out.push_str("\n```\n");
+                let json = serde_json::to_string_pretty(&tool.arguments)
+                    .unwrap_or_else(|_| tool.arguments.to_string());
+                push_markdown_fence(out, "json", &json);
             }
         }
     }
 }
 
-fn render_blocks_html(out: &mut String, blocks: &[ContentBlock]) {
+fn push_markdown_fence(out: &mut String, info: &str, body: &str) {
+    let fence = markdown_fence_for(body);
+    out.push_str(&fence);
+    out.push_str(info);
+    out.push('\n');
+    out.push_str(body);
+    out.push('\n');
+    out.push_str(&fence);
+    out.push('\n');
+}
+
+fn markdown_fence_for(body: &str) -> String {
+    let mut longest = 0usize;
+    let mut current = 0usize;
+    for ch in body.chars() {
+        if ch == '`' {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    "`".repeat(longest.saturating_add(1).max(3))
+}
+
+fn render_blocks_html(out: &mut String, blocks: &[ContentBlock], redacted: bool) {
     for block in blocks {
         match block {
             ContentBlock::Text(text) => out.push_str(&html_paragraphs(&text.text)),
@@ -7915,11 +8262,15 @@ fn render_blocks_html(out: &mut String, blocks: &[ContentBlock]) {
             ContentBlock::ToolCall(tool) => {
                 out.push_str("<h3>Tool Call: ");
                 out.push_str(&escape_html(&tool.name));
-                out.push_str("</h3><pre><code>");
-                let json = serde_json::to_string_pretty(&tool.arguments)
-                    .unwrap_or_else(|_| tool.arguments.to_string());
-                out.push_str(&escape_html(&json));
-                out.push_str("</code></pre>");
+                if redacted {
+                    out.push_str("</h3><p><em>Arguments redacted in share output.</em></p>");
+                } else {
+                    out.push_str("</h3><pre><code>");
+                    let json = serde_json::to_string_pretty(&tool.arguments)
+                        .unwrap_or_else(|_| tool.arguments.to_string());
+                    out.push_str(&escape_html(&json));
+                    out.push_str("</code></pre>");
+                }
             }
         }
     }
@@ -10111,7 +10462,7 @@ fn print_templates() {
     if templates.is_empty() {
         println!("{DIM}  no prompt templates found.{RESET}");
         println!(
-            "{DIM}  create .claude/commands/<name>.md or .claude/skills/<name>/SKILL.md.{RESET}"
+            "{DIM}  create .claude|.libertai/commands/<name>.md or .claude|.libertai|.agents/skills/<name>/SKILL.md.{RESET}"
         );
     } else {
         for t in templates {
@@ -10200,6 +10551,8 @@ fn template_json_payload(cwd: &Path, query: &str) -> serde_json::Value {
         "count": rows.len(),
         "templates": rows,
         "will_write": false,
+        "project_locations": [".claude/commands", ".libertai/commands", ".liberclaw/commands", ".claude/skills", ".libertai/skills", ".agents/skills"],
+        "user_locations": ["~/.claude/commands", "~/.config/libertai/commands", "~/.liberclaw/commands", "~/.claude/skills", "~/.config/libertai/skills"],
         "supported_actions": ["list", "show", "json", "--json", "status --json", "list --json", "show --json", "<name> [args]"],
     })
 }
@@ -11304,6 +11657,7 @@ fn custom_slash_invocation_name(
         .unwrap_or_else(|| cmd.name.clone())
 }
 
+#[cfg(test)]
 fn custom_slash_matches(
     cmd: &crate::commands::code_slash_registry::CustomCommand,
     needle: &str,
@@ -11321,6 +11675,60 @@ fn custom_slash_starts_with(
             .starts_with(needle)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CustomSlashResolve<'a> {
+    Hit(&'a crate::commands::code_slash_registry::CustomCommand),
+    NotFound,
+    Ambiguous(Vec<String>),
+}
+
+fn resolve_custom_slash<'a>(
+    commands: &'a [crate::commands::code_slash_registry::CustomCommand],
+    name: &str,
+) -> CustomSlashResolve<'a> {
+    let needle = name.trim().trim_start_matches('/').to_ascii_lowercase();
+    if needle.is_empty() {
+        return CustomSlashResolve::NotFound;
+    }
+
+    let exact_invocation: Vec<_> = commands
+        .iter()
+        .filter(|cmd| custom_slash_invocation_name(cmd).eq_ignore_ascii_case(&needle))
+        .collect();
+    if let Some(hit) = unique_custom_slash_match(exact_invocation) {
+        return hit;
+    }
+
+    let exact_name: Vec<_> = commands.iter().filter(|cmd| cmd.name == needle).collect();
+    if let Some(hit) = unique_custom_slash_match(exact_name) {
+        return hit;
+    }
+
+    let prefix: Vec<_> = commands
+        .iter()
+        .filter(|cmd| custom_slash_starts_with(cmd, &needle))
+        .collect();
+    unique_custom_slash_match(prefix).unwrap_or(CustomSlashResolve::NotFound)
+}
+
+fn unique_custom_slash_match<'a>(
+    matches: Vec<&'a crate::commands::code_slash_registry::CustomCommand>,
+) -> Option<CustomSlashResolve<'a>> {
+    match matches.as_slice() {
+        [] => None,
+        [hit] => Some(CustomSlashResolve::Hit(hit)),
+        _ => {
+            let mut names: Vec<String> = matches
+                .into_iter()
+                .map(custom_slash_invocation_name)
+                .collect();
+            names.sort();
+            names.dedup();
+            Some(CustomSlashResolve::Ambiguous(names))
+        }
+    }
+}
+
 async fn build_custom_slash_prompt(
     name: &str,
     args: &str,
@@ -11328,17 +11736,16 @@ async fn build_custom_slash_prompt(
 ) -> Result<Option<String>> {
     let cwd = std::env::current_dir().context("resolving cwd")?;
     let templates = crate::commands::code_slash_registry::discover(&cwd);
-    let needle = name.trim().to_lowercase();
-    let Some(hit) = templates
-        .iter()
-        .find(|cmd| custom_slash_matches(cmd, &needle))
-        .or_else(|| {
-            templates
-                .iter()
-                .find(|cmd| custom_slash_starts_with(cmd, &needle))
-        })
-    else {
-        return Ok(None);
+    let hit = match resolve_custom_slash(&templates, name) {
+        CustomSlashResolve::Hit(hit) => hit,
+        CustomSlashResolve::NotFound => return Ok(None),
+        CustomSlashResolve::Ambiguous(names) => {
+            anyhow::bail!(
+                "ambiguous custom slash `{}`; use one of: {}",
+                name.trim(),
+                names.join(", ")
+            );
+        }
     };
     let context = slash_expansion_context(handle).await;
     Ok(Some(
@@ -11524,8 +11931,9 @@ fn background_agent_args(exe: &Path, launch: &BackgroundAgentLaunch) -> Vec<Stri
         args.push("--model".to_string());
         args.push(launch.model.clone());
     }
-    if launch.mode == Mode::Plan {
-        args.push("--plan".to_string());
+    if launch.mode != Mode::Normal {
+        args.push("--mode".to_string());
+        args.push(mode_label(launch.mode).to_string());
     }
     args.push(launch.prompt.clone());
     args
@@ -12164,6 +12572,7 @@ fn print_session_status(
     mode: Mode,
     output_style: Option<&str>,
     cfg: &LibertaiConfig,
+    active_session_path: Option<&Path>,
     usage: Option<UsageSummary>,
 ) {
     let cwd = std::env::current_dir()
@@ -12178,6 +12587,10 @@ fn print_session_status(
         output_style.unwrap_or("default")
     );
     println!("{DIM}  cwd:{RESET} {cwd}");
+    match active_session_path {
+        Some(path) => println!("{DIM}  session:{RESET} {}", path.display()),
+        None => println!("{DIM}  session:{RESET} fresh"),
+    }
     println!(
         "{DIM}  default provider:{RESET} {}",
         cfg.default_code_provider
@@ -12206,10 +12619,19 @@ fn print_session_status_json(
     mode: Mode,
     output_style: Option<&str>,
     cfg: &LibertaiConfig,
+    active_session_path: Option<&Path>,
     usage: Option<UsageSummary>,
 ) {
-    let payload =
-        session_status_json_payload(input, provider, model, mode, output_style, cfg, usage);
+    let payload = session_status_json_payload(
+        input,
+        provider,
+        model,
+        mode,
+        output_style,
+        cfg,
+        active_session_path,
+        usage,
+    );
     match serde_json::to_string_pretty(&payload) {
         Ok(text) => println!("{text}"),
         Err(e) => eprintln!("{DIM}  /status json: {e:#}{RESET}"),
@@ -12223,6 +12645,7 @@ fn session_status_json_payload(
     mode: Mode,
     output_style: Option<&str>,
     cfg: &LibertaiConfig,
+    active_session_path: Option<&Path>,
     usage: Option<UsageSummary>,
 ) -> serde_json::Value {
     let cwd = std::env::current_dir()
@@ -12237,6 +12660,9 @@ fn session_status_json_payload(
             "output_total_human": human_tokens(summary.output_total),
         })
     });
+    let session = active_session_path
+        .map(session_status_metadata)
+        .unwrap_or_else(|| json!({"state": "fresh", "path": null, "indexed": false}));
     json!({
         "surface": "terminal",
         "command": "status",
@@ -12246,6 +12672,7 @@ fn session_status_json_payload(
         "mode": mode_label(mode),
         "output_style": output_style.unwrap_or("default"),
         "cwd": cwd,
+        "session": session,
         "defaults": {
             "provider": cfg.default_code_provider,
             "code_model": cfg.default_code_model,
@@ -12254,6 +12681,32 @@ fn session_status_json_payload(
         "aliases": ["status"],
         "supported_actions": ["status", "state", "show", "info", "current", "session", "json", "--json", "status --json", "state --json", "show --json", "info --json", "current --json", "session --json"],
     })
+}
+
+fn session_status_metadata(path: &Path) -> serde_json::Value {
+    let meta = resume_session_meta(path);
+    let exists = path.is_file();
+    match meta {
+        Some(meta) => json!({
+            "state": "resumed",
+            "path": meta.path,
+            "id": meta.id,
+            "name": meta.name,
+            "cwd": meta.cwd,
+            "timestamp": meta.timestamp,
+            "message_count": meta.message_count,
+            "last_modified_ms": meta.last_modified_ms,
+            "size_bytes": meta.size_bytes,
+            "exists": exists,
+            "indexed": true,
+        }),
+        None => json!({
+            "state": "resumed",
+            "path": path.display().to_string(),
+            "exists": exists,
+            "indexed": false,
+        }),
+    }
 }
 
 fn print_reload_preview_json(
@@ -15480,6 +15933,13 @@ impl TurnRenderer {
                 self.spinner.set_label("thinking…");
                 self.spinner.show();
             }
+            AgentEvent::ToolExecutionUpdate { partial_result, .. } => {
+                if let Some(line) = smart_approval_audit_line(partial_result) {
+                    self.spinner.hide();
+                    self.dim_chrome_line(&format!("  {line}"));
+                    self.spinner.show();
+                }
+            }
             AgentEvent::AutoCompactionStart { reason } => {
                 self.spinner.hide();
                 self.dim_chrome_line(&format!("● compacting · {reason}"));
@@ -15523,8 +15983,9 @@ impl TurnRenderer {
             .strip_prefix(tool_name)
             .map(str::trim_start)
             .unwrap_or("");
+        let detail = sanitize_terminal_preview_text(detail);
         let detail = clip_chars(
-            detail,
+            &detail,
             self.term_width().saturating_sub(tool_name.len() + 6),
         );
         if self.styled {
@@ -15569,6 +16030,33 @@ impl TurnRenderer {
 /// Mirrors the `auto_allow` set in `code_approvals.rs`.
 const READ_ONLY_AUTO_ALLOW_TOOLS: &[&str] = &["read", "grep", "find", "ls", "bash_output"];
 
+pub(crate) fn smart_approval_audit_line(output: &pi::sdk::ToolOutput) -> Option<String> {
+    let details = output.details.as_ref()?;
+    if details.get("kind").and_then(|value| value.as_str()) != Some("smart_approval") {
+        return None;
+    }
+    let decision = details
+        .get("decision")
+        .and_then(|value| value.as_str())
+        .unwrap_or("updated");
+    let tool = details
+        .get("tool")
+        .and_then(|value| value.as_str())
+        .unwrap_or("tool");
+    let reason = details
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    Some(match (decision, reason) {
+        ("approved", _) => format!("✓ smart-approved · {tool}"),
+        ("denied", Some(reason)) => format!("✗ smart-denied · {tool}: {reason}"),
+        ("denied", None) => format!("✗ smart-denied · {tool}"),
+        (other, Some(reason)) => format!("smart approval {other} · {tool}: {reason}"),
+        (other, None) => format!("smart approval {other} · {tool}"),
+    })
+}
+
 /// Concatenated text blocks of a tool result.
 fn tool_output_text(result: &pi::sdk::ToolOutput) -> String {
     let mut out = String::new();
@@ -15591,7 +16079,8 @@ fn tool_result_preview(text: &str, is_error: bool, width: usize, max_lines: usiz
     let head = if is_error { "  └ ✗ " } else { "  └ " };
     let cont = "    ";
     let budget = width.saturating_sub(head.chars().count() + 1).max(8);
-    let lines: Vec<&str> = text
+    let safe_text = sanitize_terminal_preview_text(text);
+    let lines: Vec<&str> = safe_text
         .lines()
         .map(str::trim_end)
         .filter(|l| !l.is_empty())
@@ -15635,6 +16124,70 @@ pub(crate) fn clip_chars(s: &str, max: usize) -> String {
     }
     out.push('…');
     out
+}
+
+/// Strip terminal escape/control sequences from text that will be
+/// echoed in the CLI chrome. Newlines and tabs survive because they are
+/// meaningful user text; CR is normalized to LF so paste payloads and
+/// previews share one shape.
+pub(crate) fn sanitize_terminal_preview_text(input: &str) -> String {
+    strip_terminal_sequences(&input.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
+fn strip_terminal_sequences(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            0x1b => {
+                i = skip_escape_sequence(bytes, i + 1);
+            }
+            0x00..=0x08 | 0x0b | 0x0c | 0x0e..=0x1f | 0x7f => {
+                i += 1;
+            }
+            _ => {
+                let s = &input[i..];
+                let Some(ch) = s.chars().next() else {
+                    break;
+                };
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+fn skip_escape_sequence(bytes: &[u8], mut i: usize) -> usize {
+    let Some(&kind) = bytes.get(i) else {
+        return i;
+    };
+    i += 1;
+    match kind {
+        b'[' => {
+            while let Some(&b) = bytes.get(i) {
+                i += 1;
+                if (0x40..=0x7e).contains(&b) {
+                    break;
+                }
+            }
+            i
+        }
+        b']' | b'P' | b'^' | b'_' => {
+            while i < bytes.len() {
+                match bytes[i] {
+                    0x07 => return i + 1,
+                    0x1b if bytes.get(i + 1) == Some(&b'\\') => return i + 2,
+                    _ => i += 1,
+                }
+            }
+            i
+        }
+        b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => (i + 1).min(bytes.len()),
+        0x40..=0x5f | 0x60..=0x7e => i,
+        _ => i,
+    }
 }
 
 /// `41s`, `2m08s` — elapsed-time fragment for spinner and stop line.
@@ -15752,7 +16305,8 @@ const MAX_QUEUED_PREVIEW_LINES: usize = 3;
 fn queued_preview_lines(texts: &[String], width: usize) -> Vec<String> {
     let mut out = Vec::with_capacity(texts.len().min(MAX_QUEUED_PREVIEW_LINES) + 1);
     for text in texts.iter().take(MAX_QUEUED_PREVIEW_LINES) {
-        let first = text.lines().next().unwrap_or("").trim_end();
+        let safe_text = sanitize_terminal_preview_text(text);
+        let first = safe_text.lines().next().unwrap_or("").trim_end();
         out.push(clip_chars(&format!("  › queued: {first}"), width.max(16)));
     }
     if texts.len() > MAX_QUEUED_PREVIEW_LINES {
@@ -15769,7 +16323,8 @@ fn queued_preview_lines(texts: &[String], width: usize) -> Vec<String> {
 /// tail window keeps it visible). Newlines (Alt+Enter) render as `⏎`.
 /// Plain text — the footer drawer adds the prompt styling.
 fn typed_preview_line(typed: &str, width: usize) -> String {
-    let flat: String = typed
+    let safe_typed = sanitize_terminal_preview_text(typed);
+    let flat: String = safe_typed
         .chars()
         .map(|c| if c == '\n' { '⏎' } else { c })
         .collect();
@@ -15886,6 +16441,7 @@ struct TurnInputPump {
     /// queued) text is handed back to the caller at [`Self::stop`] so
     /// it can prefill the idle input bar.
     typed: Arc<Mutex<String>>,
+    paste_guard: Option<BracketedPasteGuard>,
     #[cfg(unix)]
     termios: Option<CbreakGuard>,
 }
@@ -15904,6 +16460,7 @@ impl TurnInputPump {
             stop: Arc::new(AtomicBool::new(true)),
             thread: None,
             typed: Arc::new(Mutex::new(prefill.clone())),
+            paste_guard: None,
             #[cfg(unix)]
             termios: None,
         };
@@ -15917,6 +16474,7 @@ impl TurnInputPump {
             Some(guard) => guard,
             None => return inert,
         };
+        let paste_guard = BracketedPasteGuard::enter().ok();
         // Non-unix: no cbreak termios → keep today's behaviour (no
         // mid-turn keyboard; typeahead lands in the next idle prompt).
         #[cfg(not(unix))]
@@ -15938,6 +16496,7 @@ impl TurnInputPump {
                 stop,
                 thread: Some(thread),
                 typed,
+                paste_guard,
                 termios: Some(termios),
             }
         }
@@ -15953,6 +16512,7 @@ impl TurnInputPump {
         }
         #[cfg(unix)]
         {
+            self.paste_guard = None;
             self.termios = None; // restore termios via Drop
         }
         self.typed
@@ -16055,7 +16615,7 @@ fn pump_loop(
             },
             Event::Paste(data) => {
                 if let Ok(mut t) = typed.lock() {
-                    t.push_str(&data.replace("\r\n", "\n").replace('\r', "\n"));
+                    t.push_str(&sanitize_paste(&data));
                     dirty = true;
                 }
             }
@@ -16693,11 +17253,7 @@ fn is_newline_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
 /// kept — the submitted text should stay faithful — and rendered as
 /// spaces by `repaint`.
 fn sanitize_paste(data: &str) -> String {
-    data.replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .chars()
-        .filter(|c| *c == '\n' || *c == '\t' || !c.is_control())
-        .collect()
+    sanitize_terminal_preview_text(data)
 }
 
 /// Insert a paste into the buffer at `cursor_pos` as one edit — newlines
@@ -17799,6 +18355,60 @@ mod tests {
         assert_eq!(empty, vec!["  └ (no output)".to_string()]);
     }
 
+    #[test]
+    fn tool_result_preview_strips_terminal_sequences_before_rendering() {
+        let text = "\x1b]8;;https://example.com\x07link\x1b]8;;\x07\n\x1b[31mred\x1b[0m\nbell\x07";
+        let lines = tool_result_preview(text, false, 80, 4);
+        assert_eq!(
+            lines,
+            vec![
+                "  └ link".to_string(),
+                "    red".to_string(),
+                "    bell".to_string(),
+            ]
+        );
+        assert!(lines.iter().all(|line| !line.contains('\x1b')));
+    }
+
+    #[test]
+    fn smart_approval_audit_line_renders_structured_updates() {
+        let approved = pi::sdk::ToolOutput {
+            content: vec![],
+            details: Some(serde_json::json!({
+                "kind": "smart_approval",
+                "decision": "approved",
+                "tool": "bash",
+            })),
+            is_error: false,
+        };
+        assert_eq!(
+            smart_approval_audit_line(&approved),
+            Some("✓ smart-approved · bash".to_string())
+        );
+
+        let denied = pi::sdk::ToolOutput {
+            content: vec![],
+            details: Some(serde_json::json!({
+                "kind": "smart_approval",
+                "decision": "denied",
+                "tool": "write",
+                "reason": "outside workspace",
+            })),
+            is_error: true,
+        };
+        assert_eq!(
+            smart_approval_audit_line(&denied),
+            Some("✗ smart-denied · write: outside workspace".to_string())
+        );
+
+        let unrelated = pi::sdk::ToolOutput {
+            content: vec![],
+            details: Some(serde_json::json!({"kind": "progress"})),
+            is_error: false,
+        };
+        assert_eq!(smart_approval_audit_line(&unrelated), None);
+    }
+
     // -- message stacking ------------------------------------------------
 
     fn queue_of(items: &[&str]) -> MessageQueue {
@@ -17888,6 +18498,16 @@ mod tests {
         // Multi-line messages preview their first line only.
         assert_eq!(lines[2], "  › queued: multi");
         assert_eq!(lines[3], "  › … and 2 more queued");
+    }
+
+    #[test]
+    fn queued_and_typed_previews_strip_terminal_sequences() {
+        let texts = vec!["\x1b[31mred\x1b[0m\nsecond".to_string()];
+        assert_eq!(queued_preview_lines(&texts, 80), vec!["  › queued: red"]);
+        assert_eq!(
+            typed_preview_line("a\x1b]0;title\x07b\x1b[2K\nc", 80),
+            "❯ ab⏎c"
+        );
     }
 
     #[test]
@@ -18042,7 +18662,7 @@ mod tests {
         assert!(joined.contains("~/repos/demo"));
         assert!(joined.contains("new session"));
         assert!(joined.contains("/help commands"));
-        assert!(joined.contains("Shift+Tab plan mode"));
+        assert!(joined.contains("Shift+Tab mode cycle"));
         assert!(joined.contains("Alt+Enter newline"));
         assert!(joined.contains("\u{1b}["), "styled header should use ANSI");
     }
@@ -18362,8 +18982,13 @@ mod tests {
     fn paste_sanitizer_normalizes_newlines_and_strips_control_chars() {
         assert_eq!(sanitize_paste("a\r\nb\rc"), "a\nb\nc");
         // Tabs survive (rendered as spaces, submitted verbatim); other
-        // control bytes — stray ESC, BEL, DEL — are dropped.
-        assert_eq!(sanitize_paste("x\ty\x1b[31mz\x07\x7f"), "x\ty[31mz");
+        // control bytes and full terminal escape sequences are dropped.
+        assert_eq!(sanitize_paste("x\ty\x1b[31mz\x07\x7f"), "x\tyz");
+        assert_eq!(
+            sanitize_paste("a\x1b]52;c;SGVsbG8=\x07b\x1b[?2004lc"),
+            "abc"
+        );
+        assert_eq!(sanitize_paste("a\x1b]0;title\x1b\\b"), "ab");
         assert_eq!(sanitize_paste("plain"), "plain");
     }
 
@@ -18616,10 +19241,14 @@ mod tests {
         let profile = crate::commands::code_sandbox::detect_strict_profile(Path::new(env!(
             "CARGO_MANIFEST_DIR"
         )));
-        let payload = sandbox_json_payload(&profile, "diagnostics --json");
+        let effective = effective_sandbox_state(Some(&["/usr/bin/bwrap".to_string()]));
+        let payload = sandbox_json_payload(&profile, "diagnostics --json", &effective);
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "sandbox");
         assert_eq!(payload["query"], "diagnostics --json");
+        assert_eq!(payload["effective"]["contained"], true);
+        assert_eq!(payload["effective"]["mode"], "strict");
+        assert_eq!(payload["effective"]["wrapper"], "bwrap");
         assert_eq!(payload["cwd"], env!("CARGO_MANIFEST_DIR"));
         assert_eq!(payload["network_allowed"], false);
         assert_eq!(payload["will_write"], false);
@@ -18631,6 +19260,9 @@ mod tests {
         assert_eq!(payload["supported_actions"][8], "status --json");
         assert_eq!(payload["supported_actions"][9], "state --json");
         assert_eq!(payload["supported_actions"][13], "diag --json");
+        let off = effective_sandbox_state(None);
+        assert_eq!(off.contained, false);
+        assert_eq!(off.mode, "off");
     }
 
     #[test]
@@ -19015,7 +19647,45 @@ mod tests {
             resolve_repl_resume_path_from_sessions("other.jsonl", &sessions).unwrap(),
             PathBuf::from("/tmp/project/other.jsonl")
         );
+        assert_eq!(
+            resolve_repl_resume_path_from_sessions("2", &sessions).unwrap(),
+            PathBuf::from("/tmp/project/other.jsonl")
+        );
         assert!(resolve_repl_resume_path_from_sessions("missing", &sessions).is_err());
+    }
+
+    #[test]
+    fn resolve_repl_resume_path_reports_ambiguous_targets() {
+        let sessions = vec![
+            crate::commands::code_session::SessionMeta {
+                path: "/tmp/project/a.jsonl".to_string(),
+                id: "s_a".to_string(),
+                cwd: "/tmp/project".to_string(),
+                timestamp: "2026-05-31T00:00:00Z".to_string(),
+                message_count: 3,
+                last_modified_ms: 1,
+                size_bytes: 128,
+                name: Some("release".to_string()),
+            },
+            crate::commands::code_session::SessionMeta {
+                path: "/tmp/project/b.jsonl".to_string(),
+                id: "s_b".to_string(),
+                cwd: "/tmp/project".to_string(),
+                timestamp: "2026-05-30T00:00:00Z".to_string(),
+                message_count: 1,
+                last_modified_ms: 0,
+                size_bytes: 64,
+                name: Some("release".to_string()),
+            },
+        ];
+
+        let error = resolve_repl_resume_path_from_sessions("release", &sessions)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("ambiguous session target: release"));
+        assert!(error.contains("1. release"));
+        assert!(error.contains("2. release"));
     }
 
     #[test]
@@ -19058,6 +19728,7 @@ mod tests {
             &cwd,
             "status --json",
             vec![json!({
+                "number": 1,
                 "id": "s1",
                 "name": "release",
                 "path": "/tmp/project/session.jsonl",
@@ -19074,6 +19745,7 @@ mod tests {
         assert_eq!(payload["aliases"][0], "resume");
         assert_eq!(payload["available"], true);
         assert_eq!(payload["candidate_count"], 1);
+        assert_eq!(payload["candidates"][0]["number"], 1);
         assert_eq!(payload["default_target"]["id"], "s1");
         assert_eq!(payload["will_replace_current_repl_session"], true);
         assert_eq!(payload["accepts_path"], true);
@@ -20266,6 +20938,7 @@ mod tests {
             Mode::Normal,
             Some("review"),
             &LibertaiConfig::default(),
+            None,
             Some(UsageSummary {
                 turns: 2,
                 last_input: 100,
@@ -20285,6 +20958,8 @@ mod tests {
         assert_eq!(payload["supported_actions"][13], "session --json");
         assert_eq!(payload["usage"]["turns"], 2);
         assert_eq!(payload["output_style"], "review");
+        assert_eq!(payload["session"]["state"], "fresh");
+        assert_eq!(payload["session"]["indexed"], false);
     }
 
     #[test]
@@ -20372,12 +21047,24 @@ mod tests {
         assert_eq!(parse_help_command("list"), HelpCommand::Show);
         assert_eq!(parse_help_command("json"), HelpCommand::Json);
         assert_eq!(parse_help_command("--json"), HelpCommand::Json);
-        assert_eq!(parse_help_command("status --json"), HelpCommand::Json);
+        assert_eq!(
+            parse_help_command("status"),
+            HelpCommand::Command("status".to_string())
+        );
+        assert_eq!(
+            parse_help_command("pr-comments"),
+            HelpCommand::Command("pr_comments".to_string())
+        );
+        assert_eq!(
+            parse_help_command("status --json"),
+            HelpCommand::CommandJson("status".to_string())
+        );
         assert_eq!(parse_help_command("show --json"), HelpCommand::Json);
         assert_eq!(parse_help_command("list --json"), HelpCommand::Json);
         assert_eq!(parse_help_command("commands --json"), HelpCommand::Json);
-        assert!(help_usage_text().contains("list|commands|json|--json"));
+        assert!(help_usage_text().contains("show|list|commands|json|--json"));
         assert!(help_usage_text().contains("show --json|list --json|commands --json"));
+        assert!(help_usage_text().contains("<command>|<command> --json"));
         let payload = help_json_payload("commands --json");
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "help");
@@ -20397,13 +21084,25 @@ mod tests {
             .iter()
             .any(|row| row["name"] == "model"
                 && row["description"] == "show or change the active model"
-                && row["arg_hint"].as_str().unwrap().contains("list --json")));
+                && row["arg_hint"].as_str().unwrap().contains("list --json")
+                && row["usage"].as_str().unwrap().starts_with("/model ")));
         assert!(payload["commands"]
             .as_array()
             .unwrap()
             .iter()
             .any(|row| row["name"] == "remember"
                 && row["arg_hint"].as_str().unwrap().contains("preview --json")));
+
+        let detail = help_command_json_payload("pr-comments", "pr-comments --json");
+        assert_eq!(detail["name"], "pr_comments");
+        assert_eq!(detail["aliases"][0], "pr-comments");
+        assert_eq!(
+            detail["usage"]
+                .as_str()
+                .unwrap()
+                .starts_with("/pr_comments "),
+            true
+        );
     }
 
     #[test]
@@ -21353,6 +22052,31 @@ mod tests {
             parse_login_slash_target("inspect libertai"),
             LoginSlashTarget::ProviderStatus("libertai")
         );
+        assert_eq!(
+            parse_login_slash_target("claude"),
+            LoginSlashTarget::Provider("anthropic")
+        );
+        assert_eq!(
+            parse_login_slash_target("show gemini --json"),
+            LoginSlashTarget::ProviderStatusJson("google")
+        );
+        assert_eq!(
+            parse_login_slash_target("copilot"),
+            LoginSlashTarget::Provider("github-copilot")
+        );
+        for query in [
+            "libertai",
+            "ltai",
+            "account",
+            "key",
+            "api-key",
+            "api",
+            " LIBERTAI ",
+        ] {
+            assert!(is_terminal_logout_target(query), "{query}");
+        }
+        assert!(!is_terminal_logout_target("libertai --json"));
+        assert!(!is_terminal_logout_target("anthropic"));
         assert!(login_usage_text().contains("account|key|api-key|api"));
         assert!(login_usage_text().contains("json|--json|status --json"));
         assert!(login_usage_text().contains("show --json|info --json"));
@@ -21393,7 +22117,8 @@ mod tests {
 
     #[test]
     fn parse_plan_command_accepts_on_off_and_status_aliases() {
-        assert_eq!(parse_plan_command(""), PlanCommand::Status);
+        assert_eq!(parse_plan_command(""), PlanCommand::Toggle);
+        assert_eq!(parse_plan_command("toggle"), PlanCommand::Toggle);
         assert_eq!(parse_plan_command("status"), PlanCommand::Status);
         assert_eq!(parse_plan_command("show"), PlanCommand::Status);
         assert_eq!(parse_plan_command("on"), PlanCommand::On);
@@ -21404,7 +22129,10 @@ mod tests {
         assert_eq!(parse_plan_command("disable"), PlanCommand::Off);
         assert_eq!(parse_plan_command("normal"), PlanCommand::Off);
         assert_eq!(parse_plan_command("wat"), PlanCommand::Usage);
-        assert_eq!(help_command_arg_hint("plan"), "on|off|status");
+        assert_eq!(toggle_plan_mode(Mode::Normal), Mode::Plan);
+        assert_eq!(toggle_plan_mode(Mode::AcceptEdits), Mode::Plan);
+        assert_eq!(toggle_plan_mode(Mode::Plan), Mode::Normal);
+        assert_eq!(help_command_arg_hint("plan"), "toggle|on|off|status");
     }
 
     #[test]
@@ -21521,6 +22249,7 @@ mod tests {
             &["qwen*".to_string()],
             "list --json",
             Some(vec!["qwen3".to_string()]),
+            Some(model_list_source(&cfg)),
         );
         assert_eq!(payload["surface"], "terminal");
         assert_eq!(payload["command"], "model");
@@ -21528,6 +22257,10 @@ mod tests {
         assert_eq!(payload["current"]["id"], "libertai/qwen3");
         assert_eq!(payload["scope"]["is_scoped"], true);
         assert_eq!(payload["available_models"][0], "qwen3");
+        assert_eq!(
+            payload["available_models_source"],
+            format!("{}/v1/models", cfg.api_base.trim_end_matches('/'))
+        );
         assert_eq!(payload["supported_actions"][4], "--json");
         assert_eq!(payload["supported_actions"][5], "status --json");
         assert_eq!(payload["supported_actions"][10], "list --json");
@@ -21765,6 +22498,34 @@ mod tests {
     }
 
     #[test]
+    fn share_options_default_to_redacted_with_full_opt_out() {
+        assert_eq!(
+            parse_share_options(Some("report.html")).unwrap(),
+            ShareOptions {
+                target: ShareTarget::File(PathBuf::from("report.html")),
+                redacted: true,
+            }
+        );
+        assert_eq!(
+            parse_share_options(Some("--full report.html")).unwrap(),
+            ShareOptions {
+                target: ShareTarget::File(PathBuf::from("report.html")),
+                redacted: false,
+            }
+        );
+        assert_eq!(
+            parse_share_options(Some("gist --raw public team notes.html")).unwrap(),
+            ShareOptions {
+                target: ShareTarget::Gist {
+                    public: true,
+                    filename: "team-notes.html".to_string(),
+                },
+                redacted: false,
+            }
+        );
+    }
+
+    #[test]
     fn share_json_arg_accepts_preview_aliases() {
         assert!(is_share_json_arg("json"));
         assert!(is_share_json_arg("--json"));
@@ -21791,8 +22552,17 @@ mod tests {
         assert_eq!(payload["will_write"], false);
         assert_eq!(payload["will_publish"], false);
         assert_eq!(payload["will_copy"], false);
+        assert_eq!(payload["redacted_by_default"], true);
         assert!(payload["artifact"]["bytes"].as_u64().unwrap() > 0);
         assert_eq!(payload["aliases"][0], "share");
+        assert!(!payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("copy")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("full")));
         assert!(payload["supported_actions"]
             .as_array()
             .unwrap()
@@ -21907,6 +22677,16 @@ mod tests {
     }
 
     #[test]
+    fn markdown_fence_grows_past_body_backticks() {
+        let body = "before ``` inner ```` after";
+        assert_eq!(markdown_fence_for(body), "`````");
+        let mut rendered = String::new();
+        push_markdown_fence(&mut rendered, "json", body);
+        assert!(rendered.starts_with("`````json\n"));
+        assert!(rendered.ends_with("\n`````\n"));
+    }
+
+    #[test]
     fn render_html_transcript_escapes_roles_text_and_tool_json() {
         let messages = vec![
             Message::User(pi::model::UserMessage {
@@ -21939,6 +22719,47 @@ mod tests {
         assert!(rendered.contains("hi &amp; bye"));
         assert!(rendered.contains("Tool Call: read"));
         assert!(rendered.contains("src/&lt;lib&gt;.rs"));
+    }
+
+    #[test]
+    fn share_html_redacts_tool_arguments_and_results_by_default() {
+        let messages = vec![
+            Message::assistant(pi::model::AssistantMessage {
+                content: vec![ContentBlock::ToolCall(pi::model::ToolCall {
+                    id: "tool-1".to_string(),
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({"path":"secret.txt"}),
+                    thought_signature: None,
+                })],
+                api: "openai".to_string(),
+                provider: "libertai".to_string(),
+                model: "fast".to_string(),
+                usage: pi::model::Usage::default(),
+                stop_reason: pi::model::StopReason::Stop,
+                error_message: None,
+                timestamp: 1,
+            }),
+            Message::tool_result(pi::model::ToolResultMessage {
+                tool_call_id: "tool-1".to_string(),
+                tool_name: "read".to_string(),
+                content: vec![ContentBlock::Text(pi::model::TextContent::new(
+                    "secret contents",
+                ))],
+                details: None,
+                is_error: false,
+                paused: None,
+                timestamp: 2,
+            }),
+        ];
+        let redacted = render_html_transcript_with_options(&messages, true);
+        assert!(redacted.contains("Tool Call: read"));
+        assert!(redacted.contains("Arguments redacted"));
+        assert!(!redacted.contains("secret.txt"));
+        assert!(!redacted.contains("secret contents"));
+
+        let full = render_html_transcript_with_options(&messages, false);
+        assert!(full.contains("secret.txt"));
+        assert!(full.contains("secret contents"));
     }
 
     #[test]
@@ -22076,7 +22897,8 @@ mod tests {
                 "libertai",
                 "--model",
                 "qwen",
-                "--plan",
+                "--mode",
+                "plan",
                 "Use the task tool"
             ]
         );
@@ -22087,7 +22909,8 @@ mod tests {
                 "libertai",
                 "--model",
                 "qwen",
-                "--plan",
+                "--mode",
+                "plan",
                 "Use the task tool"
             ]
         );
@@ -22105,7 +22928,7 @@ mod tests {
         };
         assert_eq!(
             background_agent_args(Path::new("/usr/bin/libertai"), &launch),
-            vec!["code", "Run review"]
+            vec!["code", "--mode", "accept-edits", "Run review"]
         );
     }
 
@@ -22191,7 +23014,8 @@ mod tests {
                 "libertai".to_string(),
                 "--model".to_string(),
                 "qwen".to_string(),
-                "--plan".to_string(),
+                "--mode".to_string(),
+                "plan".to_string(),
                 "Run review\nwith details".to_string(),
             ]
         );
@@ -22937,6 +23761,56 @@ mod tests {
         assert_eq!(
             parse_direct_custom_slash("/team/audit src"),
             Some(("team/audit", "src"))
+        );
+    }
+
+    #[test]
+    fn custom_slash_resolution_rejects_ambiguous_bare_names_and_prefixes() {
+        fn command(
+            namespace: Option<&str>,
+            name: &str,
+        ) -> crate::commands::code_slash_registry::CustomCommand {
+            crate::commands::code_slash_registry::CustomCommand {
+                name: name.to_string(),
+                namespace: namespace.map(str::to_string),
+                description: None,
+                arg_hint: None,
+                argument_names: Vec::new(),
+                body: "Body".to_string(),
+                source: crate::commands::code_slash_registry::CommandSource::Project,
+                path: PathBuf::from(format!(
+                    ".claude/commands/{}/{}.md",
+                    namespace.unwrap_or(""),
+                    name
+                )),
+            }
+        }
+
+        let commands = vec![
+            command(Some("team"), "audit"),
+            command(Some("ops"), "audit"),
+            command(None, "apply"),
+        ];
+
+        assert!(matches!(
+            resolve_custom_slash(&commands, "team/audit"),
+            CustomSlashResolve::Hit(hit) if custom_slash_invocation_name(hit) == "team/audit"
+        ));
+        assert!(matches!(
+            resolve_custom_slash(&commands, "apply"),
+            CustomSlashResolve::Hit(hit) if custom_slash_invocation_name(hit) == "apply"
+        ));
+        assert_eq!(
+            resolve_custom_slash(&commands, "audit"),
+            CustomSlashResolve::Ambiguous(vec!["ops/audit".to_string(), "team/audit".to_string()])
+        );
+        assert_eq!(
+            resolve_custom_slash(&commands, "a"),
+            CustomSlashResolve::Ambiguous(vec![
+                "apply".to_string(),
+                "ops/audit".to_string(),
+                "team/audit".to_string(),
+            ])
         );
     }
 

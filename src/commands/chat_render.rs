@@ -415,6 +415,7 @@ fn stdout_render_width() -> usize {
 fn complete_block_end(buf: &str) -> Option<usize> {
     let mut in_fence = false;
     let mut fence_char = '`';
+    let mut fence_len = 0usize;
     let mut offset = 0usize;
     let mut last_boundary: Option<usize> = None;
 
@@ -429,10 +430,12 @@ fn complete_block_end(buf: &str) -> Option<usize> {
         let fence_open = trimmed.starts_with("```") || trimmed.starts_with("~~~");
         if fence_open {
             let c = trimmed.chars().next().unwrap_or('`');
+            let len = trimmed.chars().take_while(|ch| *ch == c).count();
             if !in_fence {
                 in_fence = true;
                 fence_char = c;
-            } else if c == fence_char {
+                fence_len = len;
+            } else if c == fence_char && len >= fence_len {
                 in_fence = false;
             }
             continue;
@@ -490,6 +493,13 @@ mod tests {
         let buf = "~~~\n```\nstill fenced\n~~~\n\ndone";
         let cut = complete_block_end(buf).expect("boundary");
         assert_eq!(&buf[..cut], "~~~\n```\nstill fenced\n~~~\n\n");
+    }
+
+    #[test]
+    fn fence_close_must_match_opening_length() {
+        let buf = "````\ncode\n```\nstill code\n````\n\ndone";
+        let cut = complete_block_end(buf).expect("boundary");
+        assert_eq!(&buf[..cut], "````\ncode\n```\nstill code\n````\n\n");
     }
 
     #[test]

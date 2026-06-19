@@ -185,6 +185,9 @@ pub enum Command {
         /// back to normal (Shift+Tab or /plan).
         #[arg(long)]
         plan: bool,
+        /// Initial permission mode (`normal`, `accept-edits`, or `plan`).
+        #[arg(long)]
+        mode: Option<String>,
         /// Resume a specific saved session by JSONL path
         /// (see `--list-sessions` to find one).
         #[arg(long, value_name = "PATH", conflicts_with_all = ["continue_recent", "list_sessions"])]
@@ -478,6 +481,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             model,
             provider,
             plan,
+            mode,
             resume,
             continue_recent,
             list_sessions,
@@ -490,6 +494,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             model,
             provider,
             plan,
+            mode,
             resume,
             continue_recent,
             list_sessions,

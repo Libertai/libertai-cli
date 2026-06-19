@@ -142,13 +142,54 @@ pub fn build_session_options(cfg: CodeSessionConfig) -> SessionOptions {
 /// the cwd verbatim, not canonicalised).
 pub fn list_past_sessions(cwd: Option<&Path>) -> Result<Vec<SessionMeta>> {
     let index = SessionIndex::new();
+    index.reindex_all().map_err(anyhow::Error::new)?;
     let cwd_str = cwd.map(|p| p.to_string_lossy().into_owned());
-    index
+    let sessions = index
         .list_sessions(cwd_str.as_deref())
-        .map_err(anyhow::Error::new)
+        .map_err(anyhow::Error::new)?;
+    Ok(filter_existing_sessions(sessions))
 }
 
 /// Resolve "the most recent session for this cwd" — used by `--continue`.
 pub fn most_recent_session(cwd: &Path) -> Result<Option<SessionMeta>> {
     Ok(list_past_sessions(Some(cwd))?.into_iter().next())
+}
+
+fn filter_existing_sessions(sessions: Vec<SessionMeta>) -> Vec<SessionMeta> {
+    sessions
+        .into_iter()
+        .filter(|session| Path::new(&session.path).is_file())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(path: &Path, id: &str) -> SessionMeta {
+        SessionMeta {
+            path: path.display().to_string(),
+            id: id.to_string(),
+            cwd: "/tmp/project".to_string(),
+            timestamp: "2026-05-31T00:00:00Z".to_string(),
+            message_count: 1,
+            last_modified_ms: 1,
+            size_bytes: 10,
+            name: None,
+        }
+    }
+
+    #[test]
+    fn filter_existing_sessions_drops_missing_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let existing = temp.path().join("session.jsonl");
+        std::fs::write(&existing, "{}\n").unwrap();
+        let missing = temp.path().join("missing.jsonl");
+
+        let filtered =
+            filter_existing_sessions(vec![meta(&missing, "missing"), meta(&existing, "ok")]);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "ok");
+    }
 }

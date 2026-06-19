@@ -102,6 +102,11 @@ fn discover_with_home(
         CommandSource::Project,
         &mut out,
     );
+    scan_skill_dir(
+        &cwd.join(".agents").join("skills"),
+        CommandSource::Project,
+        &mut out,
+    );
     dedupe_by_name(&mut out);
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
@@ -756,6 +761,26 @@ mod tests {
                 "Summarize repo from {}.",
                 temp.path().join(".claude/skills/summarize").display()
             )
+        );
+    }
+
+    #[test]
+    fn discovers_project_agents_skills_like_skills_inventory() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            &temp.path().join(".agents/skills/triage/SKILL.md"),
+            "---\ndescription: Triage failure\n---\nTriage $ARGUMENTS",
+        );
+
+        let cmds = discover_with_home(temp.path(), None, None);
+
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].name, "triage");
+        assert_eq!(cmds[0].source, CommandSource::Project);
+        assert_eq!(cmds[0].description.as_deref(), Some("Triage failure"));
+        assert_eq!(
+            cmds[0].path,
+            temp.path().join(".agents/skills/triage/SKILL.md")
         );
     }
 

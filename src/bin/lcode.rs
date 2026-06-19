@@ -23,6 +23,9 @@ struct LcodeCli {
     /// Start in plan mode (read-only tools; toggle with Shift+Tab or /plan).
     #[arg(long)]
     plan: bool,
+    /// Initial permission mode (`normal`, `accept-edits`, or `plan`).
+    #[arg(long)]
+    mode: Option<String>,
     /// Resume a saved session by JSONL path.
     #[arg(long, value_name = "PATH", conflicts_with_all = ["continue_recent", "list_sessions"])]
     resume: Option<std::path::PathBuf>,
@@ -57,6 +60,7 @@ fn main() {
             model: parsed.model,
             provider: parsed.provider,
             plan: parsed.plan,
+            mode: parsed.mode,
             resume: parsed.resume,
             continue_recent: parsed.continue_recent,
             list_sessions: parsed.list_sessions,
