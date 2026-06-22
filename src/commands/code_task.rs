@@ -28,6 +28,7 @@ use crate::commands::code_approvals::{ApprovalState, ApprovalUi};
 use crate::commands::code_factory::{LibertaiToolFactory, ModeFlag};
 use crate::commands::code_session::{build_session_options, CodeSessionConfig, SessionPersistence};
 use crate::commands::code_skills::{self, SkillPillar};
+use crate::commands::code_team::{AgentHandle, AgentKind, AgentRegistry, AgentStatus};
 use crate::config;
 
 const NAME: &str = "task";
@@ -35,17 +36,20 @@ const LABEL: &str = "Task";
 const DESCRIPTION: &str = concat!(
     "Run a focused subtask in an isolated agent session. Use when a ",
     "piece of research or a narrow lookup is well-defined and should ",
-    "not clutter the main conversation. The child runs with a fixed ",
-    "read-only tool set (read, grep, find, ls) — subagents cannot ",
-    "mutate the filesystem, even if the caller names other tools."
+    "not clutter the main conversation. By default the child runs with ",
+    "a read-only tool set (read, grep, find, ls); a named sub-agent's ",
+    "`tools:` frontmatter can opt in to mutating tools (write, edit, ",
+    "bash, …), in which case the child defaults to worktree isolation ",
+    "and still goes through the normal approval flow."
 );
 
-/// Tools a subagent is ever allowed to run, regardless of what the
-/// caller passes in. This is a hard ceiling, not a default: even if a
-/// compromised or prompt-injected model names `bash` or `write` in the
-/// `tools` argument, those names are filtered out here and the child
-/// session gets the intersection with this list.
-const TASK_TOOL_ALLOWLIST: &[&str] = &["read", "grep", "find", "ls"];
+/// Tools a subagent gets when no `tools:` frontmatter and no `tools`
+/// argument narrow the set. This is a *default*, not a hard ceiling: a
+/// named agent definition that lists `write`/`edit`/`bash` in its
+/// frontmatter is honored (see M1.3), so a subagent can be made
+/// write-capable. Worktree isolation and the shared approval state
+/// remain the guardrails for write-capable subagents.
+const TASK_DEFAULT_TOOLS: &[&str] = &["read", "grep", "find", "ls"];
 
 pub struct TaskTool {
     mode: ModeFlag,
@@ -53,6 +57,7 @@ pub struct TaskTool {
     ui: Arc<dyn ApprovalUi>,
     parent_depth: u8,
     cwd: PathBuf,
+    registry: Arc<AgentRegistry>,
 }
 
 impl TaskTool {
@@ -62,6 +67,7 @@ impl TaskTool {
         ui: Arc<dyn ApprovalUi>,
         parent_depth: u8,
         cwd: PathBuf,
+        registry: Arc<AgentRegistry>,
     ) -> Self {
         Self {
             mode,
@@ -69,6 +75,7 @@ impl TaskTool {
             ui,
             parent_depth,
             cwd,
+            registry,
         }
     }
 }
@@ -153,11 +160,15 @@ impl Tool for TaskTool {
             None => None,
         };
 
-        // Intersect the caller's tool list with our read-only allowlist.
-        // A missing or empty `tools` argument falls back to the full
-        // allowlist; an all-invalid list drops to the allowlist as well
-        // (rather than giving the child an empty tool registry and no
-        // way to research).
+        // Resolve the child's tool set. A named agent definition's
+        // `tools:` frontmatter is the ceiling — honored fully, so a
+        // definition can opt a subagent into write/edit/bash (M1.3).
+        // With no `tools:` frontmatter the ceiling is the read-only
+        // `TASK_DEFAULT_TOOLS`, preserving the historical safety
+        // default. The caller's `tools` argument intersects with the
+        // ceiling; a missing/empty argument falls back to the ceiling,
+        // and an all-filtered-out argument falls back to the ceiling
+        // too (so the child always has at least the read-only set).
         let requested: Vec<String> = input
             .get("tools")
             .and_then(|v| v.as_array())
@@ -167,17 +178,11 @@ impl Tool for TaskTool {
                     .collect()
             })
             .unwrap_or_default();
-        let agent_tools = agent.as_ref().and_then(|a| a.tools.clone());
-        let ceiling: Vec<String> = agent_tools
-            .unwrap_or_else(|| TASK_TOOL_ALLOWLIST.iter().map(|&s| s.to_string()).collect())
-            .into_iter()
-            .filter(|name| TASK_TOOL_ALLOWLIST.contains(&name.as_str()))
-            .collect();
-        let ceiling = if ceiling.is_empty() {
-            TASK_TOOL_ALLOWLIST.iter().map(|&s| s.to_string()).collect()
-        } else {
-            ceiling
-        };
+        let ceiling: Vec<String> = agent
+            .as_ref()
+            .and_then(|a| a.tools.clone())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| TASK_DEFAULT_TOOLS.iter().map(|&s| s.to_string()).collect());
         let filtered: Vec<String> = if requested.is_empty() {
             ceiling.clone()
         } else {
@@ -223,6 +228,7 @@ impl Tool for TaskTool {
             ui: Arc::clone(&self.ui),
             depth: self.parent_depth,
             features,
+            registry: Arc::clone(&self.registry),
             libertai_cfg: Some(Arc::clone(&cfg)),
             tool_policy: None,
             smart_approval: crate::commands::code_aux::smart_approval_from_config(Arc::clone(&cfg)),
@@ -230,10 +236,21 @@ impl Tool for TaskTool {
         }
         .child();
 
+        // Worktree isolation: explicit `same-cwd` wins (no isolation),
+        // then an explicit `worktree` request, then the definition's
+        // `worktree:` frontmatter. As a safety default (M1.3), a
+        // write-capable subagent — one whose resolved tools include
+        // write/edit/bash — defaults into a worktree even when the
+        // definition didn't set `worktree: true`, so its mutations land
+        // in an isolated checkout rather than the live working copy.
+        let capability = crate::commands::code_team::AgentCapability::from_tools(&filtered);
+        let is_write_capable = !matches!(capability, crate::commands::code_team::AgentCapability::ReadOnly);
         let wants_worktree = if requested_same_cwd {
             false
         } else {
-            requested_worktree || agent.as_ref().is_some_and(|a| a.worktree)
+            requested_worktree
+                || agent.as_ref().is_some_and(|a| a.worktree)
+                || is_write_capable
         };
         let max_tokens = Some(crate::commands::code_session::DEFAULT_MAX_TOKENS);
         let worktree = if wants_worktree {
@@ -270,6 +287,9 @@ impl Tool for TaskTool {
             .as_ref()
             .and_then(|a| a.model.clone())
             .unwrap_or_else(|| cfg.default_code_model.clone());
+        // Capture for the registry registration below — `model` is
+        // moved into `CodeSessionConfig` on the next line.
+        let model_for_handle = model.clone();
         let options = build_session_options(CodeSessionConfig {
             provider: cfg.default_code_provider.clone(),
             model,
@@ -304,21 +324,67 @@ impl Tool for TaskTool {
             eprintln!("\n  \x1b[2m[subagent] running: {prompt}\x1b[0m");
         }
 
+        // Register the subagent in the shared live registry so the
+        // panel and agent view can show it while it runs. In-process
+        // subagents are ephemeral: the handle is removed on return.
+        let display_name = agent
+            .as_ref()
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "subagent".to_string());
+        let prompt_preview: String = prompt.chars().take(80).collect();
+        let handle_arc = self.registry.register(
+            crate::commands::code_team::AgentRegistration {
+                name: display_name.clone(),
+                kind: AgentKind::Subagent {
+                    depth: self.parent_depth,
+                    parent: None,
+                },
+                color: agent
+                    .as_ref()
+                    .and_then(|a| a.color)
+                    .unwrap_or_else(|| crate::commands::code_team::AgentColor::color_for_name(&display_name)),
+                capability,
+                cwd: child_cwd.clone(),
+                model: model_for_handle,
+                prompt_preview,
+                parent: None,
+            },
+        );
+
         let mut handle = match create_agent_session(options).await {
-            Ok(h) => h,
-            Err(e) => return Ok(err_output(&format!("task: session init failed: {e}"))),
+            Ok(h) => {
+                handle_arc.set_status(AgentStatus::Working);
+                h
+            }
+            Err(e) => {
+                handle_arc.set_status(AgentStatus::Failed);
+                self.registry.remove(handle_arc.id);
+                return Ok(err_output(&format!("task: session init failed: {e}")));
+            }
         };
         handle.set_max_tokens(max_tokens);
 
         let child_updates: Option<Arc<dyn Fn(ToolUpdate) + Send + Sync>> = on_update.map(Arc::from);
+        let handle_for_render = Arc::clone(&handle_arc);
         let render = {
             let child_updates = child_updates.clone();
-            move |event: AgentEvent| render_child(event, child_updates.as_deref())
+            move |event: AgentEvent| {
+                update_handle_from_event(&handle_for_render, &event);
+                render_child(event, child_updates.as_deref())
+            }
         };
         let assistant = match handle.prompt(prompt, render).await {
-            Ok(msg) => msg,
-            Err(e) => return Ok(err_output(&format!("task: run failed: {e}"))),
+            Ok(msg) => {
+                handle_arc.set_status(AgentStatus::Completed);
+                msg
+            }
+            Err(e) => {
+                handle_arc.set_status(AgentStatus::Failed);
+                self.registry.remove(handle_arc.id);
+                return Ok(err_output(&format!("task: run failed: {e}")));
+            }
         };
+        self.registry.remove(handle_arc.id);
 
         // Collapse the child assistant's text blocks into a single
         // string; tool-call / thinking blocks are dropped (the parent
@@ -531,6 +597,27 @@ fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String, Str
     String::from_utf8(out.stdout).map_err(|e| format!("git output was not utf-8: {e}"))
 }
 
+/// Update a registered agent handle from a child session event, so
+/// the live panel can show the subagent's current tool and working
+/// state. This rides on the same event stream `render_child` consumes
+/// — no new plumbing — and is a no-op when the handle was already
+/// removed (e.g. the subagent returned and the registry dropped it).
+fn update_handle_from_event(handle: &Arc<AgentHandle>, event: &AgentEvent) {
+    match event {
+        AgentEvent::ToolExecutionStart { tool_name, .. } => {
+            handle.set_current_tool(Some(tool_name.clone()));
+            handle.set_status(AgentStatus::Working);
+        }
+        AgentEvent::ToolExecutionEnd { .. } => {
+            handle.set_current_tool(None);
+        }
+        AgentEvent::AgentEnd { .. } => {
+            handle.set_current_tool(None);
+        }
+        _ => {}
+    }
+}
+
 /// Render events from the child session with a dim `subagent:` prefix
 /// so they're visually distinct from the parent's main stream.
 fn render_child(event: AgentEvent, on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>) {
@@ -719,6 +806,7 @@ mod tests {
             tools: None,
             model: None,
             worktree: false,
+            color: None,
             system_prompt: "Focus on correctness.".to_string(),
             source: AgentSource::Project(tempfile::tempdir().unwrap().path().to_path_buf()),
         };

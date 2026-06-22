@@ -895,6 +895,11 @@ pub fn run_interactive(
         estimated_cost: None,
     });
 
+    // Shared live-agent registry: in-process subagents spawned by the
+    // `task` tool and background runs launched from the REPL land here,
+    // so the live panel (M1.2) and agent view (M2) see one table.
+    let registry = crate::commands::code_team::AgentRegistry::new();
+
     // Forward Ctrl-C during streaming to pi's AbortHandle.
     install_ctrlc_handler();
 
@@ -922,6 +927,7 @@ pub fn run_interactive(
             resume_path,
             bash_command_wrapper,
             cfg,
+            registry,
         )
         .await
     })
@@ -1108,6 +1114,7 @@ fn unix_now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn repl_loop(
     mut provider: String,
     mut model: String,
@@ -1116,6 +1123,7 @@ async fn repl_loop(
     resume_path: Option<PathBuf>,
     bash_command_wrapper: Option<Vec<String>>,
     mut cfg: Arc<LibertaiConfig>,
+    registry: Arc<crate::commands::code_team::AgentRegistry>,
 ) -> Result<()> {
     // Shared mode flag — flipped by Shift+Tab and `/plan`. The same
     // Arc is held by every ApprovalTool inside the session's
@@ -1123,6 +1131,12 @@ async fn repl_loop(
     // tool call without rebuilding the session (and so without losing
     // message history).
     let mode = ModeFlag::new(initial_mode);
+    // Publish the registry so the spinner footer's ticker thread can
+    // render the live agent panel without plumbing the Arc through
+    // every renderer. Cleared on return so a subsequent REPL in the
+    // same process doesn't see a stale registry.
+    set_active_agent_registry(Some(Arc::clone(&registry)));
+    let _registry_guard = RegistryGuard::default();
     let mut handle = build_handle(
         &provider,
         &model,
@@ -1131,6 +1145,7 @@ async fn repl_loop(
         resume_path.clone(),
         bash_command_wrapper.clone(),
         Arc::clone(&cfg),
+        Arc::clone(&registry),
     )
     .await?;
     let mut session_hooks = crate::commands::code_hooks::SessionHookGuard::start(Arc::clone(&cfg));
@@ -1378,6 +1393,7 @@ async fn repl_loop(
                         mode.clone(),
                         Arc::clone(&approvals),
                         bash_command_wrapper.clone(),
+                        Arc::clone(&registry),
                     )
                     .await
                     {
@@ -1632,6 +1648,7 @@ async fn repl_loop(
                             mode.clone(),
                             Arc::clone(&approvals),
                             bash_command_wrapper.clone(),
+                            Arc::clone(&registry),
                         )
                         .await
                         {
@@ -1678,6 +1695,7 @@ async fn repl_loop(
                             Arc::clone(&approvals),
                             bash_command_wrapper.clone(),
                             Arc::clone(&cfg),
+                            Arc::clone(&registry),
                         )
                         .await
                         {
@@ -1781,6 +1799,7 @@ async fn repl_loop(
                     None,
                     bash_command_wrapper.clone(),
                     Arc::clone(&cfg),
+                    Arc::clone(&registry),
                 )
                 .await?;
                 drop(session_hooks);
@@ -1884,6 +1903,7 @@ async fn repl_loop(
                         Arc::clone(&approvals),
                         bash_command_wrapper.clone(),
                         Arc::clone(&cfg),
+                        Arc::clone(&registry),
                     )
                     .await
                     {
@@ -2912,6 +2932,7 @@ fn parse_init_section_indexes(input: &str) -> Option<Vec<usize>> {
     (!indexes.is_empty()).then_some(indexes)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_handle(
     provider: &str,
     model: &str,
@@ -2920,6 +2941,7 @@ async fn build_handle(
     resume_path: Option<PathBuf>,
     bash_command_wrapper: Option<Vec<String>>,
     cfg: Arc<LibertaiConfig>,
+    registry: Arc<crate::commands::code_team::AgentRegistry>,
 ) -> Result<AgentSessionHandle> {
     // Snapshot the mode value before the factory consumes the flag so
     // the prompt addendum (S1-B) can be conditional on the *initial*
@@ -2937,7 +2959,8 @@ async fn build_handle(
         )
         .with_tool_policy(crate::commands::code_hooks::tool_policy_from_config(
             Arc::clone(&cfg),
-        )),
+        ))
+        .with_registry(registry),
     );
     let persistence = match resume_path {
         Some(p) => SessionPersistence::Resume(p),
@@ -2973,6 +2996,7 @@ async fn build_handle(
     Ok(handle)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn reload_repl_session(
     label: &str,
     provider: &mut String,
@@ -2981,6 +3005,7 @@ async fn reload_repl_session(
     mode: ModeFlag,
     approvals: Arc<ApprovalState>,
     bash_command_wrapper: Option<Vec<String>>,
+    registry: Arc<crate::commands::code_team::AgentRegistry>,
 ) -> Result<AgentSessionHandle> {
     let next_cfg = crate::config::load().context("reload config")?;
     crate::commands::code_models::ensure_libertai_registered(&next_cfg)
@@ -2998,6 +3023,7 @@ async fn reload_repl_session(
         None,
         bash_command_wrapper,
         Arc::clone(cfg),
+        registry,
     )
     .await?;
     set_bar_status(BarStatus {
@@ -3031,6 +3057,7 @@ fn reload_model_selection(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resume_repl_session(
     path: &Path,
     provider: &str,
@@ -3039,6 +3066,7 @@ async fn resume_repl_session(
     approvals: Arc<ApprovalState>,
     bash_command_wrapper: Option<Vec<String>>,
     cfg: Arc<LibertaiConfig>,
+    registry: Arc<crate::commands::code_team::AgentRegistry>,
 ) -> Result<AgentSessionHandle> {
     let handle = build_handle(
         provider,
@@ -3048,6 +3076,7 @@ async fn resume_repl_session(
         Some(path.to_path_buf()),
         bash_command_wrapper,
         cfg,
+        registry,
     )
     .await?;
     println!("{DIM}  → resumed session: {}{RESET}", path.display());
@@ -15611,10 +15640,19 @@ impl SpinnerCore {
         }
     }
 
-    /// Repaint the footer block in one terminal write: spinner line,
-    /// dim `› queued:` previews, and the live typing row.
+    /// Repaint the footer block in one terminal write: live agent
+    /// panel (one row per active agent), spinner line, dim `› queued:`
+    /// previews, and the live typing row.
     fn draw(&mut self) {
         let width = term_cols();
+        // Assemble footer rows top-to-bottom. The agent panel rides on
+        // the shared `ACTIVE_AGENT_REGISTRY` so the ticker thread can
+        // render live subagents without the Arc threaded through every
+        // constructor.
+        let mut rows: Vec<String> = Vec::new();
+        for handle in active_agents_for_footer() {
+            rows.push(agent_footer_line(&handle, width));
+        }
         let spinner = clip_chars(
             &format!(
                 "{}{}",
@@ -15627,27 +15665,34 @@ impl SpinnerCore {
             ),
             width,
         );
-        let mut block = if self.styled {
+        rows.push(if self.styled {
             format!("{DIM}{spinner}{RESET}")
         } else {
             spinner
-        };
-        let mut rows: u16 = 1;
+        });
         for line in queued_preview_lines(&self.queued_texts, width) {
-            if self.styled {
-                block.push_str(&format!("\r\n\x1b[2K{DIM}{line}{RESET}"));
+            rows.push(if self.styled {
+                format!("{DIM}{line}{RESET}")
+            } else {
+                line
+            });
+        }
+        let typed = typed_preview_line(&self.typed, width);
+        rows.push(if self.styled {
+            format!("{BOLD}{typed}{RESET}")
+        } else {
+            typed
+        });
+        let mut block = String::new();
+        let mut row_count: u16 = 0;
+        for (i, line) in rows.into_iter().enumerate() {
+            if i == 0 {
+                block.push_str(&line);
             } else {
                 block.push_str(&format!("\r\n\x1b[2K{line}"));
             }
-            rows = rows.saturating_add(1);
+            row_count = row_count.saturating_add(1);
         }
-        let line = typed_preview_line(&self.typed, width);
-        if self.styled {
-            block.push_str(&format!("\r\n\x1b[2K{BOLD}{line}{RESET}"));
-        } else {
-            block.push_str(&format!("\r\n\x1b[2K{line}"));
-        }
-        rows = rows.saturating_add(1);
         // Erase + repaint as one write so the ticker never shows a
         // half-cleared footer between two writes.
         let seq = if self.drawn_rows > 0 {
@@ -15656,7 +15701,7 @@ impl SpinnerCore {
             format!("\r\x1b[2K{block}")
         };
         self.stream.write_str(&seq);
-        self.drawn_rows = rows;
+        self.drawn_rows = row_count;
     }
 }
 
@@ -15684,6 +15729,81 @@ static ACTIVE_SPINNER: Mutex<Option<Arc<Mutex<SpinnerCore>>>> = Mutex::new(None)
 fn set_active_spinner(core: Option<Arc<Mutex<SpinnerCore>>>) {
     if let Ok(mut g) = ACTIVE_SPINNER.lock() {
         *g = core;
+    }
+}
+
+/// Shared live-agent registry for the current REPL session. Set by
+/// `repl_loop` at startup so the spinner footer (a background ticker
+/// thread) can read the active-agent count and per-agent state without
+/// plumbing the `Arc` through every renderer constructor. Mirrors the
+/// `ACTIVE_SPINNER` pattern. `None` in headless `--print` mode and in
+/// tests.
+static ACTIVE_AGENT_REGISTRY: Mutex<Option<Arc<crate::commands::code_team::AgentRegistry>>> =
+    Mutex::new(None);
+
+fn set_active_agent_registry(reg: Option<Arc<crate::commands::code_team::AgentRegistry>>) {
+    if let Ok(mut g) = ACTIVE_AGENT_REGISTRY.lock() {
+        *g = reg;
+    }
+}
+
+/// Snapshot of the active agents for the footer panel. Returns an
+/// empty vec when no REPL is running (headless/tests) so the spinner
+/// simply omits the agents line.
+fn active_agents_for_footer() -> Vec<Arc<crate::commands::code_team::AgentHandle>> {
+    ACTIVE_AGENT_REGISTRY
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .map(|r| r.active())
+        .unwrap_or_default()
+}
+
+/// One-line summary of an active agent for the footer panel, e.g.
+/// `●reviewer 12s read`. Clipped to `width` cols so a long current-
+/// tool name never wraps the footer.
+fn agent_footer_line(handle: &crate::commands::code_team::AgentHandle, width: usize) -> String {
+    use crate::commands::code_team::AgentColor;
+    let secs = handle.elapsed().as_secs();
+    let dot = match handle.capability {
+        crate::commands::code_team::AgentCapability::ReadOnly => "●",
+        crate::commands::code_team::AgentCapability::ReadWrite => "✎",
+    };
+    let mut body = format!("{}{}", dot, handle.name);
+    if let Some(tool) = handle.current_tool() {
+        body.push_str(&format!(" {tool}"));
+    }
+    body.push_str(&format!(" {}s", secs));
+    let depth = match handle.kind {
+        crate::commands::code_team::AgentKind::Subagent { depth, .. } => {
+            if depth > 0 {
+                format!(" · depth {depth}")
+            } else {
+                String::new()
+            }
+        }
+        crate::commands::code_team::AgentKind::Background { .. } => " · bg".to_string(),
+        crate::commands::code_team::AgentKind::Teammate { .. } => " · team".to_string(),
+    };
+    body.push_str(&depth);
+    let body = clip_chars(&body, width.saturating_sub(2));
+    format!("  {}", AgentColor::paint(handle.color, &body))
+}
+
+/// RAII guard that clears `ACTIVE_AGENT_REGISTRY` on drop, so the
+/// spinner footer in a subsequent REPL (or a test) never sees a stale
+/// registry from an earlier session.
+struct RegistryGuard;
+
+impl Default for RegistryGuard {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl Drop for RegistryGuard {
+    fn drop(&mut self) {
+        set_active_agent_registry(None);
     }
 }
 
@@ -18808,6 +18928,60 @@ mod tests {
     }
 
     #[test]
+    fn agent_footer_line_renders_name_elapsed_and_tool() {
+        use crate::commands::code_team::{
+            AgentColor, AgentKind, AgentRegistration, AgentRegistry,
+        };
+        let registry = AgentRegistry::new();
+        let h = registry.register(AgentRegistration {
+            name: "reviewer".to_string(),
+            kind: AgentKind::Subagent { depth: 0, parent: None },
+            color: AgentColor::Green,
+            capability: crate::commands::code_team::AgentCapability::ReadOnly,
+            cwd: PathBuf::from("/tmp"),
+            model: "m".to_string(),
+            prompt_preview: "p".to_string(),
+            parent: None,
+        });
+        h.set_current_tool(Some("read".to_string()));
+        // Elapsed is ~0s right after spawn; assert the structure rather
+        // than the exact second count.
+        let line = agent_footer_line(&h, 80);
+        assert!(line.contains("reviewer"), "line was: {line}");
+        assert!(line.contains("read"), "line was: {line}");
+        assert!(line.contains("0s"), "line was: {line}");
+        // Read-only agents get the ● marker in the body.
+        assert!(line.contains("●reviewer"), "line was: {line}");
+    }
+
+    #[test]
+    fn agent_footer_line_markes_write_capable_with_pencil() {
+        use crate::commands::code_team::{
+            AgentColor, AgentKind, AgentRegistration, AgentRegistry,
+        };
+        let registry = AgentRegistry::new();
+        let h = registry.register(AgentRegistration {
+            name: "builder".to_string(),
+            kind: AgentKind::Subagent { depth: 0, parent: None },
+            color: AgentColor::Blue,
+            capability: crate::commands::code_team::AgentCapability::ReadWrite,
+            cwd: PathBuf::from("/tmp"),
+            model: "m".to_string(),
+            prompt_preview: "p".to_string(),
+            parent: None,
+        });
+        let line = agent_footer_line(&h, 80);
+        assert!(line.contains("✎builder"), "line was: {line}");
+    }
+
+    #[test]
+    fn active_agents_for_footer_empty_without_registry() {
+        // No REPL set the global — the footer helper must not panic.
+        set_active_agent_registry(None);
+        assert!(active_agents_for_footer().is_empty());
+    }
+
+    #[test]
     fn tool_running_label_names_slow_tool_phases() {
         assert_eq!(tool_running_label("ask_user"), "waiting for answer…");
         assert_eq!(tool_running_label("edit"), "editing…");
@@ -20021,6 +20195,7 @@ mod tests {
                 tools: None,
                 model: None,
                 worktree: true,
+                color: None,
                 system_prompt: "Review carefully.".to_string(),
                 source: crate::commands::code_agents::AgentSource::Project(PathBuf::from(
                     ".claude/agents",
@@ -20032,6 +20207,7 @@ mod tests {
                 tools: None,
                 model: None,
                 worktree: false,
+                color: None,
                 system_prompt: "Test carefully.".to_string(),
                 source: crate::commands::code_agents::AgentSource::User(PathBuf::from(
                     "~/.claude/agents",
@@ -24126,6 +24302,7 @@ mod tests {
             tools: Some(vec!["read".to_string(), "grep".to_string()]),
             model: Some("qwen".to_string()),
             worktree: true,
+            color: None,
             system_prompt: "Review carefully.\nCite files.".to_string(),
             source: crate::commands::code_agents::AgentSource::Project(PathBuf::from(
                 "/tmp/project/.libertai/agents",
@@ -24264,6 +24441,7 @@ mod tests {
             tools: None,
             model: None,
             worktree: false,
+            color: None,
             system_prompt: "Review carefully.".to_string(),
             source: crate::commands::code_agents::AgentSource::Project(PathBuf::from(
                 "/tmp/.claude/agents",
@@ -24291,6 +24469,7 @@ mod tests {
             tools: None,
             model: None,
             worktree: false,
+            color: None,
             system_prompt: "Review carefully.".to_string(),
             source: crate::commands::code_agents::AgentSource::Project(PathBuf::from(
                 "/tmp/.claude/agents",
@@ -24318,6 +24497,7 @@ mod tests {
             tools: None,
             model: None,
             worktree: true,
+            color: None,
             system_prompt: "Review carefully.".to_string(),
             source: crate::commands::code_agents::AgentSource::Project(PathBuf::from(
                 "/tmp/.claude/agents",

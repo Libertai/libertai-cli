@@ -33,6 +33,7 @@ use crate::commands::code_path_safety::{
     is_path_mutation_tool, safe_root_from_env, PathSafetyTool,
 };
 use crate::commands::code_task::TaskTool;
+use crate::commands::code_team::AgentRegistry;
 use crate::commands::code_todo::TodoTool;
 use crate::commands::fetch_tool::FetchTool;
 use crate::commands::image_tool::ImageGenTool;
@@ -176,6 +177,13 @@ pub struct LibertaiToolFactory {
     pub ui: Arc<dyn ApprovalUi>,
     pub depth: u8,
     pub features: FactoryFeatures,
+    /// Shared live-agent registry. In-process subagents spawned by the
+    /// `task` tool register here, as do background runs launched from
+    /// the REPL, so the live panel and agent view see one table. A
+    /// fresh empty registry is created when the field is unset (e.g.
+    /// desktop chat pillar), so the factory always has one to hand to
+    /// `TaskTool`.
+    pub registry: Arc<AgentRegistry>,
     /// Carrier for the libertai-cli `Config` when search/fetch are on.
     /// `None` is fine when both are off; the factory just won't
     /// register those tools. Captured as `Arc` so it's cheap to clone
@@ -198,6 +206,7 @@ impl LibertaiToolFactory {
             ui,
             depth: 0,
             features: FactoryFeatures::cli_defaults(),
+            registry: AgentRegistry::new(),
             libertai_cfg: None,
             tool_policy: None,
             smart_approval: None,
@@ -223,6 +232,36 @@ impl LibertaiToolFactory {
             ui,
             depth: 0,
             features,
+            registry: AgentRegistry::new(),
+            libertai_cfg,
+            tool_policy: None,
+            smart_approval,
+            safe_root_override: None,
+        }
+    }
+
+    /// Feature-aware constructor that shares an externally-created
+    /// registry (the REPL creates one and hands it to every
+    /// `build_handle` call so reloads and subagents land in the same
+    /// live table).
+    pub fn new_with_registry(
+        mode: ModeFlag,
+        approvals: Arc<ApprovalState>,
+        ui: Arc<dyn ApprovalUi>,
+        features: FactoryFeatures,
+        libertai_cfg: Option<Arc<LibertaiConfig>>,
+        registry: Arc<AgentRegistry>,
+    ) -> Self {
+        let smart_approval = libertai_cfg
+            .as_ref()
+            .and_then(|cfg| smart_approval_from_config(Arc::clone(cfg)));
+        Self {
+            mode,
+            approvals,
+            ui,
+            depth: 0,
+            features,
+            registry,
             libertai_cfg,
             tool_policy: None,
             smart_approval,
@@ -240,6 +279,15 @@ impl LibertaiToolFactory {
         self
     }
 
+    /// Attach an externally-created registry, overriding the empty one
+    /// a bare constructor created. Used by the REPL after building the
+    /// factory, so callers that go through `new_with_features` can still
+    /// share the REPL's registry.
+    pub fn with_registry(mut self, registry: Arc<AgentRegistry>) -> Self {
+        self.registry = registry;
+        self
+    }
+
     /// Factory for a child session spawned by the Task tool. Inherits
     /// the parent's mode flag (so a Shift+Tab in the parent REPL
     /// affects in-flight subagents too — desired), approval state,
@@ -252,6 +300,7 @@ impl LibertaiToolFactory {
             ui: Arc::clone(&self.ui),
             depth: self.depth.saturating_add(1),
             features: self.features.clone(),
+            registry: Arc::clone(&self.registry),
             libertai_cfg: self.libertai_cfg.clone(),
             tool_policy: self.tool_policy.clone(),
             smart_approval: self.smart_approval.clone(),
@@ -323,6 +372,7 @@ impl ToolFactory for LibertaiToolFactory {
                 Arc::clone(&self.ui),
                 self.depth,
                 cwd.to_path_buf(),
+                Arc::clone(&self.registry),
             )));
         }
 

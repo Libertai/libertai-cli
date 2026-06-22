@@ -30,6 +30,7 @@ pub mod code_session;
 pub mod code_skills;
 pub mod code_slash_registry;
 pub mod code_task;
+pub mod code_team;
 pub mod code_term;
 pub mod code_todo;
 pub mod code_tool_preview;

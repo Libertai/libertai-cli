@@ -22,6 +22,10 @@ pub struct AgentDefinition {
     pub tools: Option<Vec<String>>,
     pub model: Option<String>,
     pub worktree: bool,
+    /// Display color for this agent in the live panel, transcript,
+    /// and agent view. Parsed from the `color:` frontmatter; `None`
+    /// means the registry derives a stable color from the name.
+    pub color: Option<crate::commands::code_team::AgentColor>,
     pub system_prompt: String,
     pub source: AgentSource,
 }
@@ -152,6 +156,7 @@ pub(crate) fn parse_agent_md(
     let mut tools = None;
     let mut model = None;
     let mut worktree = false;
+    let mut color = None;
     let mut list_key: Option<&str> = None;
 
     for raw in frontmatter.lines() {
@@ -186,6 +191,7 @@ pub(crate) fn parse_agent_md(
             "model" => model = Some(unquote(v)),
             "worktree" => worktree = parse_bool(v),
             "isolation" => worktree = unquote(v).eq_ignore_ascii_case("worktree"),
+            "color" => color = crate::commands::code_team::AgentColor::parse(v),
             _ => {}
         }
     }
@@ -207,6 +213,7 @@ pub(crate) fn parse_agent_md(
         tools: tools.filter(|t| !t.is_empty()),
         model: model.filter(|m| !m.trim().is_empty()),
         worktree,
+        color,
         system_prompt: body.trim().to_string(),
         source,
     })
