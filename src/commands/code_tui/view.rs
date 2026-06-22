@@ -146,15 +146,18 @@ fn draw_footer(
 fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
     let Some(approval) = &app.approval else {
         return;
     };
 
-    // Modal size: 60% width, 6 rows tall, centered.
-    let modal_width = (area.width as f32 * 0.6) as u16;
-    let modal_height = 6u16;
+    // Modal size: 70% width, auto height, centered.
+    let modal_width = (area.width as f32 * 0.7) as u16;
+    // Estimate wrapped lines for preview (rough: chars / usable width).
+    let usable_width = modal_width.saturating_sub(4) as usize;
+    let preview_lines = (approval.preview.len() / usable_width.max(1)).max(1) as u16;
+    let modal_height = (7 + preview_lines).min(area.height.saturating_sub(2));
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
@@ -201,7 +204,9 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
         ]),
     ];
 
-    let paragraph = Paragraph::new(lines).block(block);
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap::default());
     frame.render_widget(paragraph, modal_area);
 }
 

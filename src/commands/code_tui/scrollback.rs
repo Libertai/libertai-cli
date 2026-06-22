@@ -4,7 +4,7 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
 
 use crate::commands::code_tui::app::{App, TranscriptEntry};
 use crate::commands::code_tui::markdown;
@@ -97,8 +97,10 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let scroll_from_top =
         max_from_top.saturating_sub(app.scroll as usize).min(max_from_top);
 
-    // Render with scroll.
-    let paragraph = Paragraph::new(lines).scroll((scroll_from_top as u16, 0));
+    // Render with scroll + wrap.
+    let paragraph = Paragraph::new(lines)
+        .scroll((scroll_from_top as u16, 0))
+        .wrap(Wrap::default());
     frame.render_widget(paragraph, para_area);
 
     // Draw scrollbar in the freed rightmost column.

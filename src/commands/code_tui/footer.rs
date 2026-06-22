@@ -18,7 +18,12 @@ use crate::commands::code_tui::app::App;
 use crate::commands::code_tui::theme;
 
 /// Draw the spinner line: `⠋ label…  ●tool(detail)`.
+/// Only shown during Streaming phase; blank otherwise.
 pub fn draw_spinner(frame: &mut Frame, area: Rect, app: &App) {
+    if app.phase != crate::commands::code_tui::app::Phase::Streaming {
+        return;
+    }
+
     let spinner = theme::SPINNER_FRAMES[app.spinner_idx];
 
     let mut spans = vec![
