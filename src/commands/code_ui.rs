@@ -11864,46 +11864,49 @@ async fn slash_expansion_context(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum AgentSlashAction {
+pub(crate) enum AgentSlashAction {
     Foreground(String),
     Background(BackgroundAgentLaunch),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct BackgroundAgentLaunch {
-    name: String,
-    provider: String,
-    model: String,
-    mode: Mode,
-    prompt: String,
-    cwd: PathBuf,
+pub(crate) struct BackgroundAgentLaunch {
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    pub mode: Mode,
+    pub prompt: String,
+    pub cwd: PathBuf,
+    /// Optional sub-agent to run the session as. Emitted as
+    /// `--agent <name>` on the spawned `libertai code` argv.
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct StartedBackgroundAgent {
-    pid: u32,
-    log_path: PathBuf,
+pub(crate) struct StartedBackgroundAgent {
+    pub pid: u32,
+    pub log_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct BackgroundAgentRecord {
-    pid: u32,
+pub(crate) struct BackgroundAgentRecord {
+    pub pid: u32,
     #[serde(default)]
-    run_id: String,
-    name: String,
-    provider: String,
-    model: String,
-    mode: String,
-    prompt_preview: String,
-    cwd: String,
-    log_path: String,
-    started_at_ms: u64,
+    pub run_id: String,
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    pub mode: String,
+    pub prompt_preview: String,
+    pub cwd: String,
+    pub log_path: String,
+    pub started_at_ms: u64,
     #[serde(default)]
-    launched_argv: Vec<String>,
+    pub launched_argv: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BackgroundAgentStatus {
+pub(crate) enum BackgroundAgentStatus {
     Running,
     Exited,
     Unknown,
@@ -11965,13 +11968,14 @@ fn build_agent_slash_action(
             mode,
             prompt,
             cwd,
+            agent: None,
         }))
     } else {
         Ok(AgentSlashAction::Foreground(prompt))
     }
 }
 
-fn start_background_agent(launch: &BackgroundAgentLaunch) -> Result<StartedBackgroundAgent> {
+pub(crate) fn start_background_agent(launch: &BackgroundAgentLaunch) -> Result<StartedBackgroundAgent> {
     let exe = std::env::current_exe().context("resolving current executable")?;
     let log_path = background_agent_log_path(&launch.name)?;
     if let Some(parent) = log_path.parent() {
@@ -12032,6 +12036,12 @@ fn background_agent_args(exe: &Path, launch: &BackgroundAgentLaunch) -> Vec<Stri
     if launch.mode != Mode::Normal {
         args.push("--mode".to_string());
         args.push(mode_label(launch.mode).to_string());
+    }
+    if let Some(agent) = launch.agent.as_ref() {
+        if !agent.trim().is_empty() {
+            args.push("--agent".to_string());
+            args.push(agent.clone());
+        }
     }
     args.push(launch.prompt.clone());
     args
@@ -12105,11 +12115,11 @@ fn background_agent_record(
     }
 }
 
-fn background_agent_run_id(pid: u32, started_at_ms: u64) -> String {
+pub(crate) fn background_agent_run_id(pid: u32, started_at_ms: u64) -> String {
     format!("bg-{started_at_ms}-{pid}")
 }
 
-fn background_agent_record_id(record: &BackgroundAgentRecord) -> String {
+pub(crate) fn background_agent_record_id(record: &BackgroundAgentRecord) -> String {
     if record.run_id.trim().is_empty() {
         background_agent_run_id(record.pid, record.started_at_ms)
     } else {
@@ -12139,7 +12149,7 @@ fn persist_background_agent_record(record: &BackgroundAgentRecord) -> Result<()>
     Ok(())
 }
 
-fn rewrite_background_agent_records(records: &[BackgroundAgentRecord]) -> Result<()> {
+pub(crate) fn rewrite_background_agent_records(records: &[BackgroundAgentRecord]) -> Result<()> {
     let path = background_agent_records_path()?;
     if let Some(parent) = path.parent() {
         crate::config::create_dir_secure(parent)
@@ -12167,7 +12177,7 @@ fn rewrite_background_agent_records(records: &[BackgroundAgentRecord]) -> Result
     Ok(())
 }
 
-fn load_background_agent_records() -> Result<Vec<BackgroundAgentRecord>> {
+pub(crate) fn load_background_agent_records() -> Result<Vec<BackgroundAgentRecord>> {
     let path = background_agent_records_path()?;
     if !path.exists() {
         return Ok(Vec::new());
@@ -12218,7 +12228,7 @@ fn resolve_background_agent_record_from_records(
     Ok(records.into_iter().rev().find(|record| record.pid == pid))
 }
 
-fn retain_running_background_agent_records(
+pub(crate) fn retain_running_background_agent_records(
     records: Vec<BackgroundAgentRecord>,
     status: impl Fn(u32) -> BackgroundAgentStatus,
 ) -> Vec<BackgroundAgentRecord> {
@@ -12237,7 +12247,7 @@ fn parse_background_agent_pid(input: &str) -> Result<u32> {
         .with_context(|| format!("invalid background agent pid `{raw}`"))
 }
 
-fn read_log_tail(path: &Path, max_bytes: usize) -> Result<String> {
+pub(crate) fn read_log_tail(path: &Path, max_bytes: usize) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let start = bytes.len().saturating_sub(max_bytes);
     let mut text = String::from_utf8_lossy(&bytes[start..]).to_string();
@@ -12247,7 +12257,7 @@ fn read_log_tail(path: &Path, max_bytes: usize) -> Result<String> {
     Ok(text)
 }
 
-fn background_agent_status(pid: u32) -> BackgroundAgentStatus {
+pub(crate) fn background_agent_status(pid: u32) -> BackgroundAgentStatus {
     #[cfg(unix)]
     {
         let status = Command::new("kill")
@@ -12270,7 +12280,7 @@ fn background_agent_status(pid: u32) -> BackgroundAgentStatus {
     }
 }
 
-fn send_background_agent_kill(pid: u32) -> Result<()> {
+pub(crate) fn send_background_agent_kill(pid: u32) -> Result<()> {
     #[cfg(unix)]
     {
         let status = Command::new("kill")
@@ -12291,7 +12301,7 @@ fn send_background_agent_kill(pid: u32) -> Result<()> {
     }
 }
 
-fn preview_text(text: &str, max_chars: usize) -> String {
+pub(crate) fn preview_text(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
     let mut out = String::new();
     for (idx, ch) in trimmed.chars().enumerate() {
@@ -23745,6 +23755,7 @@ mod tests {
             mode: Mode::Plan,
             prompt: "Use the task tool".to_string(),
             cwd: PathBuf::from("/tmp/project"),
+            agent: None,
         };
         assert_eq!(
             background_agent_args(Path::new("/usr/bin/libertai"), &launch),
@@ -23782,6 +23793,7 @@ mod tests {
             mode: Mode::AcceptEdits,
             prompt: "Run review".to_string(),
             cwd: PathBuf::from("/tmp/project"),
+            agent: None,
         };
         assert_eq!(
             background_agent_args(Path::new("/usr/bin/libertai"), &launch),
@@ -23850,6 +23862,7 @@ mod tests {
             mode: Mode::Plan,
             prompt: "Run review\nwith details".to_string(),
             cwd: PathBuf::from("/tmp/project"),
+            agent: None,
         };
         let started = StartedBackgroundAgent {
             pid: 4242,

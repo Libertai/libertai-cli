@@ -42,6 +42,9 @@ pub fn run(
     json: bool,
     sandbox: SandboxMode,
     print: bool,
+    bg: bool,
+    name: Option<String>,
+    agent: Option<String>,
     args: Vec<String>,
 ) -> Result<()> {
     let cfg = config::load()?;
@@ -64,6 +67,14 @@ pub fn run(
     } else {
         Some(build_oneshot_prompt(&args, print)?)
     };
+
+    // --bg: spawn a detached `libertai code` for the prompt and return
+    // to the shell. The run shows up in `libertai agents`. Requires a
+    // prompt (the trailing args); conflicts with --print (enforced by
+    // clap) and the interactive REPL.
+    if bg {
+        return run_background(&cfg, &model, &provider, mode, name, agent, oneshot_prompt);
+    }
 
     // Resolve --resume / --continue into an explicit session path, if any.
     let resume_path = resolve_resume_path(resume, continue_recent, print)?;
@@ -180,6 +191,118 @@ fn parse_initial_mode(plan: bool, mode: Option<&str>) -> Result<Mode> {
         bail!("--plan conflicts with --mode {}", mode.unwrap_or_default());
     }
     Ok(parsed)
+}
+
+/// `--bg` path: spawn a detached `libertai code` for the prompt, print
+/// its run id and management hints, and return to the shell. The run
+/// is visible in `libertai agents` and `/agents background`.
+///
+/// When `--agent <name>` is given the raw prompt is rewritten into a
+/// task-tool dispatch instruction (same format as `/agent <name> <task>`)
+/// and the agent definition's model override is applied. The spawned
+/// child receives the already-embedded prompt, so the launch's `agent`
+/// field is left `None`.
+fn run_background(
+    _cfg: &LibertaiConfig,
+    model: &str,
+    provider: &str,
+    mode: Mode,
+    name: Option<String>,
+    agent: Option<String>,
+    prompt: Option<String>,
+) -> Result<()> {
+    use crate::commands::code_ui::{background_agent_run_id, start_background_agent, BackgroundAgentLaunch};
+    let prompt = prompt.ok_or_else(|| anyhow::anyhow!("--bg requires a prompt (pass it as trailing args)"))?;
+
+    // --agent <name>: load the agent definition, build a task-tool
+    // dispatch prompt, and apply the agent's model override if any.
+    let (model, prompt) = if let Some(agent_name) = agent.as_ref() {
+        let cwd = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("cwd lookup failed: {e}"))?;
+        let agents = crate::commands::code_agents::discover_agents(&cwd)?;
+        let agent_def = agents
+            .iter()
+            .find(|a| a.name == agent_name.as_str())
+            .or_else(|| agents.iter().find(|a| a.name.starts_with(agent_name.as_str())))
+            .ok_or_else(|| {
+                let suffix = if agents.is_empty() {
+                    "no named sub-agents are configured".to_string()
+                } else {
+                    format!(
+                        "available sub-agents: {}",
+                        agents
+                            .iter()
+                            .map(|a| a.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                anyhow::anyhow!("unknown agent `{agent_name}` ({suffix})")
+            })?;
+        let isolation = if agent_def.worktree {
+            " and isolation: \"worktree\""
+        } else {
+            ""
+        };
+        let task_prompt = format!(
+            "Use the task tool with subagent_type \"{}\"{} for this focused task:\n\n{}\n\nReturn the named sub-agent's findings and cite any files or commands it used.",
+            agent_def.name, isolation, prompt
+        );
+        let resolved_model = agent_def.model.as_deref().unwrap_or(model).to_string();
+        (resolved_model, task_prompt)
+    } else {
+        (model.to_string(), prompt)
+    };
+
+    let display_name = name.unwrap_or_else(|| slug_from_prompt(&prompt));
+    let cwd = std::env::current_dir().map_err(|e| anyhow::anyhow!("cwd lookup failed: {e}"))?;
+    let launch = BackgroundAgentLaunch {
+        name: display_name.clone(),
+        provider: provider.to_string(),
+        model,
+        mode,
+        prompt,
+        cwd,
+        agent: None,
+    };
+    let started = start_background_agent(&launch)?;
+    let started_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let run_id = background_agent_run_id(started.pid, started_at_ms);
+    println!("backgrounded · {run_id} · {display_name}");
+    println!("  libertai agents             open the agent view");
+    println!("  libertai agents --json      machine-readable listing");
+    println!("  libertai agents --cwd .      scoped to this directory");
+    Ok(())
+}
+
+/// Derive a filesystem-safe display name from a prompt: first few
+/// words, lowercased, non-alphanumerics replaced with `-`.
+fn slug_from_prompt(prompt: &str) -> String {
+    let mut slug = String::new();
+    for (words, word) in prompt.split_whitespace().enumerate() {
+        if words >= 4 {
+            break;
+        }
+        if !slug.is_empty() {
+            slug.push('-');
+        }
+        for ch in word.chars() {
+            if ch.is_ascii_alphanumeric() {
+                slug.push(ch.to_ascii_lowercase());
+            } else {
+                slug.push('-');
+            }
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "agent".to_string()
+    } else {
+        slug
+    }
 }
 
 fn prepare_agent_environment(cfg: &LibertaiConfig) -> Result<()> {

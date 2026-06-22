@@ -230,12 +230,56 @@ pub enum Command {
         /// against a saved session.
         #[arg(long, short = 'p', conflicts_with = "list_sessions")]
         print: bool,
+        /// Start the session in the background: spawn a detached
+        /// `libertai code` process for the given prompt, print its run
+        /// id, and return to the shell. Inspect/attach with `libertai
+        /// agents`. Implies a one-shot prompt (the trailing args) and
+        /// is incompatible with `--print` and the interactive REPL.
+        #[arg(long, conflicts_with_all = ["list_sessions", "print"])]
+        bg: bool,
+        /// Display name for a `--bg` run (shown in `libertai agents`).
+        /// Defaults to a slug derived from the prompt.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Run the session as the named sub-agent (from `.claude/agents`
+        /// etc.) instead of the default agent. With `--bg`, dispatches
+        /// that sub-agent in the background.
+        #[arg(long, value_name = "AGENT")]
+        agent: Option<String>,
         /// Initial prompt. When given, runs a single one-shot turn and
         /// exits (tool approvals still prompt on the terminal unless
         /// `--print` is also set). Without a prompt and without
         /// `--print`, starts the interactive REPL.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+
+    /// One screen for all your coding-agent sessions.
+    ///
+    /// Shows what's running, what needs input, and what's done across
+    /// background `libertai code --bg` runs and `/bg` backgrounded
+    /// sessions. Dispatch new sessions from the input, peek at output
+    /// without attaching, and attach when one needs you. Run without
+    /// flags for the full-screen interactive view; pass `--json` for a
+    /// machine-readable listing that exits without a TUI.
+    Agents {
+        /// Only show sessions started under this directory.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<String>,
+        /// Emit a JSON array of sessions and exit (no TUI).
+        #[arg(long)]
+        json: bool,
+        /// Model for sessions dispatched from the view's input.
+        #[arg(long)]
+        model: Option<String>,
+        /// Permission mode for dispatched sessions (`normal`,
+        /// `accept-edits`, `plan`).
+        #[arg(long, value_name = "MODE")]
+        permission_mode: Option<String>,
+        /// Sub-agent to run dispatched sessions as (defaults to the
+        /// built-in catch-all agent).
+        #[arg(long, value_name = "AGENT")]
+        agent: Option<String>,
     },
 
     /// Run an MCP server exposing LibertAI web search and page fetch over stdio.
@@ -492,6 +536,9 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             json,
             sandbox,
             print,
+            bg,
+            name,
+            agent,
             args,
         } => crate::commands::code::run(
             model,
@@ -505,8 +552,18 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             json,
             sandbox,
             print,
+            bg,
+            name,
+            agent,
             args,
         ),
+        Command::Agents {
+            cwd,
+            json,
+            model,
+            permission_mode,
+            agent,
+        } => crate::commands::code_agent_view::run(cwd, json, model, permission_mode, agent),
         Command::Mcp => crate::commands::mcp::run(),
         Command::Config { action } => crate::commands::config_cmd::run(action),
         Command::Skills { action } => crate::commands::skills::run(action),
@@ -536,6 +593,7 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::Claw { .. } => "claw",
         Command::Hermes { .. } => "hermes",
         Command::Code { .. } => "code",
+        Command::Agents { .. } => "agents",
         Command::Mcp => "mcp",
         Command::Config { .. } => "config",
         Command::Skills { .. } => "skills",
