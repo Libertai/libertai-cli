@@ -15924,15 +15924,40 @@ impl SpinnerCore {
         // render live subagents without the Arc threaded through every
         // constructor.
         let mut rows: Vec<String> = Vec::new();
-        const MAX_AGENT_ROWS: usize = 5;
         let agents = active_agents_for_footer();
-        for handle in agents.iter().take(MAX_AGENT_ROWS) {
+
+        // Dynamic agent-panel cap: up to 1/3 of terminal height, min 3.
+        // The input bar (spinner + queued + typed) needs at least 3 rows,
+        // and the conversation needs at least 3 rows, so the agent panel
+        // can never exceed term_height - 6.
+        let max_agent_rows = ((term_height / 3) as usize).max(3);
+        let agent_count = agents.len().min(max_agent_rows);
+
+        if agent_count > 0 {
+            // Separator header: "── agents (N) ──…"
+            let header = if agents.len() > agent_count {
+                format!("── agents ({}) +{} more ", agent_count, agents.len() - agent_count)
+            } else {
+                format!("── agents ({}) ", agent_count)
+            };
+            let pad = width.saturating_sub(header.chars().count());
+            let header_line = format!(
+                "{}{}{}",
+                header,
+                "─".repeat(pad),
+                if self.styled { RESET } else { "" }
+            );
+            rows.push(if self.styled {
+                format!("{DIM}{header_line}{RESET}")
+            } else {
+                header_line
+            });
+        }
+
+        for handle in agents.iter().take(agent_count) {
             rows.push(agent_footer_line(handle, width));
         }
-        if agents.len() > MAX_AGENT_ROWS {
-            let extra = agents.len() - MAX_AGENT_ROWS;
-            rows.push(format!("{DIM}  … and {extra} more{RESET}"));
-        }
+
         let spinner = clip_chars(
             &format!(
                 "{}{}",
@@ -16121,29 +16146,63 @@ fn active_agents_for_footer() -> Vec<Arc<crate::commands::code_team::AgentHandle
 /// `●reviewer 12s read`. Clipped to `width` cols so a long current-
 /// tool name never wraps the footer.
 fn agent_footer_line(handle: &crate::commands::code_team::AgentHandle, width: usize) -> String {
-    use crate::commands::code_team::AgentColor;
+    use crate::commands::code_team::{AgentColor, AgentStatus};
     let secs = handle.elapsed().as_secs();
-    let dot = match handle.capability {
-        crate::commands::code_team::AgentCapability::ReadOnly => "●",
+    let icon = match handle.status() {
+        AgentStatus::Spawning => "○",
+        AgentStatus::Working => "✽",
+        AgentStatus::NeedsInput => "⏸",
+        AgentStatus::Idle => "∙",
+        AgentStatus::Completed => "✓",
+        AgentStatus::Failed => "✗",
+        AgentStatus::Stopped => "⊘",
+    };
+    let cap = match handle.capability {
+        crate::commands::code_team::AgentCapability::ReadOnly => "",
         crate::commands::code_team::AgentCapability::ReadWrite => "✎",
     };
-    let mut body = format!("{}{}", dot, handle.name);
-    if let Some(tool) = handle.current_tool() {
-        body.push_str(&format!(" {tool}"));
-    }
-    body.push_str(&format!(" {}s", secs));
-    let depth = match handle.kind {
+    let kind = match handle.kind {
         crate::commands::code_team::AgentKind::Subagent { depth, .. } => {
             if depth > 0 {
-                format!(" · depth {depth}")
+                format!("· d{depth}")
             } else {
                 String::new()
             }
         }
-        crate::commands::code_team::AgentKind::Background { .. } => " · bg".to_string(),
-        crate::commands::code_team::AgentKind::Teammate { .. } => " · team".to_string(),
+        crate::commands::code_team::AgentKind::Background { .. } => "· bg".to_string(),
+        crate::commands::code_team::AgentKind::Teammate { .. } => "· team".to_string(),
     };
-    body.push_str(&depth);
+    // Layout: "  ✽ name  prompt…  tool  12s · kind"
+    // Fixed: indent(2) + icon(1) + sp(1) + name(≤15) + sp(2) = 21
+    // Suffix: sp(1) + tool(≤15) + sp(1) + time(4) + sp(1) + kind(≤7) = ≤29
+    let name_w = 15usize;
+    let name = clip_chars(&handle.name, name_w);
+    let time = if secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}s", secs)
+    };
+    let tool = handle.current_tool().unwrap_or_default();
+    let tool_w = 15usize;
+    let tool_clipped = clip_chars(&tool, tool_w);
+    let kind_w = 8usize;
+    let kind_text = clip_chars(&kind, kind_w);
+    // remaining width for prompt preview
+    let fixed = 2 + 1 + 1 + name_w + 2 + 1 + tool_w + 1 + time.len() + 1 + kind_text.len();
+    let prompt_w = width.saturating_sub(fixed);
+    let prompt = if prompt_w > 3 {
+        clip_chars(&handle.prompt_preview, prompt_w)
+    } else {
+        String::new()
+    };
+    let cap_str = if cap.is_empty() {
+        String::new()
+    } else {
+        format!("{cap} ")
+    };
+    let body = format!(
+        "{cap_str}{icon} {name:<name_w$}  {prompt}  {tool_clipped:<tool_w$} {time:>4} {kind_text}",
+    );
     let body = clip_chars(&body, width.saturating_sub(2));
     format!("  {}", AgentColor::paint(handle.color, &body))
 }
@@ -19356,8 +19415,8 @@ mod tests {
         assert!(line.contains("reviewer"), "line was: {line}");
         assert!(line.contains("read"), "line was: {line}");
         assert!(line.contains("0s"), "line was: {line}");
-        // Read-only agents get the ● marker in the body.
-        assert!(line.contains("●reviewer"), "line was: {line}");
+        // Spawning status gets the ○ icon; read-only agents have no cap prefix.
+        assert!(line.contains("○ reviewer"), "line was: {line}");
     }
 
     #[test]
@@ -19377,7 +19436,9 @@ mod tests {
             parent: None,
         });
         let line = agent_footer_line(&h, 80);
-        assert!(line.contains("✎builder"), "line was: {line}");
+        // Write-capable agents get the ✎ cap prefix before the status icon.
+        assert!(line.contains("✎"), "line was: {line}");
+        assert!(line.contains("builder"), "line was: {line}");
     }
 
     #[test]
