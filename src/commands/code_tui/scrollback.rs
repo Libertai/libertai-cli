@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::commands::code_tui::app::{App, TranscriptEntry};
+use crate::commands::code_tui::markdown;
 use crate::commands::code_tui::theme;
 
 /// Draw the scrollback transcript.
@@ -28,18 +29,27 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
                 ]));
             }
             TranscriptEntry::Assistant(text) => {
-                // Split on newlines — each paragraph gets its own Line.
-                // The `●` marker only goes on the first paragraph.
-                // TODO: integrate ratatui-markdown for rich rendering.
-                for (i, para) in text.split('\n').enumerate() {
-                    if i == 0 {
-                        lines.push(Line::from(vec![
-                            Span::styled(theme::glyph::ASSISTANT_MARKER, theme::bold()),
-                            Span::raw(" "),
-                            Span::raw(para),
-                        ]));
-                    } else {
-                        lines.push(Line::from(Span::raw(para)));
+                // Render markdown: headings, bold, italic, code, lists, etc.
+                // The `●` marker goes on the first rendered line.
+                let md_lines = markdown::render(text);
+                if md_lines.is_empty() {
+                    // Empty assistant text — just show the marker.
+                    lines.push(Line::from(vec![
+                        Span::styled(theme::glyph::ASSISTANT_MARKER, theme::bold()),
+                        Span::raw(" "),
+                    ]));
+                } else {
+                    for (i, md_line) in md_lines.into_iter().enumerate() {
+                        if i == 0 {
+                            let mut v = vec![
+                                Span::styled(theme::glyph::ASSISTANT_MARKER, theme::bold()),
+                                Span::raw(" "),
+                            ];
+                            v.extend(md_line.spans);
+                            lines.push(Line::from(v));
+                        } else {
+                            lines.push(md_line);
+                        }
                     }
                 }
             }

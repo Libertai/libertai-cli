@@ -4,6 +4,7 @@ pub mod app;
 pub mod approvals;
 pub mod footer;
 pub mod input;
+pub mod markdown;
 pub mod scrollback;
 pub mod theme;
 pub mod view;

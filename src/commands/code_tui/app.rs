@@ -14,7 +14,9 @@ use crossterm::terminal::{
 use pi::model::AssistantMessageEvent;
 use pi::sdk::{create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle};
 use ratatui::backend::CrosstermBackend;
+use ratatui::style::{Color, Style};
 use ratatui::Terminal;
+use tui_textarea::TextArea;
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
@@ -128,8 +130,8 @@ pub struct App {
     pub current_tool_detail: String,
     /// Messages queued for the next turn.
     pub queued: Vec<String>,
-    /// Text being typed in the input bar.
-    pub input_buffer: String,
+    /// Multi-line input editor (tui-textarea widget).
+    pub textarea: TextArea<'static>,
     /// Input history (capped at [`HISTORY_MAX_LIMIT`]).
     pub history: VecDeque<String>,
     /// History navigation index.
@@ -138,6 +140,8 @@ pub struct App {
     pub stashed_live: Option<String>,
     /// Approval modal state (if active).
     pub approval: Option<ApprovalModal>,
+    /// Ask-user modal state (if active).
+    pub ask: Option<AskModal>,
     /// Live agent registry.
     pub registry: Arc<AgentRegistry>,
     /// Config.
@@ -155,6 +159,8 @@ pub enum Phase {
     Streaming,
     /// Approval modal is showing.
     Approval,
+    /// Ask-user modal is showing.
+    Ask,
 }
 
 /// A single entry in the conversation transcript.
@@ -192,6 +198,125 @@ pub struct ApprovalModal {
     pub preview: String,
     pub always_rule: String,
     pub responder: mpsc::Sender<PromptChoice>,
+}
+
+/// A single question in an ask_user flow.
+#[derive(Debug, Clone)]
+pub struct AskQuestion {
+    pub header: String,
+    pub question: String,
+    pub multi_select: bool,
+    pub options: Vec<AskOption>,
+}
+
+/// A single option in an ask_user question.
+#[derive(Debug, Clone)]
+pub struct AskOption {
+    pub label: String,
+    pub description: Option<String>,
+}
+
+/// Active ask-user modal state.
+pub struct AskModal {
+    /// Parsed questions from the tool payload.
+    pub questions: Vec<AskQuestion>,
+    /// Current question index.
+    pub current: usize,
+    /// List selection state for options.
+    pub list_state: ratatui::widgets::ListState,
+    /// Multi-select toggles (indices of selected options).
+    pub selected: Vec<usize>,
+    /// Free-text input (for "Other" or no-options questions).
+    pub free_text: String,
+    /// Whether we're in free-text mode (no options or "Other" selected).
+    pub free_text_mode: bool,
+    /// Collected answers so far.
+    pub answers: Vec<serde_json::Value>,
+    /// Channel to send the result back.
+    pub responder: mpsc::Sender<crate::commands::code_approvals::AskOutcome>,
+}
+
+impl AskModal {
+    /// Parse the ask_user tool payload into an `AskModal`.
+    pub fn from_payload(
+        payload: &serde_json::Value,
+        responder: mpsc::Sender<crate::commands::code_approvals::AskOutcome>,
+    ) -> Option<Self> {
+        let questions = payload.get("questions")?.as_array()?;
+        if questions.is_empty() {
+            return None;
+        }
+
+        let parsed: Vec<AskQuestion> = questions
+            .iter()
+            .map(|q| AskQuestion {
+                header: q
+                    .get("header")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                question: q
+                    .get("question")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                multi_select: q
+                    .get("multiSelect")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                options: q
+                    .get("options")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|o| {
+                                let label = o
+                                    .get("label")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if label.is_empty() {
+                                    return None;
+                                }
+                                let description = o
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.trim().is_empty())
+                                    .map(String::from);
+                                Some(AskOption { label, description })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+            .collect();
+
+        if parsed.is_empty() {
+            return None;
+        }
+
+        let first_has_options = !parsed[0].options.is_empty();
+        let mut list_state = ratatui::widgets::ListState::default();
+        if first_has_options {
+            list_state.select(Some(0));
+        }
+
+        Some(Self {
+            questions: parsed,
+            current: 0,
+            list_state,
+            selected: Vec::new(),
+            free_text: String::new(),
+            free_text_mode: !first_has_options,
+            answers: Vec::new(),
+            responder,
+        })
+    }
+
+    /// Current question.
+    pub fn current_question(&self) -> &AskQuestion {
+        &self.questions[self.current]
+    }
 }
 
 /// RAII guard that restores the terminal on drop — covers early-return
@@ -619,11 +744,19 @@ pub fn run(
         current_tool: None,
         current_tool_detail: String::new(),
         queued: Vec::new(),
-        input_buffer: String::new(),
+        textarea: {
+            let mut ta = TextArea::default();
+            ta.set_cursor_style(Style::default().bg(Color::Cyan));
+            ta.set_cursor_line_style(Style::default());
+            ta.set_placeholder_text("type your message…");
+            ta.set_placeholder_style(Style::default().fg(Color::DarkGray));
+            ta
+        },
         history: VecDeque::new(),
         history_idx: None,
         stashed_live: None,
-        approval: None,
+            approval: None,
+            ask: None,
         registry,
         cfg,
         bar: BarStatus {
@@ -740,6 +873,11 @@ fn handle_key(
         return handle_approval_key(app, key, shared_abort);
     }
 
+    // If ask-user modal is active, keys go to it.
+    if app.ask.is_some() {
+        return handle_ask_key(app, key);
+    }
+
     // Scrollback navigation works in all phases.
     match key.code {
         KeyCode::PageUp => {
@@ -785,19 +923,26 @@ fn handle_key(
             }
         }
         (KeyCode::Char('d'), KeyModifiers::CONTROL)
-            if app.phase == Phase::Idle && app.input_buffer.is_empty() =>
+            if app.phase == Phase::Idle && app.textarea.is_empty() =>
         {
             Some(Action::Quit)
         }
-        (KeyCode::Up, _) if app.phase == Phase::Idle => {
+        (KeyCode::Up, KeyModifiers::NONE) if app.phase == Phase::Idle => {
             // History navigation: go to previous entry.
+            // Only intercept when textarea is single-line (cursor on
+            // first line). On multi-line, let textarea handle Up.
+            let (row, _) = app.textarea.cursor();
+            if row > 0 {
+                app.textarea.input(key);
+                return None;
+            }
             if app.history.is_empty() {
                 return None;
             }
             if app.history_idx.is_none() {
-                // Stash the current live buffer and start from the end.
-                if !app.input_buffer.is_empty() {
-                    app.stashed_live = Some(std::mem::take(&mut app.input_buffer));
+                let current = app.textarea.lines().join("\n");
+                if !current.is_empty() {
+                    app.stashed_live = Some(current);
                 }
                 app.history_idx = Some(app.history.len() - 1);
             } else if let Some(idx) = app.history_idx {
@@ -806,37 +951,54 @@ fn handle_key(
                 }
             }
             if let Some(idx) = app.history_idx {
-                app.input_buffer = app.history[idx].clone();
+                set_textarea_text(&mut app.textarea, &app.history[idx]);
             }
             None
         }
-        (KeyCode::Down, _) if app.phase == Phase::Idle => {
+        (KeyCode::Down, KeyModifiers::NONE) if app.phase == Phase::Idle => {
             // History navigation: go to next entry.
+            // Only intercept when textarea is single-line (cursor on
+            // last line). On multi-line, let textarea handle Down.
+            let (row, _) = app.textarea.cursor();
+            let last_row = app.textarea.lines().len().saturating_sub(1);
+            if row < last_row {
+                app.textarea.input(key);
+                return None;
+            }
             match (app.history_idx, &app.stashed_live) {
                 (Some(idx), _) if idx + 1 < app.history.len() => {
                     app.history_idx = Some(idx + 1);
-                    app.input_buffer = app.history[idx + 1].clone();
+                    set_textarea_text(&mut app.textarea, &app.history[idx + 1]);
                 }
                 (Some(_), _) => {
-                    // Past the end — restore stashed live buffer.
                     app.history_idx = None;
-                    app.input_buffer = app.stashed_live.take().unwrap_or_default();
+                    let stashed = app.stashed_live.take().unwrap_or_default();
+                    set_textarea_text(&mut app.textarea, &stashed);
                 }
-                (None, _) => {}
+                (None, _) => {
+                    app.textarea.input(key);
+                }
             }
             None
         }
         (KeyCode::Enter, _) if app.phase == Phase::Idle => {
-            let prompt = std::mem::take(&mut app.input_buffer);
+            // Submit on Enter (no modifier). Multi-line via Alt+Enter
+            // or Shift+Enter (textarea handles those).
+            if key.modifiers != KeyModifiers::NONE {
+                app.textarea.input(key);
+                return None;
+            }
+            let prompt = app.textarea.lines().join("\n");
             if prompt.is_empty() && !app.queued.is_empty() {
-                // TODO: drain queue and submit first entry.
                 None
             } else if !prompt.is_empty() {
+                // Clear the textarea.
+                app.textarea = TextArea::default();
+                reset_textarea_style(&mut app.textarea);
                 // Check for slash commands.
                 if prompt.starts_with('/') {
                     handle_slash_command(app, &prompt, cmd_tx)
                 } else {
-                    // Add to history with dedup + cap.
                     if app.history.back().is_none_or(|last| last != &prompt) {
                         app.history.push_back(prompt.clone());
                         if app.history.len() > HISTORY_MAX_LIMIT {
@@ -851,16 +1013,33 @@ fn handle_key(
                 None
             }
         }
-        (KeyCode::Char(c), _) if app.phase == Phase::Idle => {
-            app.input_buffer.push(c);
-            None
-        }
-        (KeyCode::Backspace, _) if app.phase == Phase::Idle => {
-            app.input_buffer.pop();
+        _ if app.phase == Phase::Idle => {
+            // Pass all other keys to the textarea.
+            app.textarea.input(key);
             None
         }
         _ => None,
     }
+}
+
+/// Set the textarea content and reset cursor to end.
+fn set_textarea_text(ta: &mut TextArea<'static>, text: &str) {
+    let lines: Vec<String> = if text.is_empty() {
+        vec![String::new()]
+    } else {
+        text.lines().map(String::from).collect()
+    };
+    let last_row = lines.len().saturating_sub(1);
+    let last_col = lines.last().map(|l| l.chars().count()).unwrap_or(0);
+    ta.set_lines(lines, (last_row, last_col));
+}
+
+/// Reapply our styling to a fresh textarea.
+fn reset_textarea_style(ta: &mut TextArea<'static>) {
+    ta.set_cursor_style(Style::default().bg(Color::Cyan));
+    ta.set_cursor_line_style(Style::default());
+    ta.set_placeholder_text("type your message…");
+    ta.set_placeholder_style(Style::default().fg(Color::DarkGray));
 }
 
 /// Handle a slash command. Returns `Some(Action)` for commands that
@@ -1048,7 +1227,175 @@ fn handle_approval_key(
     None
 }
 
-/// Handle an agent message from the background thread.
+/// Handle a key when the ask-user modal is active.
+fn handle_ask_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    use crate::commands::code_approvals::AskOutcome;
+
+    // Ctrl+C or Esc: cancel the whole ask flow.
+    if (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+        || key.code == KeyCode::Esc
+    {
+        let modal = app.ask.take()?;
+        let _ = modal.responder.send(AskOutcome::Answer(serde_json::json!({
+            "cancelled": true,
+            "reason": "USER_DECLINED",
+        })));
+        app.phase = Phase::Streaming;
+        return None;
+    }
+
+    let modal = app.ask.as_mut()?;
+    let q = modal.current_question().clone();
+
+    if modal.free_text_mode {
+        // Free-text input mode.
+        match key.code {
+            KeyCode::Enter => {
+                let text = std::mem::take(&mut modal.free_text);
+                let selected: Vec<String> = modal
+                    .selected
+                    .iter()
+                    .map(|&i| q.options[i].label.clone())
+                    .filter(|l| !l.eq_ignore_ascii_case("other"))
+                    .collect();
+                let answer = serde_json::json!({
+                    "header": q.header,
+                    "selected": selected,
+                    "other": text,
+                });
+                modal.answers.push(answer);
+                advance_question(app);
+            }
+            KeyCode::Char(c) => {
+                modal.free_text.push(c);
+            }
+            KeyCode::Backspace => {
+                modal.free_text.pop();
+            }
+            _ => {}
+        }
+        return None;
+    }
+
+    // Options list mode.
+    match key.code {
+        KeyCode::Up => {
+            let len = q.options.len();
+            if len > 0 {
+                let idx = modal.list_state.selected().unwrap_or(0);
+                modal.list_state.select(Some((idx + len - 1) % len));
+            }
+        }
+        KeyCode::Down => {
+            let len = q.options.len();
+            if len > 0 {
+                let idx = modal.list_state.selected().unwrap_or(0);
+                modal.list_state.select(Some((idx + 1) % len));
+            }
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            // Quick-select: 1-9 picks option at that index.
+            let num = c.to_digit(10).unwrap() as usize;
+            if num >= 1 && num <= q.options.len() {
+                let idx = num - 1;
+                if q.multi_select {
+                    if let Some(pos) = modal.selected.iter().position(|&i| i == idx) {
+                        modal.selected.remove(pos);
+                    } else {
+                        modal.selected.push(idx);
+                    }
+                } else {
+                    modal.selected.clear();
+                    modal.selected.push(idx);
+                }
+            }
+        }
+        KeyCode::Char(' ') if q.multi_select => {
+            // Space toggles selection in multi-select mode.
+            if let Some(idx) = modal.list_state.selected() {
+                if let Some(pos) = modal.selected.iter().position(|&i| i == idx) {
+                    modal.selected.remove(pos);
+                } else {
+                    modal.selected.push(idx);
+                }
+            }
+        }
+        KeyCode::Enter => {
+            if q.multi_select {
+                // Enter confirms all selected.
+                let selected = modal.selected.clone();
+                if selected.is_empty() {
+                    return None;
+                }
+                // Check if "Other" is selected → switch to free-text.
+                let has_other = selected
+                    .iter()
+                    .any(|&i| q.options[i].label.eq_ignore_ascii_case("other"));
+                if has_other {
+                    modal.free_text_mode = true;
+                    return None;
+                }
+                let answer = serde_json::json!({
+                    "header": q.header,
+                    "selected": selected.iter().map(|&i| q.options[i].label.clone()).collect::<Vec<_>>(),
+                    "other": null,
+                });
+                modal.answers.push(answer);
+                advance_question(app);
+            } else {
+                // Single-select: Enter picks the highlighted option.
+                let idx = modal.list_state.selected()?;
+                let label = &q.options[idx].label;
+                if label.eq_ignore_ascii_case("other") {
+                    modal.free_text_mode = true;
+                    return None;
+                }
+                let answer = serde_json::json!({
+                    "header": q.header,
+                    "selected": [label],
+                    "other": null,
+                });
+                modal.answers.push(answer);
+                advance_question(app);
+            }
+        }
+        _ => {}
+    }
+
+    None
+}
+
+/// Advance to the next question or finalize the ask flow.
+fn advance_question(app: &mut App) {
+    let modal = match app.ask.as_mut() {
+        Some(m) => m,
+        None => return,
+    };
+
+    modal.current += 1;
+    if modal.current >= modal.questions.len() {
+        // All questions answered — send result.
+        let modal = app.ask.take().unwrap();
+        let answers = modal.answers;
+        let _ = modal.responder.send(
+            crate::commands::code_approvals::AskOutcome::Answer(
+                serde_json::json!({ "answers": answers }),
+            ),
+        );
+        app.phase = Phase::Streaming;
+    } else {
+        // Reset state for the next question.
+        let has_options = !modal.questions[modal.current].options.is_empty();
+        modal.selected.clear();
+        modal.free_text.clear();
+        modal.free_text_mode = !has_options;
+        if has_options {
+            modal.list_state.select(Some(0));
+        } else {
+            modal.list_state.select(None);
+        }
+    }
+}
 fn handle_agent_msg(app: &mut App, msg: AgentMsg) {
     match msg {
         AgentMsg::TextDelta(delta) => {
@@ -1108,8 +1455,17 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg) {
             });
             app.phase = Phase::Approval;
         }
-        AgentMsg::AskRequest { .. } => {
-            // TODO: show ask_user modal
+        AgentMsg::AskRequest { payload, responder } => {
+            let resp_clone = responder.clone();
+            if let Some(modal) = AskModal::from_payload(&payload, responder) {
+                app.ask = Some(modal);
+                app.phase = Phase::Ask;
+            } else {
+                // Invalid payload — cancel immediately.
+                let _ = resp_clone.send(crate::commands::code_approvals::AskOutcome::Answer(
+                    serde_json::json!({ "cancelled": true, "reason": "USER_DECLINED" }),
+                ));
+            }
         }
         AgentMsg::Usage {
             input_tokens,

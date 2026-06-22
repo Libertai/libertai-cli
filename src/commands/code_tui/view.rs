@@ -49,6 +49,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.phase == Phase::Approval {
         draw_approval_modal(frame, area, app);
     }
+
+    // Draw ask-user modal overlay if active.
+    if app.phase == Phase::Ask {
+        draw_ask_modal(frame, area, app);
+    }
 }
 
 /// Compute the footer height from the snapshot of agents and queued msgs.
@@ -198,4 +203,136 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
 
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, modal_area);
+}
+
+/// Draw the ask-user modal as a centered popup.
+fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+
+    let Some(modal) = app.ask.as_mut() else {
+        return;
+    };
+
+    let q = modal.current_question().clone();
+    let total = modal.questions.len();
+    let current = modal.current + 1;
+
+    // Compute modal height based on content.
+    let content_lines = if modal.free_text_mode {
+        2 // label + input line
+    } else {
+        q.options.len() + 3 // header + question + hint + options
+    };
+    let modal_height = (content_lines as u16 + 4).min(area.height.saturating_sub(2));
+    let modal_width = (area.width as f32 * 0.7) as u16;
+    let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
+    let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let title = format!(" Question {current}/{total} ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme::ACCENT))
+        .title(Span::styled(
+            title,
+            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    if modal.free_text_mode {
+        // Free-text input mode.
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("Q: ", Style::default().fg(theme::MUTED)),
+                Span::styled(&q.question, Style::default().add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("❯ ", theme::bold_accent()),
+                Span::raw(&modal.free_text),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "[enter] submit  [esc] cancel",
+                Style::default().fg(theme::MUTED),
+            )),
+        ];
+        let para = Paragraph::new(lines);
+        frame.render_widget(para, inner);
+        // Set cursor position.
+        let cursor_x = inner.x + 2 + modal.free_text.chars().count() as u16;
+        let cursor_y = inner.y + 2;
+        frame.set_cursor_position((cursor_x, cursor_y));
+    } else {
+        // Options list mode.
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("Q: ", Style::default().fg(theme::MUTED)),
+                Span::styled(&q.question, Style::default().add_modifier(Modifier::BOLD)),
+            ]),
+        ];
+        if !q.header.is_empty() {
+            lines.push(Line::from(Span::styled(
+                &q.header,
+                Style::default().fg(theme::ACCENT),
+            )));
+        }
+
+        let hint = if q.multi_select {
+            "↑↓ move · space toggle · enter confirm · esc cancel"
+        } else {
+            "↑↓ move · 1-9 pick · enter confirm · esc cancel"
+        };
+        lines.push(Line::from(Span::styled(hint, Style::default().fg(theme::MUTED))));
+
+        // Build option items.
+        let items: Vec<ListItem> = q
+            .options
+            .iter()
+            .enumerate()
+            .map(|(i, opt)| {
+                let marker = if modal.selected.contains(&i) {
+                    "◆ "
+                } else {
+                    "○ "
+                };
+                let mut spans = vec![
+                    Span::styled(marker, Style::default().fg(theme::ACCENT)),
+                    Span::raw(&opt.label),
+                ];
+                if let Some(desc) = &opt.description {
+                    spans.push(Span::styled(
+                        format!(" — {desc}"),
+                        Style::default().fg(theme::MUTED),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+
+        // Render the list + hint above it.
+        let para_area = Rect {
+            height: inner.height.saturating_sub(3),
+            ..inner
+        };
+        let header_para = Paragraph::new(lines);
+        frame.render_widget(header_para, para_area);
+
+        let list_area = Rect {
+            y: para_area.y + para_area.height,
+            height: inner.height.saturating_sub(para_area.height),
+            ..inner
+        };
+        let list = List::new(items)
+            .style(Style::default())
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        frame.render_stateful_widget(list, list_area, &mut modal.list_state);
+    }
 }

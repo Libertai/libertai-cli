@@ -52,12 +52,25 @@ impl ApprovalUi for RatatuiApprovalUi {
         resp_rx.recv().unwrap_or(PromptChoice::Deny)
     }
 
-    async fn ask(&self, _payload: serde_json::Value) -> AskOutcome {
-        // TODO: wire up ask_user modal
-        AskOutcome::Answer(serde_json::json!({
+    async fn ask(&self, payload: serde_json::Value) -> AskOutcome {
+        let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+
+        let msg = crate::commands::code_tui::app::AgentMsg::AskRequest {
+            payload,
+            responder: resp_tx,
+        };
+
+        if self.tx.send(msg).is_err() {
+            return AskOutcome::Answer(serde_json::json!({
+                "cancelled": true,
+                "reason": "UI_DISCONNECTED",
+            }));
+        }
+
+        resp_rx.recv().unwrap_or(AskOutcome::Answer(serde_json::json!({
             "cancelled": true,
-            "reason": "ASK_NOT_SUPPORTED",
-        }))
+            "reason": "UI_NO_RESPONSE",
+        })))
     }
 
     async fn notify(&self, _title: &str, _body: &str) -> NotifyOutcome {
