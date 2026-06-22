@@ -16,6 +16,9 @@ _libertai() {
             ",$1")
                 cmd="libertai"
                 ;;
+            libertai,agents)
+                cmd="libertai__subcmd__agents"
+                ;;
             libertai,aider)
                 cmd="libertai__subcmd__aider"
                 ;;
@@ -120,6 +123,9 @@ _libertai() {
                 ;;
             libertai__subcmd__config__subcmd__help,unset)
                 cmd="libertai__subcmd__config__subcmd__help__subcmd__unset"
+                ;;
+            libertai__subcmd__help,agents)
+                cmd="libertai__subcmd__help__subcmd__agents"
                 ;;
             libertai__subcmd__help,aider)
                 cmd="libertai__subcmd__help__subcmd__aider"
@@ -365,12 +371,42 @@ _libertai() {
 
     case "${cmd}" in
         libertai)
-            opts="-h -V --help --version login logout status keys models ask chat search fetch image run claude opencode aider claw hermes code mcp config skills sandbox import completions man help"
+            opts="-h -V --help --version login logout status keys models ask chat search fetch image run claude opencode aider claw hermes code agents mcp config skills sandbox import completions man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__agents)
+            opts="-h -V --cwd --json --model --permission-mode --agent --help --version"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --cwd)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --model)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --permission-mode)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --agent)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -485,7 +521,7 @@ _libertai() {
             return 0
             ;;
         libertai__subcmd__code)
-            opts="-p -h -V --model --provider --plan --mode --resume --continue --list-sessions --all --json --sandbox --print --help --version [ARGS]..."
+            opts="-p -h -V --model --provider --plan --mode --resume --continue --list-sessions --all --json --sandbox --print --bg --name --agent --team --teammate --help --version [ARGS]..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -509,6 +545,22 @@ _libertai() {
                     ;;
                 --sandbox)
                     COMPREPLY=($(compgen -W "off strict auto" -- "${cur}"))
+                    return 0
+                    ;;
+                --name)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --agent)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --team)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --teammate)
+                    COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
                 *)
@@ -701,8 +753,22 @@ _libertai() {
             return 0
             ;;
         libertai__subcmd__help)
-            opts="login logout status keys models ask chat search fetch image run claude opencode aider claw hermes code mcp config skills sandbox import completions man help"
+            opts="login logout status keys models ask chat search fetch image run claude opencode aider claw hermes code agents mcp config skills sandbox import completions man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__help__subcmd__agents)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi

@@ -273,6 +273,10 @@ _arguments "${_arguments_options[@]}" : \
 '--mode=[Initial permission mode (\`normal\`, \`accept-edits\`, or \`plan\`)]:MODE:_default' \
 '(--continue --list-sessions)--resume=[Resume a saved session. With a path, resume that specific JSONL file (see \`--list-sessions\` to find one). Bare \`--resume\` (no path) opens an interactive picker of recent sessions for the current cwd; in headless/non-TTY contexts it falls back to the most recent session]::PATH:_default' \
 '--sandbox=[Sandbox the bash tool. \`off\` (default) runs bash with the user'\''s full host privileges. \`strict\` wraps it in \`bwrap\` (Linux only today) with no network, read-only system dirs, and a tmpfs \`/tmp\` — useful for untrusted models or reviewing third-party agent scripts. \`auto\` resolves per pillar; on the CLI that'\''s currently the same as \`off\`. Also honours the \`LIBERTAI_SANDBOX\` env var]:SANDBOX:(off strict auto)' \
+'--name=[Display name for a \`--bg\` run (shown in \`libertai agents\`). Defaults to a slug derived from the prompt]:NAME:_default' \
+'--agent=[Run the session as the named sub-agent (from \`.claude/agents\` etc.) instead of the default agent. With \`--bg\`, dispatches that sub-agent in the background]:AGENT:_default' \
+'--team=[Team name this session belongs to. When set with \`--teammate\`, registers the \`team_task\` tool so the session can read/update the shared task list. Usually set automatically by \`--bg\` team spawns; use manually to run a teammate interactively]:TEAM:_default' \
+'--teammate=[Teammate name within the team. Paired with \`--team\`]:NAME:_default' \
 '--plan[Start in plan mode\: the agent can read/grep/find/ls but cannot run bash, write, or edit files until you toggle back to normal (Shift+Tab or /plan)]' \
 '(--resume --list-sessions)--continue[Resume the most recent session for the current working directory]' \
 '(--resume --continue)--list-sessions[Print recent sessions (most recent first) and exit, without starting the agent. Filters to the current cwd by default; pass \`--all\` to list every project]' \
@@ -280,11 +284,25 @@ _arguments "${_arguments_options[@]}" : \
 '--json[With \`--list-sessions\`, emit a JSON array (path, name, message_count, …) instead of the human list]' \
 '(--list-sessions)-p[Print mode (like \`claude -p\`)\: run a single agent turn headlessly and exit — no TUI, no interactive prompts. The assistant'\''s text streams to stdout; turn/tool noise goes to stderr. Tool calls not already covered by an allow rule are auto-denied instead of prompting, so scripts never hang. The prompt comes from the trailing args, piped stdin, or both (stdin becomes context above the args prompt). Composes with \`--resume\` / \`--continue\` to run one more headless turn against a saved session]' \
 '(--list-sessions)--print[Print mode (like \`claude -p\`)\: run a single agent turn headlessly and exit — no TUI, no interactive prompts. The assistant'\''s text streams to stdout; turn/tool noise goes to stderr. Tool calls not already covered by an allow rule are auto-denied instead of prompting, so scripts never hang. The prompt comes from the trailing args, piped stdin, or both (stdin becomes context above the args prompt). Composes with \`--resume\` / \`--continue\` to run one more headless turn against a saved session]' \
+'(--list-sessions -p --print)--bg[Start the session in the background\: spawn a detached \`libertai code\` process for the given prompt, print its run id, and return to the shell. Inspect/attach with \`libertai agents\`. Implies a one-shot prompt (the trailing args) and is incompatible with \`--print\` and the interactive REPL]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 '-V[Print version]' \
 '--version[Print version]' \
 '*::args -- Initial prompt. When given, runs a single one-shot turn and exits (tool approvals still prompt on the terminal unless `--print` is also set). Without a prompt and without `--print`, starts the interactive REPL:_default' \
+&& ret=0
+;;
+(agents)
+_arguments "${_arguments_options[@]}" : \
+'--cwd=[Only show sessions started under this directory]:PATH:_default' \
+'--model=[Model for sessions dispatched from the view'\''s input]:MODEL:_default' \
+'--permission-mode=[Permission mode for dispatched sessions (\`normal\`, \`accept-edits\`, \`plan\`)]:MODE:_default' \
+'--agent=[Sub-agent to run dispatched sessions as (defaults to the built-in catch-all agent)]:AGENT:_default' \
+'--json[Emit a JSON array of sessions and exit (no TUI)]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
 && ret=0
 ;;
 (mcp)
@@ -812,6 +830,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(agents)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (mcp)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -985,6 +1007,7 @@ _libertai_commands() {
 'claw:Launch Claw Code (ultraworkers/claw-code) against LibertAI' \
 'hermes:Launch Hermes Agent against LibertAI' \
 'code:LibertAI'\''s own coding agent, powered by pi_agent_rust' \
+'agents:One screen for all your coding-agent sessions' \
 'mcp:Run an MCP server exposing LibertAI web search and page fetch over stdio' \
 'config:Config file operations' \
 'skills:Install/list/uninstall the bundled agent skills (image gen etc)' \
@@ -995,6 +1018,11 @@ _libertai_commands() {
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'libertai commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__agents_commands] )) ||
+_libertai__subcmd__agents_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai agents commands' commands "$@"
 }
 (( $+functions[_libertai__subcmd__aider_commands] )) ||
 _libertai__subcmd__aider_commands() {
@@ -1123,6 +1151,7 @@ _libertai__subcmd__help_commands() {
 'claw:Launch Claw Code (ultraworkers/claw-code) against LibertAI' \
 'hermes:Launch Hermes Agent against LibertAI' \
 'code:LibertAI'\''s own coding agent, powered by pi_agent_rust' \
+'agents:One screen for all your coding-agent sessions' \
 'mcp:Run an MCP server exposing LibertAI web search and page fetch over stdio' \
 'config:Config file operations' \
 'skills:Install/list/uninstall the bundled agent skills (image gen etc)' \
@@ -1133,6 +1162,11 @@ _libertai__subcmd__help_commands() {
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'libertai help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__agents_commands] )) ||
+_libertai__subcmd__help__subcmd__agents_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help agents commands' commands "$@"
 }
 (( $+functions[_libertai__subcmd__help__subcmd__aider_commands] )) ||
 _libertai__subcmd__help__subcmd__aider_commands() {

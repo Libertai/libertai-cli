@@ -27,6 +27,9 @@ fn empty_toml_parses_as_defaults() {
     assert!(cfg.hooks.stop.is_empty());
     assert!(cfg.hooks.session_end.is_empty());
     assert!(cfg.hooks.notification.is_empty());
+    assert!(cfg.hooks.teammate_spawn.is_empty());
+    assert!(cfg.hooks.task_complete.is_empty());
+    assert!(cfg.hooks.team_complete.is_empty());
     assert!(cfg.mcp_servers.is_empty());
     assert!(cfg.auth.api_key.is_none());
 }
@@ -102,6 +105,18 @@ fn save_then_load_preserves_fields() {
             }],
             notification: vec![HookCommandConfig {
                 command: "scripts/notification.sh".into(),
+                ..HookCommandConfig::default()
+            }],
+            teammate_spawn: vec![HookCommandConfig {
+                command: "scripts/teammate-spawn.sh".into(),
+                ..HookCommandConfig::default()
+            }],
+            task_complete: vec![HookCommandConfig {
+                command: "scripts/task-complete.sh".into(),
+                ..HookCommandConfig::default()
+            }],
+            team_complete: vec![HookCommandConfig {
+                command: "scripts/team-complete.sh".into(),
                 ..HookCommandConfig::default()
             }],
         },
@@ -210,6 +225,21 @@ fn save_then_load_preserves_fields() {
     assert_eq!(
         round.hooks.notification[0].command,
         "scripts/notification.sh"
+    );
+    assert_eq!(round.hooks.teammate_spawn.len(), 1);
+    assert_eq!(
+        round.hooks.teammate_spawn[0].command,
+        "scripts/teammate-spawn.sh"
+    );
+    assert_eq!(round.hooks.task_complete.len(), 1);
+    assert_eq!(
+        round.hooks.task_complete[0].command,
+        "scripts/task-complete.sh"
+    );
+    assert_eq!(round.hooks.team_complete.len(), 1);
+    assert_eq!(
+        round.hooks.team_complete[0].command,
+        "scripts/team-complete.sh"
     );
     let policy_server = round.mcp_servers.get("policy").unwrap();
     assert_eq!(policy_server.transport, "http");
