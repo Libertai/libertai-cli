@@ -70,6 +70,11 @@ fn main() {
             json: parsed.json,
             sandbox: parsed.sandbox,
             print: parsed.print,
+            bg: false,
+            name: None,
+            agent: None,
+            team: None,
+            teammate: None,
             args: parsed.args,
         },
     };
