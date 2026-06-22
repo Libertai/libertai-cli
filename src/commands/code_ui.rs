@@ -2390,6 +2390,8 @@ async fn repl_loop(
                 prompt: task.to_string(),
                 cwd,
                 agent: None,
+                team: None,
+                teammate_name: None,
             };
             match start_background_agent(&launch) {
                 Ok(started) => {
@@ -2409,6 +2411,106 @@ async fn repl_loop(
                     eprintln!("{DIM}  /bg: {e:#}{RESET}");
                 }
             }
+            continue;
+        }
+        // /team: spawn and manage agent teams. Teams are defined by
+        // TOML manifests in `.libertai/teams/<name>.toml` and spawned
+        // as detached background processes. See `/team help` for usage.
+        if trimmed == "/team" || trimmed == "/team help" {
+            println!(
+                "{DIM}  /team list                       list available team manifests{RESET}"
+            );
+            println!(
+                "{DIM}  /team spawn <name>              spawn a team from its manifest{RESET}"
+            );
+            println!(
+                "{DIM}  /team quick <t1> | <t2> | ...   ad-hoc team (auto-names teammates){RESET}"
+            );
+            println!(
+                "{DIM}  /team status <name>            show teammate status for a team{RESET}"
+            );
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/team ") {
+            let rest = rest.trim();
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            if rest == "list" {
+                match crate::commands::code_team_spawn::discover_teams(&cwd) {
+                    Ok(teams) if teams.is_empty() => {
+                        println!("{DIM}  no team manifests found in .libertai/teams/{RESET}");
+                    }
+                    Ok(teams) => {
+                        println!("{DIM}  available teams:{RESET}");
+                        for (name, path) in teams {
+                            println!("{DIM}  {name}{RESET}  {DIM}({}){RESET}", path.display());
+                        }
+                    }
+                    Err(e) => eprintln!("{DIM}  /team list: {e:#}{RESET}"),
+                }
+                continue;
+            }
+            if let Some(spec) = rest.strip_prefix("quick ") {
+                let spec = spec.trim();
+                let teammates = crate::commands::code_team_spawn::quick_team_spec(spec);
+                if teammates.is_empty() {
+                    eprintln!("{DIM}  /team quick: no tasks found in spec (use `|` to separate){RESET}");
+                    continue;
+                }
+                // Build an ad-hoc manifest from the quick spec.
+                let manifest = crate::commands::code_team_spawn::TeamManifest {
+                    model: None,
+                    provider: None,
+                    mode: None,
+                    teammates: teammates
+                        .iter()
+                        .map(|t| crate::commands::code_team_spawn::TeammateSpec {
+                            name: t.name.clone(),
+                            agent: "general".to_string(),
+                            task: t.task.clone(),
+                            model: None,
+                        })
+                        .collect(),
+                };
+                let team_name = format!("quick-{}", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0));
+                match spawn_and_announce(&team_name, &manifest, &cwd, &provider, &model, mode.get()) {
+                    Ok(()) => {}
+                    Err(e) => eprintln!("{DIM}  /team quick: {e:#}{RESET}"),
+                }
+                continue;
+            }
+            if let Some(name) = rest.strip_prefix("spawn ") {
+                let name = name.trim();
+                if name.is_empty() {
+                    eprintln!("{DIM}  /team spawn: usage: /team spawn <name>{RESET}");
+                    continue;
+                }
+                match crate::commands::code_team_spawn::resolve_team(&cwd, name) {
+                    Ok(manifest) => {
+                        match spawn_and_announce(name, &manifest, &cwd, &provider, &model, mode.get()) {
+                            Ok(()) => {}
+                            Err(e) => eprintln!("{DIM}  /team spawn: {e:#}{RESET}"),
+                        }
+                    }
+                    Err(e) => eprintln!("{DIM}  /team spawn: {e:#}{RESET}"),
+                }
+                continue;
+            }
+            if let Some(name) = rest.strip_prefix("status ") {
+                let name = name.trim();
+                if name.is_empty() {
+                    eprintln!("{DIM}  /team status: usage: /team status <name>{RESET}");
+                    continue;
+                }
+                match crate::commands::code_team_spawn::print_team_status(name, &cwd) {
+                    Ok(()) => {}
+                    Err(e) => eprintln!("{DIM}  /team status: {e:#}{RESET}"),
+                }
+                continue;
+            }
+            eprintln!("{DIM}  /team: unknown subcommand. Try /team help.{RESET}");
             continue;
         }
         if !slash_prompt_handled {
@@ -3809,6 +3911,42 @@ fn normalize_help_command_arg(input: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Spawn a team and print a summary. Shared by `/team spawn` and
+/// `/team quick`. Initializes the shared task list, spawns each
+/// teammate as a background process, and prints the results.
+fn spawn_and_announce(
+    team_name: &str,
+    manifest: &crate::commands::code_team_spawn::TeamManifest,
+    cwd: &std::path::Path,
+    provider: &str,
+    model: &str,
+    mode: crate::commands::code_factory::Mode,
+) -> Result<()> {
+    use crate::commands::code_team_spawn;
+    // Initialize the shared task list before spawning so teammates
+    // can read it immediately on startup.
+    let team_dir = code_team_spawn::init_team_tasks(team_name, manifest, cwd)
+        .with_context(|| format!("initializing team `{team_name}` task list"))?;
+    println!(
+        "{DIM}  /team: initialized task list for `{team_name}` ({}){RESET}",
+        team_dir.display()
+    );
+    let spawned = code_team_spawn::spawn_team(team_name, manifest, cwd, provider, model, mode)
+        .with_context(|| format!("spawning team `{team_name}`"))?;
+    println!(
+        "{DIM}  /team: spawned {} teammate(s) for `{team_name}`:{RESET}",
+        spawned.len()
+    );
+    for t in &spawned {
+        println!(
+            "{DIM}    {} · pid {} · {run_id}{RESET}",
+            t.name, t.pid, run_id = t.run_id
+        );
+    }
+    println!("{DIM}  libertai agents   open the agent view{RESET}");
+    Ok(())
+}
+
 fn help_command_rows() -> &'static [(&'static str, &'static [&'static str], &'static str)] {
     &[
         ("abort", &[], "show or interrupt active-turn controls"),
@@ -3920,6 +4058,7 @@ fn help_command_rows() -> &'static [(&'static str, &'static [&'static str], &'st
             "customize the input-bar status line",
         ),
         ("template", &[], "expand a prompt template"),
+        ("team", &[], "spawn and manage agent teams"),
         ("theme", &[], "show terminal theme status"),
         ("thinking", &["think", "t"], "show or set thinking budget"),
         ("tree", &[], "show a bounded project tree"),
@@ -11928,6 +12067,13 @@ pub(crate) struct BackgroundAgentLaunch {
     /// Optional sub-agent to run the session as. Emitted as
     /// `--agent <name>` on the spawned `libertai code` argv.
     pub agent: Option<String>,
+    /// Team name when this run is a teammate in a team. Emitted as
+    /// `LIBERTAI_TEAM=<name>` env var on the child process so the
+    /// child's factory registers the `team_task` tool.
+    pub team: Option<String>,
+    /// Teammate name within the team. Emitted as
+    /// `LIBERTAI_TEAMMATE=<name>` env var.
+    pub teammate_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12017,6 +12163,8 @@ fn build_agent_slash_action(
             prompt,
             cwd,
             agent: None,
+            team: None,
+            teammate_name: None,
         }))
     } else {
         Ok(AgentSlashAction::Foreground(prompt))
@@ -12064,6 +12212,14 @@ fn background_agent_command(exe: &Path, launch: &BackgroundAgentLaunch) -> Comma
     let mut command = Command::new(exe);
     for arg in background_agent_args(exe, launch) {
         command.arg(arg);
+    }
+    // Pass team context to the child via env vars so the child's
+    // factory registers the `team_task` tool.
+    if let Some(team) = launch.team.as_ref() {
+        command.env("LIBERTAI_TEAM", team);
+    }
+    if let Some(teammate) = launch.teammate_name.as_ref() {
+        command.env("LIBERTAI_TEAMMATE", teammate);
     }
     command
 }
@@ -23804,6 +23960,8 @@ mod tests {
             prompt: "Use the task tool".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             agent: None,
+            team: None,
+            teammate_name: None,
         };
         assert_eq!(
             background_agent_args(Path::new("/usr/bin/libertai"), &launch),
@@ -23842,6 +24000,8 @@ mod tests {
             prompt: "Run review".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             agent: None,
+            team: None,
+            teammate_name: None,
         };
         assert_eq!(
             background_agent_args(Path::new("/usr/bin/libertai"), &launch),
@@ -23911,6 +24071,8 @@ mod tests {
             prompt: "Run review\nwith details".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             agent: None,
+            team: None,
+            teammate_name: None,
         };
         let started = StartedBackgroundAgent {
             pid: 4242,

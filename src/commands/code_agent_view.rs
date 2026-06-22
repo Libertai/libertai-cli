@@ -663,6 +663,8 @@ fn dispatch(config: &ViewConfig, prompt: &str) -> Result<StartedBackgroundAgent>
         prompt: prompt.to_string(),
         cwd,
         agent: config.agent.clone(),
+        team: None,
+        teammate_name: None,
     };
     start_background_agent(&launch).with_context(|| format!("dispatching background agent `{name}`"))
 }

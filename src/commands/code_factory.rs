@@ -34,6 +34,7 @@ use crate::commands::code_path_safety::{
 };
 use crate::commands::code_task::TaskTool;
 use crate::commands::code_team::AgentRegistry;
+use crate::commands::code_team_task::TeamTaskTool;
 use crate::commands::code_todo::TodoTool;
 use crate::commands::fetch_tool::FetchTool;
 use crate::commands::image_tool::ImageGenTool;
@@ -195,11 +196,36 @@ pub struct LibertaiToolFactory {
     /// unset, the factory falls back to `LIBERTAI_WRITE_SAFE_ROOT` so
     /// the CLI env-var behavior stays unchanged.
     pub safe_root_override: Option<std::path::PathBuf>,
+    /// Team name when this session is a teammate in a team (set by the
+    /// parent process via the `LIBERTAI_TEAM` env var when spawning).
+    /// When present alongside `teammate_name`, the factory registers
+    /// the `team_task` tool so the teammate can read/update the shared
+    /// task list.
+    pub team: Option<String>,
+    /// Teammate name within the team. Set via `LIBERTAI_TEAMMATE` env
+    /// var. Used as the assignee when the teammate claims a task.
+    pub teammate_name: Option<String>,
 }
 
 impl LibertaiToolFactory {
+    /// Read team context from env vars set by the parent process when
+    /// spawning a teammate. Returns `(team, teammate_name)` or
+    /// `(None, None)` when not running as part of a team.
+    fn team_from_env() -> (Option<String>, Option<String>) {
+        let team = std::env::var("LIBERTAI_TEAM")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string());
+        let teammate = std::env::var("LIBERTAI_TEAMMATE")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string());
+        (team, teammate)
+    }
+
     /// CLI default constructor. Equivalent to the pre-features behavior.
     pub fn new(mode: ModeFlag, approvals: Arc<ApprovalState>, ui: Arc<dyn ApprovalUi>) -> Self {
+        let (team, teammate_name) = Self::team_from_env();
         Self {
             mode,
             approvals,
@@ -211,6 +237,8 @@ impl LibertaiToolFactory {
             tool_policy: None,
             smart_approval: None,
             safe_root_override: None,
+            team,
+            teammate_name,
         }
     }
 
@@ -226,6 +254,7 @@ impl LibertaiToolFactory {
         let smart_approval = libertai_cfg
             .as_ref()
             .and_then(|cfg| smart_approval_from_config(Arc::clone(cfg)));
+        let (team, teammate_name) = Self::team_from_env();
         Self {
             mode,
             approvals,
@@ -237,6 +266,8 @@ impl LibertaiToolFactory {
             tool_policy: None,
             smart_approval,
             safe_root_override: None,
+            team,
+            teammate_name,
         }
     }
 
@@ -255,6 +286,7 @@ impl LibertaiToolFactory {
         let smart_approval = libertai_cfg
             .as_ref()
             .and_then(|cfg| smart_approval_from_config(Arc::clone(cfg)));
+        let (team, teammate_name) = Self::team_from_env();
         Self {
             mode,
             approvals,
@@ -266,6 +298,8 @@ impl LibertaiToolFactory {
             tool_policy: None,
             smart_approval,
             safe_root_override: None,
+            team,
+            teammate_name,
         }
     }
 
@@ -276,6 +310,15 @@ impl LibertaiToolFactory {
 
     pub fn with_safe_root(mut self, safe_root: Option<std::path::PathBuf>) -> Self {
         self.safe_root_override = safe_root;
+        self
+    }
+
+    /// Explicitly set the team context, overriding env-var detection.
+    /// Used when the REPL wants to inject team identity without relying
+    /// on `LIBERTAI_TEAM`/`LIBERTAI_TEAMMATE`.
+    pub fn with_team(mut self, team: Option<String>, teammate_name: Option<String>) -> Self {
+        self.team = team;
+        self.teammate_name = teammate_name;
         self
     }
 
@@ -305,6 +348,8 @@ impl LibertaiToolFactory {
             tool_policy: self.tool_policy.clone(),
             smart_approval: self.smart_approval.clone(),
             safe_root_override: self.safe_root_override.clone(),
+            team: self.team.clone(),
+            teammate_name: self.teammate_name.clone(),
         }
     }
 }
@@ -374,6 +419,26 @@ impl ToolFactory for LibertaiToolFactory {
                 cwd.to_path_buf(),
                 Arc::clone(&self.registry),
             )));
+        }
+
+        //    - `team_task`: shared team task list. Only registered when
+        //      this session is running as a teammate (the parent process
+        //      set `LIBERTAI_TEAM` + `LIBERTAI_TEAMMATE` env vars before
+        //      spawning). The tool reads/writes `tasks.jsonl` in the
+        //      project's `.libertai/teams/<team>/` directory. Mutating
+        //      (writes to disk), so it goes through the approval wrapper.
+        if let (Some(team), Some(teammate)) = (&self.team, &self.teammate_name) {
+            let team_dir = cwd.join(".libertai").join("teams").join(team);
+            let team_task = ApprovalTool::new(
+                Box::new(TeamTaskTool::new(team_dir, teammate.clone())),
+                Arc::clone(&self.approvals),
+                self.mode.clone(),
+                Arc::clone(&self.ui),
+            )
+            .with_base_dir(Some(cwd.to_path_buf()))
+            .with_policy(self.tool_policy.clone())
+            .with_smart_approval(self.smart_approval.clone());
+            wrapped.push(Box::new(team_task));
         }
 
         //    - `fetch`: local reqwest, no libertai dependency. Registers

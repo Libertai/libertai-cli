@@ -264,6 +264,8 @@ fn run_background(
         prompt,
         cwd,
         agent: None,
+        team: None,
+        teammate_name: None,
     };
     let started = start_background_agent(&launch)?;
     let started_at_ms = std::time::SystemTime::now()

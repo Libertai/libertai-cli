@@ -233,6 +233,8 @@ impl Tool for TaskTool {
             tool_policy: None,
             smart_approval: crate::commands::code_aux::smart_approval_from_config(Arc::clone(&cfg)),
             safe_root_override: None,
+            team: None,
+            teammate_name: None,
         }
         .child();
 
