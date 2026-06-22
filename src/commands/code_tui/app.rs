@@ -368,9 +368,17 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         if let Some(mut terminal) = self.terminal.take() {
             let _ = terminal.show_cursor();
-            let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
+            let _ = crossterm::execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                crossterm::event::DisableMouseCapture
+            );
         } else if self.alt_screen {
-            let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                LeaveAlternateScreen,
+                crossterm::event::DisableMouseCapture
+            );
         }
         if self.raw_mode {
             let _ = disable_raw_mode();
@@ -790,7 +798,7 @@ pub fn run(
     guard.raw_mode = true;
 
     let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen)?;
+    crossterm::execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
     guard.alt_screen = true;
 
     let backend = CrosstermBackend::new(stdout);
@@ -904,6 +912,18 @@ fn run_loop(
                                 app.scroll = 0;
                             }
                         }
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    use crossterm::event::MouseEventKind;
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            app.scroll = app.scroll.saturating_add(3);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            app.scroll = app.scroll.saturating_sub(3);
+                        }
+                        _ => {}
                     }
                 }
                 Event::Resize(_, _) => {
