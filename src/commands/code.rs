@@ -428,6 +428,7 @@ async fn run_async(
         code_ui::ChromeStream::Stderr,
         Some(approvals),
         Some(mode_flag),
+        false,
     )));
     let result = {
         let renderer = Arc::clone(&renderer);

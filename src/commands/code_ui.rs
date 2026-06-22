@@ -2716,6 +2716,7 @@ async fn repl_loop(
             ChromeStream::Stdout,
             Some(Arc::clone(&approvals)),
             Some(mode.clone()),
+            true,
         )));
         let render = {
             let tool_activity = Arc::clone(&tool_activity);
@@ -15850,9 +15851,19 @@ struct SpinnerCore {
     /// line + queued previews + live typing row). The eraser must clear
     /// exactly this many rows before content prints.
     drawn_rows: u16,
+    /// Terminal height when the footer was last drawn, for detecting
+    /// resize in sticky mode (requires re-emitting DECSTBM).
+    last_term_height: u16,
     stopped: bool,
     stream: ChromeStream,
     styled: bool,
+    /// When true (REPL), the footer is pinned to the bottom of the
+    /// screen via a DECSTBM scroll region and absolute positioning.
+    /// Content scrolls above the footer and the terminal's scrollback
+    /// buffer captures it. When false (one-shot `code` command), the
+    /// footer uses relative positioning (at the cursor) and never sets
+    /// a scroll region.
+    sticky: bool,
     /// Messages queued for the next turn (full texts; previews are
     /// recomputed per draw so a resize re-clips correctly).
     queued_texts: Vec<String>,
@@ -15874,28 +15885,49 @@ impl SpinnerCore {
 
     fn erase(&mut self) {
         if self.drawn_rows > 0 {
-            self.stream.write_str(&Self::erase_seq(self.drawn_rows));
+            if self.sticky {
+                // Sticky: clear footer at absolute position and reset
+                // scroll region so read_line / next output uses the
+                // full screen.
+                let (_, term_height) = terminal_size();
+                let footer_top_1 = term_height
+                    .saturating_sub(self.drawn_rows)
+                    .saturating_add(1)
+                    .max(1);
+                let mut seq = String::from("\x1b[r\x1b7");
+                seq.push_str(&format!("\x1b[{footer_top_1};1H\x1b[2K"));
+                for _ in 1..self.drawn_rows {
+                    seq.push_str("\x1b[1B\x1b[2K");
+                }
+                seq.push_str("\x1b8");
+                self.stream.write_str(&seq);
+            } else {
+                self.stream.write_str(&Self::erase_seq(self.drawn_rows));
+            }
             self.drawn_rows = 0;
+            self.last_term_height = 0;
         }
     }
 
     /// Repaint the footer block in one terminal write: live agent
     /// panel (one row per active agent), spinner line, dim `› queued:`
-    /// previews, and the live typing row. Uses relative positioning
-    /// (at the cursor) — the footer follows the conversation output
-    /// and is erased by `hide()` before content prints.
+    /// previews, and the live typing row.
+    ///
+    /// In sticky mode (REPL) the footer is pinned to the bottom of the
+    /// screen via absolute positioning and a DECSTBM scroll region
+    /// confines conversation output to the rows above. The terminal's
+    /// scrollback buffer captures scrolled content.
+    ///
+    /// In non-sticky mode (one-shot `code` command) the footer uses
+    /// relative positioning (at the cursor) and never sets a scroll
+    /// region.
     fn draw(&mut self) {
         let width = term_cols();
         let (_, term_height) = terminal_size();
 
-        // Assemble footer rows top-to-bottom. The agent panel rides on
-        // the shared `ACTIVE_AGENT_REGISTRY` so the ticker thread can
-        // render live subagents without the Arc threaded through every
-        // constructor.
         let mut rows: Vec<String> = Vec::new();
         let agents = active_agents_for_footer();
 
-        // Dynamic agent-panel cap: up to 1/3 of terminal height, min 3.
         let max_agent_rows = ((term_height / 3) as usize).max(3);
         let agent_count = agents.len().min(max_agent_rows);
 
@@ -15949,7 +15981,6 @@ impl SpinnerCore {
             typed
         });
 
-        // Cap footer height so at least one row remains for content.
         let max_rows = term_height.saturating_sub(1).max(1);
         let row_count: u16 = (rows.len() as u16).min(max_rows);
         if row_count == 0 {
@@ -15957,7 +15988,60 @@ impl SpinnerCore {
         }
         rows.truncate(row_count as usize);
 
-        // Relative-row draw: erase old footer, paint new one at cursor.
+        if self.sticky {
+            self.draw_sticky(rows, row_count, term_height);
+        } else {
+            self.draw_relative(rows, row_count);
+        }
+    }
+
+    /// Sticky draw: absolute positioning + DECSTBM scroll region.
+    fn draw_sticky(&mut self, rows: Vec<String>, row_count: u16, term_height: u16) {
+        let scroll_bottom = term_height.saturating_sub(row_count);
+        let footer_top_1 = scroll_bottom.saturating_add(1).min(term_height);
+
+        let need_region_update =
+            row_count != self.drawn_rows || term_height != self.last_term_height;
+        let need_clear_stale = self.drawn_rows > 0
+            && (self.drawn_rows > row_count || term_height != self.last_term_height);
+
+        let mut seq = String::new();
+
+        if need_clear_stale {
+            let old_footer_top_1 = self
+                .last_term_height
+                .saturating_sub(self.drawn_rows)
+                .saturating_add(1)
+                .max(1);
+            seq.push_str("\x1b7");
+            seq.push_str(&format!("\x1b[{old_footer_top_1};1H\x1b[J\x1b8"));
+        }
+
+        if need_region_update {
+            if scroll_bottom > 0 {
+                seq.push_str(&format!("\x1b[1;{scroll_bottom}r"));
+            } else {
+                seq.push_str("\x1b[r");
+            }
+        }
+
+        seq.push_str("\x1b7");
+        seq.push_str(&format!("\x1b[{footer_top_1};1H\x1b[2K"));
+        if let Some(first) = rows.first() {
+            seq.push_str(first);
+        }
+        for line in rows.iter().skip(1) {
+            seq.push_str(&format!("\x1b[1B\r\x1b[2K{line}"));
+        }
+        seq.push_str("\x1b8");
+
+        self.stream.write_str(&seq);
+        self.drawn_rows = row_count;
+        self.last_term_height = term_height;
+    }
+
+    /// Non-sticky draw: relative-row (at the cursor), no scroll region.
+    fn draw_relative(&mut self, rows: Vec<String>, row_count: u16) {
         let mut block = String::new();
         for (i, line) in rows.into_iter().enumerate() {
             if i == 0 {
@@ -16145,21 +16229,24 @@ impl Drop for ScreenGuard {
 }
 
 /// Erase and hide the live spinner footer so an interactive prompt can
-/// paint without the ticker thread clobbering it. No-op when no spinner
-/// is active (non-TTY, or between turns). Pair every call with
-/// [`resume_active_footer`] once the prompt is done.
+/// paint without the ticker thread clobbering it. In sticky mode the
+/// scroll region protects the footer, so only `visible` is toggled.
+/// In non-sticky mode the footer is also erased. No-op when no spinner
+/// is active. Pair every call with [`resume_active_footer`].
 pub(crate) fn suspend_active_footer() {
     let core = ACTIVE_SPINNER.lock().ok().and_then(|g| g.clone());
     if let Some(core) = core {
         if let Ok(mut c) = core.lock() {
             c.visible = false;
-            c.erase();
+            if !c.sticky {
+                c.erase();
+            }
         }
     }
 }
 
-/// Re-show the footer suspended by [`suspend_active_footer`]; the ticker
-/// repaints it on its next tick. No-op when no spinner is active.
+/// Resume the footer ticker paused by [`suspend_active_footer`]. The
+/// ticker repaints on its next tick. No-op when no spinner is active.
 pub(crate) fn resume_active_footer() {
     let core = ACTIVE_SPINNER.lock().ok().and_then(|g| g.clone());
     if let Some(core) = core {
@@ -16180,7 +16267,7 @@ struct Spinner {
 }
 
 impl Spinner {
-    fn start(enabled: bool, stream: ChromeStream, styled: bool) -> Self {
+    fn start(enabled: bool, stream: ChromeStream, styled: bool, sticky: bool) -> Self {
         if !enabled {
             return Self {
                 core: None,
@@ -16193,9 +16280,11 @@ impl Spinner {
             output_chars: 0,
             visible: true,
             drawn_rows: 0,
+            last_term_height: 0,
             stopped: false,
             stream,
             styled,
+            sticky,
             queued_texts: Vec::new(),
             typed: String::new(),
         }));
@@ -16221,13 +16310,17 @@ impl Spinner {
         }
     }
 
-    /// Erase the footer and pause the ticker so content output doesn't
-    /// interleave with it. The ticker resumes on [`show`].
+    /// Pause the ticker. In sticky mode the DECSTBM scroll region
+    /// protects the footer, so only `visible` is toggled. In non-sticky
+    /// mode the footer is also erased so content output doesn't
+    /// interleave with it.
     fn hide(&self) {
         if let Some(core) = &self.core {
             if let Ok(mut c) = core.lock() {
                 c.visible = false;
-                c.erase();
+                if !c.sticky {
+                    c.erase();
+                }
             }
         }
     }
@@ -16325,6 +16418,7 @@ impl TurnRenderer {
         chrome: ChromeStream,
         approvals: Option<Arc<ApprovalState>>,
         mode: Option<ModeFlag>,
+        sticky: bool,
     ) -> Self {
         let chrome_tty = chrome.is_tty();
         let styled = crate::commands::chat_render::styling_enabled(chrome_tty);
@@ -16346,7 +16440,7 @@ impl TurnRenderer {
                 crate::commands::chat_render::markdown_enabled_stdout(),
                 marker,
             ),
-            spinner: Spinner::start(chrome_tty, chrome, styled),
+            spinner: Spinner::start(chrome_tty, chrome, styled, sticky),
             styled,
             chrome,
             started: Instant::now(),
