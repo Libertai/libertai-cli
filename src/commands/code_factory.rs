@@ -36,6 +36,7 @@ use crate::commands::code_mailbox::MailboxTool;
 use crate::commands::code_task::TaskTool;
 use crate::commands::code_team::AgentRegistry;
 use crate::commands::code_team_task::TeamTaskTool;
+use crate::commands::code_team_tool::SpawnTeamTool;
 use crate::commands::code_todo::TodoTool;
 use crate::commands::fetch_tool::FetchTool;
 use crate::commands::image_tool::ImageGenTool;
@@ -420,6 +421,29 @@ impl ToolFactory for LibertaiToolFactory {
                 cwd.to_path_buf(),
                 Arc::clone(&self.registry),
             )));
+        }
+
+        //    - `spawn_team`: lets the agent itself create a team of
+        //      background teammates when the user's request warrants
+        //      parallel work. Same depth cap as `task` so nested
+        //      subagents can't recursively spawn their own teams.
+        //      Mutating (spawns processes + writes to disk), so it
+        //      goes through the approval wrapper.
+        if self.features.task && self.depth < MAX_TASK_DEPTH && self.team.is_none() {
+            let spawn_team = ApprovalTool::new(
+                Box::new(SpawnTeamTool::new(
+                    cwd.to_path_buf(),
+                    self.mode.clone(),
+                    Arc::clone(&self.registry),
+                )),
+                Arc::clone(&self.approvals),
+                self.mode.clone(),
+                Arc::clone(&self.ui),
+            )
+            .with_base_dir(Some(cwd.to_path_buf()))
+            .with_policy(self.tool_policy.clone())
+            .with_smart_approval(self.smart_approval.clone());
+            wrapped.push(Box::new(spawn_team));
         }
 
         //    - `team_task`: shared team task list. Only registered when
