@@ -280,7 +280,7 @@ fn run_background(
 
 /// Derive a filesystem-safe display name from a prompt: first few
 /// words, lowercased, non-alphanumerics replaced with `-`.
-fn slug_from_prompt(prompt: &str) -> String {
+pub(crate) fn slug_from_prompt(prompt: &str) -> String {
     let mut slug = String::new();
     for (words, word) in prompt.split_whitespace().enumerate() {
         if words >= 4 {

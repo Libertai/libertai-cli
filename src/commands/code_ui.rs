@@ -2364,6 +2364,53 @@ async fn repl_loop(
             handle_agents_command(rest.trim());
             continue;
         }
+        // /bg <task>: spawn a detached background agent for the task
+        // and return to the REPL. The run shows up in `libertai agents`.
+        if trimmed == "/bg" {
+            println!(
+                "{DIM}  usage: /bg <task> — spawn a background agent for the task{RESET}"
+            );
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/bg ") {
+            let task = rest.trim();
+            if task.is_empty() {
+                println!(
+                    "{DIM}  usage: /bg <task> — spawn a background agent for the task{RESET}"
+                );
+                continue;
+            }
+            let name = crate::commands::code::slug_from_prompt(task);
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let launch = BackgroundAgentLaunch {
+                name,
+                provider: provider.to_string(),
+                model: model.to_string(),
+                mode: mode.get(),
+                prompt: task.to_string(),
+                cwd,
+                agent: None,
+            };
+            match start_background_agent(&launch) {
+                Ok(started) => {
+                    let started_at_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let run_id = background_agent_run_id(started.pid, started_at_ms);
+                    println!(
+                        "{DIM}  /bg: started background agent `{}` · {run_id} · pid {}.{RESET}",
+                        launch.name, started.pid
+                    );
+                    println!("{DIM}  log: {}{RESET}", started.log_path.display());
+                    println!("{DIM}  libertai agents   open the agent view{RESET}");
+                }
+                Err(e) => {
+                    eprintln!("{DIM}  /bg: {e:#}{RESET}");
+                }
+            }
+            continue;
+        }
         if !slash_prompt_handled {
             if let Some((command, scope)) = review_command_parts(trimmed) {
                 match build_review_slash_prompt(command, scope) {
@@ -3773,6 +3820,7 @@ fn help_command_rows() -> &'static [(&'static str, &'static [&'static str], &'st
             &["autorun", "continuous"],
             "run bounded continuous execution",
         ),
+        ("bg", &["background"], "spawn a background agent for a task"),
         ("bug", &[], "print a bug report diagnostic template"),
         ("changelog", &[], "show recent git commits"),
         (
