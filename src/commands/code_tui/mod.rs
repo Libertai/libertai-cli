@@ -1,3 +1,4 @@
+pub mod agent_view;
 pub mod agents_panel;
 pub mod app;
 pub mod approvals;

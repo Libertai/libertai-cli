@@ -577,7 +577,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             model,
             permission_mode,
             agent,
-        } => crate::commands::code_agent_view::run(cwd, json, model, permission_mode, agent),
+        } => crate::commands::code_tui::agent_view::run(cwd, json, model, permission_mode, agent),
         Command::Mcp => crate::commands::mcp::run(),
         Command::Config { action } => crate::commands::config_cmd::run(action),
         Command::Skills { action } => crate::commands::skills::run(action),
