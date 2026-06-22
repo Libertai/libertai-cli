@@ -155,7 +155,9 @@ pub fn spawn_team(
     provider: &str,
     model: &str,
     mode: Mode,
+    registry: Option<&crate::commands::code_team::AgentRegistry>,
 ) -> Result<Vec<SpawnedTeammate>> {
+    use crate::commands::code_team::{AgentKind, AgentRegistration, AgentCapability, AgentColor};
     let mut spawned = Vec::with_capacity(manifest.teammates.len());
     for teammate in &manifest.teammates {
         // Teammate model overrides team-level, which overrides the caller default.
@@ -185,6 +187,26 @@ pub fn spawn_team(
         // code_ui::background_agent_record which calls now_epoch_ms() post-spawn.
         let started_at_ms = now_epoch_ms();
         let run_id = background_agent_run_id(started.pid, started_at_ms);
+
+        // Register the teammate in the parent's agent registry so the
+        // live panel shows it with its team affiliation. The handle
+        // stays for the lifetime of the registry (background runs
+        // aren't removed on completion, matching M1's design).
+        if let Some(reg) = registry {
+            let reg_entry = AgentRegistration {
+                name: teammate.name.clone(),
+                kind: AgentKind::Teammate { team: team_name.to_string() },
+                color: AgentColor::color_for_name(&teammate.name),
+                capability: AgentCapability::ReadOnly,
+                cwd: cwd.to_path_buf(),
+                model: resolved_model.to_string(),
+                prompt_preview: teammate.task.chars().take(80).collect(),
+                parent: None,
+            };
+            let handle = reg.register(reg_entry);
+            handle.set_status(crate::commands::code_team::AgentStatus::Working);
+        }
+
         spawned.push(SpawnedTeammate {
             name: teammate.name.clone(),
             pid: started.pid,

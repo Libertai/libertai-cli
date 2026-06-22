@@ -2475,7 +2475,7 @@ async fn repl_loop(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0));
-                match spawn_and_announce(&team_name, &manifest, &cwd, &provider, &model, mode.get()) {
+                match spawn_and_announce(&team_name, &manifest, &cwd, &provider, &model, mode.get(), &registry) {
                     Ok(()) => {}
                     Err(e) => eprintln!("{DIM}  /team quick: {e:#}{RESET}"),
                 }
@@ -2489,7 +2489,7 @@ async fn repl_loop(
                 }
                 match crate::commands::code_team_spawn::resolve_team(&cwd, name) {
                     Ok(manifest) => {
-                        match spawn_and_announce(name, &manifest, &cwd, &provider, &model, mode.get()) {
+                        match spawn_and_announce(name, &manifest, &cwd, &provider, &model, mode.get(), &registry) {
                             Ok(()) => {}
                             Err(e) => eprintln!("{DIM}  /team spawn: {e:#}{RESET}"),
                         }
@@ -3921,6 +3921,7 @@ fn spawn_and_announce(
     provider: &str,
     model: &str,
     mode: crate::commands::code_factory::Mode,
+    registry: &Arc<crate::commands::code_team::AgentRegistry>,
 ) -> Result<()> {
     use crate::commands::code_team_spawn;
     // Initialize the shared task list before spawning so teammates
@@ -3931,7 +3932,7 @@ fn spawn_and_announce(
         "{DIM}  /team: initialized task list for `{team_name}` ({}){RESET}",
         team_dir.display()
     );
-    let spawned = code_team_spawn::spawn_team(team_name, manifest, cwd, provider, model, mode)
+    let spawned = code_team_spawn::spawn_team(team_name, manifest, cwd, provider, model, mode, Some(registry))
         .with_context(|| format!("spawning team `{team_name}`"))?;
     println!(
         "{DIM}  /team: spawned {} teammate(s) for `{team_name}`:{RESET}",

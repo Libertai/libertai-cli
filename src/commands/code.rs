@@ -45,6 +45,8 @@ pub fn run(
     bg: bool,
     name: Option<String>,
     agent: Option<String>,
+    team: Option<String>,
+    teammate: Option<String>,
     args: Vec<String>,
 ) -> Result<()> {
     let cfg = config::load()?;
@@ -56,6 +58,17 @@ pub fn run(
     let model = model.unwrap_or_else(|| cfg.default_code_model.clone());
     let provider = provider.unwrap_or_else(|| cfg.default_code_provider.clone());
     let mode = parse_initial_mode(plan, mode.as_deref())?;
+
+    // --team / --teammate: set env vars so the factory (and any child
+    // background agents) register the team_task tool. This lets a user
+    // run a teammate interactively: `libertai code --team myteam
+    // --teammate alice`.
+    if let Some(t) = team.as_ref() {
+        std::env::set_var("LIBERTAI_TEAM", t);
+    }
+    if let Some(tn) = teammate.as_ref() {
+        std::env::set_var("LIBERTAI_TEAMMATE", tn);
+    }
 
     // --list-sessions short-circuits before any agent setup.
     if list_sessions {
@@ -73,7 +86,7 @@ pub fn run(
     // prompt (the trailing args); conflicts with --print (enforced by
     // clap) and the interactive REPL.
     if bg {
-        return run_background(&cfg, &model, &provider, mode, name, agent, oneshot_prompt);
+        return run_background(&cfg, &model, &provider, mode, name, agent, team, teammate, oneshot_prompt);
     }
 
     // Resolve --resume / --continue into an explicit session path, if any.
@@ -202,6 +215,7 @@ fn parse_initial_mode(plan: bool, mode: Option<&str>) -> Result<Mode> {
 /// and the agent definition's model override is applied. The spawned
 /// child receives the already-embedded prompt, so the launch's `agent`
 /// field is left `None`.
+#[allow(clippy::too_many_arguments)]
 fn run_background(
     _cfg: &LibertaiConfig,
     model: &str,
@@ -209,6 +223,8 @@ fn run_background(
     mode: Mode,
     name: Option<String>,
     agent: Option<String>,
+    team: Option<String>,
+    teammate: Option<String>,
     prompt: Option<String>,
 ) -> Result<()> {
     use crate::commands::code_ui::{background_agent_run_id, start_background_agent, BackgroundAgentLaunch};
@@ -264,8 +280,8 @@ fn run_background(
         prompt,
         cwd,
         agent: None,
-        team: None,
-        teammate_name: None,
+        team,
+        teammate_name: teammate,
     };
     let started = start_background_agent(&launch)?;
     let started_at_ms = std::time::SystemTime::now()

@@ -246,6 +246,16 @@ pub enum Command {
         /// that sub-agent in the background.
         #[arg(long, value_name = "AGENT")]
         agent: Option<String>,
+        /// Team name this session belongs to. When set with
+        /// `--teammate`, registers the `team_task` tool so the session
+        /// can read/update the shared task list. Usually set
+        /// automatically by `--bg` team spawns; use manually to run a
+        /// teammate interactively.
+        #[arg(long, value_name = "TEAM")]
+        team: Option<String>,
+        /// Teammate name within the team. Paired with `--team`.
+        #[arg(long, value_name = "NAME", requires = "team")]
+        teammate: Option<String>,
         /// Initial prompt. When given, runs a single one-shot turn and
         /// exits (tool approvals still prompt on the terminal unless
         /// `--print` is also set). Without a prompt and without
@@ -539,6 +549,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             bg,
             name,
             agent,
+            team,
+            teammate,
             args,
         } => crate::commands::code::run(
             model,
@@ -555,6 +567,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             bg,
             name,
             agent,
+            team,
+            teammate,
             args,
         ),
         Command::Agents {
