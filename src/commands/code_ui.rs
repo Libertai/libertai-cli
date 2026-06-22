@@ -15776,16 +15776,24 @@ const TOOL_RESULT_PREVIEW_LINES: usize = 4;
 /// Spinner repaint cadence. Fast enough that the elapsed-seconds field
 /// never looks stuck, slow enough to stay invisible in `top`.
 const SPINNER_TICK: Duration = Duration::from_millis(120);
-/// Fallback width when the terminal size probe fails (e.g. tests).
-const FALLBACK_RENDER_WIDTH: usize = 100;
+/// Fallback terminal size when the probe fails (e.g. tests, piped
+/// stdout). Previously the footer and the input bar had separate
+/// fallbacks (100 cols vs 80×24); now both use this single source.
+const FALLBACK_TERM_SIZE: (u16, u16) = (100, 24);
+
+/// Current terminal size (cols, rows). Single source of truth for all
+/// render paths — the footer, the input bar, and the agent view all
+/// ask crossterm the same question and get the same fallback.
+fn terminal_size() -> (u16, u16) {
+    terminal::size()
+        .ok()
+        .filter(|(c, r)| *c > 0 && *r > 0)
+        .unwrap_or(FALLBACK_TERM_SIZE)
+}
 
 /// Current terminal width for footer/preview painting.
 fn term_cols() -> usize {
-    terminal::size()
-        .ok()
-        .map(|(cols, _)| cols as usize)
-        .filter(|cols| *cols > 0)
-        .unwrap_or(FALLBACK_RENDER_WIDTH)
+    terminal_size().0 as usize
 }
 
 /// Where a [`TurnRenderer`] writes its chrome (markers, previews,
@@ -15875,8 +15883,18 @@ impl SpinnerCore {
         // render live subagents without the Arc threaded through every
         // constructor.
         let mut rows: Vec<String> = Vec::new();
-        for handle in active_agents_for_footer() {
-            rows.push(agent_footer_line(&handle, width));
+        // Cap the agent panel so a wide fan-out doesn't push the whole
+        // footer off-screen. The queued-preview and input-bar panels
+        // are already capped; the agent panel was the last unbounded
+        // one (see M5.1 audit issue #7).
+        const MAX_AGENT_ROWS: usize = 5;
+        let agents = active_agents_for_footer();
+        for handle in agents.iter().take(MAX_AGENT_ROWS) {
+            rows.push(agent_footer_line(handle, width));
+        }
+        if agents.len() > MAX_AGENT_ROWS {
+            let extra = agents.len() - MAX_AGENT_ROWS;
+            rows.push(format!("{DIM}  … and {extra} more{RESET}"));
         }
         let spinner = clip_chars(
             &format!(
@@ -17271,6 +17289,11 @@ fn pump_loop(
                     dirty = true;
                 }
             }
+            // Force a footer redraw on resize so the spinner doesn't
+            // show stale-width content until the next 120ms tick.
+            Event::Resize(_, _) => {
+                dirty = true;
+            }
             _ => {}
         }
         if dirty {
@@ -17721,9 +17744,12 @@ fn read_line(
                 cursor_pos = insert_paste(&mut buffer, cursor_pos, &data);
             }
             Event::Resize(_, _) => {
-                // Don't try to MoveToPreviousLine onto a row that may
-                // no longer exist after a shrink — treat as a fresh
-                // paint after clearing the previous block.
+                // Clear the bar with the known row count. crossterm's
+                // MoveToPreviousLine clamps at the terminal top, so
+                // even if the terminal shrank below the old row count,
+                // we won't under-clear. After clearing, reset
+                // rows_above to None so the next repaint treats it as
+                // a fresh paint (cursor is already at the right spot).
                 clear_bar(&mut stdout, rows_above)?;
                 rows_above = None;
             }
@@ -17782,16 +17808,14 @@ fn repaint(
     prev_rows_above: Option<u16>,
     queued_texts: &[String],
 ) -> Result<u16> {
-    let (cols, rows) = terminal::size()
-        .ok()
-        .filter(|(c, r)| *c > 0 && *r > 0)
-        .unwrap_or((80, 24));
+    let (cols, rows) = terminal_size();
     let cols = cols as usize;
+    let rows = rows as usize;
     // Queued-message previews sit above the rule and count against the
     // vertical budget so the whole block still fits the screen.
     let queued_lines = queued_preview_lines(queued_texts, cols);
     let queued_rows = queued_lines.len();
-    let max_rows = (rows as usize)
+    let max_rows = rows
         .saturating_sub(2 + queued_rows)
         .clamp(1, MAX_INPUT_ROWS);
 
