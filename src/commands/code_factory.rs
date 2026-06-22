@@ -32,6 +32,7 @@ use crate::commands::code_notification::PushNotificationTool;
 use crate::commands::code_path_safety::{
     is_path_mutation_tool, safe_root_from_env, PathSafetyTool,
 };
+use crate::commands::code_mailbox::MailboxTool;
 use crate::commands::code_task::TaskTool;
 use crate::commands::code_team::AgentRegistry;
 use crate::commands::code_team_task::TeamTaskTool;
@@ -430,7 +431,7 @@ impl ToolFactory for LibertaiToolFactory {
         if let (Some(team), Some(teammate)) = (&self.team, &self.teammate_name) {
             let team_dir = cwd.join(".libertai").join("teams").join(team);
             let team_task = ApprovalTool::new(
-                Box::new(TeamTaskTool::new(team_dir, teammate.clone())),
+                Box::new(TeamTaskTool::new(team_dir.clone(), teammate.clone())),
                 Arc::clone(&self.approvals),
                 self.mode.clone(),
                 Arc::clone(&self.ui),
@@ -439,6 +440,21 @@ impl ToolFactory for LibertaiToolFactory {
             .with_policy(self.tool_policy.clone())
             .with_smart_approval(self.smart_approval.clone());
             wrapped.push(Box::new(team_task));
+
+            //    - `mailbox`: file-based messaging between teammates.
+            //      Same team context as `team_task`. Mutating (writes
+            //      files to recipient's mailbox dir), so it goes through
+            //      the approval wrapper.
+            let mailbox = ApprovalTool::new(
+                Box::new(MailboxTool::new(team_dir, teammate.clone())),
+                Arc::clone(&self.approvals),
+                self.mode.clone(),
+                Arc::clone(&self.ui),
+            )
+            .with_base_dir(Some(cwd.to_path_buf()))
+            .with_policy(self.tool_policy.clone())
+            .with_smart_approval(self.smart_approval.clone());
+            wrapped.push(Box::new(mailbox));
         }
 
         //    - `fetch`: local reqwest, no libertai dependency. Registers

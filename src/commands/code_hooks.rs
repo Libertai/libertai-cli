@@ -65,6 +65,50 @@ pub fn run_notification_hooks(
     run_nonblocking_event_hooks("Notification", &cfg.hooks.notification, &cwd, &payload);
 }
 
+/// Fire `TeammateSpawn` hooks when a teammate is spawned by `/team
+/// spawn` or `/team quick`. The payload includes the team name,
+/// teammate name, task, and pid.
+pub fn run_teammate_spawn_hooks(
+    cfg: &Config,
+    team_name: &str,
+    teammate_name: &str,
+    task: &str,
+    pid: u32,
+) {
+    if !cfg.hooks.teammate_spawn.iter().any(is_runnable_hook) {
+        return;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let payload = json!({
+        "event": "TeammateSpawn",
+        "team": team_name,
+        "teammate": teammate_name,
+        "task": task,
+        "pid": pid,
+        "cwd": cwd.display().to_string(),
+    });
+    run_nonblocking_event_hooks("TeammateSpawn", &cfg.hooks.teammate_spawn, &cwd, &payload);
+}
+
+/// Fire `TeamComplete` hooks when all teammates in a team have finished.
+/// Called by the team spawn logic after all teammates have been launched
+/// (the hooks fire on spawn completion, not on task completion — true
+/// task-completion detection would require monitoring the background
+/// processes, which is deferred to a future milestone).
+pub fn run_team_complete_hooks(cfg: &Config, team_name: &str, teammate_count: usize) {
+    if !cfg.hooks.team_complete.iter().any(is_runnable_hook) {
+        return;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let payload = json!({
+        "event": "TeamComplete",
+        "team": team_name,
+        "teammate_count": teammate_count,
+        "cwd": cwd.display().to_string(),
+    });
+    run_nonblocking_event_hooks("TeamComplete", &cfg.hooks.team_complete, &cwd, &payload);
+}
+
 pub fn run_user_prompt_submit_hooks(cfg: &Config, prompt: &str) -> anyhow::Result<String> {
     if !cfg.hooks.user_prompt_submit.iter().any(is_runnable_hook) {
         return Ok(prompt.to_string());

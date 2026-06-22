@@ -388,6 +388,24 @@ pub struct HooksConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub notification: Vec<HookCommandConfig>,
+    #[serde(
+        default,
+        rename = "TeammateSpawn",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub teammate_spawn: Vec<HookCommandConfig>,
+    #[serde(
+        default,
+        rename = "TaskComplete",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub task_complete: Vec<HookCommandConfig>,
+    #[serde(
+        default,
+        rename = "TeamComplete",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub team_complete: Vec<HookCommandConfig>,
 }
 
 impl<'de> Deserialize<'de> for HooksConfig {
@@ -413,6 +431,12 @@ impl<'de> Deserialize<'de> for HooksConfig {
             session_end: Vec<serde_json::Value>,
             #[serde(default, rename = "Notification")]
             notification: Vec<serde_json::Value>,
+            #[serde(default, rename = "TeammateSpawn")]
+            teammate_spawn: Vec<serde_json::Value>,
+            #[serde(default, rename = "TaskComplete")]
+            task_complete: Vec<serde_json::Value>,
+            #[serde(default, rename = "TeamComplete")]
+            team_complete: Vec<serde_json::Value>,
         }
 
         let raw = RawHooksConfig::deserialize(deserializer)?;
@@ -432,6 +456,12 @@ impl<'de> Deserialize<'de> for HooksConfig {
                 .map_err(serde::de::Error::custom)?,
             notification: deserialize_hook_rows(raw.notification)
                 .map_err(serde::de::Error::custom)?,
+            teammate_spawn: deserialize_hook_rows(raw.teammate_spawn)
+                .map_err(serde::de::Error::custom)?,
+            task_complete: deserialize_hook_rows(raw.task_complete)
+                .map_err(serde::de::Error::custom)?,
+            team_complete: deserialize_hook_rows(raw.team_complete)
+                .map_err(serde::de::Error::custom)?,
         })
     }
 }
@@ -446,6 +476,9 @@ impl HooksConfig {
             && self.stop.is_empty()
             && self.session_end.is_empty()
             && self.notification.is_empty()
+            && self.teammate_spawn.is_empty()
+            && self.task_complete.is_empty()
+            && self.team_complete.is_empty()
     }
 }
 

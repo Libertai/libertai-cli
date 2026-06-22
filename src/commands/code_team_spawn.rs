@@ -213,7 +213,31 @@ pub fn spawn_team(
             log_path: started.log_path,
             run_id,
         });
+
+        // Fire TeammateSpawn hook for this teammate. Best-effort —
+        // hook failures are logged by the runner, not propagated.
+        if let Ok(cfg) = crate::config::load() {
+            crate::commands::code_hooks::run_teammate_spawn_hooks(
+                &cfg,
+                team_name,
+                &teammate.name,
+                &teammate.task,
+                started.pid,
+            );
+        }
     }
+
+    // Fire TeamComplete hook — all teammates launched. (True
+    // task-completion detection would require monitoring the
+    // background processes; that's deferred to a future milestone.)
+    if let Ok(cfg) = crate::config::load() {
+        crate::commands::code_hooks::run_team_complete_hooks(
+            &cfg,
+            team_name,
+            spawned.len(),
+        );
+    }
+
     Ok(spawned)
 }
 
