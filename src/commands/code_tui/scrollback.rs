@@ -69,6 +69,55 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
                     ]));
                 }
             }
+            TranscriptEntry::SubagentText { agent_name, text } => {
+                // Look up the agent's color from the registry.
+                let color = app
+                    .registry
+                    .find_by_name(agent_name)
+                    .map(|h| theme::agent_color_for(h.color))
+                    .unwrap_or(theme::MUTED);
+                let md_lines = markdown::render(text);
+                for (i, md_line) in md_lines.into_iter().enumerate() {
+                    if i == 0 {
+                        let mut v = vec![
+                            Span::styled(agent_name.clone(), ratatui::style::Style::default().fg(color).add_modifier(ratatui::style::Modifier::BOLD)),
+                            Span::raw(" "),
+                        ];
+                        v.extend(md_line.spans);
+                        lines.push(Line::from(v));
+                    } else {
+                        lines.push(md_line);
+                    }
+                }
+            }
+            TranscriptEntry::SubagentTool {
+                agent_name,
+                tool_name,
+            } => {
+                let color = app
+                    .registry
+                    .find_by_name(agent_name)
+                    .map(|h| theme::agent_color_for(h.color))
+                    .unwrap_or(theme::MUTED);
+                lines.push(Line::from(vec![
+                    Span::styled(agent_name.clone(), ratatui::style::Style::default().fg(color).add_modifier(ratatui::style::Modifier::BOLD)),
+                    Span::raw(" "),
+                    Span::styled(theme::glyph::TOOL_MARKER, ratatui::style::Style::default().fg(color)),
+                    Span::raw(" "),
+                    Span::styled(tool_name, theme::muted()),
+                ]));
+            }
+            TranscriptEntry::SubagentEnd { agent_name } => {
+                let color = app
+                    .registry
+                    .find_by_name(agent_name)
+                    .map(|h| theme::agent_color_for(h.color))
+                    .unwrap_or(theme::MUTED);
+                lines.push(Line::from(Span::styled(
+                    format!("{agent_name} done"),
+                    ratatui::style::Style::default().fg(color),
+                )));
+            }
             TranscriptEntry::AutoAllowed(text) => {
                 lines.push(Line::from(Span::styled(text, theme::muted())));
             }

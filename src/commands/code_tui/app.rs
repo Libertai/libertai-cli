@@ -85,6 +85,25 @@ pub enum AgentMsg {
     System(String),
     /// Result from a slash command executed on the background thread.
     CommandResult(String),
+    /// Streaming text delta from a subagent (task tool child session).
+    SubagentText {
+        agent_name: String,
+        text: String,
+    },
+    /// A subagent tool started executing.
+    SubagentToolStart {
+        agent_name: String,
+        tool_name: String,
+    },
+    /// A subagent tool finished.
+    SubagentToolEnd {
+        agent_name: String,
+        tool_name: String,
+    },
+    /// A subagent finished its turn.
+    SubagentEnd {
+        agent_name: String,
+    },
     /// Error from the background thread.
     Error(String),
 }
@@ -174,6 +193,20 @@ pub enum TranscriptEntry {
     Tool {
         name: String,
         detail: String,
+    },
+    /// Subagent text (colored agent name prefix).
+    SubagentText {
+        agent_name: String,
+        text: String,
+    },
+    /// Subagent tool marker.
+    SubagentTool {
+        agent_name: String,
+        tool_name: String,
+    },
+    /// Subagent finished.
+    SubagentEnd {
+        agent_name: String,
     },
     /// Auto-allow notice (dim).
     AutoAllowed(String),
@@ -485,6 +518,64 @@ fn translate_event(event: &AgentEvent) -> Option<AgentMsg> {
             }
         }
         AgentEvent::ExtensionError { error, .. } => Some(AgentMsg::Error(error.clone())),
+        AgentEvent::ToolExecutionUpdate {
+            partial_result, ..
+        } => {
+            // Subagent events arrive as ToolExecutionUpdate with a
+            // `kind` field in the details JSON.
+            let details = match &partial_result.details {
+                Some(d) => d,
+                None => return None,
+            };
+            let kind = details.get("kind").and_then(|v| v.as_str())?;
+            let agent_name = details
+                .get("agent")
+                .and_then(|v| v.as_str())
+                .unwrap_or("subagent")
+                .to_string();
+            match kind {
+                "subagent_text_delta" => {
+                    // Text content is in partial_result.content[0].text
+                    let text = partial_result
+                        .content
+                        .first()
+                        .and_then(|c| match c {
+                            pi::model::ContentBlock::Text(t) => Some(t.text.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(AgentMsg::SubagentText { agent_name, text })
+                    }
+                }
+                "subagent_tool_start" => {
+                    let tool_name = partial_result
+                        .content
+                        .first()
+                        .and_then(|c| match c {
+                            pi::model::ContentBlock::Text(t) => Some(t.text.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    Some(AgentMsg::SubagentToolStart {
+                        agent_name,
+                        tool_name: tool_name.trim().to_string(),
+                    })
+                }
+                "subagent_tool_end" => Some(AgentMsg::SubagentToolEnd {
+                    agent_name,
+                    tool_name: details
+                        .get("tool")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool")
+                        .to_string(),
+                }),
+                "subagent_end" => Some(AgentMsg::SubagentEnd { agent_name }),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -1482,6 +1573,51 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg) {
         }
         AgentMsg::CommandResult(text) => {
             app.transcript.push(TranscriptEntry::System(text));
+            app.transcript.push(TranscriptEntry::Blank);
+            app.scroll = 0; // auto-scroll to bottom
+        }
+        AgentMsg::SubagentText { agent_name, text } => {
+            // Append to last subagent text from same agent, or create new entry.
+            if let Some(TranscriptEntry::SubagentText {
+                agent_name: name,
+                text: existing,
+            }) = app.transcript.last_mut()
+            {
+                if name == &agent_name {
+                    existing.push_str(&text);
+                    app.scroll = 0;
+                    return;
+                }
+            }
+            app.transcript.push(TranscriptEntry::SubagentText {
+                agent_name,
+                text,
+            });
+            app.scroll = 0; // auto-scroll to bottom
+        }
+        AgentMsg::SubagentToolStart {
+            agent_name,
+            tool_name,
+        } => {
+            app.transcript.push(TranscriptEntry::SubagentTool {
+                agent_name,
+                tool_name,
+            });
+            app.scroll = 0; // auto-scroll to bottom
+        }
+        AgentMsg::SubagentToolEnd {
+            agent_name,
+            tool_name: _,
+        } => {
+            // Tool end is implicit — the next text or tool start
+            // replaces the current tool. No transcript entry needed,
+            // but we could add a dim "done" marker if desired.
+            let _ = agent_name;
+        }
+        AgentMsg::SubagentEnd { agent_name } => {
+            app.transcript.push(TranscriptEntry::SubagentEnd {
+                agent_name,
+            });
             app.transcript.push(TranscriptEntry::Blank);
             app.scroll = 0; // auto-scroll to bottom
         }

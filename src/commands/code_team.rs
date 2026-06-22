@@ -372,6 +372,18 @@ impl AgentRegistry {
             .filter(|h| h.status().is_active())
             .count()
     }
+
+    /// Find a handle by agent name. Returns the first match (names
+    /// are unique in practice). Used by the TUI to look up an agent's
+    /// color for transcript attribution.
+    pub fn find_by_name(&self, name: &str) -> Option<Arc<AgentHandle>> {
+        self.handles
+            .lock()
+            .unwrap()
+            .values()
+            .find(|h| h.name == name)
+            .cloned()
+    }
 }
 
 #[cfg(test)]

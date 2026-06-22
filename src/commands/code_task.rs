@@ -369,11 +369,12 @@ impl Tool for TaskTool {
 
         let child_updates: Option<Arc<dyn Fn(ToolUpdate) + Send + Sync>> = on_update.map(Arc::from);
         let handle_for_render = Arc::clone(&handle_arc);
+        let name_for_render = display_name.clone();
         let render = {
             let child_updates = child_updates.clone();
             move |event: AgentEvent| {
                 update_handle_from_event(&handle_for_render, &event);
-                render_child(event, child_updates.as_deref())
+                render_child(event, child_updates.as_deref(), &name_for_render)
             }
         };
         let assistant = match handle.prompt(prompt, render).await {
@@ -621,9 +622,12 @@ fn update_handle_from_event(handle: &Arc<AgentHandle>, event: &AgentEvent) {
     }
 }
 
-/// Render events from the child session with a dim `subagent:` prefix
-/// so they're visually distinct from the parent's main stream.
-fn render_child(event: AgentEvent, on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>) {
+/// Render events from the child session. Sends structured `ToolUpdate`s
+/// via `on_update` so the parent's event loop can route subagent text
+/// to the TUI transcript with agent attribution. The raw `eprint!`
+/// output is kept for the one-shot path (non-TUI) where stderr dim
+/// text is the only rendering channel.
+fn render_child(event: AgentEvent, on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>, agent_name: &str) {
     match event {
         AgentEvent::MessageUpdate {
             assistant_message_event: pi::model::AssistantMessageEvent::TextDelta { delta, .. },
@@ -632,15 +636,18 @@ fn render_child(event: AgentEvent, on_update: Option<&(dyn Fn(ToolUpdate) + Send
             use std::io::Write;
             eprint!("\x1b[2m{delta}\x1b[0m");
             let _ = std::io::stderr().flush();
-            send_child_update(on_update, "subagent_text_delta", &delta);
+            send_child_update(on_update, "subagent_text_delta", &delta, agent_name);
         }
-        AgentEvent::ToolExecutionStart { tool_name, .. } => {
+        AgentEvent::ToolExecutionStart { tool_name, args, .. } => {
             eprintln!("\n  \x1b[2m[subagent tool] {tool_name}\x1b[0m");
+            let detail = tool_name.clone();
             send_child_update(
                 on_update,
                 "subagent_tool_start",
-                &format!("\n[subagent tool] {tool_name}\n"),
+                &detail,
+                agent_name,
             );
+            let _ = args; // args available if needed later
         }
         AgentEvent::ToolExecutionUpdate {
             tool_name,
@@ -653,6 +660,7 @@ fn render_child(event: AgentEvent, on_update: Option<&(dyn Fn(ToolUpdate) + Send
                     content: partial_result.content,
                     details: Some(serde_json::json!({
                         "kind": "subagent_tool_update",
+                        "agent": agent_name,
                         "tool": tool_name,
                         "toolCallId": tool_call_id,
                         "details": partial_result.details,
@@ -672,6 +680,7 @@ fn render_child(event: AgentEvent, on_update: Option<&(dyn Fn(ToolUpdate) + Send
                     content: result.content,
                     details: Some(serde_json::json!({
                         "kind": "subagent_tool_end",
+                        "agent": agent_name,
                         "tool": tool_name,
                         "toolCallId": tool_call_id,
                         "isError": is_error,
@@ -682,7 +691,7 @@ fn render_child(event: AgentEvent, on_update: Option<&(dyn Fn(ToolUpdate) + Send
         }
         AgentEvent::AgentEnd { .. } => {
             eprintln!();
-            send_child_update(on_update, "subagent_end", "\n[subagent done]\n");
+            send_child_update(on_update, "subagent_end", "\n[subagent done]\n", agent_name);
         }
         _ => {}
     }
@@ -692,13 +701,14 @@ fn send_child_update(
     on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>,
     kind: &str,
     text: &str,
+    agent_name: &str,
 ) {
     let Some(on_update) = on_update else {
         return;
     };
     on_update(ToolUpdate {
         content: vec![ContentBlock::Text(TextContent::new(text.to_string()))],
-        details: Some(serde_json::json!({ "kind": kind })),
+        details: Some(serde_json::json!({ "kind": kind, "agent": agent_name })),
     });
 }
 
@@ -843,6 +853,7 @@ mod tests {
                 },
             },
             Some(&sink),
+            "reviewer",
         );
         render_child(
             AgentEvent::ToolExecutionEnd {
@@ -856,6 +867,7 @@ mod tests {
                 is_error: false,
             },
             Some(&sink),
+            "reviewer",
         );
 
         let updates = updates.lock().unwrap();
@@ -865,6 +877,7 @@ mod tests {
             updates[0].details.as_ref().unwrap()["kind"],
             "subagent_tool_update"
         );
+        assert_eq!(updates[0].details.as_ref().unwrap()["agent"], "reviewer");
         assert_eq!(updates[0].details.as_ref().unwrap()["tool"], "read");
         assert_eq!(
             updates[0].details.as_ref().unwrap()["toolCallId"],
@@ -876,6 +889,7 @@ mod tests {
             updates[1].details.as_ref().unwrap()["kind"],
             "subagent_tool_end"
         );
+        assert_eq!(updates[1].details.as_ref().unwrap()["agent"], "reviewer");
         assert_eq!(updates[1].details.as_ref().unwrap()["isError"], false);
         assert_eq!(updates[1].details.as_ref().unwrap()["details"]["bytes"], 24);
     }
