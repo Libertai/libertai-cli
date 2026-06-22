@@ -183,14 +183,15 @@ pub fn run(
     } else {
         prepare_agent_environment(&cfg)?;
         // No prompt on the command line → interactive REPL.
-        // Raw-mode UI + input bar + agent session reuse live in code_ui.
-        code_ui::run_interactive(
+        // Ratatui-based TUI with background asupersync + pi session.
+        crate::commands::code_tui::app::run(
             provider,
             model,
             mode,
             resume_path,
             bash_command_wrapper,
             Arc::new(cfg),
+            crate::commands::code_team::AgentRegistry::new(),
         )
     }
 }

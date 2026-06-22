@@ -3,25 +3,40 @@
 //! runtime that drives `pi::AgentSessionHandle`.
 
 use std::collections::VecDeque;
-use std::sync::{mpsc, Arc};
+use std::path::PathBuf;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use pi::model::AssistantMessageEvent;
+use pi::sdk::{create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::commands::code_approvals::PromptChoice;
-use crate::commands::code_factory::{Mode, ModeFlag};
+use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
+use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
+use crate::commands::code_hooks::tool_policy_from_config;
+use crate::commands::code_identity_prompt;
+use crate::commands::code_mode_prompt;
+use crate::commands::code_session::{
+    build_session_options, CodeSessionConfig, DEFAULT_MAX_TOKENS, SessionPersistence,
+};
+use crate::commands::code_skills::{prompt_for_pillar, SkillPillar};
 use crate::commands::code_team::AgentRegistry;
+use crate::commands::code_tui::approvals::RatatuiApprovalUi;
 use crate::commands::code_tui::theme;
 use crate::commands::code_tui::view;
-use crate::config::Config as LibertaiConfig;
+use crate::config::{allow_rules_path, Config as LibertaiConfig};
 
 /// Maximum entries in the input history. Matches the legacy REPL.
 const HISTORY_MAX_LIMIT: usize = 64;
+
+/// Shared abort handle — the main thread calls `.abort()` on Ctrl+C
+/// to interrupt the background thread's current turn.
+type SharedAbort = Arc<Mutex<Option<AbortHandle>>>;
 
 /// Events sent from the background thread (pi session) to the main
 /// thread (ratatui event loop).
@@ -64,6 +79,8 @@ pub enum AgentMsg {
         context_window: u32,
         model_label: String,
     },
+    /// System notice (compaction, retry, etc.) — dim in transcript.
+    System(String),
     /// Error from the background thread.
     Error(String),
 }
@@ -185,14 +202,275 @@ impl Drop for TerminalGuard {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Background thread: asupersync runtime + pi session
+// ---------------------------------------------------------------------------
+
+/// Build a pi `AgentSessionHandle` wired with `RatatuiApprovalUi`.
+///
+/// Mirrors `code_ui::build_handle` but uses the ratatui approval UI
+/// instead of `TerminalApprovalUi`.
+#[allow(clippy::too_many_arguments)]
+async fn build_session(
+    provider: &str,
+    model: &str,
+    mode: ModeFlag,
+    cfg: Arc<LibertaiConfig>,
+    registry: Arc<AgentRegistry>,
+    resume_path: Option<PathBuf>,
+    bash_command_wrapper: Option<Vec<String>>,
+    agent_tx: &mpsc::Sender<AgentMsg>,
+) -> anyhow::Result<AgentSessionHandle> {
+    let initial_mode = mode.get();
+    let approvals = Arc::new(ApprovalState::with_persistent_store(allow_rules_path()?)?);
+    let ui: Arc<dyn ApprovalUi> = Arc::new(RatatuiApprovalUi::new(agent_tx.clone()));
+    let factory = Arc::new(
+        LibertaiToolFactory::new_with_features(
+            mode,
+            approvals,
+            ui,
+            FactoryFeatures::cli_defaults(),
+            Some(Arc::clone(&cfg)),
+        )
+        .with_tool_policy(tool_policy_from_config(Arc::clone(&cfg)))
+        .with_registry(registry),
+    );
+    let persistence = match resume_path {
+        Some(p) => SessionPersistence::Resume(p),
+        None => SessionPersistence::Fresh,
+    };
+    let max_tokens = Some(DEFAULT_MAX_TOKENS);
+    let skill_cwd = std::env::current_dir().ok();
+    let append_system_prompt = prompt_for_pillar(SkillPillar::Code, skill_cwd.as_deref())?;
+    let append_system_prompt = code_mode_prompt::apply(append_system_prompt, initial_mode);
+    let append_system_prompt = code_identity_prompt::apply(append_system_prompt);
+    let options = build_session_options(CodeSessionConfig {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        working_directory: None,
+        include_cwd_in_prompt: true,
+        max_tool_iterations: 50,
+        tool_factory: factory,
+        persistence,
+        enabled_tools: None,
+        append_system_prompt,
+        max_tokens,
+        bash_command_wrapper,
+        auto_compaction_enabled: cfg.code_auto_compaction_enabled,
+        compaction_reserve_tokens: cfg.code_compaction_reserve_tokens,
+        compaction_keep_recent_tokens: cfg.code_compaction_keep_recent_tokens,
+    });
+    let mut handle = create_agent_session(options)
+        .await
+        .map_err(|e| anyhow::Error::new(e).context("create_agent_session"))?;
+    handle.set_max_tokens(max_tokens);
+    Ok(handle)
+}
+
+/// Translate a pi `AgentEvent` into an `AgentMsg` for the main thread.
+///
+/// Most variants are swallowed (lifecycle noise the TUI doesn't need).
+/// The ones that matter: text deltas, tool start/end, compaction/retry
+/// status, and errors.
+fn translate_event(event: &AgentEvent) -> Option<AgentMsg> {
+    match event {
+        AgentEvent::MessageUpdate {
+            assistant_message_event: AssistantMessageEvent::TextDelta { delta, .. },
+            ..
+        } => {
+            if delta.is_empty() {
+                None
+            } else {
+                Some(AgentMsg::TextDelta(delta.clone()))
+            }
+        }
+        AgentEvent::ToolExecutionStart {
+            tool_call_id,
+            tool_name,
+            args,
+        } => Some(AgentMsg::ToolStart {
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.clone(),
+            args: args.clone(),
+        }),
+        AgentEvent::ToolExecutionEnd {
+            tool_call_id,
+            tool_name,
+            result,
+            ..
+        } => Some(AgentMsg::ToolEnd {
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.clone(),
+            output: serde_json::to_value(result).unwrap_or(serde_json::Value::Null),
+        }),
+        AgentEvent::AutoCompactionStart { reason } => {
+            Some(AgentMsg::System(format!("compacting: {reason}")))
+        }
+        AgentEvent::AutoCompactionEnd {
+            aborted,
+            error_message,
+            ..
+        } => {
+            let text = if *aborted {
+                "compaction aborted".to_string()
+            } else if let Some(err) = error_message {
+                format!("compaction error: {err}")
+            } else {
+                "compaction complete".to_string()
+            };
+            Some(AgentMsg::System(text))
+        }
+        AgentEvent::AutoRetryStart {
+            attempt,
+            max_attempts,
+            error_message,
+            ..
+        } => Some(AgentMsg::System(format!(
+            "retry {attempt}/{max_attempts}: {error_message}"
+        ))),
+        AgentEvent::AutoRetryEnd {
+            success,
+            attempt,
+            final_error,
+        } => {
+            if *success {
+                Some(AgentMsg::System(format!("retry {attempt} succeeded")))
+            } else {
+                final_error
+                    .as_ref()
+                    .map(|err| AgentMsg::System(format!("retry {attempt} failed: {err}")))
+            }
+        }
+        AgentEvent::ExtensionError { error, .. } => Some(AgentMsg::Error(error.clone())),
+        _ => None,
+    }
+}
+
+/// Spawn the background thread that owns the asupersync runtime and
+/// the pi `AgentSessionHandle`.
+///
+/// The thread loops on `cmd_rx.recv()`, calling
+/// `handle.prompt_with_abort(...)` for each `Cmd::Prompt`. AgentEvents
+/// are translated to `AgentMsg`s and sent via `agent_tx`. Ctrl+C aborts
+/// are handled via `shared_abort` (the main thread calls `.abort()`
+/// directly — no channel round-trip needed).
+#[allow(clippy::too_many_arguments)]
+fn spawn_background(
+    agent_tx: mpsc::Sender<AgentMsg>,
+    cmd_rx: mpsc::Receiver<Cmd>,
+    shared_abort: SharedAbort,
+    provider: String,
+    model: String,
+    mode: ModeFlag,
+    cfg: Arc<LibertaiConfig>,
+    registry: Arc<AgentRegistry>,
+    resume_path: Option<PathBuf>,
+    bash_command_wrapper: Option<Vec<String>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let reactor = match asupersync::runtime::reactor::create_reactor() {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = agent_tx.send(AgentMsg::Error(format!("asupersync reactor: {e}")));
+                return;
+            }
+        };
+        let runtime = match asupersync::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
+            .build()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = agent_tx.send(AgentMsg::Error(format!("asupersync runtime: {e}")));
+                return;
+            }
+        };
+
+        runtime.block_on(async move {
+            let mut handle = match build_session(
+                &provider,
+                &model,
+                mode,
+                Arc::clone(&cfg),
+                Arc::clone(&registry),
+                resume_path,
+                bash_command_wrapper,
+                &agent_tx,
+            )
+            .await
+            {
+                Ok(h) => h,
+                Err(e) => {
+                    let _ = agent_tx.send(AgentMsg::Error(format!("{e:#}")));
+                    return;
+                }
+            };
+
+            loop {
+                match cmd_rx.recv() {
+                    Ok(Cmd::Prompt(prompt)) => {
+                        let (abort_handle, abort_signal) = AbortHandle::new();
+                        *shared_abort.lock().unwrap() = Some(abort_handle);
+
+                        let tx = agent_tx.clone();
+                        let start = Instant::now();
+                        let result = handle
+                            .prompt_with_abort(
+                                prompt,
+                                abort_signal,
+                                move |event: AgentEvent| {
+                                    if let Some(msg) = translate_event(&event) {
+                                        let _ = tx.send(msg);
+                                    }
+                                },
+                            )
+                            .await;
+
+                        *shared_abort.lock().unwrap() = None;
+                        let elapsed = start.elapsed().as_secs();
+
+                        match result {
+                            Ok(msg) => {
+                                let _ = agent_tx.send(AgentMsg::Usage {
+                                    input_tokens: msg.usage.input,
+                                    context_window: 0,
+                                    model_label: format!("{}/{}", msg.provider, msg.model),
+                                });
+                                let _ =
+                                    agent_tx.send(AgentMsg::TurnEnd { elapsed_secs: elapsed });
+                            }
+                            Err(e) => {
+                                let _ = agent_tx.send(AgentMsg::Error(format!("{e}")));
+                                let _ =
+                                    agent_tx.send(AgentMsg::TurnEnd { elapsed_secs: elapsed });
+                            }
+                        }
+                    }
+                    Ok(Cmd::Queued(_)) => {
+                        // TODO: queued messages
+                    }
+                    Ok(Cmd::Abort) => {
+                        // Handled via shared_abort directly from the main thread.
+                    }
+                    Err(_) => break, // channel closed — main thread exited
+                }
+            }
+        });
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
 /// Entry point — replaces `run_interactive` in `code_ui.rs`.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     provider: String,
     model: String,
     initial_mode: Mode,
-    _resume_path: Option<std::path::PathBuf>,
-    _bash_command_wrapper: Option<Vec<String>>,
+    resume_path: Option<PathBuf>,
+    bash_command_wrapper: Option<Vec<String>>,
     cfg: Arc<LibertaiConfig>,
     registry: Arc<AgentRegistry>,
 ) -> anyhow::Result<()> {
@@ -212,10 +490,25 @@ pub fn run(
     let mode = ModeFlag::new(initial_mode);
 
     // Channels: bg -> main (AgentMsg), main -> bg (Cmd).
-    // agent_tx will be passed to RatatuiApprovalUi once the background
-    // thread is wired. cmd_rx will be drained by the background thread.
-    let (_agent_tx, agent_rx) = mpsc::channel::<AgentMsg>();
-    let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+    let (agent_tx, agent_rx) = mpsc::channel::<AgentMsg>();
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+    // Shared abort handle for Ctrl+C to interrupt the current turn.
+    let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+
+    // Spawn the background thread (asupersync runtime + pi session).
+    let _bg_thread = spawn_background(
+        agent_tx,
+        cmd_rx,
+        Arc::clone(&shared_abort),
+        provider.clone(),
+        model.clone(),
+        mode.clone(),
+        Arc::clone(&cfg),
+        Arc::clone(&registry),
+        resume_path,
+        bash_command_wrapper,
+    );
 
     // Build initial app state.
     let mut app = App {
@@ -243,7 +536,7 @@ pub fn run(
     };
 
     // Run the event loop.
-    let result = run_loop(terminal, &mut app, agent_rx, cmd_tx);
+    let result = run_loop(terminal, &mut app, agent_rx, cmd_tx, &shared_abort);
 
     // Restore terminal (also done by guard on drop, but do it explicitly
     // on the success path so `result` is returned after cleanup).
@@ -258,6 +551,7 @@ fn run_loop(
     app: &mut App,
     agent_rx: mpsc::Receiver<AgentMsg>,
     cmd_tx: mpsc::Sender<Cmd>,
+    shared_abort: &SharedAbort,
 ) -> anyhow::Result<()> {
     let tick = Duration::from_millis(theme::TICK_RATE_MS);
 
@@ -269,7 +563,7 @@ fn run_loop(
         if event::poll(tick)? {
             match event::read()? {
                 Event::Key(key) => {
-                    if let Some(action) = handle_key(app, key, &cmd_tx) {
+                    if let Some(action) = handle_key(app, key, &cmd_tx, shared_abort) {
                         match action {
                             Action::Quit => break,
                             Action::Submit(prompt) => {
@@ -315,7 +609,12 @@ enum Action {
 
 /// Handle a keyboard event. Returns `Some(Action)` if the loop should
 /// do something (quit, submit), `None` otherwise.
-fn handle_key(app: &mut App, key: KeyEvent, _cmd_tx: &mpsc::Sender<Cmd>) -> Option<Action> {
+fn handle_key(
+    app: &mut App,
+    key: KeyEvent,
+    _cmd_tx: &mpsc::Sender<Cmd>,
+    shared_abort: &SharedAbort,
+) -> Option<Action> {
     // If approval modal is active, keys go to it.
     if app.approval.is_some() {
         return handle_approval_key(app, key);
@@ -324,7 +623,10 @@ fn handle_key(app: &mut App, key: KeyEvent, _cmd_tx: &mpsc::Sender<Cmd>) -> Opti
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
             if app.phase == Phase::Streaming {
-                _cmd_tx.send(Cmd::Abort).ok();
+                // Abort the current turn directly via the shared abort handle.
+                if let Some(abort) = shared_abort.lock().unwrap().take() {
+                    abort.abort();
+                }
                 app.phase = Phase::Idle;
                 None
             } else {
@@ -455,6 +757,9 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg) {
             app.bar.input_tokens = input_tokens;
             app.bar.context_window = context_window;
             app.bar.model_label = model_label;
+        }
+        AgentMsg::System(text) => {
+            app.transcript.push(TranscriptEntry::System(text));
         }
         AgentMsg::Error(e) => {
             app.transcript.push(TranscriptEntry::System(format!("error: {e}")));
