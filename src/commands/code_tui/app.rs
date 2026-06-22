@@ -81,6 +81,8 @@ pub enum AgentMsg {
     },
     /// System notice (compaction, retry, etc.) — dim in transcript.
     System(String),
+    /// Result from a slash command executed on the background thread.
+    CommandResult(String),
     /// Error from the background thread.
     Error(String),
 }
@@ -94,6 +96,10 @@ pub enum Cmd {
     Abort,
     /// Queued message for the next turn.
     Queued(String),
+    /// Set the model (provider, model_id).
+    SetModel(String, String),
+    /// Clear the session and start fresh.
+    Clear,
 }
 
 /// The top-level App state.
@@ -390,11 +396,11 @@ fn spawn_background(
             let mut handle = match build_session(
                 &provider,
                 &model,
-                mode,
+                mode.clone(),
                 Arc::clone(&cfg),
                 Arc::clone(&registry),
                 resume_path,
-                bash_command_wrapper,
+                bash_command_wrapper.clone(),
                 &agent_tx,
             )
             .await
@@ -451,6 +457,42 @@ fn spawn_background(
                     }
                     Ok(Cmd::Abort) => {
                         // Handled via shared_abort directly from the main thread.
+                    }
+                    Ok(Cmd::SetModel(provider, model_id)) => {
+                        match handle.set_model(&provider, &model_id).await {
+                            Ok(()) => {
+                                let _ = agent_tx.send(AgentMsg::CommandResult(
+                                    format!("→ model set to {provider}/{model_id}"),
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = agent_tx.send(AgentMsg::Error(format!("{e}")));
+                            }
+                        }
+                    }
+                    Ok(Cmd::Clear) => {
+                        match build_session(
+                            &provider,
+                            &model,
+                            mode.clone(),
+                            Arc::clone(&cfg),
+                            Arc::clone(&registry),
+                            None, // fresh session
+                            bash_command_wrapper.clone(),
+                            &agent_tx,
+                        )
+                        .await
+                        {
+                            Ok(new_handle) => {
+                                handle = new_handle;
+                                let _ = agent_tx.send(AgentMsg::CommandResult(
+                                    "→ fresh session.".to_string(),
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = agent_tx.send(AgentMsg::Error(format!("{e:#}")));
+                            }
+                        }
                     }
                     Err(_) => break, // channel closed — main thread exited
                 }
@@ -577,6 +619,10 @@ fn run_loop(
                                 app.current_tool = None;
                                 app.spinner_label = "thinking…";
                             }
+                            Action::ClearTranscript => {
+                                app.transcript.clear();
+                                app.scroll = 0;
+                            }
                         }
                     }
                 }
@@ -605,6 +651,8 @@ fn run_loop(
 enum Action {
     Quit,
     Submit(String),
+    /// Clear the transcript (for /clear).
+    ClearTranscript,
 }
 
 /// Handle a keyboard event. Returns `Some(Action)` if the loop should
@@ -612,7 +660,7 @@ enum Action {
 fn handle_key(
     app: &mut App,
     key: KeyEvent,
-    _cmd_tx: &mpsc::Sender<Cmd>,
+    cmd_tx: &mpsc::Sender<Cmd>,
     shared_abort: &SharedAbort,
 ) -> Option<Action> {
     // If approval modal is active, keys go to it.
@@ -620,10 +668,41 @@ fn handle_key(
         return handle_approval_key(app, key);
     }
 
+    // Scrollback navigation works in all phases.
+    match key.code {
+        KeyCode::PageUp => {
+            app.scroll = app.scroll.saturating_add(10);
+            return None;
+        }
+        KeyCode::PageDown => {
+            app.scroll = app.scroll.saturating_sub(10);
+            return None;
+        }
+        _ => {}
+    }
+
+    // Shift+Tab: cycle mode (Normal → AcceptEdits → Plan → Normal).
+    if key.code == KeyCode::BackTab {
+        let new_mode = match app.mode.get() {
+            Mode::Normal => Mode::AcceptEdits,
+            Mode::AcceptEdits => Mode::Plan,
+            Mode::Plan => Mode::Normal,
+        };
+        app.mode.set(new_mode);
+        let label = match new_mode {
+            Mode::Normal => "normal mode",
+            Mode::AcceptEdits => "accept-edits mode",
+            Mode::Plan => "plan mode",
+        };
+        app.transcript.push(TranscriptEntry::System(
+            format!("→ {label}"),
+        ));
+        return None;
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
             if app.phase == Phase::Streaming {
-                // Abort the current turn directly via the shared abort handle.
                 if let Some(abort) = shared_abort.lock().unwrap().take() {
                     abort.abort();
                 }
@@ -638,22 +717,64 @@ fn handle_key(
         {
             Some(Action::Quit)
         }
+        (KeyCode::Up, _) if app.phase == Phase::Idle => {
+            // History navigation: go to previous entry.
+            if app.history.is_empty() {
+                return None;
+            }
+            if app.history_idx.is_none() {
+                // Stash the current live buffer and start from the end.
+                if !app.input_buffer.is_empty() {
+                    app.stashed_live = Some(std::mem::take(&mut app.input_buffer));
+                }
+                app.history_idx = Some(app.history.len() - 1);
+            } else if let Some(idx) = app.history_idx {
+                if idx > 0 {
+                    app.history_idx = Some(idx - 1);
+                }
+            }
+            if let Some(idx) = app.history_idx {
+                app.input_buffer = app.history[idx].clone();
+            }
+            None
+        }
+        (KeyCode::Down, _) if app.phase == Phase::Idle => {
+            // History navigation: go to next entry.
+            match (app.history_idx, &app.stashed_live) {
+                (Some(idx), _) if idx + 1 < app.history.len() => {
+                    app.history_idx = Some(idx + 1);
+                    app.input_buffer = app.history[idx + 1].clone();
+                }
+                (Some(_), _) => {
+                    // Past the end — restore stashed live buffer.
+                    app.history_idx = None;
+                    app.input_buffer = app.stashed_live.take().unwrap_or_default();
+                }
+                (None, _) => {}
+            }
+            None
+        }
         (KeyCode::Enter, _) if app.phase == Phase::Idle => {
             let prompt = std::mem::take(&mut app.input_buffer);
             if prompt.is_empty() && !app.queued.is_empty() {
                 // TODO: drain queue and submit first entry.
                 None
             } else if !prompt.is_empty() {
-                // Add to history with dedup + cap.
-                if app.history.back().is_none_or(|last| last != &prompt) {
-                    app.history.push_back(prompt.clone());
-                    if app.history.len() > HISTORY_MAX_LIMIT {
-                        app.history.pop_front();
+                // Check for slash commands.
+                if prompt.starts_with('/') {
+                    handle_slash_command(app, &prompt, cmd_tx)
+                } else {
+                    // Add to history with dedup + cap.
+                    if app.history.back().is_none_or(|last| last != &prompt) {
+                        app.history.push_back(prompt.clone());
+                        if app.history.len() > HISTORY_MAX_LIMIT {
+                            app.history.pop_front();
+                        }
                     }
+                    app.history_idx = None;
+                    app.stashed_live = None;
+                    Some(Action::Submit(prompt))
                 }
-                app.history_idx = None;
-                app.stashed_live = None;
-                Some(Action::Submit(prompt))
             } else {
                 None
             }
@@ -667,6 +788,154 @@ fn handle_key(
             None
         }
         _ => None,
+    }
+}
+
+/// Handle a slash command. Returns `Some(Action)` for commands that
+/// need the main loop to act (Quit, Submit), `None` for commands
+/// handled entirely here.
+fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) -> Option<Action> {
+    let trimmed = input.trim();
+    let (cmd, rest) = match trimmed.split_once(' ') {
+        Some((c, r)) => (c, r.trim()),
+        None => (trimmed, ""),
+    };
+
+    match cmd {
+        "/exit" | "/quit" => {
+            app.transcript.push(TranscriptEntry::System("goodbye.".to_string()));
+            Some(Action::Quit)
+        }
+        "/help" => {
+            app.transcript.push(TranscriptEntry::System(
+                "Commands: /help /exit /clear /mode /model /status /history".to_string(),
+            ));
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
+        "/clear" | "/new" => {
+            let _ = cmd_tx.send(Cmd::Clear);
+            Some(Action::ClearTranscript)
+        }
+        "/mode" | "/permissions" => {
+            if rest.is_empty() || rest == "show" || rest == "status" {
+                let mode = app.mode.get();
+                let label = match mode {
+                    Mode::Normal => "normal",
+                    Mode::AcceptEdits => "accept-edits",
+                    Mode::Plan => "plan",
+                };
+                app.transcript.push(TranscriptEntry::System(
+                    format!("mode: {label}"),
+                ));
+            } else {
+                let new_mode = match rest {
+                    "normal" | "default" => Some(Mode::Normal),
+                    "accept-edits" | "accept_edits" | "accept" => Some(Mode::AcceptEdits),
+                    "plan" | "readonly" => Some(Mode::Plan),
+                    _ => None,
+                };
+                if let Some(m) = new_mode {
+                    app.mode.set(m);
+                    let label = match m {
+                        Mode::Normal => "normal",
+                        Mode::AcceptEdits => "accept-edits",
+                        Mode::Plan => "plan",
+                    };
+                    app.transcript.push(TranscriptEntry::System(
+                        format!("→ {label} mode"),
+                    ));
+                } else {
+                    app.transcript.push(TranscriptEntry::System(
+                        format!("unknown mode: {rest}"),
+                    ));
+                }
+            }
+            None
+        }
+        "/plan" => {
+            let new_mode = match app.mode.get() {
+                Mode::Normal | Mode::AcceptEdits => Mode::Plan,
+                Mode::Plan => Mode::Normal,
+            };
+            app.mode.set(new_mode);
+            let label = match new_mode {
+                Mode::Normal => "normal",
+                Mode::AcceptEdits => "accept-edits",
+                Mode::Plan => "plan",
+            };
+            app.transcript.push(TranscriptEntry::System(
+                format!("→ {label} mode"),
+            ));
+            None
+        }
+        "/model" => {
+            if rest.is_empty() || rest == "show" || rest == "status" {
+                app.transcript.push(TranscriptEntry::System(
+                    format!("model: {}", app.bar.model_label),
+                ));
+            } else {
+                // Parse "provider/model" or just "model".
+                if let Some((provider, model_id)) = rest.split_once('/') {
+                    let _ = cmd_tx.send(Cmd::SetModel(
+                        provider.to_string(),
+                        model_id.to_string(),
+                    ));
+                    app.transcript.push(TranscriptEntry::System(
+                        format!("setting model to {rest}…"),
+                    ));
+                } else {
+                    // Just model — keep current provider.
+                    let provider = app
+                        .bar
+                        .model_label
+                        .split('/')
+                        .next()
+                        .unwrap_or("openai")
+                        .to_string();
+                    let _ = cmd_tx.send(Cmd::SetModel(provider, rest.to_string()));
+                    app.transcript.push(TranscriptEntry::System(
+                        format!("setting model to {rest}…"),
+                    ));
+                }
+            }
+            None
+        }
+        "/status" => {
+            let mode = app.mode.get();
+            let mode_label = match mode {
+                Mode::Normal => "normal",
+                Mode::AcceptEdits => "accept-edits",
+                Mode::Plan => "plan",
+            };
+            app.transcript.push(TranscriptEntry::System(format!(
+                "model: {}  ·  mode: {mode_label}  ·  tokens: {}",
+                app.bar.model_label, app.bar.input_tokens,
+            )));
+            None
+        }
+        "/history" => {
+            if app.history.is_empty() {
+                app.transcript.push(TranscriptEntry::System(
+                    "no history yet.".to_string(),
+                ));
+            } else {
+                app.transcript.push(TranscriptEntry::System("history:".to_string()));
+                for (i, item) in app.history.iter().rev().take(20).enumerate() {
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "  {}. {item}",
+                        i + 1,
+                    )));
+                }
+            }
+            None
+        }
+        _ => {
+            app.transcript.push(TranscriptEntry::System(format!(
+                "unknown command: {cmd}  (try /help)",
+            )));
+            None
+        }
     }
 }
 
@@ -760,6 +1029,10 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg) {
         }
         AgentMsg::System(text) => {
             app.transcript.push(TranscriptEntry::System(text));
+        }
+        AgentMsg::CommandResult(text) => {
+            app.transcript.push(TranscriptEntry::System(text));
+            app.transcript.push(TranscriptEntry::Blank);
         }
         AgentMsg::Error(e) => {
             app.transcript.push(TranscriptEntry::System(format!("error: {e}")));
