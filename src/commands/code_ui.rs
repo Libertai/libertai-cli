@@ -15842,12 +15842,18 @@ struct SpinnerCore {
     started: Instant,
     output_chars: u64,
     /// Ticker may draw. Cleared while content or a tool is printing so
-    /// the spinner never interleaves with real output.
+    /// the spinner never interleaves with real output. Also cleared by
+    /// [`suspend_active_footer`] during interactive prompts so the
+    /// ticker doesn't fight the prompt UI.
     visible: bool,
     /// Rows of the footer block currently painted on screen (spinner
     /// line + queued previews + live typing row). The eraser must clear
     /// exactly this many rows before content prints.
     drawn_rows: u16,
+    /// Terminal height when the footer was last drawn, for detecting
+    /// resize. In alt-screen mode a resize requires re-emitting the
+    /// DECSTBM scroll region and clearing stale footer rows.
+    last_term_height: u16,
     stopped: bool,
     stream: ChromeStream,
     styled: bool,
@@ -15862,7 +15868,7 @@ impl SpinnerCore {
     /// ANSI sequence clearing `rows` footer rows, assuming the cursor
     /// sits at the end of the bottom row. Leaves the cursor on the top
     /// row, column 0 — where content (or the next footer) paints.
-    #[allow(dead_code)]
+    /// Used by the non-alt-screen fallback in [`draw`] and [`erase`].
     fn erase_seq(rows: u16) -> String {
         let mut seq = String::from("\r\x1b[2K");
         for _ in 1..rows {
@@ -15873,18 +15879,25 @@ impl SpinnerCore {
 
     fn erase(&mut self) {
         if self.drawn_rows > 0 {
-            let (_, term_height) = terminal_size();
-            let footer_top = term_height.saturating_sub(self.drawn_rows);
-            // Reset scroll region to full screen, save cursor, move to
-            // footer top, clear each row downward, restore cursor.
-            let mut seq = String::from("\x1b[r\x1b7");
-            seq.push_str(&format!("\x1b[{footer_top};1H\x1b[2K"));
-            for _ in 1..self.drawn_rows {
-                seq.push_str("\x1b[1B\x1b[2K");
+            if alt_screen_active() {
+                // Alt-screen: reset scroll region to full screen, clear
+                // footer at its absolute position (1-indexed).
+                let (_, term_height) = terminal_size();
+                let footer_top_1 = term_height.saturating_sub(self.drawn_rows).saturating_add(1);
+                let footer_top_1 = footer_top_1.max(1);
+                let mut seq = String::from("\x1b[r\x1b7");
+                seq.push_str(&format!("\x1b[{footer_top_1};1H\x1b[2K"));
+                for _ in 1..self.drawn_rows {
+                    seq.push_str("\x1b[1B\x1b[2K");
+                }
+                seq.push_str("\x1b8");
+                self.stream.write_str(&seq);
+            } else {
+                // Non-alt-screen fallback: relative-row erase.
+                self.stream.write_str(&Self::erase_seq(self.drawn_rows));
             }
-            seq.push_str("\x1b8");
-            self.stream.write_str(&seq);
             self.drawn_rows = 0;
+            self.last_term_height = 0;
         }
     }
 
@@ -15892,23 +15905,25 @@ impl SpinnerCore {
     /// panel (one row per active agent), spinner line, dim `› queued:`
     /// previews, and the live typing row.
     ///
-    /// In alt-screen mode the footer is painted at an absolute position
-    /// at the bottom of the screen. A DECSTBM scroll region confines
-    /// conversation output to the rows above the footer so it never
-    /// overwrites the footer — eliminating the hide/show dance the
+    /// In alt-screen mode (REPL) the footer is painted at an absolute
+    /// position at the bottom of the screen. A DECSTBM scroll region
+    /// confines conversation output to the rows above the footer so it
+    /// never overwrites the footer — eliminating the hide/show dance the
     /// relative-row eraser required.
+    ///
+    /// In non-alt-screen mode (one-shot `code` command) the old
+    /// relative-row behaviour is used so the footer never sets a scroll
+    /// region on the user's main terminal screen.
     fn draw(&mut self) {
         let width = term_cols();
         let (_, term_height) = terminal_size();
+        let alt = alt_screen_active();
+
         // Assemble footer rows top-to-bottom. The agent panel rides on
         // the shared `ACTIVE_AGENT_REGISTRY` so the ticker thread can
         // render live subagents without the Arc threaded through every
         // constructor.
         let mut rows: Vec<String> = Vec::new();
-        // Cap the agent panel so a wide fan-out doesn't push the whole
-        // footer off-screen. The queued-preview and input-bar panels
-        // are already capped; the agent panel was the last unbounded
-        // one (see M5.1 audit issue #7).
         const MAX_AGENT_ROWS: usize = 5;
         let agents = active_agents_for_footer();
         for handle in agents.iter().take(MAX_AGENT_ROWS) {
@@ -15956,19 +15971,53 @@ impl SpinnerCore {
             return;
         }
         rows.truncate(row_count as usize);
-        let footer_top = term_height.saturating_sub(row_count);
+
+        if alt {
+            self.draw_alt_screen(rows, row_count, term_height);
+        } else {
+            self.draw_relative(rows, row_count);
+        }
+    }
+
+    /// Alt-screen draw: absolute positioning + DECSTBM scroll region.
+    fn draw_alt_screen(&mut self, rows: Vec<String>, row_count: u16, term_height: u16) {
+        // 1-indexed: scroll_bottom = last content row, footer_top = first footer row.
+        let scroll_bottom = term_height.saturating_sub(row_count);
+        let footer_top_1 = scroll_bottom.saturating_add(1).min(term_height);
+
+        let need_region_update =
+            row_count != self.drawn_rows || term_height != self.last_term_height;
+        // Footer shrank or terminal resized: clear stale rows from the
+        // old footer position. ED (\x1b[J) is not affected by DECSTBM,
+        // so it clears to the physical end of screen regardless of the
+        // current scroll region.
+        let need_clear_stale = self.drawn_rows > 0
+            && (self.drawn_rows > row_count || term_height != self.last_term_height);
 
         let mut seq = String::new();
-        // Update scroll region when footer height changes. DECSTBM uses
-        // 1-indexed rows: \x1b[top;bottom r. The scroll region covers
-        // rows 1..footer_top (1-indexed), i.e. everything above the
-        // footer.
-        if row_count != self.drawn_rows && footer_top > 0 {
-            seq.push_str(&format!("\x1b[1;{footer_top}r"));
+
+        if need_clear_stale {
+            let old_footer_top_1 = self
+                .last_term_height
+                .saturating_sub(self.drawn_rows)
+                .saturating_add(1)
+                .max(1);
+            seq.push_str("\x1b7");
+            seq.push_str(&format!("\x1b[{old_footer_top_1};1H\x1b[J\x1b8"));
         }
+
+        if need_region_update {
+            if scroll_bottom > 0 {
+                seq.push_str(&format!("\x1b[1;{scroll_bottom}r"));
+            } else {
+                // Footer fills the whole screen — no scroll region.
+                seq.push_str("\x1b[r");
+            }
+        }
+
         // Save cursor, move to footer top, clear + draw each row, restore.
         seq.push_str("\x1b7");
-        seq.push_str(&format!("\x1b[{footer_top};1H\x1b[2K"));
+        seq.push_str(&format!("\x1b[{footer_top_1};1H\x1b[2K"));
         if let Some(first) = rows.first() {
             seq.push_str(first);
         }
@@ -15976,6 +16025,27 @@ impl SpinnerCore {
             seq.push_str(&format!("\x1b[1B\r\x1b[2K{line}"));
         }
         seq.push_str("\x1b8");
+
+        self.stream.write_str(&seq);
+        self.drawn_rows = row_count;
+        self.last_term_height = term_height;
+    }
+
+    /// Non-alt-screen draw: old relative-row behaviour (no scroll region).
+    fn draw_relative(&mut self, rows: Vec<String>, row_count: u16) {
+        let mut block = String::new();
+        for (i, line) in rows.into_iter().enumerate() {
+            if i == 0 {
+                block.push_str(&line);
+            } else {
+                block.push_str(&format!("\r\n\x1b[2K{line}"));
+            }
+        }
+        let seq = if self.drawn_rows > 0 {
+            format!("{}{}", Self::erase_seq(self.drawn_rows), block)
+        } else {
+            format!("\r\x1b[2K{block}")
+        };
         self.stream.write_str(&seq);
         self.drawn_rows = row_count;
     }
@@ -16006,6 +16076,18 @@ fn set_active_spinner(core: Option<Arc<Mutex<SpinnerCore>>>) {
     if let Ok(mut g) = ACTIVE_SPINNER.lock() {
         *g = core;
     }
+}
+
+/// Process-wide flag set by [`AltScreenGuard::enter`] so the spinner
+/// footer knows it can use absolute positioning + a DECSTBM scroll
+/// region. When false (one-shot `code` command, non-TTY, tests), the
+/// footer falls back to the old relative-row `erase_seq` behaviour so
+/// it never sets a scroll region on the user's main terminal screen.
+static ALT_SCREEN_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn alt_screen_active() -> bool {
+    ALT_SCREEN_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Shared live-agent registry for the current REPL session. Set by
@@ -16096,9 +16178,11 @@ struct AltScreenGuard {
 impl AltScreenGuard {
     fn enter() -> Self {
         use std::io::IsTerminal;
+        use std::sync::atomic::Ordering;
         let active = io::stdout().is_terminal();
         if active {
             let _ = execute!(std::io::stdout(), EnterAlternateScreen, Hide);
+            ALT_SCREEN_ACTIVE.store(true, Ordering::Relaxed);
         }
         Self { active }
     }
@@ -16106,7 +16190,9 @@ impl AltScreenGuard {
 
 impl Drop for AltScreenGuard {
     fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
         if self.active {
+            ALT_SCREEN_ACTIVE.store(false, Ordering::Relaxed);
             let _ = execute!(
                 std::io::stdout(),
                 Print("\x1b[r"),
@@ -16117,18 +16203,33 @@ impl Drop for AltScreenGuard {
     }
 }
 
-/// No-op. In alt-screen mode the footer is protected by a DECSTBM scroll
-/// region, so the interactive prompt (which runs in the content area)
-/// can never collide with it. Previously this erased the footer and set
-/// `visible = false` before an interactive prompt; both are unnecessary
-/// with absolute positioning.
+/// Pause the active spinner ticker (if any) so an interactive prompt
+/// can run without the footer fighting it. In alt-screen mode the
+/// scroll region protects the footer from the prompt's output, so only
+/// the `visible` flag is toggled (no erase needed). In non-alt-screen
+/// mode the old erase + hide behaviour is used. No-op when no spinner
+/// is active. Pair every call with [`resume_active_footer`].
 pub(crate) fn suspend_active_footer() {
-    // Intentionally empty — scroll region protects the footer.
+    let core = ACTIVE_SPINNER.lock().ok().and_then(|g| g.clone());
+    if let Some(core) = core {
+        if let Ok(mut c) = core.lock() {
+            c.visible = false;
+            if !alt_screen_active() {
+                c.erase();
+            }
+        }
+    }
 }
 
-/// No-op. See [`suspend_active_footer`].
+/// Resume the footer ticker paused by [`suspend_active_footer`]. The
+/// ticker repaints on its next tick. No-op when no spinner is active.
 pub(crate) fn resume_active_footer() {
-    // Intentionally empty — scroll region protects the footer.
+    let core = ACTIVE_SPINNER.lock().ok().and_then(|g| g.clone());
+    if let Some(core) = core {
+        if let Ok(mut c) = core.lock() {
+            c.visible = true;
+        }
+    }
 }
 
 /// Bottom-line activity spinner. Lives on its own ticker thread so the
@@ -16155,6 +16256,7 @@ impl Spinner {
             output_chars: 0,
             visible: true,
             drawn_rows: 0,
+            last_term_height: 0,
             stopped: false,
             stream,
             styled,
@@ -16183,18 +16285,28 @@ impl Spinner {
         }
     }
 
-    /// No-op. In alt-screen mode the footer is protected by a DECSTBM
-    /// scroll region, so printing to the content area can never
-    /// overwrite it. Previously this erased the footer and set
-    /// `visible = false` to stop the ticker from repainting during
-    /// output; both are unnecessary with absolute positioning.
+    /// Pause the ticker and (in non-alt-screen mode) erase the footer
+    /// so content output doesn't interleave with it. In alt-screen mode
+    /// the DECSTBM scroll region protects the footer, so only the
+    /// `visible` flag is toggled — no erase needed.
     fn hide(&self) {
-        // Intentionally empty — scroll region protects the footer.
+        if let Some(core) = &self.core {
+            if let Ok(mut c) = core.lock() {
+                c.visible = false;
+                if !alt_screen_active() {
+                    c.erase();
+                }
+            }
+        }
     }
 
-    /// No-op. See [`hide`](Self::hide).
+    /// Let the ticker paint again (next tick, ≤ one `SPINNER_TICK` away).
     fn show(&self) {
-        // Intentionally empty — scroll region protects the footer.
+        if let Some(core) = &self.core {
+            if let Ok(mut c) = core.lock() {
+                c.visible = true;
+            }
+        }
     }
 
     fn set_label(&self, label: &'static str) {
