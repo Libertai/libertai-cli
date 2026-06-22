@@ -119,6 +119,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # without depending on transitive feature flags.
 uuid = { version = "1", features = ["v4"] }
 
+# Ratatui TUI framework — replaces hand-rolled ANSI/cursor math in
+# code_ui.rs with declarative layout, double-buffering, automatic
+# resize/scroll. tui-textarea-2 for the multi-line input bar.
+ratatui = { version = "0.30", features = ["all-widgets", "macros"] }
+tui-textarea-2 = "0.11"
+
 # Mid-turn input pump (`libertai code` message queueing): needs a
 # cbreak/no-echo terminal mode that crossterm doesn't expose — its raw
 # mode also clears OPOST (breaking '\n' in streamed markdown output) and

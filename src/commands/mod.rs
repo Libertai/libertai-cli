@@ -38,6 +38,7 @@ pub mod code_team_tool;
 pub mod code_mailbox;
 pub mod code_team_task;
 pub mod code_term;
+pub mod code_tui;
 pub mod code_todo;
 pub mod code_tool_preview;
 pub mod code_ui;
