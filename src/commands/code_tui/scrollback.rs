@@ -137,12 +137,28 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         ..area
     };
 
+    // With Wrap enabled, Paragraph wraps long lines to fit the width.
+    // We must count *visual* (wrapped) lines, not source lines, for
+    // the scroll calculation.  Each Line's visual row count is
+    // ceil(char_count / usable_width), minimum 1.
+    let usable_width = para_area.width as usize;
+    let total_visual_lines: usize = lines
+        .iter()
+        .map(|line| {
+            let chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+            if chars == 0 {
+                1
+            } else {
+                ((chars + usable_width.saturating_sub(1)) / usable_width.max(1)).max(1)
+            }
+        })
+        .sum();
+
     // `app.scroll` is "offset from bottom" (0 = latest).  But
-    // `Paragraph::scroll()` expects "offset from top".  Convert:
-    //   scroll_from_top = max(0, total_lines − viewport − scroll_from_bottom)
-    let total_lines = lines.len();
+    // `Paragraph::scroll()` expects "offset from top" in *visual* lines.
+    //   scroll_from_top = max(0, total_visual_lines − viewport − scroll_from_bottom)
     let viewport = area.height as usize;
-    let max_from_top = total_lines.saturating_sub(viewport);
+    let max_from_top = total_visual_lines.saturating_sub(viewport);
     let scroll_from_top =
         max_from_top.saturating_sub(app.scroll as usize).min(max_from_top);
 

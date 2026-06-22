@@ -226,9 +226,9 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
 
     // Compute modal height based on content.
     let content_lines = if modal.free_text_mode {
-        2 // label + input line
+        4 // question + blank + input + hint
     } else {
-        q.options.len() + 3 // header + question + hint + options
+        q.options.len() + 4 // question + optional header + hint + blank + options
     };
     let modal_height = (content_lines as u16 + 4).min(area.height.saturating_sub(2));
     let modal_width = (area.width as f32 * 0.7) as u16;
@@ -322,17 +322,19 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
             })
             .collect();
 
-        // Render the list + hint above it.
-        let para_area = Rect {
-            height: inner.height.saturating_sub(3),
+        // Render the header (question + optional header + hint),
+        // then the list below it.
+        let header_height = lines.len() as u16 + 1; // +1 for blank separator
+        let header_area = Rect {
+            height: header_height,
             ..inner
         };
         let header_para = Paragraph::new(lines);
-        frame.render_widget(header_para, para_area);
+        frame.render_widget(header_para, header_area);
 
         let list_area = Rect {
-            y: para_area.y + para_area.height,
-            height: inner.height.saturating_sub(para_area.height),
+            y: header_area.y + header_area.height,
+            height: inner.height.saturating_sub(header_area.height),
             ..inner
         };
         let list = List::new(items)

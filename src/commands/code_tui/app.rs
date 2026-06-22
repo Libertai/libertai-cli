@@ -916,7 +916,7 @@ fn run_loop(
         // Drain agent messages (non-blocking).
         loop {
             match agent_rx.try_recv() {
-                Ok(msg) => handle_agent_msg(app, msg),
+                Ok(msg) => handle_agent_msg(app, msg, &cmd_tx),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     // Background thread exited — show error and quit.
@@ -1104,8 +1104,25 @@ fn handle_key(
                 None
             }
         }
-        _ if app.phase == Phase::Idle => {
-            // Pass all other keys to the textarea.
+        (KeyCode::Enter, _) if app.phase == Phase::Streaming => {
+            // Queue a message while the agent is working.
+            if key.modifiers != KeyModifiers::NONE {
+                app.textarea.input(key);
+                return None;
+            }
+            let prompt = app.textarea.lines().join("\n");
+            if !prompt.is_empty() {
+                app.textarea = TextArea::default();
+                reset_textarea_style(&mut app.textarea);
+                app.queued.push(prompt.clone());
+                app.transcript
+                    .push(TranscriptEntry::System(format!("› queued: {prompt}")));
+                app.scroll = 0;
+            }
+            None
+        }
+        // Allow textarea input in all phases (Idle + Streaming).
+        _ if app.phase == Phase::Idle || app.phase == Phase::Streaming => {
             app.textarea.input(key);
             None
         }
@@ -1487,7 +1504,7 @@ fn advance_question(app: &mut App) {
         }
     }
 }
-fn handle_agent_msg(app: &mut App, msg: AgentMsg) {
+fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
     match msg {
         AgentMsg::TextDelta(delta) => {
             app.output_chars += delta.len() as u64;
@@ -1531,6 +1548,20 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg) {
             app.current_tool_detail = String::new();
             app.transcript.push(TranscriptEntry::Blank);
             app.scroll = 0; // auto-scroll to bottom
+
+            // If there are queued messages, submit the first one.
+            if !app.queued.is_empty() {
+                let next = app.queued.remove(0);
+                app.transcript.push(TranscriptEntry::User(next.clone()));
+                app.transcript.push(TranscriptEntry::Blank);
+                let _ = cmd_tx.send(Cmd::Prompt(next));
+                app.phase = Phase::Streaming;
+                app.turn_started = Some(Instant::now());
+                app.output_chars = 0;
+                app.current_tool = None;
+                app.current_tool_detail = String::new();
+                app.spinner_label = "thinking…";
+            }
         }
         AgentMsg::ApprovalRequest {
             tool_name,

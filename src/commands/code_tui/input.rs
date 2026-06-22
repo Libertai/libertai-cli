@@ -1,8 +1,8 @@
 //! Input bar: prompt glyph + tui-textarea widget.
 //!
-//! In Idle phase the textarea is active and shows the `❯` prompt
-//! glyph to its left. In Streaming/Approval phase the textarea is
-//! dimmed and a hint is shown instead.
+//! In Idle and Streaming phases the textarea is active and shows
+//! the `❯` prompt glyph to its left. In Approval/Ask phases the
+//! textarea is dimmed and a hint is shown instead.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -14,7 +14,7 @@ use crate::commands::code_tui::theme;
 
 /// Draw the input bar.
 pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
-    if app.phase == Phase::Idle {
+    if app.phase == Phase::Idle || app.phase == Phase::Streaming {
         // Split: 2 cols for `❯ ` + rest for textarea.
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
