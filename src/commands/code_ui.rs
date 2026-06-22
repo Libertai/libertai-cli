@@ -3122,6 +3122,7 @@ async fn build_handle(
     // Git context is injected once by pi (build_git_context); do not duplicate it here.
     let append_system_prompt =
         crate::commands::code_mode_prompt::apply(append_system_prompt, initial_mode);
+    let append_system_prompt = crate::commands::code_identity_prompt::apply(append_system_prompt);
     let options = build_session_options(CodeSessionConfig {
         provider: provider.to_string(),
         model: model.to_string(),

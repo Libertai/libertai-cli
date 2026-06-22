@@ -15,6 +15,7 @@ pub mod code_env_prompt;
 pub mod code_factory;
 pub mod code_guardrail;
 pub mod code_hooks;
+pub mod code_identity_prompt;
 pub mod code_init;
 pub mod code_mcp;
 pub mod code_mcp_tool;

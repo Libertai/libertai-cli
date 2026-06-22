@@ -284,6 +284,7 @@ impl Tool for TaskTool {
         } else {
             Some(append_parts.join("\n\n"))
         };
+        let append_system_prompt = crate::commands::code_identity_prompt::apply(append_system_prompt);
         // Git context is injected once by pi (build_git_context); do not duplicate it here.
         let model = agent
             .as_ref()

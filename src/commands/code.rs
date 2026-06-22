@@ -70,6 +70,11 @@ pub fn run(
         std::env::set_var("LIBERTAI_TEAMMATE", tn);
     }
 
+    // Brand the base system prompt as LibertAI Code and hide the pi-only
+    // docs block. Must precede any `build_system_prompt` call (here or in
+    // the REPL / background teammates, which inherit the environment).
+    crate::commands::code_identity_prompt::set_brand_env();
+
     // --list-sessions short-circuits before any agent setup.
     if list_sessions {
         return print_session_list(all, json);
@@ -362,6 +367,7 @@ async fn run_async(
         code_skills::prompt_for_pillar(SkillPillar::Code, skill_cwd.as_deref())?;
     // Git context is injected once by pi (build_git_context); do not duplicate it here.
     let append_system_prompt = crate::commands::code_mode_prompt::apply(append_system_prompt, mode);
+    let append_system_prompt = crate::commands::code_identity_prompt::apply(append_system_prompt);
     let options = build_session_options(CodeSessionConfig {
         provider,
         model,

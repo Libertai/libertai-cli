@@ -2966,6 +2966,7 @@ async fn run_agent_hook_async(
                 };
             }
         };
+    let append_system_prompt = crate::commands::code_identity_prompt::apply(append_system_prompt);
     // Git context is injected once by pi (build_git_context); do not duplicate it here.
     let prompt = prompt_hook_user_content(&hook.prompt, &payload);
     let model = if hook.model.trim().is_empty() {

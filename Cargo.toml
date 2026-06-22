@@ -88,7 +88,7 @@ zeroize = { version = "1", features = ["derive"] }
 # - asupersync 0.3.1 -> 0.3.2 bump (fixes franken-decision Result API break;
 #   0.3.2 is the latest stable-compatible release — 0.3.3+ require nightly;
 #   maps new `LockError::TimedOut` variant to `Session` error)
-pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "e1c0282c", default-features = false }
+pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "f44c800b", default-features = false }
 asupersync = { version = "=0.3.2", default-features = false, features = ["tls-native-roots"] }
 async-trait = "0.1"
 futures = "0.3"
