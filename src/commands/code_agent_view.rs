@@ -387,6 +387,8 @@ fn print_json(cwd_filter: Option<&Path>) -> Result<()> {
             "promptPreview": record.prompt_preview,
             "startedAtMs": record.started_at_ms,
             "logPath": record.log_path,
+            "team": record.team,
+            "teammateName": record.teammate_name,
         }));
     }
     println!(
@@ -815,11 +817,32 @@ fn row_line(entry: &AgentViewEntry, selected: bool, cols: usize, now_ms: u64) ->
     let icon = status_icon(entry.status);
     let name = clip_to(&sanitize_for_term(&entry.record.name), 20);
     let time = relative_time(entry.record.started_at_ms, now_ms);
-    // Fixed columns: pointer(1) + sp(1) + icon(1) + sp(1) + name(20) + sp(2) + time(8) + sp(2).
-    let used = 2 + 2 + 20 + 2 + 8 + 2;
+    // Mail badge: show `✉ N` when this teammate has unread mail.
+    let mail_badge = mail_badge_for(&entry.record);
+    // Fixed columns: pointer(1) + sp(1) + icon(1) + sp(1) + name(20) + sp(2) + time(8) + sp(2) + badge(0-6).
+    let badge_width = mail_badge.chars().count();
+    let used = 2 + 2 + 20 + 2 + 8 + 2 + badge_width;
     let preview_budget = cols.saturating_sub(used).max(10);
     let preview = preview_text(&entry.record.prompt_preview, preview_budget);
-    format!("{pointer} {icon} {name:<20}  {preview}  {time:>8}")
+    format!("{pointer} {icon} {name:<20}  {preview}  {time:>8}{mail_badge}")
+}
+
+/// Build a `✉ N` badge (with a leading space) when the record is a
+/// teammate with unread mail. Empty string for plain background runs
+/// or when the mailbox is empty/missing.
+fn mail_badge_for(record: &BackgroundAgentRecord) -> String {
+    let (Some(team), Some(teammate)) = (record.team.as_ref(), record.teammate_name.as_ref()) else {
+        return String::new();
+    };
+    let cwd = std::path::Path::new(&record.cwd);
+    let team_dir = cwd.join(".libertai").join("teams").join(team);
+    let mailbox_dir = team_dir.join("mailbox").join(teammate);
+    let unread = crate::commands::code_mailbox::count_unread(&mailbox_dir);
+    if unread > 0 {
+        format!("  \u{2709} {unread}")
+    } else {
+        String::new()
+    }
 }
 
 /// State icon for a row. Working runs get a filled starburst (`✽`),
@@ -890,6 +913,8 @@ mod tests {
             log_path: format!("/tmp/agent-{pid}.log"),
             started_at_ms: started,
             launched_argv: Vec::new(),
+            team: None,
+            teammate_name: None,
         }
     }
 

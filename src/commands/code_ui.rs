@@ -12098,6 +12098,13 @@ pub(crate) struct BackgroundAgentRecord {
     pub started_at_ms: u64,
     #[serde(default)]
     pub launched_argv: Vec<String>,
+    /// Team name when this run is a teammate. None for plain background
+    /// runs. Used by the agent view to show a mail badge.
+    #[serde(default)]
+    pub team: Option<String>,
+    /// Teammate name within the team. None for plain background runs.
+    #[serde(default)]
+    pub teammate_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12317,6 +12324,8 @@ fn background_agent_record(
         log_path: started.log_path.display().to_string(),
         started_at_ms,
         launched_argv,
+        team: launch.team.clone(),
+        teammate_name: launch.teammate_name.clone(),
     }
 }
 
@@ -20447,6 +20456,8 @@ mod tests {
                 log_path: "/tmp/one.log".to_string(),
                 started_at_ms: 10,
                 launched_argv: Vec::new(),
+                team: None,
+                teammate_name: None,
             },
             BackgroundAgentRecord {
                 pid: 2,
@@ -20460,6 +20471,8 @@ mod tests {
                 log_path: "/tmp/two.log".to_string(),
                 started_at_ms: 20,
                 launched_argv: Vec::new(),
+                team: None,
+                teammate_name: None,
             },
             BackgroundAgentRecord {
                 pid: 3,
@@ -20473,6 +20486,8 @@ mod tests {
                 log_path: "/tmp/three.log".to_string(),
                 started_at_ms: 30,
                 launched_argv: Vec::new(),
+                team: None,
+                teammate_name: None,
             },
         ];
         assert_eq!(
@@ -24117,6 +24132,8 @@ mod tests {
             log_path: "/tmp/reviewer.log".to_string(),
             started_at_ms: 99,
             launched_argv: Vec::new(),
+            team: None,
+            teammate_name: None,
         };
         assert_eq!(background_agent_record_id(&record), "bg-99-4242");
         record.run_id = "custom-run".to_string();
@@ -24145,6 +24162,8 @@ mod tests {
                 "--plan".to_string(),
                 "Run review".to_string(),
             ],
+            team: None,
+            teammate_name: None,
         };
         let details = format_background_agent_details(&record, BackgroundAgentStatus::Running);
         assert!(details.contains("background agent: pid 4242"));
@@ -24183,6 +24202,8 @@ mod tests {
             log_path: "/tmp/reviewer.log".to_string(),
             started_at_ms: 0,
             launched_argv: Vec::new(),
+            team: None,
+            teammate_name: None,
         };
         let payload = BackgroundAgentRecordJson {
             record: &record,
@@ -24207,6 +24228,8 @@ mod tests {
             log_path: "/tmp/reviewer.log".to_string(),
             started_at_ms: 0,
             launched_argv: Vec::new(),
+            team: None,
+            teammate_name: None,
         };
         let payload = BackgroundAgentDetailsJson {
             surface: "terminal",
@@ -24265,6 +24288,8 @@ mod tests {
             log_path: "/tmp/reviewer.log".to_string(),
             started_at_ms: 0,
             launched_argv: Vec::new(),
+            team: None,
+            teammate_name: None,
         };
         let payload = BackgroundAgentListJson {
             surface: "terminal",
@@ -24307,6 +24332,8 @@ mod tests {
                 log_path: "/tmp/one.log".to_string(),
                 started_at_ms: 10,
                 launched_argv: Vec::new(),
+                team: None,
+                teammate_name: None,
             },
             BackgroundAgentRecord {
                 pid: 2222,
@@ -24320,6 +24347,8 @@ mod tests {
                 log_path: "/tmp/two.log".to_string(),
                 started_at_ms: 20,
                 launched_argv: Vec::new(),
+                team: None,
+                teammate_name: None,
             },
         ];
         assert_eq!(
@@ -24365,6 +24394,8 @@ mod tests {
                 log_path: "/tmp/one.log".to_string(),
                 started_at_ms: 10,
                 launched_argv: Vec::new(),
+                team: None,
+                teammate_name: None,
             },
             BackgroundAgentRecord {
                 pid: 2,
@@ -24378,6 +24409,8 @@ mod tests {
                 log_path: "/tmp/two.log".to_string(),
                 started_at_ms: 20,
                 launched_argv: Vec::new(),
+                team: None,
+                teammate_name: None,
             },
         ];
         let kept = retain_running_background_agent_records(records, |pid| {
@@ -24406,6 +24439,8 @@ mod tests {
                 log_path: "/tmp/one.log".to_string(),
                 started_at_ms: 10,
                 launched_argv: Vec::new(),
+                team: None,
+                teammate_name: None,
             },
             BackgroundAgentRecord {
                 pid: 2,
@@ -24419,6 +24454,8 @@ mod tests {
                 log_path: "/tmp/two.log".to_string(),
                 started_at_ms: 20,
                 launched_argv: Vec::new(),
+                team: None,
+                teammate_name: None,
             },
             BackgroundAgentRecord {
                 pid: 3,
@@ -24432,6 +24469,8 @@ mod tests {
                 log_path: "/tmp/three.log".to_string(),
                 started_at_ms: 30,
                 launched_argv: Vec::new(),
+                team: None,
+                teammate_name: None,
             },
         ];
         assert_eq!(
