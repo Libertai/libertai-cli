@@ -15864,6 +15864,10 @@ struct SpinnerCore {
     /// footer uses relative positioning (at the cursor) and never sets
     /// a scroll region.
     sticky: bool,
+    /// Shared mode flag so the ticker thread can render the rule line
+    /// (mode chip + model + context info) without plumbing the Arc
+    /// through every draw call. `None` in the one-shot path.
+    mode_flag: Option<ModeFlag>,
     /// Messages queued for the next turn (full texts; previews are
     /// recomputed per draw so a resize re-clips correctly).
     queued_texts: Vec<String>,
@@ -15972,6 +15976,17 @@ impl SpinnerCore {
                 format!("{DIM}{line}{RESET}")
             } else {
                 line
+            });
+        }
+        // Rule line (mode chip + model + context info) — same line
+        // read_line shows above ❯, so the status bar is visible
+        // during turns too.
+        if let Some(mf) = &self.mode_flag {
+            let rule = rule_chip(width, mf.get());
+            rows.push(if self.styled {
+                format!("{DIM}{rule}{RESET}")
+            } else {
+                rule
             });
         }
         let typed = typed_preview_line(&self.typed, width);
@@ -16267,7 +16282,13 @@ struct Spinner {
 }
 
 impl Spinner {
-    fn start(enabled: bool, stream: ChromeStream, styled: bool, sticky: bool) -> Self {
+    fn start(
+        enabled: bool,
+        stream: ChromeStream,
+        styled: bool,
+        sticky: bool,
+        mode_flag: Option<ModeFlag>,
+    ) -> Self {
         if !enabled {
             return Self {
                 core: None,
@@ -16285,6 +16306,7 @@ impl Spinner {
             stream,
             styled,
             sticky,
+            mode_flag,
             queued_texts: Vec::new(),
             typed: String::new(),
         }));
@@ -16440,7 +16462,7 @@ impl TurnRenderer {
                 crate::commands::chat_render::markdown_enabled_stdout(),
                 marker,
             ),
-            spinner: Spinner::start(chrome_tty, chrome, styled, sticky),
+            spinner: Spinner::start(chrome_tty, chrome, styled, sticky, mode.clone()),
             styled,
             chrome,
             started: Instant::now(),
