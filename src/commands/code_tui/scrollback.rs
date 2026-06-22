@@ -78,16 +78,25 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         ..area
     };
 
+    // `app.scroll` is "offset from bottom" (0 = latest).  But
+    // `Paragraph::scroll()` expects "offset from top".  Convert:
+    //   scroll_from_top = max(0, total_lines − viewport − scroll_from_bottom)
+    let total_lines = lines.len();
+    let viewport = area.height as usize;
+    let max_from_top = total_lines.saturating_sub(viewport);
+    let scroll_from_top =
+        max_from_top.saturating_sub(app.scroll as usize).min(max_from_top);
+
     // Render with scroll.
-    let paragraph = Paragraph::new(lines).scroll((app.scroll, 0));
+    let paragraph = Paragraph::new(lines).scroll((scroll_from_top as u16, 0));
     frame.render_widget(paragraph, para_area);
 
     // Draw scrollbar in the freed rightmost column.
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .begin_symbol(Some("↑"))
         .end_symbol(Some("↓"));
-    let mut scrollbar_state = ScrollbarState::new(app.transcript.len())
-        .position(app.scroll as usize)
+    let mut scrollbar_state = ScrollbarState::new(max_from_top)
+        .position(scroll_from_top)
         .viewport_content_length(area.height as usize);
     frame.render_stateful_widget(
         scrollbar,

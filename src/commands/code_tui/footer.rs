@@ -33,6 +33,12 @@ pub fn draw_spinner(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(theme::glyph::TOOL_MARKER, theme::accent()));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(tool_name, theme::bold()));
+        if !app.current_tool_detail.is_empty() {
+            spans.push(Span::styled(
+                format!("({})", app.current_tool_detail),
+                theme::muted(),
+            ));
+        }
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);

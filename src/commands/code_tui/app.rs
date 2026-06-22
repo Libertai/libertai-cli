@@ -18,7 +18,7 @@ use ratatui::Terminal;
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
-use crate::commands::code_hooks::tool_policy_from_config;
+use crate::commands::code_hooks::{tool_policy_from_config, run_post_tool_hooks, run_stop_hooks, run_user_prompt_submit_hooks, SessionHookGuard};
 use crate::commands::code_identity_prompt;
 use crate::commands::code_mode_prompt;
 use crate::commands::code_session::{
@@ -124,6 +124,8 @@ pub struct App {
     /// Name of the tool currently executing in the main session, if any.
     /// Updated from `AgentMsg::ToolStart`/`ToolEnd`.
     pub current_tool: Option<String>,
+    /// Detail string for the current tool (e.g. "bash(npm run build)").
+    pub current_tool_detail: String,
     /// Messages queued for the next turn.
     pub queued: Vec<String>,
     /// Text being typed in the input bar.
@@ -194,16 +196,26 @@ pub struct ApprovalModal {
 
 /// RAII guard that restores the terminal on drop — covers early-return
 /// and panic paths between `enable_raw_mode` and the end of `run_loop`.
+///
+/// Tracks which terminal modifications have been applied so far so
+/// that if `enable_raw_mode` succeeds but `Terminal::new` fails, we
+/// still undo raw mode and the alternate screen.
 struct TerminalGuard {
+    raw_mode: bool,
+    alt_screen: bool,
     terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         if let Some(mut terminal) = self.terminal.take() {
-            let _ = disable_raw_mode();
-            let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
             let _ = terminal.show_cursor();
+            let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
+        } else if self.alt_screen {
+            let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
+        }
+        if self.raw_mode {
+            let _ = disable_raw_mode();
         }
     }
 }
@@ -412,19 +424,50 @@ fn spawn_background(
                 }
             };
 
+            // Session start hooks (SessionEnd fires on drop).
+            let _session_hooks = SessionHookGuard::start(Arc::clone(&cfg));
+
+            // Track the current provider/model so /clear doesn't revert
+            // to the original model after /model has changed it.
+            let mut current_provider = provider.clone();
+            let mut current_model = model.clone();
+            let hook_cfg = Arc::clone(&cfg);
+
             loop {
                 match cmd_rx.recv() {
                     Ok(Cmd::Prompt(prompt)) => {
                         let (abort_handle, abort_signal) = AbortHandle::new();
                         *shared_abort.lock().unwrap() = Some(abort_handle);
 
+                        // Apply turn guidance + user-prompt-submit hooks.
+                        let prompt = code_mode_prompt::apply_turn_guidance(
+                            prompt,
+                            mode.get(),
+                        );
+                        let prompt = match run_user_prompt_submit_hooks(
+                            cfg.as_ref(),
+                            &prompt,
+                        ) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                let _ = agent_tx.send(AgentMsg::Error(format!("{e:#}")));
+                                let _ = agent_tx.send(AgentMsg::TurnEnd {
+                                    elapsed_secs: 0,
+                                });
+                                *shared_abort.lock().unwrap() = None;
+                                continue;
+                            }
+                        };
+
                         let tx = agent_tx.clone();
+                        let hook_cfg = Arc::clone(&hook_cfg);
                         let start = Instant::now();
                         let result = handle
                             .prompt_with_abort(
                                 prompt,
                                 abort_signal,
                                 move |event: AgentEvent| {
+                                    run_post_tool_hooks(hook_cfg.as_ref(), &event);
                                     if let Some(msg) = translate_event(&event) {
                                         let _ = tx.send(msg);
                                     }
@@ -444,6 +487,7 @@ fn spawn_background(
                                 });
                                 let _ =
                                     agent_tx.send(AgentMsg::TurnEnd { elapsed_secs: elapsed });
+                                run_stop_hooks(cfg.as_ref());
                             }
                             Err(e) => {
                                 let _ = agent_tx.send(AgentMsg::Error(format!("{e}")));
@@ -459,6 +503,8 @@ fn spawn_background(
                         // Handled via shared_abort directly from the main thread.
                     }
                     Ok(Cmd::SetModel(provider, model_id)) => {
+                        current_provider = provider.clone();
+                        current_model = model_id.clone();
                         match handle.set_model(&provider, &model_id).await {
                             Ok(()) => {
                                 let _ = agent_tx.send(AgentMsg::CommandResult(
@@ -472,8 +518,8 @@ fn spawn_background(
                     }
                     Ok(Cmd::Clear) => {
                         match build_session(
-                            &provider,
-                            &model,
+                            &current_provider,
+                            &current_model,
                             mode.clone(),
                             Arc::clone(&cfg),
                             Arc::clone(&registry),
@@ -516,17 +562,25 @@ pub fn run(
     cfg: Arc<LibertaiConfig>,
     registry: Arc<AgentRegistry>,
 ) -> anyhow::Result<()> {
-    // Set up terminal.
+    // Set up terminal — guard created first so any early-return
+    // between enable_raw_mode and the end of run_loop is cleaned up.
+    let mut guard = TerminalGuard {
+        raw_mode: false,
+        alt_screen: false,
+        terminal: None,
+    };
+
     enable_raw_mode()?;
+    guard.raw_mode = true;
+
     let mut stdout = std::io::stdout();
     crossterm::execute!(stdout, EnterAlternateScreen)?;
+    guard.alt_screen = true;
+
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
+    guard.terminal = Some(terminal);
 
-    // RAII guard — if anything below fails, the terminal is restored.
-    let mut guard = TerminalGuard {
-        terminal: Some(terminal),
-    };
     let terminal = guard.terminal.as_mut().unwrap();
 
     let mode = ModeFlag::new(initial_mode);
@@ -563,6 +617,7 @@ pub fn run(
         output_chars: 0,
         spinner_label: "thinking…",
         current_tool: None,
+        current_tool_detail: String::new(),
         queued: Vec::new(),
         input_buffer: String::new(),
         history: VecDeque::new(),
@@ -617,6 +672,7 @@ fn run_loop(
                                 app.turn_started = Some(Instant::now());
                                 app.output_chars = 0;
                                 app.current_tool = None;
+                                app.current_tool_detail = String::new();
                                 app.spinner_label = "thinking…";
                             }
                             Action::ClearTranscript => {
@@ -634,8 +690,24 @@ fn run_loop(
         }
 
         // Drain agent messages (non-blocking).
-        while let Ok(msg) = agent_rx.try_recv() {
-            handle_agent_msg(app, msg);
+        loop {
+            match agent_rx.try_recv() {
+                Ok(msg) => handle_agent_msg(app, msg),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Background thread exited — show error and quit.
+                    if app.phase == Phase::Streaming {
+                        app.phase = Phase::Idle;
+                        app.turn_started = None;
+                    }
+                    app.transcript
+                        .push(TranscriptEntry::System(
+                            "session ended — background thread exited.".to_string(),
+                        ));
+                    terminal.draw(|frame| view::draw(frame, app))?;
+                    return Ok(());
+                }
+            }
         }
 
         // Animate spinner.
@@ -665,7 +737,7 @@ fn handle_key(
 ) -> Option<Action> {
     // If approval modal is active, keys go to it.
     if app.approval.is_some() {
-        return handle_approval_key(app, key);
+        return handle_approval_key(app, key, shared_abort);
     }
 
     // Scrollback navigation works in all phases.
@@ -940,7 +1012,22 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
 }
 
 /// Handle a key when the approval modal is active.
-fn handle_approval_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+fn handle_approval_key(
+    app: &mut App,
+    key: KeyEvent,
+    shared_abort: &SharedAbort,
+) -> Option<Action> {
+    // Ctrl+C: deny the approval and abort the current turn.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        let approval = app.approval.take()?;
+        let _ = approval.responder.send(PromptChoice::Deny);
+        if let Some(abort) = shared_abort.lock().unwrap().take() {
+            abort.abort();
+        }
+        app.phase = Phase::Idle;
+        return None;
+    }
+
     let approval = app.approval.take()?;
     use crate::commands::code_approvals::PromptChoice;
     let choice = match key.code {
@@ -972,6 +1059,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg) {
             } else {
                 app.transcript.push(TranscriptEntry::Assistant(delta));
             }
+            app.scroll = 0; // auto-scroll to bottom
         }
         AgentMsg::ToolStart {
             tool_name,
@@ -986,20 +1074,25 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg) {
                 .to_string();
             app.transcript.push(TranscriptEntry::Tool {
                 name: tool_name.clone(),
-                detail,
+                detail: detail.clone(),
             });
             app.current_tool = Some(tool_name);
+            app.current_tool_detail = detail;
             app.spinner_label = "working…";
+            app.scroll = 0; // auto-scroll to bottom
         }
         AgentMsg::ToolEnd { .. } => {
             app.current_tool = None;
+            app.current_tool_detail = String::new();
             app.spinner_label = "thinking…";
         }
         AgentMsg::TurnEnd { elapsed_secs: _ } => {
             app.phase = Phase::Idle;
             app.turn_started = None;
             app.current_tool = None;
+            app.current_tool_detail = String::new();
             app.transcript.push(TranscriptEntry::Blank);
+            app.scroll = 0; // auto-scroll to bottom
         }
         AgentMsg::ApprovalRequest {
             tool_name,
@@ -1029,13 +1122,16 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg) {
         }
         AgentMsg::System(text) => {
             app.transcript.push(TranscriptEntry::System(text));
+            app.scroll = 0; // auto-scroll to bottom
         }
         AgentMsg::CommandResult(text) => {
             app.transcript.push(TranscriptEntry::System(text));
             app.transcript.push(TranscriptEntry::Blank);
+            app.scroll = 0; // auto-scroll to bottom
         }
         AgentMsg::Error(e) => {
             app.transcript.push(TranscriptEntry::System(format!("error: {e}")));
+            app.scroll = 0; // auto-scroll to bottom
         }
     }
 }

@@ -44,15 +44,21 @@ const PEEK_CONTENT_ROWS: usize = 20;
 // ---------------------------------------------------------------------------
 
 struct TerminalGuard {
+    raw_mode: bool,
+    alt_screen: bool,
     terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         if let Some(mut terminal) = self.terminal.take() {
-            let _ = disable_raw_mode();
-            let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
             let _ = terminal.show_cursor();
+            let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
+        } else if self.alt_screen {
+            let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
+        }
+        if self.raw_mode {
+            let _ = disable_raw_mode();
         }
     }
 }
@@ -196,15 +202,23 @@ fn print_plain(cwd_filter: Option<&Path>) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn run_tui(config: &ViewConfig) -> Result<()> {
+    let mut guard = TerminalGuard {
+        raw_mode: false,
+        alt_screen: false,
+        terminal: None,
+    };
+
     enable_raw_mode()?;
+    guard.raw_mode = true;
+
     let mut stdout = std::io::stdout();
     crossterm::execute!(stdout, EnterAlternateScreen)?;
+    guard.alt_screen = true;
+
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
+    guard.terminal = Some(terminal);
 
-    let mut guard = TerminalGuard {
-        terminal: Some(terminal),
-    };
     let terminal = guard.terminal.as_mut().unwrap();
 
     let mut state = ViewState::default();
