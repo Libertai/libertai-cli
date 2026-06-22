@@ -14,7 +14,9 @@ use crate::commands::code_tui::theme;
 
 /// Draw the input bar.
 pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
-    if app.phase == Phase::Idle || app.phase == Phase::Streaming {
+    if (app.phase == Phase::Idle || app.phase == Phase::Streaming)
+        && app.focus == crate::commands::code_tui::app::Focus::Input
+    {
         // Split: 2 cols for `❯ ` + rest for textarea.
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -36,6 +38,17 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
         let cursor_x = chunks[1].x.saturating_add(col as u16);
         let cursor_y = chunks[1].y.saturating_add(row as u16);
         frame.set_cursor_position((cursor_x, cursor_y));
+    } else if app.focus == crate::commands::code_tui::app::Focus::Agents {
+        // Agent panel is focused — show hint.
+        let line = Line::from(vec![
+            Span::styled(theme::glyph::USER_PROMPT, theme::bold_accent()),
+            Span::raw(" "),
+            Span::styled(
+                "(browsing agents — tab/esc to return)",
+                theme::muted(),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
     } else {
         // Dimmed — show a hint.
         let line = Line::from(vec![

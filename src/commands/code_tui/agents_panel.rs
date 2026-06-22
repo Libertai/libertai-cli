@@ -2,6 +2,8 @@
 //!
 //! Renders below the scrollback transcript, above the spinner.
 //! Each row: `○ agent-name  tool-name  prompt preview…`.
+//! When focused (Tab), the selected agent is highlighted and
+//! navigable with Up/Down/Enter.
 
 use std::sync::Arc;
 
@@ -16,32 +18,57 @@ use crate::commands::code_tui::theme;
 use crate::commands::code_tui::theme::glyph;
 
 /// Draw the agents panel header: `── agents (N) ──`.
-pub fn draw_header(frame: &mut Frame, area: Rect, count: usize) {
-    let label = format!(" agents ({count}) ");
+pub fn draw_header(frame: &mut Frame, area: Rect, count: usize, focused: bool) {
+    let label = if focused {
+        format!(" agents ({count}) — ↑↓ select · enter view · esc back ")
+    } else {
+        format!(" agents ({count}) ")
+    };
     let dash_count = area
         .width
         .saturating_sub(label.len() as u16) as usize;
+    let style = if focused {
+        theme::bold_accent()
+    } else {
+        theme::bold_muted()
+    };
     let line = Line::from(vec![
         Span::styled(
             glyph::DIVIDER.to_string().repeat(dash_count),
-            theme::muted(),
+            if focused { theme::accent() } else { theme::muted() },
         ),
-        Span::styled(label, theme::bold_muted()),
+        Span::styled(label, style),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// Draw the agent rows.
-pub fn draw(frame: &mut Frame, area: Rect, agents: &[Arc<AgentHandle>], max_rows: usize) {
+/// Draw the agent rows. `selected` is the index of the highlighted
+/// agent (only when `focused` is true).
+pub fn draw(
+    frame: &mut Frame,
+    area: Rect,
+    agents: &[Arc<AgentHandle>],
+    max_rows: usize,
+    selected: usize,
+    focused: bool,
+) {
     let lines: Vec<Line> = agents
         .iter()
         .take(max_rows)
-        .map(|handle| {
+        .enumerate()
+        .map(|(i, handle)| {
             let status = handle.status();
             let icon = glyph::status_icon(status);
             let color = theme::agent_color_for(handle.color);
 
             let mut spans = Vec::new();
+
+            // Selection indicator.
+            if focused && i == selected {
+                spans.push(Span::styled("▸ ", theme::bold_accent()));
+            } else {
+                spans.push(Span::raw("  "));
+            }
 
             // Status icon — colored by status.
             let icon_style = match status {
@@ -66,7 +93,12 @@ pub fn draw(frame: &mut Frame, area: Rect, agents: &[Arc<AgentHandle>], max_rows
             }
 
             // Agent name — colored by agent color.
-            spans.push(Span::styled(&handle.name, Style::default().fg(color)));
+            let name_style = if focused && i == selected {
+                Style::default().fg(color).add_modifier(ratatui::style::Modifier::BOLD | ratatui::style::Modifier::REVERSED)
+            } else {
+                Style::default().fg(color)
+            };
+            spans.push(Span::styled(&handle.name, name_style));
 
             // Current tool.
             if let Some(tool) = handle.current_tool() {
@@ -86,4 +118,3 @@ pub fn draw(frame: &mut Frame, area: Rect, agents: &[Arc<AgentHandle>], max_rows
 
     frame.render_widget(Paragraph::new(lines), area);
 }
-

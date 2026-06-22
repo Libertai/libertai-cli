@@ -161,6 +161,12 @@ pub struct App {
     pub approval: Option<ApprovalModal>,
     /// Ask-user modal state (if active).
     pub ask: Option<AskModal>,
+    /// Which pane has keyboard focus.
+    pub focus: Focus,
+    /// Selected agent index in the agents panel (when focus == Agents).
+    pub agent_selection: usize,
+    /// Agent output overlay (if active).
+    pub agent_overlay: Option<AgentOverlay>,
     /// Live agent registry.
     pub registry: Arc<AgentRegistry>,
     /// Config.
@@ -180,6 +186,24 @@ pub enum Phase {
     Approval,
     /// Ask-user modal is showing.
     Ask,
+}
+
+/// Which pane has keyboard focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    /// Normal input mode — textarea is active.
+    #[default]
+    Input,
+    /// Browsing the agents panel — Up/Down selects, Enter opens overlay.
+    Agents,
+}
+
+/// Agent output overlay state.
+pub struct AgentOverlay {
+    /// Agent name being viewed.
+    pub agent_name: String,
+    /// Scroll position within the overlay (0 = bottom).
+    pub scroll: u16,
 }
 
 /// A single entry in the conversation transcript.
@@ -856,6 +880,9 @@ pub fn run(
         stashed_live: None,
             approval: None,
             ask: None,
+            focus: Focus::default(),
+            agent_selection: 0,
+            agent_overlay: None,
         registry,
         cfg,
         bar: BarStatus {
@@ -1021,6 +1048,67 @@ fn handle_key(
         return None;
     }
 
+    // Tab: toggle focus between input and agents panel.
+    if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE {
+        // Close overlay first if open.
+        if app.agent_overlay.is_some() {
+            app.agent_overlay = None;
+            return None;
+        }
+        let agents = app.registry.active();
+        if agents.is_empty() {
+            return None; // no agents to browse
+        }
+        app.focus = match app.focus {
+            Focus::Input => Focus::Agents,
+            Focus::Agents => Focus::Input,
+        };
+        // Clamp selection.
+        if app.agent_selection >= agents.len() {
+            app.agent_selection = 0;
+        }
+        return None;
+    }
+
+    // Agent overlay keys (takes priority over everything).
+    if app.agent_overlay.is_some() {
+        return handle_agent_overlay_key(app, key);
+    }
+
+    // Agent panel browse mode.
+    if app.focus == Focus::Agents {
+        let agents = app.registry.active();
+        match key.code {
+            KeyCode::Up => {
+                if !agents.is_empty() {
+                    app.agent_selection =
+                        (app.agent_selection + agents.len() - 1) % agents.len();
+                }
+                return None;
+            }
+            KeyCode::Down => {
+                if !agents.is_empty() {
+                    app.agent_selection = (app.agent_selection + 1) % agents.len();
+                }
+                return None;
+            }
+            KeyCode::Enter => {
+                if let Some(handle) = agents.get(app.agent_selection) {
+                    app.agent_overlay = Some(AgentOverlay {
+                        agent_name: handle.name.clone(),
+                        scroll: 0,
+                    });
+                }
+                return None;
+            }
+            KeyCode::Esc => {
+                app.focus = Focus::Input;
+                return None;
+            }
+            _ => {}
+        }
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
             if app.phase == Phase::Streaming {
@@ -1173,6 +1261,56 @@ fn reset_textarea_style(ta: &mut TextArea<'static>) {
 /// Handle a slash command. Returns `Some(Action)` for commands that
 /// need the main loop to act (Quit, Submit), `None` for commands
 /// handled entirely here.
+/// Handle keys when the agent output overlay is open.
+fn handle_agent_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Tab => {
+            app.agent_overlay = None;
+        }
+        KeyCode::Up | KeyCode::PageUp => {
+            if let Some(overlay) = &mut app.agent_overlay {
+                overlay.scroll = overlay.scroll.saturating_add(3);
+            }
+        }
+        KeyCode::Down | KeyCode::PageDown => {
+            if let Some(overlay) = &mut app.agent_overlay {
+                overlay.scroll = overlay.scroll.saturating_sub(3);
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+/// Collect transcript entries for a specific agent (by name).
+/// Returns text lines suitable for the overlay view.
+pub fn agent_transcript(app: &App, agent_name: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for entry in &app.transcript {
+        match entry {
+            TranscriptEntry::SubagentText {
+                agent_name: name,
+                text,
+            } if name == agent_name => {
+                lines.push(text.clone());
+            }
+            TranscriptEntry::SubagentTool {
+                agent_name: name,
+                tool_name,
+            } if name == agent_name => {
+                lines.push(format!("● {tool_name}"));
+            }
+            TranscriptEntry::SubagentEnd {
+                agent_name: name,
+            } if name == agent_name => {
+                lines.push("done".to_string());
+            }
+            _ => {}
+        }
+    }
+    lines
+}
+
 fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) -> Option<Action> {
     let trimmed = input.trim();
     let (cmd, rest) = match trimmed.split_once(' ') {

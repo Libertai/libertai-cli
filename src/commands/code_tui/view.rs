@@ -11,7 +11,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 use crate::commands::code_team::AgentHandle;
 use crate::commands::code_tui::agents_panel;
-use crate::commands::code_tui::app::{App, Phase};
+use crate::commands::code_tui::app::{App, Phase, Focus};
 use crate::commands::code_tui::footer;
 use crate::commands::code_tui::input;
 use crate::commands::code_tui::scrollback;
@@ -53,6 +53,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Draw ask-user modal overlay if active.
     if app.phase == Phase::Ask {
         draw_ask_modal(frame, area, app);
+    }
+
+    // Draw agent output overlay if active.
+    if app.agent_overlay.is_some() {
+        draw_agent_overlay(frame, area, app);
     }
 }
 
@@ -116,11 +121,11 @@ fn draw_footer(
 
     // Agent header + agent rows.
     if agent_header > 0 {
-        agents_panel::draw_header(frame, chunks[chunk_idx], agents.len());
+        agents_panel::draw_header(frame, chunks[chunk_idx], agents.len(), app.focus == Focus::Agents);
         chunk_idx += 1;
     }
     if agent_rows > 0 {
-        agents_panel::draw(frame, chunks[chunk_idx], agents, agent_rows as usize);
+        agents_panel::draw(frame, chunks[chunk_idx], agents, agent_rows as usize, app.agent_selection, app.focus == Focus::Agents);
         chunk_idx += 1;
     }
 
@@ -357,4 +362,85 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
         frame.render_stateful_widget(list, list_area, &mut modal.list_state);
     }
+}
+
+/// Draw the agent output overlay — a near-fullscreen popup showing
+/// the selected agent's transcript (text + tool calls).
+fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+
+    let Some(overlay) = &app.agent_overlay else {
+        return;
+    };
+
+    // Look up the agent handle for color.
+    let color = app
+        .registry
+        .find_by_name(&overlay.agent_name)
+        .map(|h| theme::agent_color_for(h.color))
+        .unwrap_or(theme::MUTED);
+
+    // Collect this agent's transcript.
+    let agent_lines = crate::commands::code_tui::app::agent_transcript(app, &overlay.agent_name);
+
+    // Overlay: 80% width, 80% height, centered.
+    let overlay_width = (area.width as f32 * 0.8) as u16;
+    let overlay_height = (area.height as f32 * 0.8) as u16;
+    let overlay_x = area.x + (area.width.saturating_sub(overlay_width)) / 2;
+    let overlay_y = area.y + (area.height.saturating_sub(overlay_height)) / 2;
+    let overlay_area = Rect::new(overlay_x, overlay_y, overlay_width, overlay_height);
+
+    frame.render_widget(Clear, overlay_area);
+
+    let title = format!(" {} — esc/tab to close ", overlay.agent_name);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(color))
+        .title(Span::styled(
+            title,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+
+    // Build the content lines.
+    let mut lines: Vec<Line> = Vec::new();
+    for text in &agent_lines {
+        for line in text.lines() {
+            lines.push(Line::from(Span::raw(line.to_string())));
+        }
+        lines.push(Line::from(""));
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(no output yet)",
+            Style::default().fg(theme::MUTED),
+        )));
+    }
+
+    // Scroll calculation (same bottom-anchoring as scrollback).
+    let usable_width = overlay_width.saturating_sub(4) as usize;
+    let total_visual: usize = lines
+        .iter()
+        .map(|l| {
+            let chars: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+            if chars == 0 {
+                1
+            } else {
+                ((chars + usable_width.saturating_sub(1)) / usable_width.max(1)).max(1)
+            }
+        })
+        .sum();
+    let inner_height = overlay_height.saturating_sub(2) as usize; // minus borders
+    let max_from_top = total_visual.saturating_sub(inner_height);
+    let scroll_from_top =
+        max_from_top.saturating_sub(overlay.scroll as usize).min(max_from_top);
+
+    let para = Paragraph::new(lines)
+        .block(block)
+        .scroll((scroll_from_top as u16, 0))
+        .wrap(Wrap::default());
+    frame.render_widget(para, overlay_area);
 }

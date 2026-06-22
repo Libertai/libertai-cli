@@ -114,5 +114,18 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(mode_label, theme::warning()));
     }
 
+    // Tab hint when agents are present and not already focused.
+    let agent_count = app.registry.active_count();
+    if agent_count > 0 {
+        spans.push(Span::raw("  "));
+        let hint = match app.focus {
+            crate::commands::code_tui::app::Focus::Input => {
+                format!("[tab] {} agent{}", agent_count, if agent_count > 1 { "s" } else { "" })
+            }
+            crate::commands::code_tui::app::Focus::Agents => "[esc] back to input".to_string(),
+        };
+        spans.push(Span::styled(hint, theme::accent()));
+    }
+
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
