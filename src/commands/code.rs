@@ -144,8 +144,23 @@ pub fn run(
         // --print never blocks on the terminal: anything that would need an
         // interactive approval is auto-denied instead. Without it, one-shot
         // runs keep the terminal micro-prompt (the user is still at a TTY).
+        // Background teammates get team_task/mailbox auto-allowed so they
+        // can coordinate without hanging on a hidden prompt.
         let ui: Arc<dyn ApprovalUi> = if print {
-            Arc::new(PrintModeApprovalUi)
+            let has_team = std::env::var("LIBERTAI_TEAM")
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
+            let has_teammate = std::env::var("LIBERTAI_TEAMMATE")
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
+            if has_team && has_teammate {
+                Arc::new(
+                    PrintModeApprovalUi::new()
+                        .with_auto_allow(vec!["team_task".into(), "mailbox".into()]),
+                )
+            } else {
+                Arc::new(PrintModeApprovalUi::new())
+            }
         } else {
             Arc::new(TerminalApprovalUi)
         };
@@ -553,7 +568,27 @@ fn read_piped_stdin() -> Option<String> {
 /// user hasn't pre-approved — those are denied with a stderr note,
 /// mirroring how `claude -p` refuses un-permitted tools rather than
 /// hanging a script on a hidden prompt.
-struct PrintModeApprovalUi;
+///
+/// Background teammates (spawned with `--print` + `LIBERTAI_TEAM`/
+/// `LIBERTAI_TEAMMATE` env vars) get `team_task` and `mailbox` in
+/// `auto_allow` so they can coordinate without hanging; all other
+/// un-approved tools are still denied.
+struct PrintModeApprovalUi {
+    auto_allow: Vec<String>,
+}
+
+impl PrintModeApprovalUi {
+    fn new() -> Self {
+        Self {
+            auto_allow: Vec::new(),
+        }
+    }
+
+    fn with_auto_allow(mut self, tools: Vec<String>) -> Self {
+        self.auto_allow = tools;
+        self
+    }
+}
 
 #[async_trait::async_trait]
 impl ApprovalUi for PrintModeApprovalUi {
@@ -562,6 +597,9 @@ impl ApprovalUi for PrintModeApprovalUi {
     }
 
     async fn decide(&self, tool_name: &str, _preview: &str, always_rule: &str) -> PromptChoice {
+        if self.auto_allow.iter().any(|t| t == tool_name) {
+            return PromptChoice::Allow;
+        }
         let (dim, reset) = crate::commands::output::stderr_dim_pair();
         eprintln!(
             "  {dim}[print] {tool_name} needs approval — auto-denied (non-interactive). \

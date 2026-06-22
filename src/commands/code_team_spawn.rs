@@ -139,15 +139,39 @@ pub fn resolve_team(cwd: &Path, name: &str) -> Result<TeamManifest> {
     parse_manifest(&raw)
 }
 
+/// Wrap a teammate's raw task with coordination instructions so the
+/// background agent knows how to report back via `team_task` and
+/// `mailbox`. Without this, teammates do the work but never write
+/// results back to the shared task list or mailbox.
+fn format_teammate_prompt(task: &str, team_name: &str, teammate_name: &str) -> String {
+    format!(
+        "{task}\n\
+         \n\
+         ---\n\
+         \n\
+         You are teammate **{teammate_name}** in team **{team_name}**, running \
+         headlessly in the background. You have access to `team_task` and \
+         `mailbox` tools for team coordination.\n\
+         \n\
+         Follow this workflow:\n\
+         1. Use `team_task` to find your assigned task and mark it \
+         `in_progress`.\n\
+         2. Do the work described above.\n\
+         3. Use `team_task` to mark your task `done` when finished.\n\
+         4. Use `mailbox` to post a concise summary of your findings, \
+         results, and any files or commands you used to the team.\n"
+    )
+}
+
 /// Spawn all teammates in a team as background processes. Returns the
 /// list of started teammates (`name`, `pid`, `log_path`, `run_id`).
 ///
 /// Per-teammate `model` overrides the team-level [`TeamManifest::model`],
 /// which in turn overrides the caller-supplied `model` default. The
 /// same precedence applies to `provider`/`mode` (which are team-level
-/// only). The `LIBERTAI_TEAM` env var is not threaded through here —
-/// the parent process is expected to set it before calling this so
-/// the spawned children inherit it.
+/// only). Team context (`LIBERTAI_TEAM` / `LIBERTAI_TEAMMATE` env vars)
+/// is threaded via [`BackgroundAgentLaunch`]'s `team` and `teammate_name`
+/// fields, which `start_background_agent` sets on the child process.
 pub fn spawn_team(
     team_name: &str,
     manifest: &TeamManifest,
@@ -175,7 +199,11 @@ pub fn spawn_team(
             provider: resolved_provider.to_string(),
             model: resolved_model.to_string(),
             mode: resolved_mode,
-            prompt: teammate.task.clone(),
+            prompt: format_teammate_prompt(
+                &teammate.task,
+                team_name,
+                &teammate.name,
+            ),
             cwd: cwd.to_path_buf(),
             agent: Some(teammate.agent.clone()),
             team: Some(team_name.to_string()),

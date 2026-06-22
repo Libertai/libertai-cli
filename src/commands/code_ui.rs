@@ -9594,6 +9594,10 @@ fn background_agent_args(exe: &Path, launch: &BackgroundAgentLaunch) -> Vec<Stri
     if !is_lcode_executable(exe) {
         args.push("code".to_string());
     }
+    // Background children have no TTY (stdin is null, stdout/stderr are
+    // log files). Without --print they'd pick TerminalApprovalUi and
+    // hang forever on the first un-approved tool call.
+    args.push("--print".to_string());
     if !launch.provider.trim().is_empty() {
         args.push("--provider".to_string());
         args.push(launch.provider.clone());
@@ -19499,6 +19503,7 @@ mod tests {
             background_agent_args(Path::new("/usr/bin/libertai"), &launch),
             vec![
                 "code",
+                "--print",
                 "--provider",
                 "libertai",
                 "--model",
@@ -19511,6 +19516,7 @@ mod tests {
         assert_eq!(
             background_agent_args(Path::new("/usr/bin/lcode"), &launch),
             vec![
+                "--print",
                 "--provider",
                 "libertai",
                 "--model",
@@ -19537,7 +19543,7 @@ mod tests {
         };
         assert_eq!(
             background_agent_args(Path::new("/usr/bin/libertai"), &launch),
-            vec!["code", "--mode", "accept-edits", "Run review"]
+            vec!["code", "--print", "--mode", "accept-edits", "Run review"]
         );
     }
 
@@ -19622,6 +19628,7 @@ mod tests {
             record.launched_argv,
             vec![
                 "/usr/bin/lcode".to_string(),
+                "--print".to_string(),
                 "--provider".to_string(),
                 "libertai".to_string(),
                 "--model".to_string(),
