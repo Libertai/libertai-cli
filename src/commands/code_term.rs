@@ -3,6 +3,9 @@
 //! Lives here so both the REPL's input bar (`code_ui.rs`) and the
 //! approval micro-prompt (the `TerminalApprovalUi` implementation
 //! below) use the same RAII guard — otherwise a panic during an
+//! approval prompt would leave the terminal in raw mode.
+
+#![allow(dead_code)]
 //! approval prompt would leak raw mode and leave the user's terminal
 //! broken.
 
