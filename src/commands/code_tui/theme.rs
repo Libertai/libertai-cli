@@ -89,23 +89,22 @@ pub fn bold_muted() -> Style {
 // Agent color rotation
 // ---------------------------------------------------------------------------
 
-/// Rotation of colors for agent identity, matching the existing
-/// `AgentColor` palette in `code_team.rs`.
-pub const AGENT_COLORS: [Color; 9] = [
-    Color::Red,
-    Color::Green,
-    Color::Yellow,
-    Color::Blue,
-    Color::Magenta,
-    Color::Cyan,
-    Color::Rgb(216, 144, 60), // orange
-    Color::Rgb(220, 120, 180), // pink
-    Color::DarkGray,
-];
-
-/// Map an agent color index to a ratatui `Color`.
-pub fn agent_color(index: usize) -> Color {
-    AGENT_COLORS[index % AGENT_COLORS.len()]
+/// Map an `AgentColor` to a ratatui `Color`. Single source of truth —
+/// used by both the agents panel and any other widget that needs the
+/// mapping.
+pub fn agent_color_for(color: crate::commands::code_team::AgentColor) -> Color {
+    use crate::commands::code_team::AgentColor;
+    match color {
+        AgentColor::Red => Color::Red,
+        AgentColor::Green => Color::Green,
+        AgentColor::Yellow => Color::Yellow,
+        AgentColor::Blue => Color::Blue,
+        AgentColor::Purple => Color::Magenta,
+        AgentColor::Cyan => Color::Cyan,
+        AgentColor::Orange => Color::Rgb(216, 144, 60),
+        AgentColor::Pink => Color::Rgb(220, 120, 180),
+        AgentColor::Dim => Color::DarkGray,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -162,11 +161,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn agent_color_rotates() {
-        assert_eq!(agent_color(0), Color::Red);
-        assert_eq!(agent_color(1), Color::Green);
-        assert_eq!(agent_color(9), Color::Red); // wraps
-        assert_eq!(agent_color(10), Color::Green);
+    fn agent_color_for_maps_all_variants() {
+        use crate::commands::code_team::AgentColor;
+        assert_eq!(agent_color_for(AgentColor::Red), Color::Red);
+        assert_eq!(agent_color_for(AgentColor::Green), Color::Green);
+        assert_eq!(agent_color_for(AgentColor::Purple), Color::Magenta);
+        assert_eq!(agent_color_for(AgentColor::Dim), Color::DarkGray);
+        assert_eq!(agent_color_for(AgentColor::Orange), Color::Rgb(216, 144, 60));
     }
 
     #[test]

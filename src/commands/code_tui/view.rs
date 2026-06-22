@@ -4,9 +4,12 @@
 //! fills the remaining space above it. ratatui handles double-buffering,
 //! resize, and cursor positioning automatically.
 
+use std::sync::Arc;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
+use crate::commands::code_team::AgentHandle;
 use crate::commands::code_tui::agents_panel;
 use crate::commands::code_tui::app::{App, Phase};
 use crate::commands::code_tui::footer;
@@ -18,15 +21,18 @@ use crate::commands::code_tui::theme;
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
-    // Compute footer height based on current state.
-    let footer_height = compute_footer_height(app);
+    // Snapshot agents once per frame to avoid repeated mutex locks.
+    let agents = app.registry.active();
+
+    // Compute footer height from the frame area, not a separate syscall.
+    let footer_height = compute_footer_height(&agents, &app.queued, area.height);
 
     // Split: scrollback (variable) + footer (fixed).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),         // scrollback — takes remaining space
-            Constraint::Length(footer_height), // footer — pinned to bottom
+            Constraint::Min(1),                // scrollback — takes remaining space
+            Constraint::Length(footer_height),  // footer — pinned to bottom
         ])
         .split(area);
 
@@ -37,7 +43,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     scrollback::draw(frame, scrollback_area, app);
 
     // Draw footer (agents + spinner + queued + rule + input).
-    draw_footer(frame, footer_area, app);
+    draw_footer(frame, footer_area, app, &agents);
 
     // Draw approval modal overlay if active.
     if app.phase == Phase::Approval {
@@ -45,39 +51,40 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-/// Compute the footer height based on current state.
-fn compute_footer_height(app: &App) -> u16 {
-    let agents = app.registry.active();
-    let agent_rows = agents.len().min((area_height(app) / 3) as usize).max(3) as u16;
+/// Compute the footer height from the snapshot of agents and queued msgs.
+///
+/// `term_height` is the frame's area height — not a separate syscall.
+fn compute_footer_height(agents: &[Arc<AgentHandle>], queued: &[String], term_height: u16) -> u16 {
     let agent_header = if agents.is_empty() { 0 } else { 1 };
-    let queued_rows = app.queued.len().min(3) as u16;
-    // spinner + queued + rule + input = 3 + queued_rows
-    let base = 1 + queued_rows + 1 + 1; // spinner + queued + rule + input
+    let agent_rows = if agents.is_empty() {
+        0
+    } else {
+        agents.len().min((term_height / 3) as usize) as u16
+    };
+    let queued_rows = queued.len().min(3) as u16;
+    // spinner + queued + rule + input
+    let base = 1 + queued_rows + 1 + 1;
     let total = agent_header + agent_rows + base;
-    total.min(area_height(app).saturating_sub(1))
-}
-
-/// Get terminal height from the frame area.
-fn area_height(_app: &App) -> u16 {
-    crossterm::terminal::size()
-        .ok()
-        .filter(|(_, h)| *h > 0)
-        .map(|(_, h)| h)
-        .unwrap_or(24)
+    total.min(term_height.saturating_sub(1))
 }
 
 /// Draw the footer block: agents panel + spinner + queued + rule + input.
-fn draw_footer(frame: &mut Frame, area: Rect, app: &mut App) {
-    let agents = app.registry.active();
-    let agent_rows = agents.len().min((area.height / 3) as usize).max(3) as u16;
+fn draw_footer(
+    frame: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    agents: &[Arc<AgentHandle>],
+) {
     let agent_header = if agents.is_empty() { 0 } else { 1 };
+    let agent_rows = if agents.is_empty() {
+        0
+    } else {
+        agents.len().min((area.height / 3) as usize) as u16
+    };
     let queued_rows = app.queued.len().min(3) as u16;
     let spinner_h = 1u16;
     let rule_h = 1u16;
     let input_h = 1u16;
-
-    let constraints: Vec<Constraint> = Vec::new();
-    let _ = constraints;
 
     // Build vertical layout for the footer.
     let chunks = Layout::default()
@@ -108,7 +115,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &mut App) {
         chunk_idx += 1;
     }
     if agent_rows > 0 {
-        agents_panel::draw(frame, chunks[chunk_idx], &agents, agent_rows as usize);
+        agents_panel::draw(frame, chunks[chunk_idx], agents, agent_rows as usize);
         chunk_idx += 1;
     }
 
@@ -140,9 +147,9 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    // Modal size: 60% width, 5 rows tall, centered.
+    // Modal size: 60% width, 6 rows tall, centered.
     let modal_width = (area.width as f32 * 0.6) as u16;
-    let modal_height = 5u16;
+    let modal_height = 6u16;
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
@@ -167,6 +174,10 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(vec![
             Span::styled("Preview: ", Style::default().fg(Color::DarkGray)),
             Span::raw(&approval.preview),
+        ]),
+        Line::from(vec![
+            Span::styled("Always rule: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&approval.always_rule, Style::default().fg(theme::ACCENT)),
         ]),
         Line::from(""),
         Line::from(vec![

@@ -11,7 +11,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::commands::code_team::{AgentCapability, AgentColor, AgentHandle, AgentStatus};
+use crate::commands::code_team::{AgentCapability, AgentHandle, AgentStatus};
 use crate::commands::code_tui::theme;
 use crate::commands::code_tui::theme::glyph;
 
@@ -39,7 +39,7 @@ pub fn draw(frame: &mut Frame, area: Rect, agents: &[Arc<AgentHandle>], max_rows
         .map(|handle| {
             let status = handle.status();
             let icon = glyph::status_icon(status);
-            let color = agent_color_to_ratatui(handle.color);
+            let color = theme::agent_color_for(handle.color);
 
             let mut spans = Vec::new();
 
@@ -87,17 +87,3 @@ pub fn draw(frame: &mut Frame, area: Rect, agents: &[Arc<AgentHandle>], max_rows
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Map `AgentColor` to a ratatui `Color`.
-fn agent_color_to_ratatui(color: AgentColor) -> ratatui::style::Color {
-    match color {
-        AgentColor::Red => ratatui::style::Color::Red,
-        AgentColor::Green => ratatui::style::Color::Green,
-        AgentColor::Yellow => ratatui::style::Color::Yellow,
-        AgentColor::Blue => ratatui::style::Color::Blue,
-        AgentColor::Purple => ratatui::style::Color::Magenta,
-        AgentColor::Cyan => ratatui::style::Color::Cyan,
-        AgentColor::Orange => ratatui::style::Color::Rgb(216, 144, 60),
-        AgentColor::Pink => ratatui::style::Color::Rgb(220, 120, 180),
-        AgentColor::Dim => ratatui::style::Color::DarkGray,
-    }
-}

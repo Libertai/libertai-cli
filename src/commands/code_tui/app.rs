@@ -2,6 +2,7 @@
 //! between the ratatui main thread and the asupersync background
 //! runtime that drives `pi::AgentSessionHandle`.
 
+use std::collections::VecDeque;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
@@ -12,12 +13,15 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::commands::code_approvals::{ApprovalUi, PromptChoice};
+use crate::commands::code_approvals::PromptChoice;
 use crate::commands::code_factory::{Mode, ModeFlag};
 use crate::commands::code_team::AgentRegistry;
 use crate::commands::code_tui::theme;
 use crate::commands::code_tui::view;
 use crate::config::Config as LibertaiConfig;
+
+/// Maximum entries in the input history. Matches the legacy REPL.
+const HISTORY_MAX_LIMIT: usize = 64;
 
 /// Events sent from the background thread (pi session) to the main
 /// thread (ratatui event loop).
@@ -94,12 +98,15 @@ pub struct App {
     pub output_chars: u64,
     /// Spinner label ("thinking…", "writing…", etc.).
     pub spinner_label: &'static str,
+    /// Name of the tool currently executing in the main session, if any.
+    /// Updated from `AgentMsg::ToolStart`/`ToolEnd`.
+    pub current_tool: Option<String>,
     /// Messages queued for the next turn.
     pub queued: Vec<String>,
     /// Text being typed in the input bar.
     pub input_buffer: String,
-    /// Input history (persisted).
-    pub history: Vec<String>,
+    /// Input history (capped at [`HISTORY_MAX_LIMIT`]).
+    pub history: VecDeque<String>,
     /// History navigation index.
     pub history_idx: Option<usize>,
     /// Stashed live buffer when navigating history.
@@ -152,8 +159,6 @@ pub struct BarStatus {
     pub input_tokens: u64,
     pub context_window: u32,
     pub estimated_cost: Option<f64>,
-    pub status_line_template: String,
-    pub status_line_command: String,
 }
 
 /// Active approval modal state.
@@ -164,13 +169,28 @@ pub struct ApprovalModal {
     pub responder: mpsc::Sender<PromptChoice>,
 }
 
+/// RAII guard that restores the terminal on drop — covers early-return
+/// and panic paths between `enable_raw_mode` and the end of `run_loop`.
+struct TerminalGuard {
+    terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if let Some(mut terminal) = self.terminal.take() {
+            let _ = disable_raw_mode();
+            let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
+            let _ = terminal.show_cursor();
+        }
+    }
+}
+
 /// Entry point — replaces `run_interactive` in `code_ui.rs`.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     provider: String,
     model: String,
     initial_mode: Mode,
-    _approvals: Arc<dyn ApprovalUi>,
     _resume_path: Option<std::path::PathBuf>,
     _bash_command_wrapper: Option<Vec<String>>,
     cfg: Arc<LibertaiConfig>,
@@ -181,16 +201,24 @@ pub fn run(
     let mut stdout = std::io::stdout();
     crossterm::execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let terminal = Terminal::new(backend)?;
+
+    // RAII guard — if anything below fails, the terminal is restored.
+    let mut guard = TerminalGuard {
+        terminal: Some(terminal),
+    };
+    let terminal = guard.terminal.as_mut().unwrap();
 
     let mode = ModeFlag::new(initial_mode);
 
     // Channels: bg -> main (AgentMsg), main -> bg (Cmd).
+    // agent_tx will be passed to RatatuiApprovalUi once the background
+    // thread is wired. cmd_rx will be drained by the background thread.
     let (_agent_tx, agent_rx) = mpsc::channel::<AgentMsg>();
     let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
 
     // Build initial app state.
-    let app = App {
+    let mut app = App {
         phase: Phase::Idle,
         mode,
         transcript: Vec::new(),
@@ -199,9 +227,10 @@ pub fn run(
         turn_started: None,
         output_chars: 0,
         spinner_label: "thinking…",
+        current_tool: None,
         queued: Vec::new(),
         input_buffer: String::new(),
-        history: Vec::new(),
+        history: VecDeque::new(),
         history_idx: None,
         stashed_live: None,
         approval: None,
@@ -214,13 +243,11 @@ pub fn run(
     };
 
     // Run the event loop.
-    let result = run_loop(&mut terminal, app, agent_rx, cmd_tx);
+    let result = run_loop(terminal, &mut app, agent_rx, cmd_tx);
 
-    // Restore terminal.
-    disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
+    // Restore terminal (also done by guard on drop, but do it explicitly
+    // on the success path so `result` is returned after cleanup).
+    drop(guard);
     result
 }
 
@@ -228,7 +255,7 @@ pub fn run(
 /// updates app state, and draws.
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    mut app: App,
+    app: &mut App,
     agent_rx: mpsc::Receiver<AgentMsg>,
     cmd_tx: mpsc::Sender<Cmd>,
 ) -> anyhow::Result<()> {
@@ -236,20 +263,24 @@ fn run_loop(
 
     loop {
         // Draw.
-        terminal.draw(|frame| view::draw(frame, &mut app))?;
+        terminal.draw(|frame| view::draw(frame, app))?;
 
         // Poll for events (keyboard, mouse, resize) with timeout.
         if event::poll(tick)? {
             match event::read()? {
                 Event::Key(key) => {
-                    if let Some(action) = handle_key(&mut app, key, &cmd_tx) {
+                    if let Some(action) = handle_key(app, key, &cmd_tx) {
                         match action {
                             Action::Quit => break,
                             Action::Submit(prompt) => {
-                                cmd_tx.send(Cmd::Prompt(prompt))?;
+                                // Echo the user prompt into the transcript.
+                                app.transcript.push(TranscriptEntry::User(prompt.clone()));
+                                app.transcript.push(TranscriptEntry::Blank);
+                                let _ = cmd_tx.send(Cmd::Prompt(prompt));
                                 app.phase = Phase::Streaming;
                                 app.turn_started = Some(Instant::now());
                                 app.output_chars = 0;
+                                app.current_tool = None;
                                 app.spinner_label = "thinking…";
                             }
                         }
@@ -264,7 +295,7 @@ fn run_loop(
 
         // Drain agent messages (non-blocking).
         while let Ok(msg) = agent_rx.try_recv() {
-            handle_agent_msg(&mut app, msg);
+            handle_agent_msg(app, msg);
         }
 
         // Animate spinner.
@@ -300,17 +331,24 @@ fn handle_key(app: &mut App, key: KeyEvent, _cmd_tx: &mpsc::Sender<Cmd>) -> Opti
                 Some(Action::Quit)
             }
         }
-        (KeyCode::Char('d'), KeyModifiers::CONTROL) if app.input_buffer.is_empty() => {
+        (KeyCode::Char('d'), KeyModifiers::CONTROL)
+            if app.phase == Phase::Idle && app.input_buffer.is_empty() =>
+        {
             Some(Action::Quit)
         }
         (KeyCode::Enter, _) if app.phase == Phase::Idle => {
             let prompt = std::mem::take(&mut app.input_buffer);
             if prompt.is_empty() && !app.queued.is_empty() {
-                // Drain queue.
+                // TODO: drain queue and submit first entry.
                 None
             } else if !prompt.is_empty() {
-                // Add to history.
-                app.history.push(prompt.clone());
+                // Add to history with dedup + cap.
+                if app.history.back().is_none_or(|last| last != &prompt) {
+                    app.history.push_back(prompt.clone());
+                    if app.history.len() > HISTORY_MAX_LIMIT {
+                        app.history.pop_front();
+                    }
+                }
                 app.history_idx = None;
                 app.stashed_live = None;
                 Some(Action::Submit(prompt))
@@ -347,6 +385,8 @@ fn handle_approval_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         }
     };
     let _ = approval.responder.send(choice);
+    // The turn resumes while the background thread processes the choice.
+    app.phase = Phase::Streaming;
     None
 }
 
@@ -374,17 +414,21 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg) {
                 .unwrap_or("")
                 .to_string();
             app.transcript.push(TranscriptEntry::Tool {
-                name: tool_name,
+                name: tool_name.clone(),
                 detail,
             });
+            app.current_tool = Some(tool_name);
             app.spinner_label = "working…";
         }
         AgentMsg::ToolEnd { .. } => {
+            app.current_tool = None;
             app.spinner_label = "thinking…";
         }
         AgentMsg::TurnEnd { elapsed_secs: _ } => {
             app.phase = Phase::Idle;
             app.turn_started = None;
+            app.current_tool = None;
+            app.transcript.push(TranscriptEntry::Blank);
         }
         AgentMsg::ApprovalRequest {
             tool_name,

@@ -11,6 +11,10 @@ use crate::commands::code_tui::theme;
 
 /// Draw the scrollback transcript.
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
     // Build lines from transcript entries.
     let mut lines: Vec<Line> = Vec::new();
 
@@ -18,25 +22,26 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         match entry {
             TranscriptEntry::User(text) => {
                 lines.push(Line::from(vec![
-                    Span::styled(
-                        theme::glyph::USER_PROMPT,
-                        theme::bold_accent(),
-                    ),
+                    Span::styled(theme::glyph::USER_PROMPT, theme::bold_accent()),
                     Span::raw(" "),
                     Span::styled(text, theme::bold()),
                 ]));
             }
             TranscriptEntry::Assistant(text) => {
-                // For now, render as plain text with the ● marker.
+                // Split on newlines — each paragraph gets its own Line.
+                // The `●` marker only goes on the first paragraph.
                 // TODO: integrate ratatui-markdown for rich rendering.
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        theme::glyph::ASSISTANT_MARKER,
-                        theme::bold(),
-                    ),
-                    Span::raw(" "),
-                    Span::raw(text),
-                ]));
+                for (i, para) in text.split('\n').enumerate() {
+                    if i == 0 {
+                        lines.push(Line::from(vec![
+                            Span::styled(theme::glyph::ASSISTANT_MARKER, theme::bold()),
+                            Span::raw(" "),
+                            Span::raw(para),
+                        ]));
+                    } else {
+                        lines.push(Line::from(Span::raw(para)));
+                    }
+                }
             }
             TranscriptEntry::Tool { name, detail } => {
                 if detail.is_empty() {
@@ -66,11 +71,18 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
+    // Reserve a 1-column right margin for the scrollbar so it doesn't
+    // clobber the last column of wrapped text.
+    let para_area = Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+
     // Render with scroll.
     let paragraph = Paragraph::new(lines).scroll((app.scroll, 0));
-    frame.render_widget(paragraph, area);
+    frame.render_widget(paragraph, para_area);
 
-    // Draw scrollbar on the right edge.
+    // Draw scrollbar in the freed rightmost column.
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .begin_symbol(Some("↑"))
         .end_symbol(Some("↓"));

@@ -23,15 +23,19 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     if app.phase == Phase::Idle {
         spans.push(Span::raw(&app.input_buffer));
     } else {
-        // Dimmed — show nothing or a hint.
-        spans.push(Span::styled("(press Ctrl+C to abort)", theme::muted()));
+        // Dimmed — show a hint.
+        spans.push(Span::styled("(Ctrl+C to abort)", theme::muted()));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
     // Set cursor position at end of input buffer (Idle only).
+    // Use char count, not byte length, so Unicode positions are correct.
     if app.phase == Phase::Idle {
-        let cursor_x = area.x + 2 + app.input_buffer.len() as u16;
+        let cursor_x = area
+            .x
+            .saturating_add(2)
+            .saturating_add(app.input_buffer.chars().count() as u16);
         let cursor_y = area.y;
         frame.set_cursor_position((cursor_x, cursor_y));
     }

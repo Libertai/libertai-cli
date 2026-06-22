@@ -10,7 +10,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -27,14 +27,12 @@ pub fn draw_spinner(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(app.spinner_label, theme::muted()),
     ];
 
-    // If there's a current tool, show it.
-    if let Some(tool) = app.registry.active().first() {
-        if let Some(tool_name) = tool.current_tool() {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(theme::glyph::TOOL_MARKER, theme::accent()));
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(tool_name, theme::bold()));
-        }
+    // If there's a current tool running in the main session, show it.
+    if let Some(tool_name) = &app.current_tool {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(theme::glyph::TOOL_MARKER, theme::accent()));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(tool_name, theme::bold()));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -57,16 +55,25 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
     // Model label.
     spans.push(Span::styled(
         &app.bar.model_label,
-        Style::default().fg(theme::MUTED).add_modifier(Modifier::BOLD),
+        ratatui::style::Style::default()
+            .fg(theme::MUTED)
+            .add_modifier(Modifier::BOLD),
     ));
 
     // Token count (if available).
     if app.bar.input_tokens > 0 {
         spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            format!("{}k", app.bar.input_tokens / 1000),
-            theme::muted(),
-        ));
+        if app.bar.input_tokens < 1000 {
+            spans.push(Span::styled(
+                format!("{}tok", app.bar.input_tokens),
+                theme::muted(),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!("{:.1}k", app.bar.input_tokens as f64 / 1000.0),
+                theme::muted(),
+            ));
+        }
     }
 
     // Context window.
@@ -76,6 +83,12 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
             format!("ctx {}k", app.bar.context_window / 1000),
             theme::muted(),
         ));
+    }
+
+    // Estimated cost.
+    if let Some(cost) = app.bar.estimated_cost {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(format!("${cost:.2}"), theme::muted()));
     }
 
     // Mode.
