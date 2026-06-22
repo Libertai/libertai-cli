@@ -40,7 +40,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute, queue,
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, Clear, ClearType},
+    terminal::{self, Clear, ClearType},
 };
 
 use pi::model::{
@@ -856,7 +856,7 @@ pub fn run_interactive(
     // Enter alt-screen before any output so the welcome header,
     // transcript, and footer all live on the clean alt-screen canvas.
     // The guard leaves alt-screen on drop (normal return or panic).
-    let _alt_screen = AltScreenGuard::enter();
+    let _screen = ScreenGuard::enter();
     let styled = welcome_styling_enabled();
     // `--continue`/`--resume`: one-line summary of what came back,
     // printed above the welcome header.
@@ -16112,30 +16112,34 @@ impl Drop for RegistryGuard {
     }
 }
 
-/// RAII guard that enters the terminal alternate screen on construction
-/// and leaves it on drop (including the panic-unwind path). Alt-screen
-/// gives the REPL a clean canvas (no shell history) and is restored on
-/// exit. The footer uses relative positioning (at the cursor) both in
-/// and out of alt-screen — no DECSTBM scroll region.
-struct AltScreenGuard {
+/// RAII guard that clears the screen on construction for a clean REPL
+/// canvas, and shows the cursor on drop. Uses the primary screen (not
+/// alt-screen) so the terminal's native scrollback buffer is available —
+/// scroll wheel and Page Up/Down scroll previous content.
+struct ScreenGuard {
     active: bool,
 }
 
-impl AltScreenGuard {
+impl ScreenGuard {
     fn enter() -> Self {
         use std::io::IsTerminal;
         let active = io::stdout().is_terminal();
         if active {
-            let _ = execute!(std::io::stdout(), EnterAlternateScreen, Hide);
+            let _ = execute!(
+                std::io::stdout(),
+                Clear(ClearType::All),
+                cursor::MoveTo(0, 0),
+                Hide
+            );
         }
         Self { active }
     }
 }
 
-impl Drop for AltScreenGuard {
+impl Drop for ScreenGuard {
     fn drop(&mut self) {
         if self.active {
-            let _ = execute!(std::io::stdout(), Show, LeaveAlternateScreen);
+            let _ = execute!(std::io::stdout(), Show);
         }
     }
 }
