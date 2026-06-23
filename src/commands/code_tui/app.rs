@@ -3,7 +3,7 @@
 //! runtime that drives `pi::AgentSessionHandle`.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,13 +16,16 @@ use ratatui::style::{Color, Style};
 use ratatui::Terminal;
 use tui_textarea::TextArea;
 
+use anyhow::Context;
+
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
 use crate::commands::code_slash_registry;
 use crate::commands::code_slash_router::{self, BgCommand, CustomResolveResult};
 use crate::commands::code_ui::{
     apply_pending_shell_context, context_percent, context_tokens, context_window_for,
-    shell_escape_command, stop_line_text, usage_summary, ShellEscapeAction, UsageRecord,
+    shell_escape_command, start_background_agent, stop_line_text, usage_summary,
+    BackgroundAgentLaunch, ShellEscapeAction, UsageRecord,
 };
 use crate::commands::code_hooks::{tool_policy_from_config, run_post_tool_hooks, run_stop_hooks, run_user_prompt_submit_hooks, SessionHookGuard};
 use crate::commands::code_identity_prompt;
@@ -31,7 +34,10 @@ use crate::commands::code_session::{
     build_session_options, CodeSessionConfig, DEFAULT_MAX_TOKENS, SessionPersistence,
 };
 use crate::commands::code_skills::{prompt_for_pillar, SkillPillar};
-use crate::commands::code_team::AgentRegistry;
+use crate::commands::code_team::{
+    AgentCapability, AgentRegistry, AgentColor, AgentKind, AgentRegistration, AgentStatus,
+};
+use crate::commands::code_team_spawn::{self, TeamManifest};
 use crate::commands::code_tui::approvals::RatatuiApprovalUi;
 use crate::commands::code_tui::terminal::TerminalGuard;
 use crate::commands::code_tui::theme;
@@ -1647,6 +1653,177 @@ async fn doctor_text(
     out
 }
 
+// ---------------------------------------------------------------------------
+// M3b: agent / team spawn — pure parsing helpers + small app accessors
+// ---------------------------------------------------------------------------
+//
+// These helpers are the testability seam between the slash-command *parsing*
+// (pure: no spawn, no println, no registry mutation) and the *real spawn*
+// (the thin arm shells in `handle_slash_command`). `build_team_invocation`
+// and `build_agent_invocation` return the fully-resolved invocation the arm
+// then hands to `code_team_spawn::spawn_team` / `start_background_agent`.
+
+/// A parsed `/team` invocation: the team name plus its resolved
+/// `TeamManifest`. Produced by the pure [`build_team_invocation`] helper;
+/// the slash arm feeds it to the real spawn.
+#[derive(Debug, Clone)]
+struct TeamInvocation {
+    team_name: String,
+    manifest: TeamManifest,
+}
+
+/// Split `app.bar.model_label` (`"provider/model"`) into its `(provider,
+/// model)` parts. Falls back to the config's defaults when the label can't
+/// be split, so the spawn always has a concrete provider/model pair. Reads
+/// only from `app` — no spawn, no mutation.
+fn app_provider_model(app: &App) -> (String, String) {
+    if let Some((p, m)) = app.bar.model_label.split_once('/') {
+        if !p.is_empty() && !m.is_empty() {
+            return (p.to_string(), m.to_string());
+        }
+    }
+    (
+        app.cfg.default_code_provider.clone(),
+        app.cfg.default_code_model.clone(),
+    )
+}
+
+/// Render an [`AgentStatus`] as a short lowercase label for `/agents`.
+fn status_label(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Spawning => "spawning",
+        AgentStatus::Working => "working",
+        AgentStatus::NeedsInput => "needs-input",
+        AgentStatus::Idle => "idle",
+        AgentStatus::Completed => "completed",
+        AgentStatus::Failed => "failed",
+        AgentStatus::Stopped => "stopped",
+    }
+}
+
+/// Parse `/team` args into a [`TeamInvocation`] WITHOUT spawning. Pure:
+/// no I/O beyond reading a manifest file (needed to resolve a team name),
+/// no spawn, no registry mutation, no printing.
+///
+/// Supported forms:
+/// - `/team <name>` — resolve `<name>` against `.libertai/teams/<name>.toml`.
+/// - `/team <name> <manifest-path>` — load the manifest from an explicit path.
+/// - `/team <name> <agent> <task>` — quick inline form: a single teammate
+///   named `agent-1` running `<agent>` on `<task>`.
+///
+/// The provider/model/mode are the caller's resolved defaults (the manifest
+/// may override them at spawn time).
+fn build_team_invocation(
+    rest: &str,
+    cwd: &Path,
+    provider: &str,
+    model: &str,
+    mode: Mode,
+) -> anyhow::Result<TeamInvocation> {
+    let _ = (provider, model, mode); // defaults threaded by the arm; unused here.
+    let rest = rest.trim();
+    if rest.is_empty() {
+        anyhow::bail!("usage: /team <name>  |  /team <name> <manifest-path>  |  /team <name> <agent> <task>");
+    }
+    // Tokenize on whitespace runs so `"a  b"` doesn't yield an empty middle
+    // token. We count tokens to pick the form, then recover the raw remainder
+    // for the task/manifest path via `split_once` on the first run.
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    let team_name = tokens[0].to_string();
+    if team_name.is_empty() {
+        anyhow::bail!("team name must not be empty");
+    }
+
+    // Quick inline form: `<name> <agent> <task...>` — three+ tokens. Build a
+    // single-teammate manifest; the task is everything after the agent token.
+    if tokens.len() >= 3 {
+        let agent = tokens[1].trim();
+        // The raw task is the remainder after the first two tokens. Use
+        // `split_once` on the first whitespace run to skip `<name>`, then
+        // `split_once` again on the next run to skip `<agent>`.
+        let after_name = rest
+            .split_once(char::is_whitespace)
+            .map(|(_, r)| r.trim_start())
+            .unwrap_or("");
+        let task = after_name
+            .split_once(char::is_whitespace)
+            .map(|(_, r)| r.trim())
+            .unwrap_or("");
+        if agent.is_empty() || task.is_empty() {
+            anyhow::bail!("usage: /team <name> <agent> <task>");
+        }
+        let manifest = TeamManifest {
+            model: None,
+            provider: None,
+            mode: None,
+            teammates: vec![code_team_spawn::TeammateSpec {
+                name: "agent-1".to_string(),
+                agent: agent.to_string(),
+                task: task.to_string(),
+                model: None,
+            }],
+        };
+        return Ok(TeamInvocation { team_name, manifest });
+    }
+
+    // Two-token form: `<name> <manifest-path>` — load from an explicit file.
+    if tokens.len() == 2 {
+        let path_arg = rest
+            .split_once(char::is_whitespace)
+            .map(|(_, r)| r.trim())
+            .unwrap_or("");
+        let manifest_path = if Path::new(path_arg).is_absolute() {
+            PathBuf::from(path_arg)
+        } else {
+            cwd.join(path_arg)
+        };
+        let raw = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("reading manifest {}", manifest_path.display()))?;
+        let manifest = code_team_spawn::parse_manifest(&raw)?;
+        return Ok(TeamInvocation { team_name, manifest });
+    }
+
+    // Bare `<name>` — resolve against `.libertai/teams/<name>.toml`.
+    let manifest = code_team_spawn::resolve_team(cwd, &team_name)?;
+    Ok(TeamInvocation { team_name, manifest })
+}
+
+/// Parse `/agent` args (`"<agent> [task...]"`) into a [`BackgroundAgentLaunch`]
+/// WITHOUT spawning. Pure: no spawn, no registry mutation, no printing. The
+/// caller resolves provider/model/mode/cwd from app state and passes them in.
+///
+/// Supported form: `/agent <agent> <task...>` (the `<agent>` is a sub-agent
+/// name; the remainder is the task prompt). The launch is marked as a plain
+/// background run (no team / teammate context).
+fn build_agent_invocation(
+    rest: &str,
+    cwd: &Path,
+    provider: &str,
+    model: &str,
+    mode: Mode,
+) -> anyhow::Result<BackgroundAgentLaunch> {
+    let rest = rest.trim();
+    let Some((name, task)) = rest.split_once(char::is_whitespace) else {
+        anyhow::bail!("usage: /agent <agent> <task>");
+    };
+    let name = name.trim();
+    let task = task.trim();
+    if name.is_empty() || task.is_empty() {
+        anyhow::bail!("usage: /agent <agent> <task>");
+    }
+    Ok(BackgroundAgentLaunch {
+        name: name.to_string(),
+        provider: provider.to_string(),
+        model: model.to_string(),
+        mode,
+        prompt: task.to_string(),
+        cwd: cwd.to_path_buf(),
+        agent: Some(name.to_string()),
+        team: None,
+        teammate_name: None,
+    })
+}
+
 /// Handle a slash command. Returns `Some(Action)` for commands that
 /// need the main loop to act (Quit, Submit), `None` for commands
 /// handled entirely here.
@@ -1758,7 +1935,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
         }
         "/help" => {
             app.transcript.push(TranscriptEntry::System(
-                "Commands: /help /exit /clear /mode /model [/model list] /status /statusline /statusline-command /output-style /history /usage /doctor /skills list /memory show /skills /memory  !<cmd>  !!  custom templates (e.g. /apply)".to_string(),
+                "Commands: /help /exit /clear /mode /model [/model list] /status /statusline /statusline-command /output-style /history /usage /doctor /skills list /memory show /skills /memory /team /agent /agents  !<cmd>  !!  custom templates (e.g. /apply)".to_string(),
             ));
             app.transcript.push(TranscriptEntry::Blank);
             None
@@ -2039,6 +2216,175 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     )));
                 }
             }
+            None
+        }
+        "/team" => {
+            // Tier 1 — needs App state (registry, mode, cwd). Parse the
+            // args into a TeamManifest via the pure `build_team_invocation`
+            // helper, then run the real spawn (init_team_tasks + spawn_team),
+            // which registers each teammate in `app.registry`. spawn_team
+            // already registers teammates, so no further registry work is
+            // needed for the agents panel / completion notification path.
+            let cwd = match std::env::current_dir() {
+                Ok(c) => c,
+                Err(e) => {
+                    app.transcript.push(TranscriptEntry::System(
+                        format!("team: could not resolve cwd: {e}"),
+                    ));
+                    app.transcript.push(TranscriptEntry::Blank);
+                    return None;
+                }
+            };
+            let (provider, model) = app_provider_model(app);
+            let mode = app.mode.get();
+            match build_team_invocation(rest, &cwd, &provider, &model, mode) {
+                Ok(inv) => {
+                    // Initialize the shared task list BEFORE spawning so
+                    // teammates can read it immediately on startup (legacy
+                    // order). Errors here are non-fatal — we surface them
+                    // but still attempt the spawn.
+                    if let Err(e) =
+                        code_team_spawn::init_team_tasks(&inv.team_name, &inv.manifest, &cwd)
+                    {
+                        app.transcript.push(TranscriptEntry::System(format!(
+                            "team: failed to init task list: {e:#}"
+                        )));
+                    }
+                    match code_team_spawn::spawn_team(
+                        &inv.team_name,
+                        &inv.manifest,
+                        &cwd,
+                        &provider,
+                        &model,
+                        mode,
+                        Some(&app.registry),
+                    ) {
+                        Ok(spawned) => {
+                            // Clear the one-shot completion notification so
+                            // a respawn can fire again.
+                            app.notified_teams.remove(&inv.team_name);
+                            let n = spawned.len();
+                            let names: Vec<&str> =
+                                spawned.iter().map(|t| t.name.as_str()).collect();
+                            app.transcript.push(TranscriptEntry::System(format!(
+                                "→ team “{}” spawned · {n} teammate(s): {}",
+                                inv.team_name,
+                                names.join(", "),
+                            )));
+                            app.transcript.push(TranscriptEntry::System(
+                                "press Tab to browse agents.".to_string(),
+                            ));
+                            app.transcript.push(TranscriptEntry::Blank);
+                        }
+                        Err(e) => {
+                            app.transcript.push(TranscriptEntry::System(format!(
+                                "team: failed to spawn `{}`: {e:#}",
+                                inv.team_name
+                            )));
+                            app.transcript.push(TranscriptEntry::Blank);
+                        }
+                    }
+                }
+                Err(e) => {
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "team: {e:#}"
+                    )));
+                    app.transcript.push(TranscriptEntry::Blank);
+                }
+            }
+            None
+        }
+        "/agent" => {
+            // Tier 1 — parse "<agent> [task...]" into a pure
+            // BackgroundAgentLaunch via `build_agent_invocation`, then start
+            // the detached child and register it in `app.registry` (mirrors
+            // spawn_team's AgentRegistration construction).
+            let cwd = match std::env::current_dir() {
+                Ok(c) => c,
+                Err(e) => {
+                    app.transcript.push(TranscriptEntry::System(
+                        format!("agent: could not resolve cwd: {e}"),
+                    ));
+                    app.transcript.push(TranscriptEntry::Blank);
+                    return None;
+                }
+            };
+            let (provider, model) = app_provider_model(app);
+            let mode = app.mode.get();
+            match build_agent_invocation(rest, &cwd, &provider, &model, mode) {
+                Ok(launch) => {
+                    let name = launch.name.clone();
+                    let prompt_preview: String =
+                        launch.prompt.chars().take(80).collect();
+                    match start_background_agent(&launch) {
+                        Ok(started) => {
+                            let reg = AgentRegistration {
+                                name: name.clone(),
+                                kind: AgentKind::Background {
+                                    pid: started.pid,
+                                    run_id: String::new(),
+                                },
+                                color: AgentColor::color_for_name(&name),
+                                capability: AgentCapability::ReadOnly,
+                                cwd: cwd.clone(),
+                                model: launch.model.clone(),
+                                prompt_preview,
+                                parent: None,
+                                pid: Some(started.pid),
+                                log_path: Some(started.log_path.clone()),
+                            };
+                            let handle = app.registry.register(reg);
+                            handle.set_status(AgentStatus::Working);
+                            app.transcript.push(TranscriptEntry::System(format!(
+                                "→ agent “{name}” spawned · pid {}",
+                                started.pid
+                            )));
+                            app.transcript.push(TranscriptEntry::System(
+                                "press Tab to browse agents.".to_string(),
+                            ));
+                            app.transcript.push(TranscriptEntry::Blank);
+                        }
+                        Err(e) => {
+                            app.transcript.push(TranscriptEntry::System(format!(
+                                "agent: failed to spawn `{name}`: {e:#}"
+                            )));
+                            app.transcript.push(TranscriptEntry::Blank);
+                        }
+                    }
+                }
+                Err(e) => {
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "agent: {e:#}"
+                    )));
+                    app.transcript.push(TranscriptEntry::Blank);
+                }
+            }
+            None
+        }
+        "/agents" => {
+            // Tier 1 — render the current registry snapshot directly (do NOT
+            // call a separate active_agents_for_footer). One System line per
+            // agent: name · status · pid (if any) · team (if any).
+            let snapshot = app.registry.snapshot();
+            if snapshot.is_empty() {
+                app.transcript.push(TranscriptEntry::System("no agents.".to_string()));
+            } else {
+                app.transcript.push(TranscriptEntry::System(format!(
+                    "agents ({}):",
+                    snapshot.len()
+                )));
+                for h in &snapshot {
+                    let mut line = format!("  {} · {}", h.name, status_label(h.status()));
+                    if let Some(pid) = h.pid {
+                        line.push_str(&format!(" · pid {pid}"));
+                    }
+                    if let AgentKind::Teammate { team } = &h.kind {
+                        line.push_str(&format!(" · team {team}"));
+                    }
+                    app.transcript.push(TranscriptEntry::System(line));
+                }
+            }
+            app.transcript.push(TranscriptEntry::Blank);
             None
         }
         _ => {
@@ -3305,6 +3651,315 @@ mod tests {
         assert!(status_line.contains("cost: $0.42"), "cost: {status_line:?}");
         // ctx % derived from the (known) hermetic window.
         assert!(status_line.contains("ctx: 3%"), "ctx: {status_line:?}");
+    }
+
+    // --- M3b: agent / team spawn — pure parsing helpers ----------------------
+    //
+    // The seam is `build_team_invocation` / `build_agent_invocation`: they
+    // produce the fully-resolved invocation WITHOUT spawning, so we can test
+    // the parsing hermetically. The real spawn (spawn_team /
+    // start_background_agent) is exercised only via the slash arms, which we
+    // don't drive here (they spawn OS processes).
+
+    #[test]
+    fn app_provider_model_splits_label_on_slash() {
+        let mut app = test_app();
+        app.bar.model_label = "anthropic/claude-3.5".to_string();
+        let (p, m) = app_provider_model(&app);
+        assert_eq!(p, "anthropic");
+        assert_eq!(m, "claude-3.5");
+    }
+
+    #[test]
+    fn app_provider_model_falls_back_to_config_defaults() {
+        let mut app = test_app();
+        // A label with no slash falls back to config defaults.
+        app.bar.model_label = "gpt-4o".to_string();
+        app.cfg = Arc::new(LibertaiConfig {
+            default_code_provider: "openai".to_string(),
+            default_code_model: "gpt-4o".to_string(),
+            ..LibertaiConfig::default()
+        });
+        let (p, m) = app_provider_model(&app);
+        assert_eq!(p, "openai");
+        assert_eq!(m, "gpt-4o");
+    }
+
+    #[test]
+    fn build_team_invocation_empty_is_usage_error() {
+        let cwd = PathBuf::from(".");
+        let err = build_team_invocation("", &cwd, "openai", "gpt-4o", Mode::Normal)
+            .expect_err("empty rest should error");
+        assert!(format!("{err:#}").contains("usage:"), "err: {err:#}");
+    }
+
+    #[test]
+    fn build_team_invocation_quick_form_builds_single_teammate_manifest() {
+        let cwd = PathBuf::from(".");
+        let inv = build_team_invocation("refactor coder refactor the parser", &cwd, "openai", "gpt-4o", Mode::Normal)
+            .expect("quick form parses");
+        assert_eq!(inv.team_name, "refactor");
+        assert_eq!(inv.manifest.teammates.len(), 1);
+        let t = &inv.manifest.teammates[0];
+        assert_eq!(t.name, "agent-1");
+        assert_eq!(t.agent, "coder");
+        assert_eq!(t.task, "refactor the parser");
+        assert!(t.model.is_none());
+    }
+
+    #[test]
+    fn build_team_invocation_quick_form_requires_task() {
+        let cwd = PathBuf::from(".");
+        // Only two tokens — interpreted as `<name> <manifest-path>`, not the
+        // quick form. A nonexistent path → read error (not a usage error).
+        let err = build_team_invocation("refactor coder", &cwd, "openai", "gpt-4o", Mode::Normal)
+            .expect_err("two-token form with a missing path errors");
+        assert!(format!("{err:#}").contains("reading manifest"), "err: {err:#}");
+    }
+
+    #[test]
+    fn build_team_invocation_manifest_path_form_loads_file() {
+        // Write a minimal manifest to a temp file and load it by explicit path.
+        let dir = std::env::temp_dir();
+        let manifest_path = dir.join(format!(
+            "libertai-m3b-team-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &manifest_path,
+            r#"
+model = "glm-5.2"
+[[teammate]]
+name = "alice"
+agent = "coder"
+task = "Do the thing"
+"#,
+        )
+        .expect("write temp manifest");
+        let rel = manifest_path.to_string_lossy().to_string();
+        let arg = format!("myteam {rel}");
+        let inv = build_team_invocation(&arg, &dir, "openai", "gpt-4o", Mode::Normal)
+            .expect("manifest-path form parses");
+        assert_eq!(inv.team_name, "myteam");
+        assert_eq!(inv.manifest.teammates.len(), 1);
+        assert_eq!(inv.manifest.teammates[0].name, "alice");
+        assert_eq!(inv.manifest.model.as_deref(), Some("glm-5.2"));
+        let _ = std::fs::remove_file(&manifest_path);
+    }
+
+    #[test]
+    fn build_agent_invocation_parses_name_and_task() {
+        let cwd = PathBuf::from(".");
+        let launch = build_agent_invocation("coder fix the parser", &cwd, "openai", "gpt-4o", Mode::AcceptEdits)
+            .expect("agent parses");
+        assert_eq!(launch.name, "coder");
+        assert_eq!(launch.prompt, "fix the parser");
+        assert_eq!(launch.provider, "openai");
+        assert_eq!(launch.model, "gpt-4o");
+        assert_eq!(launch.mode, Mode::AcceptEdits);
+        assert_eq!(launch.cwd, cwd);
+        // A plain /agent run carries the agent name + no team context.
+        assert_eq!(launch.agent.as_deref(), Some("coder"));
+        assert!(launch.team.is_none());
+        assert!(launch.teammate_name.is_none());
+    }
+
+    #[test]
+    fn build_agent_invocation_missing_task_is_usage_error() {
+        let cwd = PathBuf::from(".");
+        let err = build_agent_invocation("coder", &cwd, "openai", "gpt-4o", Mode::Normal)
+            .expect_err("no task should error");
+        assert!(format!("{err:#}").contains("usage:"), "err: {err:#}");
+    }
+
+    #[test]
+    fn build_agent_invocation_empty_is_usage_error() {
+        let cwd = PathBuf::from(".");
+        let err = build_agent_invocation("   ", &cwd, "openai", "gpt-4o", Mode::Normal)
+            .expect_err("empty rest should error");
+        assert!(format!("{err:#}").contains("usage:"), "err: {err:#}");
+    }
+
+    // /agents renders the registry snapshot directly. Empty → "no agents.";
+    // populated → a header + one line per agent. No Cmd is sent.
+    #[test]
+    fn slash_agents_empty_registry_reports_no_agents() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let action = handle_slash_command(&mut app, "/agents", &cmd_tx);
+        assert!(action.is_none());
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s == "no agents."
+        )));
+        // /agents sends no command to the bg thread.
+        assert!(cmd_rx.try_recv().is_err(), "/agents sends no Cmd");
+    }
+
+    #[test]
+    fn slash_agents_lists_registered_agents() {
+        let mut app = test_app();
+        // Register one teammate + one background agent directly in the registry.
+        let _ = app.registry.register(AgentRegistration {
+            name: "alice".to_string(),
+            kind: AgentKind::Teammate { team: "refactor".to_string() },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: "gpt-4o".to_string(),
+            prompt_preview: "do work".to_string(),
+            parent: None,
+            pid: Some(4242),
+            log_path: None,
+        });
+        let bg = app.registry.register(AgentRegistration {
+            name: "coder".to_string(),
+            kind: AgentKind::Background { pid: 99, run_id: String::new() },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: "gpt-4o".to_string(),
+            prompt_preview: "fix parser".to_string(),
+            parent: None,
+            pid: Some(99),
+            log_path: None,
+        });
+        bg.set_status(AgentStatus::Completed);
+
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let action = handle_slash_command(&mut app, "/agents", &cmd_tx);
+        assert!(action.is_none());
+
+        // Header reports 2 agents.
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s == "agents (2):"
+        )));
+        // The teammate line names the team; the background line carries a pid.
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s.contains("alice") && s.contains("team refactor") && s.contains("pid 4242")
+        )));
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s.contains("coder") && s.contains("pid 99") && s.contains("completed")
+        )));
+    }
+
+    // /team with empty args pushes a usage error (no spawn attempted).
+    #[test]
+    fn slash_team_empty_args_pushes_usage_error() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let action = handle_slash_command(&mut app, "/team", &cmd_tx);
+        assert!(action.is_none());
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s.contains("usage:") && s.contains("team")
+        )));
+        // No spawn → no command sent.
+        assert!(cmd_rx.try_recv().is_err(), "/team empty sends no Cmd");
+    }
+
+    // /agent with empty args pushes a usage error (no spawn attempted).
+    #[test]
+    fn slash_agent_empty_args_pushes_usage_error() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let action = handle_slash_command(&mut app, "/agent", &cmd_tx);
+        assert!(action.is_none());
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s.contains("usage:") && s.contains("agent")
+        )));
+        assert!(cmd_rx.try_recv().is_err(), "/agent empty sends no Cmd");
+    }
+
+    // /help lists the new agent/team commands.
+    #[test]
+    fn slash_help_lists_team_agent_agents() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let _ = handle_slash_command(&mut app, "/help", &cmd_tx);
+        let help_line = app
+            .transcript
+            .iter()
+            .find_map(|e| match e {
+                TranscriptEntry::System(s) if s.starts_with("Commands:") => Some(s.clone()),
+                _ => None,
+            })
+            .expect("a Commands: line was pushed");
+        assert!(help_line.contains("/team"), "help: {help_line}");
+        assert!(help_line.contains("/agent"), "help: {help_line}");
+        assert!(help_line.contains("/agents"), "help: {help_line}");
+    }
+
+    // /agents populated via the shared `register_with_status` test helper
+    // (the task's recommended seam). A single registered teammate renders
+    // as the header + one line naming the agent, its status, and its team.
+    #[test]
+    fn slash_agents_lists_single_teammate_via_register_with_status() {
+        let mut app = test_app();
+        register_with_status(&app.registry, "refactor", AgentStatus::Working);
+
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let action = handle_slash_command(&mut app, "/agents", &cmd_tx);
+        assert!(action.is_none());
+
+        // Header reports exactly one agent.
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s == "agents (1):"
+        )));
+        // The teammate line names the registered agent (reg_teammate builds
+        // "{team}-agent"), carries the status label, and tags its team.
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s)
+                if s.contains("refactor-agent") && s.contains("working") && s.contains("team refactor")
+        )));
+    }
+
+    // /team with malformed args (a two-token form pointing at a missing
+    // manifest path) pushes a System error message and does NOT spawn:
+    // the registry stays empty and no Cmd is sent.
+    #[test]
+    fn slash_team_malformed_args_do_not_spawn() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        // Two tokens where the second is a nonexistent path → the parser
+        // reaches read_to_string and bails before any spawn.
+        let action = handle_slash_command(&mut app, "/team myteam /no/such/manifest.toml", &cmd_tx);
+        assert!(action.is_none());
+        // A System error was pushed (prefixed with "team:").
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s.starts_with("team:") && s.contains("reading manifest")
+        )));
+        // No spawn: the registry is still empty and no Cmd was sent.
+        assert!(app.registry.snapshot().is_empty(), "registry must stay empty on a failed /team");
+        assert!(cmd_rx.try_recv().is_err(), "malformed /team sends no Cmd");
+    }
+
+    // /agent with malformed args (an agent name but no task) pushes a System
+    // error message and does NOT spawn: the registry stays empty and no Cmd
+    // is sent.
+    #[test]
+    fn slash_agent_malformed_args_do_not_spawn() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        // A single token parses as the agent name with an empty task → the
+        // parser bails at the usage check before any spawn.
+        let action = handle_slash_command(&mut app, "/agent coder", &cmd_tx);
+        assert!(action.is_none());
+        // A System error was pushed (prefixed with "agent:").
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s.starts_with("agent:") && s.contains("usage:")
+        )));
+        // No spawn: the registry is still empty and no Cmd was sent.
+        assert!(app.registry.snapshot().is_empty(), "registry must stay empty on a failed /agent");
+        assert!(cmd_rx.try_recv().is_err(), "malformed /agent sends no Cmd");
     }
 }
 
