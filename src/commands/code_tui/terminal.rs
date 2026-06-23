@@ -48,11 +48,44 @@ impl TerminalGuard {
     }
 }
 
+/// Pure decision helper: emit `DisableMouseCapture` on drop iff mouse capture
+/// was enabled at setup time (`restore_mouse`). Extracted from the inline
+/// `Drop` branch conditions so the mouse-disable decision is testable in
+/// isolation (no real terminal / crossterm I/O). The `Drop` impl calls this
+/// for both its terminal-backend and stdout branches, so behaviour is
+/// unchanged.
+pub(crate) fn should_disable_mouse(restore_mouse: bool) -> bool {
+    restore_mouse
+}
+
+// Test-only drop-probe: a thread-local flag the guard's `Drop` sets on entry.
+// Defined at module scope (not inside `mod tests`) so the `Drop` impl can call
+// it; compiled ONLY behind `#[cfg(test)]` so production behaviour is unchanged.
+// It lets tests observe that teardown fired (including on a panic path) without
+// driving a real terminal through crossterm.
+#[cfg(test)]
+thread_local! {
+    static DROP_PROBE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn drop_probe_mark_ran() {
+    DROP_PROBE.with(|p| p.set(true));
+}
+
+#[cfg(test)]
+fn drop_probe_take() -> bool {
+    DROP_PROBE.with(|p| p.replace(false))
+}
+
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        #[cfg(test)]
+        drop_probe_mark_ran();
+        let disable_mouse = should_disable_mouse(self.restore_mouse);
         if let Some(mut terminal) = self.terminal.take() {
             let _ = terminal.show_cursor();
-            if self.restore_mouse {
+            if disable_mouse {
                 let _ = crossterm::execute!(
                     terminal.backend_mut(),
                     LeaveAlternateScreen,
@@ -62,7 +95,7 @@ impl Drop for TerminalGuard {
                 let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
             }
         } else if self.alt_screen {
-            if self.restore_mouse {
+            if disable_mouse {
                 let _ = crossterm::execute!(
                     std::io::stdout(),
                     LeaveAlternateScreen,
@@ -75,5 +108,52 @@ impl Drop for TerminalGuard {
         if self.raw_mode {
             let _ = disable_raw_mode();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mouse-disable decision is purely a function of `restore_mouse`.
+    #[test]
+    fn should_disable_mouse_tracks_flag() {
+        assert!(!should_disable_mouse(false), "no mouse capture -> no disable");
+        assert!(should_disable_mouse(true), "mouse capture -> disable on drop");
+    }
+
+    /// A guard with `restore_mouse=false` drops cleanly and never asks for a
+    /// disable sequence (the pure decision gates it; no real I/O needed).
+    #[test]
+    fn guard_drops_without_mouse_disable_when_flag_false() {
+        drop_probe_take(); // reset
+        let guard = TerminalGuard::new(false);
+        assert!(
+            !should_disable_mouse(guard.restore_mouse),
+            "restore_mouse=false must not produce DisableMouseCapture"
+        );
+        drop(guard);
+        // Drop ran (probe set) and asked for no mouse disable above.
+        assert!(drop_probe_take(), "guard Drop must run on normal drop");
+    }
+
+    /// Pins the documented contract: the guard's `Drop` teardown fires on a
+    /// panic path, not just a normal return. We use `catch_unwind` so the
+    /// panic is contained and we can still observe the probe afterwards.
+    #[test]
+    fn drop_runs_on_panic() {
+        drop_probe_take(); // reset
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Create the guard in a scope that is exited by a panic rather
+            // than a normal return: the guard is dropped during unwinding.
+            let _guard = TerminalGuard::new(true);
+            panic!("simulated TUI panic during run_loop");
+        }));
+        assert!(result.is_err(), "the inner closure must panic");
+        assert!(
+            drop_probe_take(),
+            "TerminalGuard::drop must run during unwind \
+             (teardown fires on panic, not just normal return)"
+        );
     }
 }

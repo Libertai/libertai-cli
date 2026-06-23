@@ -14,11 +14,81 @@
 //! `Paragraph` widget above wraps NOTHING. Code-block lines are left
 //! hard (no soft-wrap) — they may overflow or hard-break at `width`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::commands::code_tui::{theme, wrap};
+
+/// Maximum nesting depth for recursive inline parsing. Emphasis captures
+/// (`**bold**`, `*italic*`/`_italic_`, `~~strike~~`) recurse into
+/// [`parse_inline_depth`]; a pathological input (e.g. deeply nested
+/// `**...**`) could otherwise recurse without bound. At this limit we
+/// stop recursing and emit the remaining captured text as a single plain
+/// span (no further inline parsing, no style layering). 32 is far above
+/// any realistic nesting the LLM emits, so normal markup is unaffected.
+const MAX_INLINE_DEPTH: usize = 32;
+
+/// Process-global OSC-8 hyperlink capability flag.
+///
+/// OSC-8 (`\x1b]8;;url\x1b\\label\x1b]8;;\x1b\\`) is emitted unconditionally
+/// by default (matching the pre-detection behavior), but some terminals
+/// mangle the escape and render it as garbage. The flag is set ONCE at TUI
+/// startup via [`probe_osc8_capability`] (an env-var heuristic — there is no
+/// hermetic, deterministic in-process terminal-capability query available
+/// from within a render fn, which must stay pure / I/O-free for
+/// testability), and may be flipped at runtime via
+/// [`set_osc8_enabled`] (e.g. tests, or a future `/osc8` slash command).
+///
+/// Modeled on the `VIM_INPUT_ENABLED` flag in `code_ui.rs`: a plain
+/// `AtomicBool` plus `pub(crate)` get/set fns, so the render path stays pure
+/// (it only reads the flag) while the startup probe / tests can write it.
+static OSC8_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Read the process-global OSC-8 capability flag. Used by the inline link
+/// renderer to decide whether to emit the OSC-8 escape or fall back to the
+/// underlined label only.
+pub(crate) fn osc8_enabled() -> bool {
+    OSC8_ENABLED.load(Ordering::SeqCst)
+}
+
+/// Store the process-global OSC-8 capability flag. Used by the startup probe
+/// ([`probe_osc8_capability`]) and tests. `Relaxed` is sufficient: the render
+/// path reads on its own cadence and does not require acquire/release
+/// synchronization (mirroring `set_vim_input_enabled`).
+pub(crate) fn set_osc8_enabled(enabled: bool) {
+    OSC8_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// Probe terminal OSC-8 capability once at startup and set the flag
+/// accordingly. There is no hermetic, deterministic in-process query for
+/// OSC-8 support (querying the terminal would require a synchronous
+/// read-response round-trip, which is I/O and is unavailable inside the pure
+/// render path), so this uses a simple env-var heuristic:
+///
+/// - `LIBERTAI_OSC8=0` / `=false` / `=off` -> DISABLE OSC-8 (label-only).
+/// - `LIBERTAI_OSC8=1` / `=true` / `=on`  -> ENABLE OSC-8 (the default).
+/// - Unset -> leave the flag at its compile-time default (ENABLED), matching
+///   the pre-detection behavior.
+///
+/// Call this once near TUI startup (after `TerminalGuard::new`). It performs
+/// no terminal I/O — only an env-var read — so it is hermetic and
+/// deterministic. Tests flip the flag directly via [`set_osc8_enabled`]
+/// rather than mutating the process environment.
+pub(crate) fn probe_osc8_capability() {
+    // Unset (Err) -> keep the default (enabled); only a recognized value
+    // flips the flag. `if let` avoids a single-pattern `match` arm.
+    if let Ok(v) = std::env::var("LIBERTAI_OSC8") {
+        let lower = v.trim().to_ascii_lowercase();
+        match lower.as_str() {
+            "0" | "false" | "off" | "no" => set_osc8_enabled(false),
+            "1" | "true" | "on" | "yes" => set_osc8_enabled(true),
+            _ => {} // unknown value -> keep default (enabled)
+        }
+    }
+}
 
 /// Parse a markdown string into a list of ratatui lines, pre-wrapped
 /// to `width` usable columns. `width` is clamped to >= 1.
@@ -540,15 +610,29 @@ fn layer(spans: Vec<Span<'static>>, outer: Style) -> Vec<Span<'static>> {
 }
 
 /// Render inline markdown (`**bold**`, `*italic*`, `` `code` ``, `~~strike~~`,
-/// `[text](url)`) into styled spans. All spans are `'static` (owned).
+/// `[text](url)`) into styled spans. All spans are `'static` (owned). Thin
+/// wrapper over [`parse_inline_depth`] starting at depth 0; see that fn for
+/// the recursion + depth-guard contract.
+fn parse_inline(text: &str) -> Vec<Span<'static>> {
+    parse_inline_depth(text, 0)
+}
+
+/// Recursive inline parser with a depth guard.
 ///
 /// Emphasis is recursive: the captured inner text of `**bold**` / `*italic*` /
-/// `~~strike~~` is itself `parse_inline`d, and the outer emphasis style is
-/// layered onto the inner spans via [`layer`] (using `Span::patch_style`,
-/// which unions modifiers while preserving inner fg/bg). So
-/// `**bold *italic* bold**` italicizes the inner word AND keeps it bold, and
-/// `**see [x](u)**` renders a clickable link that is also bold.
-fn parse_inline(text: &str) -> Vec<Span<'static>> {
+/// `~~strike~~` is itself parsed (via [`parse_inline_depth`]), and the outer
+/// emphasis style is layered onto the inner spans via [`layer`] (using
+/// `Span::patch_style`, which unions modifiers while preserving inner
+/// fg/bg). So `**bold *italic* bold**` italicizes the inner word AND keeps
+/// it bold, and `**see [x](u)**` renders a clickable link that is also bold.
+///
+/// `depth` tracks the current recursion depth. To prevent stack overflow on
+/// pathological/malicious deeply-nested input (e.g. `***...***` x N), once
+/// `depth` reaches [`MAX_INLINE_DEPTH`] the emphasis captures stop recursing
+/// and instead emit their captured inner text as a single plain
+/// `Span::raw` (no further inline parsing, no style layering). Normal
+/// nesting is far below the limit, so well-formed markup is unaffected.
+fn parse_inline_depth(text: &str, depth: usize) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut buf = String::new();
     let mut chars = text.chars().peekable();
@@ -610,7 +694,16 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                     chars.next();
                 }
                 if found_close {
-                    spans.extend(layer(parse_inline(&bold), theme::bold()));
+                    if depth + 1 > MAX_INLINE_DEPTH {
+                        // Depth guard: stop recursing, emit the captured
+                        // inner text as a single plain span.
+                        spans.push(Span::raw(bold));
+                    } else {
+                        spans.extend(layer(
+                            parse_inline_depth(&bold, depth + 1),
+                            theme::bold(),
+                        ));
+                    }
                 } else {
                     spans.push(Span::raw(format!("**{bold}")));
                 }
@@ -630,10 +723,16 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                     chars.next();
                 }
                 if found_close {
-                    spans.extend(layer(
-                        parse_inline(&italic),
-                        Style::default().add_modifier(Modifier::ITALIC),
-                    ));
+                    if depth + 1 > MAX_INLINE_DEPTH {
+                        // Depth guard: stop recursing, emit the captured
+                        // inner text as a single plain span.
+                        spans.push(Span::raw(italic));
+                    } else {
+                        spans.extend(layer(
+                            parse_inline_depth(&italic, depth + 1),
+                            Style::default().add_modifier(Modifier::ITALIC),
+                        ));
+                    }
                 } else {
                     spans.push(Span::raw(format!("{marker}{italic}")));
                 }
@@ -655,10 +754,16 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                     chars.next();
                 }
                 if found_close {
-                    spans.extend(layer(
-                        parse_inline(&strike),
-                        Style::default().add_modifier(Modifier::CROSSED_OUT),
-                    ));
+                    if depth + 1 > MAX_INLINE_DEPTH {
+                        // Depth guard: stop recursing, emit the captured
+                        // inner text as a single plain span.
+                        spans.push(Span::raw(strike));
+                    } else {
+                        spans.extend(layer(
+                            parse_inline_depth(&strike, depth + 1),
+                            Style::default().add_modifier(Modifier::CROSSED_OUT),
+                        ));
+                    }
                 } else {
                     spans.push(Span::raw(format!("~~{strike}")));
                 }
@@ -689,10 +794,14 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                     }
                     // OSC 8 hyperlink: terminals that support it make the
                     // label clickable; others render just the label. Fall
-                    // back to the underlined label only if the URL is
-                    // very long (>200) or contains control chars.
+                    // back to the underlined label only if the URL is very
+                    // long (>200), contains control chars, OR the terminal
+                    // does not advertise OSC-8 support
+                    // ([`osc8_enabled`] — a capability flag probed once at
+                    // startup; some terminals mangle the OSC-8 escape into
+                    // visible garbage).
                     let style = theme::accent().add_modifier(Modifier::UNDERLINED);
-                    if url.len() > 200 || url.chars().any(|c| c.is_control()) {
+                    if !osc8_enabled() || url.len() > 200 || url.chars().any(|c| c.is_control()) {
                         spans.push(Span::styled(label, style));
                     } else {
                         let content = format!("\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\");
@@ -808,7 +917,17 @@ fn wrap_spans(
 mod tests {
     use super::*;
     use ratatui::style::Color;
+    use std::sync::Mutex;
 
+    // The OSC-8 capability flag (`OSC8_ENABLED`) and the `LIBERTAI_OSC8` env
+    // var it reads are PROCESS-GLOBAL. Rust's default test runner executes
+    // tests in parallel threads within ONE process, so the OSC-8 flag/env
+    // tests below — which flip the global and then assert on flag-dependent
+    // `render` output or on the flag value itself — would race and stomp each
+    // other's state without serialization. This guard mutex serializes ONLY
+    // the OSC-8 flag/env tests (each acquires it for its full duration); all
+    // other markdown tests run concurrently as before. No new deps.
+    static OSC8_TEST_GUARD: Mutex<()> = Mutex::new(());
     #[test]
     fn renders_plain_text() {
         let lines = render("hello world", 80);
@@ -1158,6 +1277,9 @@ mod tests {
 
     #[test]
     fn recursive_inline_link_in_bold() {
+        // Asserts the OSC-8 escape IS emitted (finds a span with `\x1b`),
+        // so the flag must be true. Serialize against the flag/env tests.
+        let _guard = OSC8_TEST_GUARD.lock().unwrap();
         // `**see [x](u)**` -> the link span is bold AND underlined+accent.
         let lines = render("**see [x](u)**", 80);
         assert_eq!(lines.len(), 1);
@@ -1174,6 +1296,10 @@ mod tests {
 
     #[test]
     fn osc8_hyperlink_emitted() {
+        // Asserts the OSC-8 escape IS emitted, which requires the capability
+        // flag at its default (true). Serialize against the flag/env tests that
+        // flip the process-global flag so they can't turn it off mid-render.
+        let _guard = OSC8_TEST_GUARD.lock().unwrap();
         // `[x](u)` -> span content contains the OSC-8 escape sequence.
         let lines = render("[label](https://example.com)", 80);
         assert_eq!(lines.len(), 1);
@@ -1521,6 +1647,9 @@ mod tests {
 
     #[test]
     fn recursive_link_in_bold_is_bold_and_underlined() {
+        // Asserts the OSC-8 escape IS emitted (finds a span with `\x1b]8;;`),
+        // so the flag must be true. Serialize against the flag/env tests.
+        let _guard = OSC8_TEST_GUARD.lock().unwrap();
         // `**a [b](u) c**` -> the link label "b" is bold AND underlined.
         let lines = render("**a [b](u) c**", 80);
         assert_eq!(lines.len(), 1);
@@ -1584,6 +1713,9 @@ mod tests {
 
     #[test]
     fn osc8_span_contains_opener_label_and_closer() {
+        // Asserts the OSC-8 escape IS emitted (flag must be true). Serialize
+        // against the flag/env tests. See `osc8_hyperlink_emitted`.
+        let _guard = OSC8_TEST_GUARD.lock().unwrap();
         // `[x](http://e.com)` -> one span's content contains the OSC-8
         // opener `\x1b]8;;http://e.com\x1b\\`, the label "x", AND the
         // closer `\x1b]8;;\x1b\\`.
@@ -1646,5 +1778,279 @@ mod tests {
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains("\x1b]8;;"), "control-char URL omits OSC-8: {text:?}");
         assert!(text.contains("lbl"), "label shown: {text:?}");
+    }
+
+    // ---- #17: OSC-8 capability detection (flag-gated emission) ----
+
+    #[test]
+    fn osc8_disabled_omits_escape_label_only() {
+        // Serialize against the other OSC-8 flag/env tests: the capability
+        // flag and `LIBERTAI_OSC8` env var are process-global, so a concurrent
+        // flag/env test would flip the global between our `set` and `render`,
+        // breaking the assertion. Hold the guard for the whole test.
+        let _guard = OSC8_TEST_GUARD.lock().unwrap();
+        // With the capability flag OFF, `[label](url)` must fall back to the
+        // underlined label only — NO OSC-8 escape anywhere. This is the
+        // contract terminals that mangle OSC-8 rely on. The flag is a
+        // process-global AtomicBool (like VIM_INPUT_ENABLED), so flip it and
+        // restore the prior value on the way out so this test does not
+        // perturb the global state for other tests.
+        let prior = osc8_enabled();
+        set_osc8_enabled(false);
+        let lines = render("[label](https://example.com)", 80);
+        set_osc8_enabled(prior);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !text.contains("\x1b]8;;"),
+            "OSC-8 disabled -> no escape emitted: {text:?}"
+        );
+        assert!(text.contains("label"), "label still shown: {text:?}");
+        // The label span is still styled (underlined + accent) — only the
+        // escape is suppressed, not the link styling.
+        let link = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("label"))
+            .expect("label span");
+        assert!(
+            link.style.add_modifier.contains(Modifier::UNDERLINED),
+            "disabled OSC-8 keeps underlined label styling"
+        );
+    }
+
+    #[test]
+    fn osc8_enabled_emits_escape() {
+        // Serialize against the other OSC-8 flag/env tests (process-global
+        // flag/env). See `osc8_disabled_omits_escape_label_only`.
+        let _guard = OSC8_TEST_GUARD.lock().unwrap();
+        // With the flag ON (the default), OSC-8 is emitted as before. Guards
+        // against a regression that flips the polarity. Restore prior state.
+        let prior = osc8_enabled();
+        set_osc8_enabled(true);
+        let lines = render("[label](https://example.com)", 80);
+        set_osc8_enabled(prior);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("\x1b]8;;https://example.com\x1b\\"),
+            "OSC-8 enabled -> opener present: {text:?}"
+        );
+        assert!(text.contains("\x1b]8;;\x1b\\"), "closer present: {text:?}");
+    }
+
+    #[test]
+    fn osc8_disabled_inside_bold_is_label_only() {
+        // Serialize against the other OSC-8 flag/env tests (process-global
+        // flag/env). See `osc8_disabled_omits_escape_label_only`.
+        let _guard = OSC8_TEST_GUARD.lock().unwrap();
+        // The flag gate is read at the link render site, so a link nested in
+        // bold (`**[x](u)**`) also suppresses the escape when disabled — the
+        // outer bold layer is still applied to the (label-only) span.
+        let prior = osc8_enabled();
+        set_osc8_enabled(false);
+        let lines = render("**[x](https://e.com)**", 80);
+        set_osc8_enabled(prior);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains("\x1b]8;;"), "no OSC-8 under bold: {text:?}");
+        assert!(text.contains('x'), "label survives: {text:?}");
+        // The label span keeps the layered BOLD modifier from the outer
+        // emphasis — only the escape is suppressed.
+        let label = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains('x'))
+            .expect("label span");
+        assert!(
+            label.style.add_modifier.contains(Modifier::BOLD),
+            "bold layer still applied to label-only link"
+        );
+    }
+
+    #[test]
+    fn osc8_probe_env_var_disables() {
+        // Serialize against the other OSC-8 flag/env tests: the env var and
+        // the flag it writes are process-global, so a concurrent flag/env test
+        // would race the `probe`/assertion. Hold the guard for the whole test.
+        let _guard = OSC8_TEST_GUARD.lock().unwrap();
+        // `probe_osc8_capability` honors `LIBERTAI_OSC8=0` by turning the flag
+        // OFF. Uses a child env snapshot so the real process env is restored
+        // after the test (env vars are process-global).
+        let prior_flag = osc8_enabled();
+        let prior_env = std::env::var("LIBERTAI_OSC8").ok();
+        std::env::set_var("LIBERTAI_OSC8", "0");
+        probe_osc8_capability();
+        assert!(!osc8_enabled(), "LIBERTAI_OSC8=0 disables the flag");
+        // Restore env + flag for other tests.
+        match prior_env {
+            Some(v) => std::env::set_var("LIBERTAI_OSC8", v),
+            None => std::env::remove_var("LIBERTAI_OSC8"),
+        }
+        set_osc8_enabled(prior_flag);
+    }
+
+    #[test]
+    fn osc8_probe_env_var_unknown_keeps_default() {
+        // Serialize against the other OSC-8 flag/env tests (process-global
+        // env/flag). See `osc8_probe_env_var_disables`.
+        let _guard = OSC8_TEST_GUARD.lock().unwrap();
+        // An unrecognized `LIBERTAI_OSC8` value must NOT change the flag — it
+        // stays at its current setting (the default-on behavior).
+        let prior_flag = osc8_enabled();
+        set_osc8_enabled(true); // establish a known baseline
+        let prior_env = std::env::var("LIBERTAI_OSC8").ok();
+        std::env::set_var("LIBERTAI_OSC8", "maybe");
+        probe_osc8_capability();
+        assert!(osc8_enabled(), "unknown env value keeps the flag as-is");
+        match prior_env {
+            Some(v) => std::env::set_var("LIBERTAI_OSC8", v),
+            None => std::env::remove_var("LIBERTAI_OSC8"),
+        }
+        set_osc8_enabled(prior_flag);
+    }
+
+    // ---- #18: recursive inline parse depth guard ----
+
+    #[test]
+    fn pathological_inline_run_terminates() {
+        // The pathological input from the bug report: a long run of `**`
+        // markers around some text. Whether or not the greedy parser
+        // interprets it as deep nesting, the contract is that `render`
+        // TERMINATES (no infinite loop, no stack overflow, no panic) and the
+        // inner text survives. The depth guard ensures bounded recursion.
+        const N: usize = 64; // well above MAX_INLINE_DEPTH (32)
+        let mut src = String::new();
+        for _ in 0..N {
+            src.push_str("**");
+        }
+        src.push_str("inner");
+        for _ in 0..N {
+            src.push_str("**");
+        }
+        let lines = render(&src, 200);
+        assert!(!lines.is_empty(), "pathological run terminates");
+        let all: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(all.contains("inner"), "inner text survives: {all:?}");
+    }
+
+    #[test]
+    fn deeply_nested_mixed_markers_terminates() {
+        // A unit that nests all three emphasis markers (bold > italic >
+        // strike), repeated many times, exercises every recursion site
+        // (bold, italic, strike) at scale. It must terminate and not
+        // overflow; the inner-most text survives.
+        let unit = "**a *b ~~c~~ b* a**";
+        let deep = unit.repeat(40);
+        let lines = render(&deep, 200);
+        assert!(!lines.is_empty(), "deeply nested mixed markers terminate");
+        let all: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(all.contains('c'), "inner-most content survives: {all:?}");
+    }
+
+    #[test]
+    fn normal_nesting_is_unaffected_by_depth_guard() {
+        // Normal, shallow nesting (`**bold *italic* bold**`, depth 2) is
+        // far below MAX_INLINE_DEPTH (32) and must still layer modifiers as
+        // before — the depth guard must NOT fire here. Guards against an
+        // off-by-one that would short-circuit legitimate nesting.
+        let lines = render("**bold *italic* bold**", 80);
+        assert_eq!(lines.len(), 1);
+        let italic = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "italic")
+            .expect("inner italic span");
+        let mods = italic.style.add_modifier;
+        assert!(mods.contains(Modifier::ITALIC), "inner is italic");
+        assert!(mods.contains(Modifier::BOLD), "inner is ALSO bold (layered)");
+        // No literal delimiters leaked (the parse completed normally).
+        for s in &lines[0].spans {
+            assert!(
+                !s.content.contains('*'),
+                "no literal '*' leaked: {:?}",
+                s.content
+            );
+        }
+    }
+
+    #[test]
+    fn depth_guard_fires_at_limit_emits_plain() {
+        // At the depth limit the guard FIRES: a `**bold**` whose parse is
+        // invoked at depth == MAX_INLINE_DEPTH must emit its captured inner
+        // text as a single PLAIN span (no BOLD modifier, no further
+        // parsing). We call the private `parse_inline_depth` directly at the
+        // limit (tests live in the same module) so the guard path is
+        // exercised deterministically regardless of how the greedy parser
+        // interprets a markup nest.
+        let spans = parse_inline_depth("**core**", MAX_INLINE_DEPTH);
+        // The captured "core" is present, and at least one span holding it
+        // carries NO BOLD modifier (the guard emitted it plain).
+        let core_plain = spans.iter().any(|s| {
+            s.content.contains("core") && !s.style.add_modifier.contains(Modifier::BOLD)
+        });
+        assert!(
+            core_plain,
+            "depth guard emits 'core' as a plain (non-bold) span: {:?}",
+            spans
+        );
+    }
+
+    #[test]
+    fn depth_guard_just_below_limit_still_parses() {
+        // One level BELOW the limit, the guard does NOT fire: `**bold**`
+        // invoked at depth MAX_INLINE_DEPTH - 1 still recurses one more
+        // level and applies the BOLD modifier. Guards the off-by-one in the
+        // other direction (the limit must not trigger too early).
+        let spans = parse_inline_depth("**core**", MAX_INLINE_DEPTH - 1);
+        // `depth + 1 == MAX_INLINE_DEPTH`, which is NOT > MAX_INLINE_DEPTH,
+        // so it recurses and layers BOLD. The "core" span is bold.
+        let core_bold = spans.iter().any(|s| {
+            s.content.contains("core") && s.style.add_modifier.contains(Modifier::BOLD)
+        });
+        assert!(
+            core_bold,
+            "just below the limit, 'core' is still bold (guard does not fire): {:?}",
+            spans
+        );
+    }
+
+    /// The literal spec input: 40 levels of nested `***...***` (triple-star,
+    /// interleaving bold `**` and italic `*`). `parse_inline` must TERMINATE
+    /// (return within the depth limit) and the inner-most tail text must
+    /// survive — no panic, no stack overflow, no infinite loop. The depth
+    /// guard bounds the recursion regardless of how the greedy parser
+    /// interprets the `***` run. (The deterministic "tail renders plain"
+    /// contract is pinned separately by `depth_guard_fires_at_limit_emits_plain`,
+    /// which calls `parse_inline_depth` directly at the limit.)
+    #[test]
+    fn forty_deep_triple_star_nest_terminates() {
+        const DEPTH: usize = 40; // well above MAX_INLINE_DEPTH (32)
+        // Interleaved bold (`**`) + italic (`*`) openers, then text, then the
+        // matching closers in reverse. `***` = bold-then-italic opener.
+        let mut src = String::new();
+        for _ in 0..DEPTH {
+            src.push_str("***");
+        }
+        src.push_str("tail");
+        for _ in 0..DEPTH {
+            src.push_str("***");
+        }
+        let lines = render(&src, 200);
+        assert!(!lines.is_empty(), "40-deep *** nest terminates (no panic)");
+        let all: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(all.contains("tail"), "inner-most tail text survives: {all:?}");
     }
 }

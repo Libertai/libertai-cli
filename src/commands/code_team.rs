@@ -238,7 +238,10 @@ pub struct AgentHandle {
 
 impl AgentHandle {
     pub fn status(&self) -> AgentStatus {
-        *self.status.lock().unwrap()
+        // Poison-recovery (#21): if a thread panicked while holding this
+        // lock, recover the (possibly stale) status instead of panicking
+        // the whole TUI. A stale status is strictly better than a dead UI.
+        *self.status.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn set_status(&self, status: AgentStatus) {
@@ -246,7 +249,11 @@ impl AgentHandle {
     }
 
     pub fn current_tool(&self) -> Option<String> {
-        self.current_tool.lock().unwrap().clone()
+        // Poison-recovery (#21): see `status()`.
+        self.current_tool
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn set_current_tool(&self, tool: Option<String>) {
@@ -265,7 +272,11 @@ impl AgentHandle {
     /// `Arc`). The handle stays in the slot, so the main thread can
     /// request a stop without the spawner having to coordinate.
     pub fn abort_handle(&self) -> Option<AbortHandle> {
-        self.abort.lock().unwrap().clone()
+        // Poison-recovery (#21): see `status()`.
+        self.abort
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Store the abort handle for a run the spawner just kicked off.
@@ -391,8 +402,14 @@ impl AgentRegistry {
     /// All handles, sorted by spawn time (oldest first). Used by the
     /// agent view and the live panel to render agents in a stable order.
     pub fn snapshot(&self) -> Vec<Arc<AgentHandle>> {
-        let mut handles: Vec<Arc<AgentHandle>> =
-            self.handles.lock().unwrap().values().cloned().collect();
+        // Poison-recovery (#21): a stale snapshot beats a dead TUI.
+        let mut handles: Vec<Arc<AgentHandle>> = self
+            .handles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
         handles.sort_by_key(|h| h.spawned_at);
         handles
     }
@@ -402,7 +419,7 @@ impl AgentRegistry {
     pub fn active(&self) -> Vec<Arc<AgentHandle>> {
         self.handles
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .values()
             .filter(|h| h.status().is_active())
             .cloned()
@@ -414,7 +431,7 @@ impl AgentRegistry {
     pub fn active_count(&self) -> usize {
         self.handles
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .values()
             .filter(|h| h.status().is_active())
             .count()
@@ -424,7 +441,7 @@ impl AgentRegistry {
     /// by the footer hint so the tab indicator shows even when all
     /// agents have finished.
     pub fn total_count(&self) -> usize {
-        self.handles.lock().unwrap().len()
+        self.handles.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Find a handle by agent name. Returns the first match (names
@@ -433,7 +450,7 @@ impl AgentRegistry {
     pub fn find_by_name(&self, name: &str) -> Option<Arc<AgentHandle>> {
         self.handles
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .values()
             .find(|h| h.name == name)
             .cloned()
@@ -599,5 +616,151 @@ mod tests {
             "aborting a taken handle must mark the paired signal aborted"
         );
         assert!(h.abort.lock().unwrap().is_none(), "taking cleared the slot");
+    }
+
+    // --- #21: mutex-poison recovery ---------------------------------------
+
+    /// Poison a `Mutex<T>` by panicking while holding its lock (caught via
+    /// `catch_unwind`), then assert the inner value is still readable. This
+    /// is the recovery contract the `AgentHandle` / `AgentRegistry` accessors
+    /// rely on: a poisoned lock yields the (possibly stale) inner value via
+    /// `unwrap_or_else(|e| e.into_inner())` instead of panicking the whole TUI.
+    /// A stale status is strictly better than a dead UI.
+    #[test]
+    fn poisoned_mutex_inner_is_recoverable() {
+        let m = std::sync::Mutex::new(42i32);
+        // Hold the lock and panic; the lock becomes poisoned, but the guard
+        // (and its 42) is dropped during unwinding, leaving the inner value
+        // intact and recoverable.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = m.lock().unwrap();
+            panic!("poison the mutex");
+        }));
+        assert!(result.is_err(), "the inner closure must panic");
+        assert!(m.is_poisoned(), "the mutex must be poisoned after a panic-in-lock");
+        // The poison-recovery accessor pattern: `.into_inner()` extracts the
+        // inner value out of the `PoisonError` instead of propagating the
+        // panic. This is exactly what `AgentHandle::status()` does.
+        let recovered = m.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(*recovered, 42, "recovered the inner value, not a panic");
+    }
+
+    /// `AgentHandle::status()` recovers from a poisoned status lock: poison
+    /// the inner `Arc<Mutex<AgentStatus>>` by panicking while locked, then
+    /// assert `status()` returns the (stale) inner value rather than
+    /// panicking. Pins the `unwrap_or_else(|e| e.into_inner())` line at the
+    /// accessor — the real recovery the TUI depends on.
+    #[test]
+    fn agent_status_recovers_from_poisoned_lock() {
+        let registry = AgentRegistry::new();
+        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        // Establish a known status before poisoning.
+        h.set_status(AgentStatus::Working);
+        assert_eq!(h.status(), AgentStatus::Working);
+
+        // Poison the status lock by panicking while holding it.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = h.status.lock().unwrap();
+            panic!("poison the status lock");
+        }));
+        assert!(result.is_err(), "inner closure must panic");
+        assert!(h.status.is_poisoned(), "status lock is poisoned");
+
+        // The accessor must NOT panic — it recovers the stale inner value.
+        // (A stale status beats a dead TUI.)
+        let recovered = h.status();
+        assert_eq!(
+            recovered, AgentStatus::Working,
+            "status() recovers the stale value from a poisoned lock: {recovered:?}"
+        );
+    }
+
+    /// `AgentHandle::current_tool()` recovers from a poisoned tool lock,
+    /// mirroring the status recovery. Poison the lock, assert the accessor
+    /// returns the stale inner value instead of panicking.
+    #[test]
+    fn agent_current_tool_recovers_from_poisoned_lock() {
+        let registry = AgentRegistry::new();
+        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        h.set_current_tool(Some("bash".to_string()));
+        assert_eq!(h.current_tool(), Some("bash".to_string()));
+
+        // Poison the current_tool lock.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = h.current_tool.lock().unwrap();
+            panic!("poison the current_tool lock");
+        }));
+        assert!(result.is_err(), "inner closure must panic");
+        assert!(h.current_tool.is_poisoned(), "current_tool lock is poisoned");
+
+        // Accessor recovers the stale value, no panic.
+        assert_eq!(
+            h.current_tool(),
+            Some("bash".to_string()),
+            "current_tool() recovers the stale value from a poisoned lock"
+        );
+    }
+
+    /// `AgentRegistry::snapshot()` recovers from a poisoned handles lock:
+    /// poison the registry's `handles` map, then assert `snapshot()` returns
+    /// the (stale) set of handles instead of panicking. Pins the
+    /// `unwrap_or_else(|e| e.into_inner())` at the registry accessors that the
+    /// agent panel reads on every tick.
+    #[test]
+    fn registry_snapshot_recovers_from_poisoned_lock() {
+        let registry = AgentRegistry::new();
+        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        assert_eq!(registry.snapshot().len(), 1);
+
+        // Poison the registry's handles lock. Reach the private field via
+        // `super::*` (tests live in the same module).
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = registry.handles.lock().unwrap();
+            panic!("poison the registry handles lock");
+        }));
+        assert!(result.is_err(), "inner closure must panic");
+        assert!(registry.handles.is_poisoned(), "registry handles lock is poisoned");
+
+        // snapshot() must recover and return the stale handle, not panic.
+        let snap = registry.snapshot();
+        assert_eq!(
+            snap.len(),
+            1,
+            "snapshot() recovers the stale handle map (len={})",
+            snap.len()
+        );
+        assert_eq!(snap[0].name, "reviewer");
+        // The other registry accessors use the same recovery; spot-check
+        // active_count / total_count don't panic on a poisoned lock either.
+        assert_eq!(registry.total_count(), 1, "total_count recovers from poison");
+        assert_eq!(registry.active_count(), 1, "active_count recovers from poison");
+        // The handle is still usable (its own locks are unpoisoned).
+        assert_eq!(h.status(), AgentStatus::Spawning);
+    }
+
+    /// `abort_handle()` recovers from a poisoned abort lock — the third
+    /// accessor using the poison-recovery pattern. Poison the abort lock and
+    /// assert the accessor returns the stale inner value.
+    #[test]
+    fn agent_abort_handle_recovers_from_poisoned_lock() {
+        let registry = AgentRegistry::new();
+        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        let (handle, _signal) = AbortHandle::new();
+        h.set_abort(handle);
+        assert!(h.abort_handle().is_some(), "abort handle is set");
+
+        // Poison the abort lock.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = h.abort.lock().unwrap();
+            panic!("poison the abort lock");
+        }));
+        assert!(result.is_err(), "inner closure must panic");
+        assert!(h.abort.is_poisoned(), "abort lock is poisoned");
+
+        // abort_handle() recovers the stale inner value, no panic.
+        assert!(
+            h.abort_handle().is_some(),
+            "abort_handle() recovers the stale handle from a poisoned lock"
+        );
     }
 }
