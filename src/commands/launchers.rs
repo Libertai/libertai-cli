@@ -44,6 +44,24 @@ pub fn claude(
         ("ANTHROPIC_DEFAULT_OPUS_MODEL".into(), opus_model),
         ("ANTHROPIC_DEFAULT_SONNET_MODEL".into(), sonnet_model),
         ("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), haiku_model),
+        // Force an explicit auto-compact window so Claude Code treats the
+        // model's context window as `source:"env"` rather than the
+        // `source:"auto"` fallback it uses for unknown (non-claude) model ids
+        // like our `glm-5.2`. Without this, Claude Code's reactive-compact
+        // gate vetoes compaction whenever the window source is "auto" and
+        // Anthropic's `tengu_amber_redwood3` server flag is off (which it is,
+        // and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` suppresses the flag
+        // fetch too). The result: usage hits 100% and auto-compact never
+        // fires, so the full context is re-sent every turn — exactly when a
+        // backend 503 ("All servers unavailable for model ...") takes down the
+        // session. 200000 matches Claude Code's own 200k fallback for unknown
+        // models, so this only unblocks the gate; it does not change *when*
+        // compaction fires relative to a real 200k model (~167k tokens). The
+        // model's real ceiling (~262k) is higher, but the window resolver caps
+        // any env value at the model's known context (200k for glm-5.2), so we
+        // can't raise it past 200k here anyway. See memory:
+        // claude-compact-never-fires.
+        ("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "200000".into()),
     ]);
 
     // The tier vars above only remap the `opus`/`sonnet`/`haiku` *aliases*.
