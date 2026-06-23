@@ -8,10 +8,11 @@ use std::sync::Arc;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::text::Line;
 
 use crate::commands::code_team::AgentHandle;
 use crate::commands::code_tui::agents_panel;
-use crate::commands::code_tui::app::{App, Phase, Focus};
+use crate::commands::code_tui::app::{App, Phase, Focus, SubagentOutcome, TranscriptEntry};
 use crate::commands::code_tui::footer;
 use crate::commands::code_tui::input;
 use crate::commands::code_tui::markdown;
@@ -408,8 +409,26 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
+/// Marker prefix for a per-tool result line — mirrors scrollback's
+/// `RESULT_MARKER` (`↳ `) so an overlay result reads as a reply rather
+/// than another invocation, matching the main transcript exactly.
+const RESULT_MARKER: &str = "↳ ";
+
+/// Max visual lines of a `ToolResult`'s `output` we render before
+/// collapsing the rest into a "… N more lines" line — same cap as
+/// scrollback's `MAX_RESULT_LINES`, kept in sync for visual parity.
+const MAX_RESULT_LINES: usize = 5;
+
 /// Draw the agent output overlay — a near-fullscreen popup showing
-/// the selected agent's transcript (text + tool calls).
+/// the selected agent's transcript (text + tool calls + tool results).
+///
+/// Reuses the scrollback's per-variant styling rather than a flat
+/// markdown dump: agent-colored markers, the `↳` result line, and
+/// `theme::error` on `is_error`. [`app::agent_transcript`] returns the
+/// typed [`TranscriptEntry`] values (for in-process subagents, the
+/// `ToolResult` per-tool lines that the previous `Vec<String>` path
+/// dropped entirely); [`render_entry_lines`] mirrors the scrollback
+/// match arms so the overlay matches the main transcript cell-for-cell.
 fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
@@ -427,8 +446,8 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
         .map(|h| theme::agent_color_for(h.color))
         .unwrap_or(theme::MUTED);
 
-    // Collect this agent's transcript.
-    let agent_lines = crate::commands::code_tui::app::agent_transcript(app, &overlay.agent_name);
+    // Collect this agent's transcript as typed entries.
+    let entries = crate::commands::code_tui::app::agent_transcript(app, &overlay.agent_name);
 
     // Overlay: 80% width, 80% height, centered.
     let overlay_width = (area.width as f32 * 0.8) as u16;
@@ -457,13 +476,12 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
     // markdown::render_code_block).
     let usable_width = overlay_width.saturating_sub(2) as usize;
 
-    // Build the content lines. Render each transcript chunk as markdown
-    // pre-wrapped to usable_width (mirrors scrollback's assistant path),
-    // so the Paragraph below wraps nothing. A blank separator between
-    // chunks preserves the prior visual grouping.
+    // Build the content lines, reusing the scrollback's per-variant
+    // styling (see [`render_entry_lines`]). A blank separator between
+    // entries preserves the prior visual grouping.
     let mut lines: Vec<Line> = Vec::new();
-    for text in &agent_lines {
-        lines.extend(markdown::render(text, usable_width));
+    for entry in &entries {
+        lines.extend(render_entry_lines(entry, &overlay.agent_name, color, usable_width));
         lines.push(Line::from(""));
     }
 
@@ -503,4 +521,141 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
         .block(block)
         .scroll((scroll_from_top as u16, 0));
     frame.render_widget(para, overlay_area);
+}
+
+/// Render a single overlay [`TranscriptEntry`] to styled [`Line`]s,
+/// mirroring the scrollback (`scrollback.rs`) match arms so the overlay
+/// matches the main transcript cell-for-cell:
+/// - `SubagentText` → agent-colored bold name prefix + markdown body.
+/// - `SubagentTool` → agent-colored name + `●` marker + bold tool name
+///   + muted detail (via `tool_preview`), identical to the scrollback.
+/// - `SubagentEnd` → agent-colored name + outcome label
+///   (`done`/`failed`/`stopped`), color-coded by outcome.
+/// - `ToolResult` → the `↳` result marker, `theme::error` on `is_error`,
+///   word-wrapped and capped at [`MAX_RESULT_LINES`] with a "… N more"
+///   overflow line.
+/// - `System` (background-agent log lines) → dim, one per line.
+///
+/// `color` is the agent's resolved color (passed in to avoid a per-entry
+/// registry lookup). `agent_name` is informational only here since the
+/// overlay is already scoped to one agent; the result lines' tool name
+/// was already stripped of the `"{agent} · "` prefix by
+/// [`app::agent_transcript`].
+fn render_entry_lines<'a>(
+    entry: &'a TranscriptEntry,
+    agent_name: &'a str,
+    color: ratatui::style::Color,
+    usable_width: usize,
+) -> Vec<Line<'a>> {
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    match entry {
+        TranscriptEntry::SubagentText { text, .. } => {
+            let agent_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+            let md_lines = markdown::render(text, usable_width);
+            let mut out = Vec::with_capacity(md_lines.len());
+            for (i, md_line) in md_lines.into_iter().enumerate() {
+                if i == 0 {
+                    let mut v = vec![
+                        Span::styled(agent_name.to_string(), agent_style),
+                        Span::raw(" "),
+                    ];
+                    v.extend(md_line.spans);
+                    out.push(Line::from(v));
+                } else {
+                    out.push(md_line);
+                }
+            }
+            out
+        }
+        TranscriptEntry::SubagentTool {
+            tool_name, args, ..
+        } => {
+            // Reuse the shared preview (not re-implemented here) to get
+            // the per-tool detail string, then split off the detail so we
+            // can color the tool name bold and the detail muted — mirroring
+            // the scrollback `SubagentTool` arm exactly.
+            let preview =
+                crate::commands::code_tool_preview::tool_preview(tool_name, args);
+            let detail = preview
+                .strip_prefix(tool_name)
+                .map(str::trim_start)
+                .unwrap_or("");
+            let agent_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+            let marker_style = Style::default().fg(color);
+            let mut spans = vec![
+                Span::styled(agent_name.to_string(), agent_style),
+                Span::raw(" "),
+                Span::styled(theme::glyph::TOOL_MARKER, marker_style),
+                Span::raw(" "),
+                Span::styled(tool_name.clone(), theme::bold()),
+            ];
+            if !detail.is_empty() {
+                spans.push(Span::styled(format!("({detail})"), theme::muted()));
+            }
+            vec![Line::from(spans)]
+        }
+        TranscriptEntry::SubagentEnd { outcome, .. } => {
+            let agent_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+            let (label, label_style) = match outcome {
+                SubagentOutcome::Completed => ("done", theme::success()),
+                SubagentOutcome::Failed => ("failed", theme::error()),
+                SubagentOutcome::Stopped => ("stopped", theme::muted()),
+            };
+            vec![Line::from(vec![
+                Span::styled(agent_name.to_string(), agent_style),
+                Span::raw(" "),
+                Span::styled(label, label_style),
+            ])]
+        }
+        TranscriptEntry::ToolResult {
+            name,
+            output,
+            is_error,
+        } => {
+            let style = if *is_error {
+                theme::error()
+            } else {
+                theme::muted()
+            };
+            let prefix = format!("{RESULT_MARKER}{name}");
+            let prefix_w = prefix.chars().count() + 1; // prefix + ": "
+            let body = if output.is_empty() {
+                prefix
+            } else {
+                format!("{prefix}: {output}")
+            };
+            // Word-wrap to usable_width (M4a pre-wrap parity with scrollback)
+            // and cap the visual lines, appending a "… N more" overflow line.
+            let wrapped = wrap::word_wrap(&body, usable_width, prefix_w);
+            let total = wrapped.len();
+            let mut out: Vec<Line> = Vec::with_capacity(wrapped.len().min(MAX_RESULT_LINES) + 1);
+            if total <= MAX_RESULT_LINES {
+                for chunk in wrapped {
+                    out.push(Line::from(Span::styled(chunk, style)));
+                }
+            } else {
+                for chunk in wrapped.into_iter().take(MAX_RESULT_LINES) {
+                    out.push(Line::from(Span::styled(chunk, style)));
+                }
+                let more = total - MAX_RESULT_LINES;
+                out.push(Line::from(Span::styled(
+                    format!("… {more} more line{}", if more == 1 { "" } else { "s" }),
+                    style,
+                )));
+            }
+            out
+        }
+        // Background-agent log lines: render each raw line dim, matching
+        // the scrollback System styling. One TranscriptEntry::System here
+        // is exactly one log line (agent_transcript wraps them 1:1), so no
+        // extra splitting is needed.
+        TranscriptEntry::System(text) => {
+            vec![Line::from(Span::styled(text.clone(), theme::muted()))]
+        }
+        // Other variants aren't produced by agent_transcript; render any
+        // stray one as dim text so the match stays exhaustive and never
+        // silently drops content.
+        _ => vec![Line::from(Span::styled(format!("{entry:?}"), theme::muted()))],
+    }
 }

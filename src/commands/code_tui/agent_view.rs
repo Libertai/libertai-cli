@@ -126,7 +126,12 @@ fn print_json(cwd_filter: Option<&Path>) -> Result<()> {
                 "cwd": r.cwd,
                 "state": match status {
                     BackgroundAgentStatus::Running => "working",
-                    BackgroundAgentStatus::Exited => "completed",
+                    // `background_agent_status` only does `kill -0`: Exited means
+                    // the pid is dead, NOT that the run succeeded. The detached
+                    // child is reaped before this view runs, so no exit code is
+                    // available. Report a neutral "exited" state rather than an
+                    // unwarranted "completed".
+                    BackgroundAgentStatus::Exited => "exited",
                     BackgroundAgentStatus::Unknown => "unknown",
                 },
                 "promptPreview": r.prompt_preview,
@@ -155,7 +160,7 @@ fn print_plain(cwd_filter: Option<&Path>) -> Result<()> {
 
     for (label, group) in [
         ("Working", &working),
-        ("Completed", &completed),
+        ("Exited", &completed),
         ("Unknown", &unknown),
     ] {
         if group.is_empty() {
@@ -267,7 +272,7 @@ fn draw_header(
     let (working, completed, _) = group_entries(&state.entries);
     let total = state.entries.len();
     let header = format!(
-        "LibertAI agents · {} · {} · {} total ({} working, {} completed)",
+        "LibertAI agents · {} · {} · {} total ({} working, {} exited)",
         config.model, config.cwd_label, total, working.len(), completed.len()
     );
     let line = Line::from(vec![Span::styled(
@@ -622,7 +627,10 @@ fn clip_to(s: &str, max: usize) -> String {
 fn status_icon(status: BackgroundAgentStatus) -> &'static str {
     match status {
         BackgroundAgentStatus::Running => "✽",
-        BackgroundAgentStatus::Exited => "✓",
+        // Exited is NEUTRAL, not a success claim: `kill -0` only tells us the
+        // pid is gone, and the detached child is reaped before this view runs,
+        // so we never have an exit code. Use a neutral idle dot, not a green ✓.
+        BackgroundAgentStatus::Exited => theme::glyph::IDLE,
         BackgroundAgentStatus::Unknown => "?",
     }
 }
@@ -793,5 +801,62 @@ mod tests {
         let records = vec![rec(1, 0, "/abc", "r1")];
         let result = filter_by_cwd(records, Some(Path::new("/a")));
         assert_eq!(result.len(), 0);
+    }
+
+    // --- M5b: agent_view exit is neutral, not a success claim ---------------
+
+    // (M5b-4a) status_icon for an Exited agent is the neutral IDLE glyph, not
+    // a green success ✓ — `kill -0` only tells us the pid is gone (no exit
+    // code is available for the reaped detached child), so a ✓ would be an
+    // unwarranted success claim.
+    #[test]
+    fn status_icon_exited_is_neutral_not_success() {
+        let icon = status_icon(BackgroundAgentStatus::Exited);
+        assert_eq!(icon, theme::glyph::IDLE, "exited should use the neutral idle glyph");
+        assert_ne!(icon, "✓", "exited must NOT claim success with a checkmark");
+        // Distinct from the Working spinner so the two states are visually
+        // separable in the list.
+        assert_ne!(icon, status_icon(BackgroundAgentStatus::Running));
+    }
+
+    // (M5b-4b) The "Exited" grouping bucket — surfaced to the user as the
+    // "Exited" header in print_plain and the "exited" count in the header
+    // chip — is named neutrally. This locks in the neutral wording (review
+    // round-1 finding #12: don't label dead-but-unknown runs "completed").
+    #[test]
+    fn group_entries_exited_bucket_is_neutral_label() {
+        let entries = vec![
+            entry(1, 100, BackgroundAgentStatus::Exited),
+            entry(2, 200, BackgroundAgentStatus::Running),
+        ];
+        let (working, completed, unknown) = group_entries(&entries);
+        // The Exited run lands in the "completed" return slot, but the
+        // user-facing label for that slot is "Exited" (see print_plain /
+        // draw_header), never "Completed". The slot itself is the only
+        // seam we can assert on here; the label is rendered inline.
+        assert_eq!(completed, vec![0], "exited run grouped apart from working");
+        assert!(working.contains(&1));
+        assert!(unknown.is_empty());
+        // Sanity: an Exited run and a Running run never share a bucket.
+        let completed_set: std::collections::HashSet<usize> = completed.into_iter().collect();
+        let working_set: std::collections::HashSet<usize> = working.into_iter().collect();
+        assert!(
+            completed_set.is_disjoint(&working_set),
+            "Exited and Running must not share a bucket"
+        );
+    }
+
+    // (M5b-4c) display_order keeps Exited (neutral) below Working so an exited
+    // run never reads as the active focus of the list.
+    #[test]
+    fn display_order_exited_after_working() {
+        let entries = vec![
+            entry(1, 100, BackgroundAgentStatus::Exited),
+            entry(2, 300, BackgroundAgentStatus::Running),
+        ];
+        let order = display_order(&entries);
+        // Working (index 1) comes before Exited (index 0).
+        assert_eq!(order, vec![1, 0]);
+        assert_eq!(order.first().copied(), Some(1), "working run ordered first");
     }
 }

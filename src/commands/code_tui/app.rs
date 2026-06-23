@@ -292,6 +292,10 @@ pub struct AgentOverlay {
     pub agent_name: String,
     /// Scroll position within the overlay (0 = bottom).
     pub scroll: u16,
+    /// Auto-tail: when true, new output resets `scroll` to 0 (stick to
+    /// bottom). Flipped to false the moment the user scrolls up, and
+    /// re-armed when they scroll back to the bottom.
+    pub follow: bool,
 }
 
 /// A single entry in the conversation transcript.
@@ -1392,6 +1396,7 @@ fn handle_key(
                     app.agent_overlay = Some(AgentOverlay {
                         agent_name: handle.name.clone(),
                         scroll: 0,
+                        follow: true,
                     });
                 }
                 return None;
@@ -1910,14 +1915,22 @@ fn handle_agent_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         KeyCode::Esc | KeyCode::Tab => {
             app.agent_overlay = None;
         }
+        // Scrolling up leaves the bottom: stop auto-tailing so new output
+        // doesn't yank the user back down.
         KeyCode::Up | KeyCode::PageUp => {
             if let Some(overlay) = &mut app.agent_overlay {
+                overlay.follow = false;
                 overlay.scroll = overlay.scroll.saturating_add(3);
             }
         }
+        // Scrolling down decrements the offset; reaching the bottom
+        // (scroll == 0) re-arms auto-tail.
         KeyCode::Down | KeyCode::PageDown => {
             if let Some(overlay) = &mut app.agent_overlay {
                 overlay.scroll = overlay.scroll.saturating_sub(3);
+                if overlay.scroll == 0 {
+                    overlay.follow = true;
+                }
             }
         }
         _ => {}
@@ -1926,54 +1939,88 @@ fn handle_agent_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
 }
 
 /// Collect output for a specific agent (by name). For background
-/// agents with a `log_path`, reads the log file. For in-process
-/// subagents, scans the transcript for `SubagentText`/`SubagentTool`
-/// entries.
-pub fn agent_transcript(app: &App, agent_name: &str) -> Vec<String> {
+/// agents with a `log_path`, reads the log file (each raw line wrapped
+/// as a [`TranscriptEntry::System`] so the overlay can render it
+/// uniformly). For in-process subagents, scans the transcript for the
+/// agent's `SubagentText` / `SubagentTool` / `SubagentEnd` entries plus
+/// the per-tool result lines (stored as `ToolResult` with the name
+/// prefixed `"{agent} · {tool}"` — see the `SubagentToolEnd` arm of
+/// [`handle_agent_msg`]).
+///
+/// Returns the *typed* entries so the overlay can reuse the scrollback's
+/// per-variant styling (agent-colored markers, `↳` result line,
+/// `theme::error` on `is_error`) instead of a flat markdown dump that
+/// dropped the results and lost the coloring.
+pub fn agent_transcript(app: &App, agent_name: &str) -> Vec<TranscriptEntry> {
     // If this agent has a log file, read it — that's the authoritative
-    // output for background agents / teammates.
+    // output for background agents / teammates. Wrap each raw stdout/stderr
+    // line as a dim System entry so the overlay renders it uniformly
+    // (the log is already the final-formatted text, so dim styling fits).
     if let Some(handle) = app.registry.find_by_name(agent_name) {
         if let Some(log_path) = &handle.log_path {
-            return read_agent_log(log_path);
+            return read_agent_log(log_path)
+                .into_iter()
+                .map(TranscriptEntry::System)
+                .collect();
         }
     }
 
-    // Fall back to transcript entries (in-process subagents).
-    let mut lines = Vec::new();
+    // Fall back to transcript entries (in-process subagents). The leading
+    // "{agent} · " prefix on `ToolResult` (see `SubagentToolEnd` storage)
+    // is what binds a per-tool result to this agent.
+    let prefix = format!("{agent_name} · ");
+    let mut entries = Vec::new();
     for entry in &app.transcript {
         match entry {
             TranscriptEntry::SubagentText {
                 agent_name: name,
                 text,
             } if name == agent_name => {
-                lines.push(text.clone());
+                entries.push(TranscriptEntry::SubagentText {
+                    agent_name: agent_name.to_string(),
+                    text: text.clone(),
+                });
             }
             TranscriptEntry::SubagentTool {
                 agent_name: name,
                 tool_name,
                 args,
             } if name == agent_name => {
-                // Reuse the shared preview so the overlay's per-tool line
-                // matches the scrollback marker exactly.
-                let preview =
-                    crate::commands::code_tool_preview::tool_preview(tool_name, args);
-                lines.push(format!("● {preview}"));
+                entries.push(TranscriptEntry::SubagentTool {
+                    agent_name: agent_name.to_string(),
+                    tool_name: tool_name.clone(),
+                    args: args.clone(),
+                });
             }
             TranscriptEntry::SubagentEnd {
                 agent_name: name,
                 outcome,
             } if name == agent_name => {
-                let label = match outcome {
-                    SubagentOutcome::Completed => "done",
-                    SubagentOutcome::Failed => "failed",
-                    SubagentOutcome::Stopped => "stopped",
-                };
-                lines.push(label.to_string());
+                entries.push(TranscriptEntry::SubagentEnd {
+                    agent_name: agent_name.to_string(),
+                    outcome: *outcome,
+                });
+            }
+            TranscriptEntry::ToolResult {
+                name,
+                output,
+                is_error,
+            } if name.starts_with(&prefix) => {
+                // Strip the "{agent} · " prefix so the overlay's result line
+                // reads "{tool}" (mirroring how the scrollback shows the
+                // tool name, just without the agent repetition here since
+                // the whole overlay is already scoped to this agent).
+                let tool = name[prefix.len()..].to_string();
+                entries.push(TranscriptEntry::ToolResult {
+                    name: tool,
+                    output: output.clone(),
+                    is_error: *is_error,
+                });
             }
             _ => {}
         }
     }
-    lines
+    entries
 }
 
 /// Read an agent's log file and return its contents as lines. The log
@@ -2846,6 +2893,20 @@ fn compact(s: &str) -> String {
     out
 }
 
+/// Auto-tail the open agent overlay: if the user is viewing `agent_name`
+/// and hasn't scrolled away (i.e. `follow` is true), reset the overlay's
+/// scroll to the bottom so new output stays in view. Called from each
+/// subagent transcript arm of [`handle_agent_msg`]. No-op when no overlay
+/// is open or it's showing a different agent — and no-op when the user
+/// scrolled up (follow == false), so we don't yank them back down.
+fn overlay_auto_tail(app: &mut App, agent_name: &str) {
+    if let Some(overlay) = &mut app.agent_overlay {
+        if overlay.agent_name == agent_name && overlay.follow {
+            overlay.scroll = 0;
+        }
+    }
+}
+
 fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
     match msg {
         AgentMsg::TextDelta(delta) => {
@@ -2998,14 +3059,16 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                 if name == &agent_name {
                     existing.push_str(&text);
                     app.scroll = 0;
+                    overlay_auto_tail(app, &agent_name);
                     return;
                 }
             }
             app.transcript.push(TranscriptEntry::SubagentText {
-                agent_name,
+                agent_name: agent_name.clone(),
                 text,
             });
             app.scroll = 0; // auto-scroll to bottom
+            overlay_auto_tail(app, &agent_name);
         }
         AgentMsg::SubagentToolStart {
             agent_name,
@@ -3015,11 +3078,12 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             // Store args on the entry; the scrollback renderer calls
             // `tool_preview` (reused, not duplicated) to format the marker.
             app.transcript.push(TranscriptEntry::SubagentTool {
-                agent_name,
+                agent_name: agent_name.clone(),
                 tool_name,
                 args,
             });
             app.scroll = 0; // auto-scroll to bottom
+            overlay_auto_tail(app, &agent_name);
         }
         AgentMsg::SubagentToolEnd {
             agent_name,
@@ -3043,14 +3107,16 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                 is_error,
             });
             app.scroll = 0; // auto-scroll to bottom
+            overlay_auto_tail(app, &agent_name);
         }
         AgentMsg::SubagentEnd { agent_name, outcome } => {
             app.transcript.push(TranscriptEntry::SubagentEnd {
-                agent_name,
+                agent_name: agent_name.clone(),
                 outcome,
             });
             app.transcript.push(TranscriptEntry::Blank);
             app.scroll = 0; // auto-scroll to bottom
+            overlay_auto_tail(app, &agent_name);
         }
         AgentMsg::Error(e) => {
             app.transcript.push(TranscriptEntry::System(format!("error: {e}")));
@@ -4386,6 +4452,240 @@ task = "Do the thing"
             }
             other => panic!("expected last entry to be SubagentTool, got {other:?}"),
         }
+    }
+
+    // --- M5b: agent_transcript + overlay follow/up/down ---------------------
+
+    // (M5b-1) agent_transcript surfaces a per-agent ToolResult (stored with the
+    // "{agent} · {tool}" name prefix) for the right agent, with the prefix
+    // stripped so the overlay reads just "{tool}". A SubagentText for the same
+    // agent is also surfaced; a ToolResult / SubagentText for a *different*
+    // agent is excluded. The test registry is empty, so agent_transcript falls
+    // through to the transcript scan (no log_path short-circuit).
+    #[test]
+    fn agent_transcript_surfaces_agent_toolresult_with_prefix_stripped() {
+        let mut app = test_app();
+        app.transcript.push(TranscriptEntry::SubagentText {
+            agent_name: "reviewer".into(),
+            text: "looking…".into(),
+        });
+        app.transcript.push(TranscriptEntry::ToolResult {
+            name: "reviewer · bash".into(),
+            output: "ok".into(),
+            is_error: false,
+        });
+        // Noise from a different agent — must be filtered out.
+        app.transcript.push(TranscriptEntry::SubagentText {
+            agent_name: "coder".into(),
+            text: "ignore me".into(),
+        });
+        app.transcript.push(TranscriptEntry::ToolResult {
+            name: "coder · bash".into(),
+            output: "nope".into(),
+            is_error: false,
+        });
+
+        let lines = agent_transcript(&app, "reviewer");
+        // The agent's own SubagentText is included.
+        assert!(
+            lines.iter().any(|e| matches!(
+                e,
+                TranscriptEntry::SubagentText { agent_name, text }
+                    if agent_name == "reviewer" && text == "looking…"
+            )),
+            "reviewer SubagentText should appear, got {lines:?}"
+        );
+        // The ToolResult line appears with the "{agent} · " prefix stripped.
+        let result = lines.iter().find_map(|e| match e {
+            TranscriptEntry::ToolResult { name, output, is_error } => {
+                Some((name.clone(), output.clone(), *is_error))
+            }
+            _ => None,
+        });
+        let (name, output, is_error) =
+            result.expect("expected a ToolResult line for reviewer");
+        assert_eq!(name, "bash", "prefix should be stripped");
+        assert_eq!(output, "ok");
+        assert!(!is_error);
+        // Nothing from `coder` leaks in.
+        assert!(
+            !lines.iter().any(|e| matches!(
+                e,
+                TranscriptEntry::SubagentText { agent_name, .. } if agent_name == "coder"
+            )),
+            "coder entries must be filtered out, got {lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::ToolResult { name, .. } if name == "nope")),
+            "coder tool result must be filtered out, got {lines:?}"
+        );
+    }
+
+    // (M5b-2a) Overlay auto-tail: with follow=true, a new SubagentText for the
+    // viewed agent keeps scroll at 0 (sticks to the bottom).
+    #[test]
+    fn overlay_auto_tail_follow_true_resets_scroll_on_new_subagent_text() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "reviewer".into(),
+            scroll: 0,
+            follow: true,
+        });
+
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::SubagentText {
+                agent_name: "reviewer".into(),
+                text: "more".into(),
+            },
+            &cmd_tx,
+        );
+
+        let overlay = app.agent_overlay.as_ref().expect("overlay still open");
+        assert_eq!(
+            overlay.scroll, 0,
+            "follow=true should auto-tail (scroll stays 0)"
+        );
+        assert!(overlay.follow, "follow flag untouched");
+    }
+
+    // (M5b-2b) Overlay auto-tail: with follow=false (user scrolled up), a new
+    // SubagentText does NOT yank scroll back to 0.
+    #[test]
+    fn overlay_auto_tail_follow_false_keeps_scroll_on_new_subagent_text() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "reviewer".into(),
+            scroll: 5,
+            follow: false,
+        });
+
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::SubagentText {
+                agent_name: "reviewer".into(),
+                text: "more".into(),
+            },
+            &cmd_tx,
+        );
+
+        let overlay = app.agent_overlay.as_ref().expect("overlay still open");
+        assert_ne!(
+            overlay.scroll, 0,
+            "follow=false must not reset scroll (user scrolled up, not yanked)"
+        );
+        assert_eq!(overlay.scroll, 5, "scroll preserved");
+        assert!(!overlay.follow);
+    }
+
+    // (M5b-2c) Overlay auto-tail only tails the *viewed* agent: a SubagentText
+    // for a different agent does not touch this overlay's scroll.
+    #[test]
+    fn overlay_auto_tail_ignores_other_agents() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "reviewer".into(),
+            scroll: 7,
+            follow: true,
+        });
+
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::SubagentText {
+                agent_name: "coder".into(),
+                text: "elsewhere".into(),
+            },
+            &cmd_tx,
+        );
+
+        let overlay = app.agent_overlay.as_ref().expect("overlay still open");
+        assert_eq!(
+            overlay.scroll, 7,
+            "a different agent's text must not auto-tail this overlay"
+        );
+    }
+
+    // (M5b-3a) Up arrow on an overlay with follow=true flips follow to false
+    // (so subsequent new output won't yank the user back) and increments scroll.
+    #[test]
+    fn handle_agent_overlay_key_up_disables_follow_and_increments_scroll() {
+        let mut app = test_app();
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "reviewer".into(),
+            scroll: 0,
+            follow: true,
+        });
+
+        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+
+        let overlay = app.agent_overlay.as_ref().expect("overlay still open");
+        assert!(
+            !overlay.follow,
+            "scrolling up must disable auto-tail (follow=false)"
+        );
+        assert!(overlay.scroll > 0, "scroll should increment on Up");
+    }
+
+    // (M5b-3b) Down arrow reaching the bottom (scroll == 0) re-arms auto-tail
+    // (follow=true), so the user re-sticks to the bottom.
+    #[test]
+    fn handle_agent_overlay_key_down_to_bottom_re_arms_follow() {
+        let mut app = test_app();
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "reviewer".into(),
+            scroll: 0,
+            follow: false,
+        });
+
+        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        let overlay = app.agent_overlay.as_ref().expect("overlay still open");
+        assert_eq!(overlay.scroll, 0, "Down saturating-sub keeps scroll at 0");
+        assert!(
+            overlay.follow,
+            "reaching the bottom must re-arm follow (auto-tail)"
+        );
+    }
+
+    // (M5b-3c) Down arrow away from the bottom (scroll > 0) does NOT re-arm
+    // follow — only reaching the very bottom does.
+    #[test]
+    fn handle_agent_overlay_key_down_off_bottom_does_not_re_arm_follow() {
+        let mut app = test_app();
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "reviewer".into(),
+            scroll: 4,
+            follow: false,
+        });
+
+        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        let overlay = app.agent_overlay.as_ref().expect("overlay still open");
+        assert_eq!(overlay.scroll, 1, "Down decrements scroll by 3 (saturating)");
+        assert!(
+            !overlay.follow,
+            "still off-bottom must keep follow=false"
+        );
+    }
+
+    // (M5b-3d) Esc closes the overlay (Tab too) — the overlay is dropped.
+    #[test]
+    fn handle_agent_overlay_key_esc_closes_overlay() {
+        let mut app = test_app();
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "reviewer".into(),
+            scroll: 0,
+            follow: true,
+        });
+
+        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(app.agent_overlay.is_none(), "Esc should close the overlay");
     }
 }
 
