@@ -169,6 +169,9 @@ pub struct App {
     pub agent_overlay: Option<AgentOverlay>,
     /// Live agent registry.
     pub registry: Arc<AgentRegistry>,
+    /// Teams we've already fired a completion notification for, so a
+    /// finished team only notifies once. Cleared by `/team` respawn.
+    pub notified_teams: std::collections::HashSet<String>,
     /// Config.
     pub cfg: Arc<LibertaiConfig>,
     /// Status bar info.
@@ -884,6 +887,7 @@ pub fn run(
             agent_selection: 0,
             agent_overlay: None,
         registry,
+        notified_teams: std::collections::HashSet::new(),
         cfg,
         bar: BarStatus {
             model_label: format!("{provider}/{model}"),
@@ -904,8 +908,19 @@ pub fn run(
 /// agent with a `pid`, checks if the process is still alive using
 /// `kill(pid, 0)`. If the process has exited, updates the status from
 /// `Working`/`Spawning` to `Completed`.
-fn poll_agent_status(registry: &AgentRegistry) {
-    for handle in registry.snapshot() {
+///
+/// Returns the set of team names whose teammates *all* transitioned
+/// from active to inactive on this poll. The caller uses this to fire
+/// a one-shot completion notification per team. (Teammates without a
+/// pid — e.g. errored-before-spawn — are treated as inactive and so
+/// still count toward "all done".)
+fn poll_agent_status(registry: &AgentRegistry) -> Vec<String> {
+    let snapshot = registry.snapshot();
+    // Active teammates per team *before* this poll reaps any exits.
+    let prev_active: std::collections::HashMap<String, bool> = active_team_set(&snapshot);
+
+    let mut completed_teams = Vec::new();
+    for handle in &snapshot {
         let Some(pid) = handle.pid else { continue };
         // Only check agents that are still in an active state.
         let status = handle.status();
@@ -920,6 +935,32 @@ fn poll_agent_status(registry: &AgentRegistry) {
             handle.set_current_tool(None);
         }
     }
+
+    // A team "completed" if it had active members before and has none now.
+    let still_active: std::collections::HashMap<String, bool> =
+        active_team_set(&registry.snapshot());
+    for team in prev_active.keys() {
+        if !still_active.contains_key(team) {
+            completed_teams.push(team.clone());
+        }
+    }
+    completed_teams
+}
+
+/// Map each team that currently has ≥1 active teammate to `true`.
+/// Non-teammate agents are ignored. Pure so it can be unit-tested.
+fn active_team_set(
+    handles: &[Arc<crate::commands::code_team::AgentHandle>],
+) -> std::collections::HashMap<String, bool> {
+    let mut map = std::collections::HashMap::new();
+    for h in handles {
+        if let crate::commands::code_team::AgentKind::Teammate { team } = &h.kind {
+            if h.status().is_active() {
+                map.insert(team.clone(), true);
+            }
+        }
+    }
+    map
 }
 
 /// Main event loop — polls crossterm events + agent messages,
@@ -1009,7 +1050,27 @@ fn run_loop(
         }
 
         // Poll background agent process status. Cheap syscall per agent.
-        poll_agent_status(&app.registry);
+        // Fires a one-shot notification when every teammate in a team finishes.
+        for team in poll_agent_status(&app.registry) {
+            if app.notified_teams.contains(&team) {
+                continue;
+            }
+            app.notified_teams.insert(team.clone());
+
+            let count = app
+                .registry
+                .snapshot()
+                .iter()
+                .filter(|h| matches!(&h.kind, crate::commands::code_team::AgentKind::Teammate { team: t } if t == &team))
+                .count();
+            crate::commands::code_hooks::run_team_complete_hooks(&app.cfg, &team, count);
+
+            let body = format!("Team “{team}” finished · {count} teammate(s) complete");
+            crate::commands::code_term::notify_terminal("Team complete", &body);
+            app.transcript
+                .push(TranscriptEntry::System(format!("› {body}")));
+            app.transcript.push(TranscriptEntry::Blank);
+        }
     }
 
     Ok(())
@@ -1860,6 +1921,78 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.transcript.push(TranscriptEntry::System(format!("error: {e}")));
             app.scroll = 0; // auto-scroll to bottom
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::code_team::{
+        AgentCapability, AgentColor, AgentKind, AgentRegistration, AgentStatus,
+    };
+
+    fn reg_teammate(team: &str) -> AgentRegistration {
+        AgentRegistration {
+            name: format!("{team}-agent"),
+            kind: AgentKind::Teammate { team: team.to_string() },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: None,
+            log_path: None,
+        }
+    }
+
+    fn register_with_status(
+        registry: &AgentRegistry,
+        team: &str,
+        status: AgentStatus,
+    ) -> Arc<crate::commands::code_team::AgentHandle> {
+        let h = registry.register(reg_teammate(team));
+        h.set_status(status);
+        h
+    }
+
+    #[test]
+    fn active_team_set_lists_only_active_teams() {
+        let registry = AgentRegistry::new();
+        register_with_status(&registry, "alpha", AgentStatus::Working);
+        register_with_status(&registry, "alpha", AgentStatus::Completed);
+        register_with_status(&registry, "beta", AgentStatus::Completed);
+        let map = active_team_set(&registry.snapshot());
+        assert!(map.contains_key("alpha"));
+        assert!(!map.contains_key("beta"));
+    }
+
+    #[test]
+    fn completed_team_is_detected_on_transition() {
+        // Simulate the two snapshots poll_agent_status compares: before
+        // (team active) and after the last member is reaped (team idle).
+        let registry = AgentRegistry::new();
+        let a = register_with_status(&registry, "alpha", AgentStatus::Working);
+        let prev = active_team_set(&registry.snapshot());
+        a.set_status(AgentStatus::Completed);
+        let after = active_team_set(&registry.snapshot());
+        let completed: Vec<String> =
+            prev.keys().filter(|t| !after.contains_key(*t)).cloned().collect();
+        assert_eq!(completed, vec!["alpha".to_string()]);
+    }
+
+    #[test]
+    fn partially_active_team_is_not_completed() {
+        let registry = AgentRegistry::new();
+        let a = register_with_status(&registry, "alpha", AgentStatus::Working);
+        register_with_status(&registry, "alpha", AgentStatus::Working);
+        let prev = active_team_set(&registry.snapshot());
+        // Only one of two finishes — team still active.
+        a.set_status(AgentStatus::Completed);
+        let after = active_team_set(&registry.snapshot());
+        let completed: Vec<String> =
+            prev.keys().filter(|t| !after.contains_key(*t)).cloned().collect();
+        assert!(completed.is_empty());
     }
 }
 
