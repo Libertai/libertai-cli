@@ -14,8 +14,11 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::commands::code_factory::Mode;
 use crate::commands::code_tui::app::App;
 use crate::commands::code_tui::theme;
+use crate::commands::code_ui::{context_percent, expand_status_line_template};
+use crate::commands::code_ui::BarStatus as LegacyBarStatus;
 
 /// Draw the spinner line: `⠋ label…  ●tool(detail)`.
 /// Only shown during Streaming phase; blank otherwise.
@@ -59,8 +62,39 @@ pub fn draw_queued(frame: &mut Frame, area: Rect, text: &str) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// Draw the rule line (status bar): `─ model ─ tokens ─ mode ─`.
+/// Draw the rule line (status bar): `─ model ─ tokens ─ mode ─ cost ─`.
+///
+/// When a `/statusline` template is configured (`app.bar.status_line_template`
+/// non-empty), the expanded template replaces the default spans. Otherwise the
+/// default chips are shown: model, context-% + token k-count, cost, mode,
+/// cwd basename, git branch, and the agent tab hint.
 pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
+    let mode = app.mode.get();
+
+    // Map the TUI BarStatus 1:1 onto the legacy code_ui::BarStatus so the
+    // shared template expander can be reused. The two structs now share
+    // field names; only cwd/git_branch are legacy-only and left at default.
+    let legacy_barstatus = LegacyBarStatus {
+        model_label: app.bar.model_label.clone(),
+        input_tokens: app.bar.input_tokens,
+        context_window: app.bar.context_window,
+        output_style: app.bar.output_style.clone(),
+        status_line_template: app.bar.status_line_template.clone(),
+        status_line_command: app.bar.status_line_command.clone(),
+        estimated_cost: app.bar.estimated_cost,
+    };
+
+    // Custom /statusline template overrides the default chips.
+    if !app.bar.status_line_template.is_empty() {
+        if let Some(rendered) =
+            expand_status_line_template(&app.bar.status_line_template, &legacy_barstatus, mode)
+        {
+            let line = Line::from(vec![Span::styled(rendered, theme::muted())]);
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
+    }
+
     let mut spans = Vec::new();
 
     // Model label.
@@ -71,8 +105,27 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
             .add_modifier(Modifier::BOLD),
     ));
 
-    // Token count (if available).
-    if app.bar.input_tokens > 0 {
+    // Context usage: percentage first (more useful), then the k-count.
+    if app.bar.context_window > 0 {
+        let pct = context_percent(app.bar.input_tokens, app.bar.context_window);
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(format!("ctx {pct}%"), theme::muted()));
+        // Token k-count alongside the percentage.
+        if app.bar.input_tokens >= 1000 {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                format!("{:.1}k", app.bar.input_tokens as f64 / 1000.0),
+                theme::muted(),
+            ));
+        } else if app.bar.input_tokens > 0 {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                format!("{}tok", app.bar.input_tokens),
+                theme::muted(),
+            ));
+        }
+    } else if app.bar.input_tokens > 0 {
+        // No context window known — fall back to a bare token count.
         spans.push(Span::raw("  "));
         if app.bar.input_tokens < 1000 {
             spans.push(Span::styled(
@@ -87,15 +140,6 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    // Context window.
-    if app.bar.context_window > 0 {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            format!("ctx {}k", app.bar.context_window / 1000),
-            theme::muted(),
-        ));
-    }
-
     // Estimated cost.
     if let Some(cost) = app.bar.estimated_cost {
         spans.push(Span::raw("  "));
@@ -103,15 +147,35 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // Mode.
-    let mode = app.mode.get();
     let mode_label = match mode {
-        crate::commands::code_factory::Mode::Normal => "",
-        crate::commands::code_factory::Mode::AcceptEdits => "accept-edits",
-        crate::commands::code_factory::Mode::Plan => "plan",
+        Mode::Normal => "",
+        Mode::AcceptEdits => "accept-edits",
+        Mode::Plan => "plan",
     };
     if !mode_label.is_empty() {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(mode_label, theme::warning()));
+    }
+
+    // cwd chip — basename only; the full path lives in /status.
+    if !app.bar.cwd.is_empty() {
+        let basename = std::path::Path::new(&app.bar.cwd)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty());
+        if let Some(name) = basename {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(format!("· {name}"), theme::muted()));
+        }
+    }
+
+    // git branch chip — `· git: <branch>` (plain prefix; no branch glyph in
+    // the theme yet, so a plain `git:` avoids a missing-glyph box).
+    if let Some(branch) = &app.bar.git_branch {
+        if !branch.is_empty() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(format!("· git: {branch}"), theme::muted()));
+        }
     }
 
     // Tab hint when agents are present and not already focused.

@@ -94,18 +94,19 @@ const STATUS_LINE_TOKENS: &[&str] = &[
 /// Snapshot of the last completed turn's token usage. Written in
 /// `repl_loop` after each successful prompt, read in `repaint()` to
 /// render the context-usage strip on the rule line.
+// pub(crate): the TUI (code_tui) builds one to feed expand_status_line_template.
 #[derive(Default, Clone)]
-struct BarStatus {
-    model_label: String,
-    input_tokens: u64,
-    context_window: u32,
-    output_style: Option<String>,
-    status_line_template: String,
-    status_line_command: String,
+pub(crate) struct BarStatus {
+    pub(crate) model_label: String,
+    pub(crate) input_tokens: u64,
+    pub(crate) context_window: u32,
+    pub(crate) output_style: Option<String>,
+    pub(crate) status_line_template: String,
+    pub(crate) status_line_command: String,
     /// Estimated session cost so far (pricing-table lookup over this
     /// session's usage records). `None` before the first turn or when
     /// the model has no pricing entry.
-    estimated_cost: Option<f64>,
+    pub(crate) estimated_cost: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -510,7 +511,7 @@ fn rule_chip(cols: usize, mode: Mode) -> String {
     )
 }
 
-fn status_line_command_text(command: &str) -> Option<String> {
+pub(crate) fn status_line_command_text(command: &str) -> Option<String> {
     let command = command.trim();
     if command.is_empty() {
         return None;
@@ -639,7 +640,7 @@ pub(crate) fn context_tokens(usage: &Usage) -> u64 {
     usage.input + usage.cache_read + usage.cache_write
 }
 
-fn context_percent(input_tokens: u64, context_window: u32) -> u32 {
+pub(crate) fn context_percent(input_tokens: u64, context_window: u32) -> u32 {
     if context_window == 0 {
         return 0;
     }
@@ -677,7 +678,7 @@ const FALLBACK_CONTEXT_WINDOW: u32 = 32_768;
 /// fallback (same hermeticity argument as `catalog_token_rates`: the
 /// dev machine's models.json / catalog cache must not leak into
 /// assertions).
-fn context_window_for(provider: &str, model: &str) -> u32 {
+pub(crate) fn context_window_for(provider: &str, model: &str) -> u32 {
     if cfg!(test) {
         return FALLBACK_CONTEXT_WINDOW;
     }
@@ -2952,7 +2953,11 @@ fn status_line_help() -> String {
     )
 }
 
-fn expand_status_line_template(template: &str, status: &BarStatus, mode: Mode) -> Option<String> {
+pub(crate) fn expand_status_line_template(
+    template: &str,
+    status: &BarStatus,
+    mode: Mode,
+) -> Option<String> {
     let template = normalize_status_line_template(template);
     if template.is_empty() {
         return None;

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
-use pi::model::AssistantMessageEvent;
+use pi::model::{AssistantMessageEvent, StopReason};
 use pi::sdk::{create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle};
 use ratatui::backend::CrosstermBackend;
 use ratatui::style::{Color, Style};
@@ -18,6 +18,9 @@ use tui_textarea::TextArea;
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
+use crate::commands::code_ui::{
+    context_percent, context_tokens, context_window_for, stop_line_text,
+};
 use crate::commands::code_hooks::{tool_policy_from_config, run_post_tool_hooks, run_stop_hooks, run_user_prompt_submit_hooks, SessionHookGuard};
 use crate::commands::code_identity_prompt;
 use crate::commands::code_mode_prompt;
@@ -76,9 +79,25 @@ pub enum AgentMsg {
     },
     /// Usage update for the status bar.
     Usage {
+        /// Context-window occupancy for the turn — `context_tokens(&msg.usage)`
+        /// (input + cache_read + cache_write), NOT `msg.usage.input`. This
+        /// matches the legacy status bar's single source of truth.
         input_tokens: u64,
+        /// `msg.usage.output` — tokens the model produced this turn.
+        output_tokens: u64,
+        /// `context_window_for(provider, model)` — resolved against pi's
+        /// models.json / the catalog, with a 32k fallback.
         context_window: u32,
+        /// `"{provider}/{model}"` label for the status chip.
         model_label: String,
+        /// `msg.usage.cost.total` — this turn's cost, accumulated into the
+        /// session total by the Usage handler.
+        cost_total: f64,
+        /// The pi `StopReason` for this turn, reused by the TurnEnd stop
+        /// line ([`stop_line_text`] takes `&StopReason`). Stored directly
+        /// (it's `Copy`) rather than stringifying so the rendered stop line
+        /// matches the legacy "● done · …" verb exactly.
+        stop_reason: StopReason,
     },
     /// System notice (compaction, retry, etc.) — dim in transcript.
     System(String),
@@ -175,6 +194,13 @@ pub struct App {
     pub cfg: Arc<LibertaiConfig>,
     /// Status bar info.
     pub bar: BarStatus,
+    /// Last reported turn usage (stop reason + ctx-in + out tokens),
+    /// stashed by the `AgentMsg::Usage` handler and consumed by the
+    /// `AgentMsg::TurnEnd` handler to render the dim stop line
+    /// ("● done · 12.3k in · 1.2k out · 42s"). `take()`n on turn end so a
+    /// later turn-end without a preceding Usage (e.g. an error path)
+    /// simply omits the line.
+    pub last_usage: Option<(StopReason, u64, u64)>,
 }
 
 /// REPL phases.
@@ -249,6 +275,18 @@ pub struct BarStatus {
     pub input_tokens: u64,
     pub context_window: u32,
     pub estimated_cost: Option<f64>,
+    /// Active output style (None == "default"). Set via `/output-style`.
+    pub output_style: Option<String>,
+    /// Status-line template string (legacy `{tokens}`/`{ctx}`/… tokens),
+    /// expanded by the footer renderer via `expand_status_line_template`.
+    pub status_line_template: String,
+    /// Status-line shell command whose stdout replaces the rule line.
+    pub status_line_command: String,
+    /// Current working directory, seeded at startup in `run()`.
+    pub cwd: String,
+    /// Current git branch, seeded at startup in `run()` (None if detached
+    /// or not in a git repo).
+    pub git_branch: Option<String>,
 }
 
 /// Active approval modal state.
@@ -696,10 +734,22 @@ fn spawn_background(
 
                         match result {
                             Ok(msg) => {
+                                // Reuse the shared context-occupancy helper so the
+                                // status bar, ctx %, and stop line all agree on one
+                                // number. NOTE: OpenAI double-counts cached tokens —
+                                // context_tokens already folds in cache_read + cache_write,
+                                // which is the pre-existing shared behavior; do not
+                                // "fix" it here.
+                                let input_tokens = context_tokens(&msg.usage);
+                                let context_window =
+                                    context_window_for(&msg.provider, &msg.model);
                                 let _ = agent_tx.send(AgentMsg::Usage {
-                                    input_tokens: msg.usage.input,
-                                    context_window: 0,
+                                    input_tokens,
+                                    output_tokens: msg.usage.output,
+                                    context_window,
                                     model_label: format!("{}/{}", msg.provider, msg.model),
+                                    cost_total: msg.usage.cost.total,
+                                    stop_reason: msg.stop_reason,
                                 });
                                 let _ =
                                     agent_tx.send(AgentMsg::TurnEnd { elapsed_secs: elapsed });
@@ -726,6 +776,23 @@ fn spawn_background(
                                 let _ = agent_tx.send(AgentMsg::CommandResult(
                                     format!("→ model set to {provider}/{model_id}"),
                                 ));
+                                // Re-resolve the context window for the new
+                                // provider/model and push a Usage update so the
+                                // status chip reflects the swap immediately. Cost
+                                // and token counts are zeroed (no turn happened);
+                                // the Usage handler only overwrites the window +
+                                // label here, leaving the session-cost accumulator
+                                // untouched. This is sent only on the explicit
+                                // SetModel path, so it can't clobber a real usage
+                                // update mid-turn.
+                                let _ = agent_tx.send(AgentMsg::Usage {
+                                    input_tokens: 0,
+                                    output_tokens: 0,
+                                    context_window: context_window_for(&provider, &model_id),
+                                    model_label: format!("{provider}/{model_id}"),
+                                    cost_total: 0.0,
+                                    stop_reason: StopReason::Stop,
+                                });
                             }
                             Err(e) => {
                                 let _ = agent_tx.send(AgentMsg::Error(format!("{e}")));
@@ -819,6 +886,10 @@ pub fn run(
     );
 
     // Build initial app state.
+    // Snapshot the status-line strings before `cfg` is moved into the
+    // App struct below (the `cfg,` shorthand moves it).
+    let status_line_template = cfg.status_line_template.clone();
+    let status_line_command = cfg.status_line_command.clone();
     let mut app = App {
         phase: Phase::Idle,
         mode,
@@ -852,9 +923,19 @@ pub fn run(
         cfg,
         bar: BarStatus {
             model_label: format!("{provider}/{model}"),
+            status_line_template,
+            status_line_command,
             ..Default::default()
         },
+        last_usage: None,
     };
+
+    // Seed the cwd + git-branch chips for the footer. These never change
+    // during a session (we don't follow `cd`), matching the legacy REPL.
+    app.bar.cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    app.bar.git_branch = current_git_branch();
 
     // Run the event loop.
     let result = run_loop(terminal, &mut app, agent_rx, cmd_tx, &shared_abort);
@@ -1379,6 +1460,29 @@ fn read_agent_log(log_path: &std::path::Path) -> Vec<String> {
     }
 }
 
+/// Best-effort current git branch, read directly from `.git/HEAD` (no
+/// subprocess). Returns `None` if not in a git repo, detached, or the
+/// file can't be read/parsed. Walks up from the cwd looking for the
+/// first `.git/HEAD`, matching how a shell prompt would resolve it.
+fn current_git_branch() -> Option<String> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let head = dir.join(".git").join("HEAD");
+        if let Ok(content) = std::fs::read_to_string(&head) {
+            let content = content.trim();
+            // On a branch: "ref: refs/heads/<branch>".
+            if let Some(rest) = content.strip_prefix("ref: refs/heads/") {
+                return Some(rest.to_string());
+            }
+            // Detached HEAD: a bare commit sha — no branch to report.
+            return None;
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
 fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) -> Option<Action> {
     let trimmed = input.trim();
     let (cmd, rest) = match trimmed.split_once(' ') {
@@ -1393,7 +1497,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
         }
         "/help" => {
             app.transcript.push(TranscriptEntry::System(
-                "Commands: /help /exit /clear /mode /model /status /history".to_string(),
+                "Commands: /help /exit /clear /mode /model /status /statusline /statusline-command /output-style /history".to_string(),
             ));
             app.transcript.push(TranscriptEntry::Blank);
             None
@@ -1493,10 +1597,109 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                 Mode::AcceptEdits => "accept-edits",
                 Mode::Plan => "plan",
             };
-            app.transcript.push(TranscriptEntry::System(format!(
-                "model: {}  ·  mode: {mode_label}  ·  tokens: {}",
-                app.bar.model_label, app.bar.input_tokens,
-            )));
+            // Build the status line segment-by-segment, each guarded for
+            // missing data so we never show a bare "·  ·" gap. Reuses the
+            // shared context_percent helper so the % matches the chip.
+            let mut parts: Vec<String> = Vec::new();
+            parts.push(format!("model: {}", app.bar.model_label));
+            parts.push(format!("mode: {mode_label}"));
+            let pct = context_percent(app.bar.input_tokens, app.bar.context_window);
+            let window_k = app.bar.context_window / 1000;
+            parts.push(format!(
+                "ctx: {pct}% ({} / {}k)",
+                app.bar.input_tokens, window_k,
+            ));
+            if let Some(cost) = app.bar.estimated_cost {
+                if cost > 0.0 {
+                    parts.push(format!("cost: ${cost:.2}"));
+                }
+            }
+            if !app.bar.cwd.is_empty() {
+                parts.push(format!("cwd: {}", app.bar.cwd));
+            }
+            if let Some(branch) = &app.bar.git_branch {
+                parts.push(format!("branch: {branch}"));
+            }
+            let style = app.bar.output_style.clone().unwrap_or_else(|| "default".to_string());
+            parts.push(format!("style: {style}"));
+            app.transcript
+                .push(TranscriptEntry::System(parts.join("  ·  ")));
+            None
+        }
+        "/statusline" => {
+            // `/statusline` (no arg) shows the current template.
+            // `/statusline <template>` stores it for the footer renderer
+            // (which expands it via `expand_status_line_template`).
+            // `/statusline-command <cmd>` stores a shell command whose
+            // stdout replaces the rule line. We only STORE here; the
+            // rendering is the footer's job.
+            if rest.is_empty() {
+                let shown = if app.bar.status_line_template.is_empty() {
+                    "no statusline template set".to_string()
+                } else {
+                    app.bar.status_line_template.clone()
+                };
+                app.transcript
+                    .push(TranscriptEntry::System(format!("statusline: {shown}")));
+            } else {
+                app.bar.status_line_template = rest.to_string();
+                app.transcript
+                    .push(TranscriptEntry::System("statusline set".to_string()));
+            }
+            None
+        }
+        "/statusline-command" => {
+            if rest.is_empty() {
+                let shown = if app.bar.status_line_command.is_empty() {
+                    "no statusline command set".to_string()
+                } else {
+                    app.bar.status_line_command.clone()
+                };
+                app.transcript
+                    .push(TranscriptEntry::System(format!("statusline-command: {shown}")));
+            } else {
+                app.bar.status_line_command = rest.to_string();
+                app.transcript.push(TranscriptEntry::System(
+                    "statusline-command set".to_string(),
+                ));
+            }
+            None
+        }
+        "/output-style" => {
+            // `/output-style` (no arg) or `/output-style status` shows the
+            // current style. `/output-style <name>` looks the style up via
+            // the pure `find_style` helper (we do NOT call the legacy
+            // handle_output_style, which prints to stdout). "default"
+            // clears the override; any other found name sets it.
+            if rest.is_empty() || rest == "status" {
+                let shown = app
+                    .bar
+                    .output_style
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string());
+                app.transcript
+                    .push(TranscriptEntry::System(format!("output style: {shown}")));
+            } else {
+                let cwd = std::env::current_dir().ok();
+                match crate::commands::code_output_style::find_style(rest, cwd.as_deref()) {
+                    Some(style) => {
+                        if style.name == "default" {
+                            app.bar.output_style = None;
+                        } else {
+                            app.bar.output_style = Some(style.name.clone());
+                        }
+                        app.transcript.push(TranscriptEntry::System(format!(
+                            "→ output style: {}",
+                            app.bar.output_style.clone().unwrap_or_else(|| "default".to_string())
+                        )));
+                    }
+                    None => {
+                        app.transcript.push(TranscriptEntry::System(format!(
+                            "unknown output style: {rest}",
+                        )));
+                    }
+                }
+            }
             None
         }
         "/history" => {
@@ -1790,7 +1993,21 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.current_tool_detail = String::new();
             app.spinner_label = "thinking…";
         }
-        AgentMsg::TurnEnd { elapsed_secs: _ } => {
+        AgentMsg::TurnEnd { elapsed_secs } => {
+            // Dim end-of-turn stop line ("● done · 12.3k in · 1.2k out · 42s"),
+            // reusing the legacy `stop_line_text` so the verb + figures
+            // match the REPL exactly. The stop reason + ctx-in + out are
+            // stashed by the Usage handler; `.take()` so a turn-end without
+            // a preceding Usage (e.g. an error path) simply omits the line.
+            if let Some((reason, ctx_in, out)) = app.last_usage.take() {
+                app.transcript.push(TranscriptEntry::System(stop_line_text(
+                    &reason,
+                    ctx_in,
+                    out,
+                    elapsed_secs,
+                )));
+            }
+
             app.phase = Phase::Idle;
             app.turn_started = None;
             app.current_tool = None;
@@ -1829,12 +2046,32 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
         }
         AgentMsg::Usage {
             input_tokens,
+            output_tokens,
             context_window,
             model_label,
+            cost_total,
+            stop_reason,
         } => {
             app.bar.input_tokens = input_tokens;
             app.bar.context_window = context_window;
             app.bar.model_label = model_label;
+            // Session-cost accumulator: `estimated_cost` was previously
+            // declared but never assigned (the core bug this fixes).
+            // Each turn's `cost_total` is added to the running session
+            // total. NaN is guarded by clamping the addend to >= 0 — pi's
+            // pricing table yields finite values, but a missing entry can
+            // surface as 0.0, never NaN, so this is belt-and-suspenders.
+            let addend = if cost_total.is_nan() || cost_total < 0.0 {
+                0.0
+            } else {
+                cost_total
+            };
+            let prev = app.bar.estimated_cost.unwrap_or(0.0);
+            app.bar.estimated_cost = Some(prev + addend);
+            // Stash for the TurnEnd stop line. `.take()`n there, so a
+            // turn-end without a preceding Usage (error path) just omits
+            // the line rather than rendering stale numbers.
+            app.last_usage = Some((stop_reason, input_tokens, output_tokens));
         }
         AgentMsg::System(text) => {
             app.transcript.push(TranscriptEntry::System(text));
@@ -1961,6 +2198,7 @@ mod tests {
                 model_label: "openai/gpt-4o".to_string(),
                 ..Default::default()
             },
+            last_usage: None,
         }
     }
 
@@ -2266,6 +2504,311 @@ mod tests {
         let action = handle_slash_command(&mut app, "/quit", &cmd_tx);
 
         assert!(matches!(action, Some(Action::Quit)));
+    }
+
+    // --- M2: cost / context / template / stop-line / statusline / output-style
+
+    // (1) Cost accumulation: two AgentMsg::Usage updates accumulate into
+    // app.bar.estimated_cost. Driven through the real handle_agent_msg
+    // Usage handler (no extraction needed — the handler is already a
+    // standalone free function, so we call it directly).
+    #[test]
+    fn usage_accumulates_cost_across_turns() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let mk = |cost: f64, stop: StopReason| AgentMsg::Usage {
+            input_tokens: 1_000,
+            output_tokens: 200,
+            context_window: context_window_for("openai", "gpt-4o"),
+            model_label: "openai/gpt-4o".to_string(),
+            cost_total: cost,
+            stop_reason: stop,
+        };
+
+        handle_agent_msg(&mut app, mk(0.12, StopReason::Stop), &cmd_tx);
+        handle_agent_msg(&mut app, mk(0.34, StopReason::Stop), &cmd_tx);
+
+        assert_eq!(app.bar.estimated_cost, Some(0.46));
+        // The latest Usage also refreshes the bar's token/window fields.
+        assert_eq!(app.bar.input_tokens, 1_000);
+        assert_eq!(app.bar.model_label, "openai/gpt-4o");
+    }
+
+    // NaN / negative addends are clamped to 0 by the Usage handler so the
+    // session total never goes non-finite or negative.
+    #[test]
+    fn usage_clamps_nan_and_negative_cost() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                context_window: 0,
+                model_label: "openai/gpt-4o".to_string(),
+                cost_total: f64::NAN,
+                stop_reason: StopReason::Stop,
+            },
+            &cmd_tx,
+        );
+        assert_eq!(app.bar.estimated_cost, Some(0.0));
+
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                context_window: 0,
+                model_label: "openai/gpt-4o".to_string(),
+                cost_total: -5.0,
+                stop_reason: StopReason::Stop,
+            },
+            &cmd_tx,
+        );
+        assert_eq!(app.bar.estimated_cost, Some(0.0));
+    }
+
+    // (2) context_percent via the pub(crate) helper: a few (input, window)
+    // pairs round correctly. window 0 → 0% (the helper's guard).
+    #[test]
+    fn context_percent_rounds_known_pairs() {
+        // 50% of 100k.
+        assert_eq!(context_percent(50_000, 100_000), 50);
+        // 0% when the window is unknown (guard against divide-by-zero).
+        assert_eq!(context_percent(1_000, 0), 0);
+        // Clamps to 100% when input exceeds the window.
+        assert_eq!(context_percent(200_000, 100_000), 100);
+        // Rounding: 33.3% of 100k rounds to 33.
+        assert_eq!(context_percent(33_300, 100_000), 33);
+    }
+
+    // context_window_for is hermetic under cfg!(test) — always the 32k
+    // fallback — so context-% assertions can lean on a known window.
+    #[test]
+    fn context_window_for_is_hermetic_under_test() {
+        let window = context_window_for("openai", "gpt-4o");
+        assert_eq!(window, 32_768);
+        // ~3% of the hermetic 32k window.
+        assert_eq!(context_percent(1_000, window), 3);
+    }
+
+    // (3) status-line template expansion: build a legacy BarStatus and
+    // call expand_status_line_template so the footer reuse path is
+    // guarded. Uses full crate paths because expand_status_line_template
+    // is pub(crate) in code_ui and not re-exported by app.rs.
+    #[test]
+    fn expand_status_line_template_substitutes_tokens() {
+        use crate::commands::code_ui::BarStatus as LegacyBarStatus;
+        use crate::commands::code_ui::expand_status_line_template;
+
+        let legacy = LegacyBarStatus {
+            model_label: "openai/gpt-4o".to_string(),
+            input_tokens: 50_000,
+            context_window: 100_000,
+            output_style: Some("concise".to_string()),
+            status_line_template: String::new(),
+            status_line_command: String::new(),
+            estimated_cost: Some(1.50),
+        };
+
+        let rendered =
+            expand_status_line_template("{model} {ctx} {cost}", &legacy, Mode::Normal)
+                .expect("non-empty template renders");
+        // {model} → part after the slash.
+        assert!(rendered.contains("gpt-4o"), "model token: {rendered:?}");
+        // {ctx} → "50%".
+        assert!(rendered.contains("50%"), "ctx token: {rendered:?}");
+        // {cost} → "~$1.50" (the legacy expander prefixes ~ and uses dollar()).
+        assert!(rendered.contains("~$1.50"), "cost token: {rendered:?}");
+    }
+
+    // An empty template yields None (the footer falls back to default chips).
+    #[test]
+    fn expand_status_line_template_empty_returns_none() {
+        use crate::commands::code_ui::BarStatus as LegacyBarStatus;
+        use crate::commands::code_ui::expand_status_line_template;
+
+        let legacy = LegacyBarStatus {
+            model_label: "openai/gpt-4o".to_string(),
+            ..Default::default()
+        };
+        assert!(expand_status_line_template("", &legacy, Mode::Normal).is_none());
+    }
+
+    // (4) stop_line_text formatting: the rendered stop line contains the
+    // expected verb + the humanized in/out token strings + the elapsed
+    // figure. Reuses the pub(crate) helper (imported at the top of app.rs).
+    #[test]
+    fn stop_line_text_contains_verb_tokens_and_elapsed() {
+        let line = stop_line_text(&StopReason::Stop, 18_324, 272, 41);
+        // Verb.
+        assert!(line.contains("● done"), "verb: {line:?}");
+        // In tokens humanized (>=1k → "18.3k").
+        assert!(line.contains("18.3k in"), "in tokens: {line:?}");
+        // Out tokens (<1k → plain "272").
+        assert!(line.contains("272 out"), "out tokens: {line:?}");
+        // Elapsed (<60s → "41s").
+        assert!(line.ends_with("41s"), "elapsed: {line:?}");
+    }
+
+    #[test]
+    fn stop_line_text_handles_minutes_and_length_reason() {
+        let line = stop_line_text(&StopReason::Length, 900, 1_200, 128);
+        assert!(line.contains("● max tokens"), "verb: {line:?}");
+        // Sub-1k in stays plain; >=1k out humanizes.
+        assert!(line.contains("900 in"), "in tokens: {line:?}");
+        assert!(line.contains("1.2k out"), "out tokens: {line:?}");
+        // >=60s renders as m:ss.
+        assert!(line.ends_with("2m08s"), "elapsed: {line:?}");
+    }
+
+    // (5) /statusline: with an arg it stores the template; with no arg it
+    // reports the stored template.
+    #[test]
+    fn slash_statusline_sets_template() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/statusline {model} {ctx}", &cmd_tx);
+
+        assert!(action.is_none());
+        assert_eq!(app.bar.status_line_template, "{model} {ctx}");
+        // A confirmation System entry was pushed.
+        assert!(app
+            .transcript
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::System(ref s) if s == "statusline set")));
+    }
+
+    #[test]
+    fn slash_statusline_no_arg_reports_template() {
+        let mut app = test_app();
+        app.bar.status_line_template = "{model}".to_string();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/statusline", &cmd_tx);
+
+        assert!(action.is_none());
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s == "statusline: {model}"
+        )));
+        // Template is left untouched.
+        assert_eq!(app.bar.status_line_template, "{model}");
+    }
+
+    #[test]
+    fn slash_statusline_no_arg_reports_unset() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/statusline", &cmd_tx);
+
+        assert!(action.is_none());
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s == "statusline: no statusline template set"
+        )));
+    }
+
+    // (6) /output-style: a known builtin name sets app.bar.output_style; an
+    // unknown name pushes an error System entry and leaves output_style
+    // unchanged. "review" is a builtin (always resolves regardless of disk
+    // state), so the known-name path is hermetic.
+    #[test]
+    fn slash_output_style_known_name_sets_style() {
+        // Confirm "review" resolves from builtins before relying on it.
+        assert!(crate::commands::code_output_style::find_style("review", None).is_some());
+
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/output-style review", &cmd_tx);
+
+        assert!(action.is_none());
+        assert_eq!(app.bar.output_style.as_deref(), Some("review"));
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s == "→ output style: review"
+        )));
+    }
+
+    #[test]
+    fn slash_output_style_default_clears_override() {
+        let mut app = test_app();
+        app.bar.output_style = Some("review".to_string());
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/output-style default", &cmd_tx);
+
+        assert!(action.is_none());
+        assert!(app.bar.output_style.is_none(), "default clears the override");
+    }
+
+    #[test]
+    fn slash_output_style_unknown_name_pushes_error_and_leaves_style() {
+        let mut app = test_app();
+        app.bar.output_style = Some("review".to_string());
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/output-style no-such-style", &cmd_tx);
+
+        assert!(action.is_none());
+        // The override is untouched.
+        assert_eq!(app.bar.output_style.as_deref(), Some("review"));
+        // An error System entry was pushed.
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s.contains("unknown output style: no-such-style")
+        )));
+    }
+
+    #[test]
+    fn slash_output_style_no_arg_reports_current() {
+        let mut app = test_app();
+        app.bar.output_style = Some("concise".to_string());
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/output-style", &cmd_tx);
+
+        assert!(action.is_none());
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s == "output style: concise"
+        )));
+    }
+
+    // /status surfaces the mocked git branch + cost (no real env / git
+    // dependency — we set the fields directly). Guards the M2 /status
+    // expansion that adds branch + cost chips.
+    #[test]
+    fn slash_status_includes_mocked_branch_and_cost() {
+        let mut app = test_app();
+        app.bar.git_branch = Some("main".to_string());
+        app.bar.estimated_cost = Some(0.42);
+        app.bar.input_tokens = 1_000;
+        app.bar.context_window = 32_768;
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/status", &cmd_tx);
+
+        assert!(action.is_none());
+        let status_line = app
+            .transcript
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                TranscriptEntry::System(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .expect("a /status System entry was pushed");
+        assert!(status_line.contains("branch: main"), "branch: {status_line:?}");
+        assert!(status_line.contains("cost: $0.42"), "cost: {status_line:?}");
+        // ctx % derived from the (known) hermetic window.
+        assert!(status_line.contains("ctx: 3%"), "ctx: {status_line:?}");
     }
 }
 
