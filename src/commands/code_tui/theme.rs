@@ -85,6 +85,22 @@ pub fn bold_muted() -> Style {
     Style::default().fg(MUTED).add_modifier(Modifier::BOLD)
 }
 
+/// Inline code — muted + bold, distinct from the accent+BOLD `❯` prompt
+/// so backtick spans read as code rather than echoing the prompt glyph.
+pub fn code() -> Style {
+    Style::default().fg(MUTED).add_modifier(Modifier::BOLD)
+}
+
+/// Markdown heading style by level: H1 bold accent, H2 bold, H3+ bold muted.
+/// Reuses existing styles — no new colors.
+pub fn heading(level: usize) -> Style {
+    match level {
+        1 => bold_accent(),
+        2 => bold(),
+        _ => bold_muted(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Agent color rotation
 // ---------------------------------------------------------------------------

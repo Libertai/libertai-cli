@@ -14,6 +14,7 @@ use crate::commands::code_tui::agents_panel;
 use crate::commands::code_tui::app::{App, Phase, Focus};
 use crate::commands::code_tui::footer;
 use crate::commands::code_tui::input;
+use crate::commands::code_tui::markdown;
 use crate::commands::code_tui::scrollback;
 use crate::commands::code_tui::theme;
 use crate::commands::code_tui::wrap;
@@ -26,8 +27,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // so completed/failed ones remain visible.
     let agents = app.registry.snapshot();
 
+    // Compute the agent-row count once from the terminal height (not the
+    // footer area height) and share it between height sizing and layout so
+    // the two never disagree on the `term_height / 3` denominator
+    // (tui-bugs #11).
+    let agent_rows = agent_rows(&agents, area.height);
+
     // Compute footer height from the frame area, not a separate syscall.
-    let footer_height = compute_footer_height(&agents, &app.queued, area.height);
+    let footer_height = compute_footer_height(agent_rows, &app.queued, area.height);
 
     // Split: scrollback (variable) + footer (fixed).
     let chunks = Layout::default()
@@ -45,7 +52,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     scrollback::draw(frame, scrollback_area, app);
 
     // Draw footer (agents + spinner + queued + rule + input).
-    draw_footer(frame, footer_area, app, &agents);
+    draw_footer(frame, footer_area, app, &agents, agent_rows);
 
     // Draw approval modal overlay if active.
     if app.phase == Phase::Approval {
@@ -63,16 +70,27 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-/// Compute the footer height from the snapshot of agents and queued msgs.
-///
-/// `term_height` is the frame's area height — not a separate syscall.
-fn compute_footer_height(agents: &[Arc<AgentHandle>], queued: &[String], term_height: u16) -> u16 {
-    let agent_header = if agents.is_empty() { 0 } else { 1 };
-    let agent_rows = if agents.is_empty() {
+/// Agent row count for the footer's agents panel, clamped to a third of
+/// the terminal height. Computed once in [`draw`] and shared with
+/// [`compute_footer_height`] (to size the footer) and [`draw_footer`]
+/// (to lay out + render the panel) so the two never disagree on the
+/// `term_height / 3` denominator (tui-bugs #11).
+fn agent_rows(agents: &[Arc<AgentHandle>], term_height: u16) -> u16 {
+    if agents.is_empty() {
         0
     } else {
         agents.len().min((term_height / 3) as usize) as u16
-    };
+    }
+}
+
+/// Compute the footer height from the precomputed agent-row count and
+/// the snapshot of queued msgs.
+///
+/// `term_height` is the frame's area height — not a separate syscall.
+/// `agent_rows` is computed once by the caller via [`agent_rows`] and
+/// passed in so the height and the layout use the same value.
+fn compute_footer_height(agent_rows: u16, queued: &[String], term_height: u16) -> u16 {
+    let agent_header = if agent_rows > 0 { 1 } else { 0 };
     let queued_rows = queued.len().min(3) as u16;
     // spinner + queued + rule + input
     let base = 1 + queued_rows + 1 + 1;
@@ -81,18 +99,19 @@ fn compute_footer_height(agents: &[Arc<AgentHandle>], queued: &[String], term_he
 }
 
 /// Draw the footer block: agents panel + spinner + queued + rule + input.
+///
+/// `agent_rows` is the precomputed panel row count (see [`agent_rows`]),
+/// sized off the terminal height — not `area.height`, which is the
+/// already-clamped footer area and would disagree with the height
+/// computation (tui-bugs #11).
 fn draw_footer(
     frame: &mut Frame,
     area: Rect,
     app: &mut App,
     agents: &[Arc<AgentHandle>],
+    agent_rows: u16,
 ) {
     let agent_header = if agents.is_empty() { 0 } else { 1 };
-    let agent_rows = if agents.is_empty() {
-        0
-    } else {
-        agents.len().min((area.height / 3) as usize) as u16
-    };
     let queued_rows = app.queued.len().min(3) as u16;
     let spinner_h = 1u16;
     let rule_h = 1u16;
@@ -394,7 +413,8 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
 fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+    use unicode_width::UnicodeWidthStr;
 
     let Some(overlay) = &app.agent_overlay else {
         return;
@@ -429,12 +449,21 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
 
-    // Build the content lines.
+    // Usable text width inside the bordered overlay: the block's
+    // Borders::ALL consumes one column on each side, leaving
+    // overlay_width − 2. This is the column budget markdown::render
+    // pre-wraps to, so each returned Line is one visual row (code-block
+    // lines excepted — they're emitted hard and may overflow, see
+    // markdown::render_code_block).
+    let usable_width = overlay_width.saturating_sub(2) as usize;
+
+    // Build the content lines. Render each transcript chunk as markdown
+    // pre-wrapped to usable_width (mirrors scrollback's assistant path),
+    // so the Paragraph below wraps nothing. A blank separator between
+    // chunks preserves the prior visual grouping.
     let mut lines: Vec<Line> = Vec::new();
     for text in &agent_lines {
-        for line in text.lines() {
-            lines.push(Line::from(Span::raw(line.to_string())));
-        }
+        lines.extend(markdown::render(text, usable_width));
         lines.push(Line::from(""));
     }
 
@@ -445,16 +474,20 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
         )));
     }
 
-    // Scroll calculation (same bottom-anchoring as scrollback).
-    let usable_width = overlay_width.saturating_sub(4) as usize;
+    // Scroll calculation (same bottom-anchoring as scrollback). The
+    // markdown-rendered lines are pre-wrapped to usable_width, so most
+    // are exactly one visual row; code-block / blank lines may differ.
+    // Count DISPLAY width (not chars) and ceil-divide by usable_width —
+    // minimum 1 — so wide glyphs and the non-pre-wrapped lines stay
+    // consistent with what Paragraph renders with wrap off.
     let total_visual: usize = lines
         .iter()
         .map(|l| {
-            let chars: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
-            if chars == 0 {
+            let w: usize = l.spans.iter().map(|s| s.content.width()).sum();
+            if w == 0 {
                 1
             } else {
-                ((chars + usable_width.saturating_sub(1)) / usable_width.max(1)).max(1)
+                ((w + usable_width.saturating_sub(1)) / usable_width.max(1)).max(1)
             }
         })
         .sum();
@@ -463,9 +496,11 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let scroll_from_top =
         max_from_top.saturating_sub(overlay.scroll as usize).min(max_from_top);
 
+    // No `.wrap()`: content is already pre-wrapped to usable_width, and
+    // leaving wrap off stops ratatui from double-counting (and drifting
+    // the scroll position against the row count above).
     let para = Paragraph::new(lines)
         .block(block)
-        .scroll((scroll_from_top as u16, 0))
-        .wrap(Wrap::default());
+        .scroll((scroll_from_top as u16, 0));
     frame.render_widget(para, overlay_area);
 }

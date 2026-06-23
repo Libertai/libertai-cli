@@ -4,11 +4,11 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
+use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use unicode_width::UnicodeWidthStr;
 
 use crate::commands::code_tui::app::{App, TranscriptEntry};
-use crate::commands::code_tui::markdown;
-use crate::commands::code_tui::theme;
+use crate::commands::code_tui::{markdown, theme, wrap};
 
 /// Draw the scrollback transcript.
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -16,22 +16,47 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
+    // Reserve a 1-column right margin for the scrollbar so it doesn't
+    // clobber the last column of wrapped text.  The remaining width is
+    // the usable column budget that markdown::render pre-wraps to, and
+    // that the scroll-row count below divides by.
+    let para_area = Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+    let usable_width = para_area.width as usize;
+
     // Build lines from transcript entries.
     let mut lines: Vec<Line> = Vec::new();
 
     for entry in &app.transcript {
         match entry {
             TranscriptEntry::User(text) => {
-                lines.push(Line::from(vec![
-                    Span::styled(theme::glyph::USER_PROMPT, theme::bold_accent()),
-                    Span::raw(" "),
-                    Span::styled(text, theme::bold()),
-                ]));
+                // Pre-wrap the user prompt to usable_width so a long
+                // prompt does not overflow once Paragraph no longer
+                // wraps.  The `❯` marker + " " prefixes only the first
+                // wrapped line; continuation lines are raw text.
+                let marker = theme::glyph::USER_PROMPT;
+                let prefix_w = marker.width() + 1; // glyph + space
+                let wrapped = wrap::word_wrap(text, usable_width, prefix_w);
+                for (i, chunk) in wrapped.into_iter().enumerate() {
+                    if i == 0 {
+                        lines.push(Line::from(vec![
+                            Span::styled(marker, theme::bold_accent()),
+                            Span::raw(" "),
+                            Span::styled(chunk, theme::bold()),
+                        ]));
+                    } else {
+                        lines.push(Line::from(vec![Span::styled(chunk, theme::bold())]));
+                    }
+                }
             }
             TranscriptEntry::Assistant(text) => {
                 // Render markdown: headings, bold, italic, code, lists, etc.
-                // The `●` marker goes on the first rendered line.
-                let md_lines = markdown::render(text);
+                // The `●` marker goes on the first rendered line.  render
+                // pre-wraps each logical line to usable_width, so each
+                // returned Line is one visual row.
+                let md_lines = markdown::render(text, usable_width);
                 if md_lines.is_empty() {
                     // Empty assistant text — just show the marker.
                     lines.push(Line::from(vec![
@@ -76,7 +101,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
                     .find_by_name(agent_name)
                     .map(|h| theme::agent_color_for(h.color))
                     .unwrap_or(theme::MUTED);
-                let md_lines = markdown::render(text);
+                let md_lines = markdown::render(text, usable_width);
                 for (i, md_line) in md_lines.into_iter().enumerate() {
                     if i == 0 {
                         let mut v = vec![
@@ -130,26 +155,23 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
-    // Reserve a 1-column right margin for the scrollbar so it doesn't
-    // clobber the last column of wrapped text.
-    let para_area = Rect {
-        width: area.width.saturating_sub(1),
-        ..area
-    };
-
-    // With Wrap enabled, Paragraph wraps long lines to fit the width.
-    // We must count *visual* (wrapped) lines, not source lines, for
-    // the scroll calculation.  Each Line's visual row count is
-    // ceil(char_count / usable_width), minimum 1.
-    let usable_width = para_area.width as usize;
+    // Paragraph no longer wraps (markdown::render pre-wraps; User text is
+    // pre-wrapped above).  We must still count *visual* rows for the scroll
+    // calculation: a pre-wrapped markdown Line already fits usable_width so
+    // it is exactly one row, but the single-Line entries (Tool / System /
+    // AutoAllowed / SubagentTool / SubagentEnd) are NOT pre-wrapped and may
+    // still exceed usable_width.  Use DISPLAY width (not char count) so
+    // wide CJK / emoji glyphs do not throw the count off, and ceil-divide by
+    // usable_width — minimum 1, consistent with the pre-wrapped markdown
+    // Lines whose width is <= usable_width (rows == 1).
     let total_visual_lines: usize = lines
         .iter()
         .map(|line| {
-            let chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-            if chars == 0 {
+            let w: usize = line.spans.iter().map(|s| s.content.width()).sum();
+            if w == 0 {
                 1
             } else {
-                ((chars + usable_width.saturating_sub(1)) / usable_width.max(1)).max(1)
+                ((w + usable_width.saturating_sub(1)) / usable_width.max(1)).max(1)
             }
         })
         .sum();
@@ -162,10 +184,11 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let scroll_from_top =
         max_from_top.saturating_sub(app.scroll as usize).min(max_from_top);
 
-    // Render with scroll + wrap.
+    // Render with scroll.  No `.wrap()`: content is already pre-wrapped to
+    // usable_width, and leaving wrap off stops ratatui from double-counting
+    // (and thus drifting the scroll position against the row count above).
     let paragraph = Paragraph::new(lines)
-        .scroll((scroll_from_top as u16, 0))
-        .wrap(Wrap::default());
+        .scroll((scroll_from_top as u16, 0));
     frame.render_widget(paragraph, para_area);
 
     // Draw scrollbar in the freed rightmost column.

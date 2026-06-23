@@ -3433,6 +3433,7 @@ dependencies = [
  "tiny_http",
  "toml",
  "tui-textarea-2",
+ "unicode-width 0.2.2",
  "url",
  "uuid",
  "zeroize",
