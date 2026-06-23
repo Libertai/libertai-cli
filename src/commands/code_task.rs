@@ -351,6 +351,8 @@ impl Tool for TaskTool {
                 model: model_for_handle,
                 prompt_preview,
                 parent: None,
+                pid: None,
+                log_path: None,
             },
         );
 

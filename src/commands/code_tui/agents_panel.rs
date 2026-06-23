@@ -43,20 +43,25 @@ pub fn draw_header(frame: &mut Frame, area: Rect, count: usize, focused: bool) {
 }
 
 /// Draw the agent rows. `selected` is the index of the highlighted
-/// agent (only when `focused` is true).
+/// agent (only when `focused` is true). `scroll_offset` is the number
+/// of agents skipped from the top so the selected one is always
+/// visible when the list is longer than the available rows.
 pub fn draw(
     frame: &mut Frame,
     area: Rect,
     agents: &[Arc<AgentHandle>],
     max_rows: usize,
+    scroll_offset: usize,
     selected: usize,
     focused: bool,
 ) {
     let lines: Vec<Line> = agents
         .iter()
+        .skip(scroll_offset)
         .take(max_rows)
         .enumerate()
         .map(|(i, handle)| {
+            let actual_index = i + scroll_offset;
             let status = handle.status();
             let icon = glyph::status_icon(status);
             let color = theme::agent_color_for(handle.color);
@@ -64,7 +69,7 @@ pub fn draw(
             let mut spans = Vec::new();
 
             // Selection indicator.
-            if focused && i == selected {
+            if focused && actual_index == selected {
                 spans.push(Span::styled("▸ ", theme::bold_accent()));
             } else {
                 spans.push(Span::raw("  "));
@@ -93,7 +98,7 @@ pub fn draw(
             }
 
             // Agent name — colored by agent color.
-            let name_style = if focused && i == selected {
+            let name_style = if focused && actual_index == selected {
                 Style::default().fg(color).add_modifier(ratatui::style::Modifier::BOLD | ratatui::style::Modifier::REVERSED)
             } else {
                 Style::default().fg(color)

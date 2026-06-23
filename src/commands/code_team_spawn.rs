@@ -230,6 +230,8 @@ pub fn spawn_team(
                 model: resolved_model.to_string(),
                 prompt_preview: teammate.task.chars().take(80).collect(),
                 parent: None,
+                pid: Some(started.pid),
+                log_path: Some(started.log_path.clone()),
             };
             let handle = reg.register(reg_entry);
             handle.set_status(crate::commands::code_team::AgentStatus::Working);

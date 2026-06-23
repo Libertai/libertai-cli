@@ -900,6 +900,28 @@ pub fn run(
     result
 }
 
+/// Poll background agent processes to detect completion. For each
+/// agent with a `pid`, checks if the process is still alive using
+/// `kill(pid, 0)`. If the process has exited, updates the status from
+/// `Working`/`Spawning` to `Completed`.
+fn poll_agent_status(registry: &AgentRegistry) {
+    for handle in registry.snapshot() {
+        let Some(pid) = handle.pid else { continue };
+        // Only check agents that are still in an active state.
+        let status = handle.status();
+        if !status.is_active() {
+            continue;
+        }
+        // kill(pid, 0) returns Err(ESRCH) if the process no longer
+        // exists. On Unix this is a cheap syscall.
+        let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+        if !alive {
+            handle.set_status(crate::commands::code_team::AgentStatus::Completed);
+            handle.set_current_tool(None);
+        }
+    }
+}
+
 /// Main event loop — polls crossterm events + agent messages,
 /// updates app state, and draws.
 fn run_loop(
@@ -985,6 +1007,9 @@ fn run_loop(
         if app.phase == Phase::Streaming {
             app.spinner_idx = (app.spinner_idx + 1) % theme::SPINNER_FRAMES.len();
         }
+
+        // Poll background agent process status. Cheap syscall per agent.
+        poll_agent_status(&app.registry);
     }
 
     Ok(())
@@ -1055,7 +1080,7 @@ fn handle_key(
             app.agent_overlay = None;
             return None;
         }
-        let agents = app.registry.active();
+        let agents = app.registry.snapshot();
         if agents.is_empty() {
             return None; // no agents to browse
         }
@@ -1077,7 +1102,7 @@ fn handle_key(
 
     // Agent panel browse mode.
     if app.focus == Focus::Agents {
-        let agents = app.registry.active();
+        let agents = app.registry.snapshot();
         match key.code {
             KeyCode::Up => {
                 if !agents.is_empty() {
@@ -1282,9 +1307,20 @@ fn handle_agent_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     None
 }
 
-/// Collect transcript entries for a specific agent (by name).
-/// Returns text lines suitable for the overlay view.
+/// Collect output for a specific agent (by name). For background
+/// agents with a `log_path`, reads the log file. For in-process
+/// subagents, scans the transcript for `SubagentText`/`SubagentTool`
+/// entries.
 pub fn agent_transcript(app: &App, agent_name: &str) -> Vec<String> {
+    // If this agent has a log file, read it — that's the authoritative
+    // output for background agents / teammates.
+    if let Some(handle) = app.registry.find_by_name(agent_name) {
+        if let Some(log_path) = &handle.log_path {
+            return read_agent_log(log_path);
+        }
+    }
+
+    // Fall back to transcript entries (in-process subagents).
     let mut lines = Vec::new();
     for entry in &app.transcript {
         match entry {
@@ -1309,6 +1345,16 @@ pub fn agent_transcript(app: &App, agent_name: &str) -> Vec<String> {
         }
     }
     lines
+}
+
+/// Read an agent's log file and return its contents as lines. The log
+/// file is the combined stdout+stderr of the background `libertai code
+/// --print` process. Returns an empty vec if the file can't be read.
+fn read_agent_log(log_path: &std::path::Path) -> Vec<String> {
+    match std::fs::read_to_string(log_path) {
+        Ok(content) => content.lines().map(String::from).collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) -> Option<Action> {

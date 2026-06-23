@@ -115,7 +115,7 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // Tab hint when agents are present and not already focused.
-    let agent_count = app.registry.active_count();
+    let agent_count = app.registry.total_count();
     if agent_count > 0 {
         spans.push(Span::raw("  "));
         let hint = match app.focus {

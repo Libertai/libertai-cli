@@ -15384,6 +15384,8 @@ mod tests {
             model: "m".to_string(),
             prompt_preview: "p".to_string(),
             parent: None,
+            pid: None,
+            log_path: None,
         });
         h.set_current_tool(Some("read".to_string()));
         // Elapsed is ~0s right after spawn; assert the structure rather
@@ -15411,6 +15413,8 @@ mod tests {
             model: "m".to_string(),
             prompt_preview: "p".to_string(),
             parent: None,
+            pid: None,
+            log_path: None,
         });
         let line = agent_footer_line(&h, 80);
         // Write-capable agents get the ✎ cap prefix before the status icon.

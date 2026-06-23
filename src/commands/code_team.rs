@@ -218,6 +218,14 @@ pub struct AgentHandle {
     /// Parent agent id, for rendering the nesting tree in the panel.
     /// `None` for top-level subagents and background runs.
     pub parent: Option<AgentId>,
+    /// OS process id for background agents / teammates. `None` for
+    /// in-process subagents. Used by the TUI to poll whether the
+    /// process is still alive.
+    pub pid: Option<u32>,
+    /// Log file path for background agents / teammates. `None` for
+    /// in-process subagents. The TUI reads this to show the agent's
+    /// output in the overlay view.
+    pub log_path: Option<PathBuf>,
 }
 
 impl AgentHandle {
@@ -254,6 +262,12 @@ pub struct AgentRegistration {
     pub model: String,
     pub prompt_preview: String,
     pub parent: Option<AgentId>,
+    /// OS process id for background agents / teammates (`None` for
+    /// in-process subagents).
+    pub pid: Option<u32>,
+    /// Log file path for background agents / teammates (`None` for
+    /// in-process subagents).
+    pub log_path: Option<PathBuf>,
 }
 
 impl AgentRegistry {
@@ -283,6 +297,8 @@ impl AgentRegistry {
             model,
             prompt_preview,
             parent,
+            pid: None,
+            log_path: None,
         }
     }
 }
@@ -319,6 +335,8 @@ impl AgentRegistry {
             status: Arc::new(Mutex::new(AgentStatus::Spawning)),
             current_tool: Arc::new(Mutex::new(None)),
             parent: reg.parent,
+            pid: reg.pid,
+            log_path: reg.log_path,
         });
         self.handles.lock().unwrap().insert(id, Arc::clone(&handle));
         handle
@@ -339,15 +357,13 @@ impl AgentRegistry {
         }
     }
 
-    /// All handles, in insertion order. Used by the agent view to
-    /// render the full table including completed background runs.
+    /// All handles, sorted by spawn time (oldest first). Used by the
+    /// agent view and the live panel to render agents in a stable order.
     pub fn snapshot(&self) -> Vec<Arc<AgentHandle>> {
-        self.handles
-            .lock()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect()
+        let mut handles: Vec<Arc<AgentHandle>> =
+            self.handles.lock().unwrap().values().cloned().collect();
+        handles.sort_by_key(|h| h.spawned_at);
+        handles
     }
 
     /// Handles in active states (Spawning/Working/NeedsInput). Used by
@@ -371,6 +387,13 @@ impl AgentRegistry {
             .values()
             .filter(|h| h.status().is_active())
             .count()
+    }
+
+    /// Total count of all agents (active + completed + failed). Used
+    /// by the footer hint so the tab indicator shows even when all
+    /// agents have finished.
+    pub fn total_count(&self) -> usize {
+        self.handles.lock().unwrap().len()
     }
 
     /// Find a handle by agent name. Returns the first match (names
@@ -400,6 +423,8 @@ mod tests {
             model: "test".to_string(),
             prompt_preview: "preview".to_string(),
             parent: None,
+            pid: None,
+            log_path: None,
         }
     }
 

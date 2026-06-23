@@ -21,8 +21,9 @@ use crate::commands::code_tui::theme;
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
-    // Snapshot agents once per frame to avoid repeated mutex locks.
-    let agents = app.registry.active();
+    // Snapshot agents once per frame — all agents, not just active,
+    // so completed/failed ones remain visible.
+    let agents = app.registry.snapshot();
 
     // Compute footer height from the frame area, not a separate syscall.
     let footer_height = compute_footer_height(&agents, &app.queued, area.height);
@@ -125,7 +126,10 @@ fn draw_footer(
         chunk_idx += 1;
     }
     if agent_rows > 0 {
-        agents_panel::draw(frame, chunks[chunk_idx], agents, agent_rows as usize, app.agent_selection, app.focus == Focus::Agents);
+        let max_rows = agent_rows as usize;
+        // Scroll offset so the selected agent is always visible.
+        let scroll_offset = app.agent_selection.saturating_sub(max_rows.saturating_sub(1));
+        agents_panel::draw(frame, chunks[chunk_idx], agents, max_rows, scroll_offset, app.agent_selection, app.focus == Focus::Agents);
         chunk_idx += 1;
     }
 
