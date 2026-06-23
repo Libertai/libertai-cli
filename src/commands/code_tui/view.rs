@@ -155,7 +155,7 @@ fn draw_footer(
 fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
     let Some(approval) = &app.approval else {
         return;
@@ -166,40 +166,50 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
     let max_modal_height = (area.height as f32 * 0.8) as u16;
     let usable_width = modal_width.saturating_sub(4) as usize;
 
-    // Count wrapped lines for preview — account for both explicit
-    // newlines and word-wrap at the usable width.
-    let preview_line_count: usize = approval
-        .preview
-        .lines()
-        .map(|line| {
-            let chars = line.chars().count();
-            if chars == 0 {
-                1
-            } else {
-                ((chars + usable_width.saturating_sub(1)) / usable_width.max(1)).max(1)
-            }
-        })
-        .sum();
+    // Pre-wrap the preview into explicit Lines (word-wrapped to the
+    // usable width). This gives us an exact line count that matches
+    // what will be rendered — no relying on Paragraph::wrap, which
+    // uses WordWrapper and can produce more lines than a naive char
+    // count predicts (words aren't broken mid-word).
+    let prefix = "Preview: ";
+    let prefix_len = prefix.chars().count();
+    let wrapped_preview = word_wrap(&approval.preview, usable_width, prefix_len);
 
-    // Fixed content lines: tool (1) + preview-prefix-line (1) + always_rule (1)
-    // + blank (1) + controls (1) = 5. Plus 2 border rows = 7.
-    let fixed_lines = 7;
-    let needed_height = fixed_lines + preview_line_count.saturating_sub(1);
+    // Fixed lines: tool (1) + always_rule (1) + blank (1) + controls (1) = 4.
+    // Plus 2 border rows.
+    let fixed_inner = 4;
+    let preview_lines = wrapped_preview.len();
+    let needed_height = 2 + fixed_inner + preview_lines;
     let modal_height = needed_height.min(max_modal_height as usize) as u16;
 
     // How many preview lines fit without clipping the controls?
-    let inner_height = modal_height.saturating_sub(2) as usize; // minus borders
-    let reserved_lines = 4; // tool + always_rule + blank + controls
-    let max_preview_lines = inner_height.saturating_sub(reserved_lines).max(1);
+    let inner_height = modal_height.saturating_sub(2) as usize;
+    let max_preview_lines = inner_height.saturating_sub(fixed_inner).max(1);
 
-    // Truncate the preview to fit, appending an ellipsis if cut.
-    let truncated_preview = truncate_preview(&approval.preview, max_preview_lines, usable_width);
+    // Truncate preview lines if needed, appending an ellipsis.
+    let display_lines: Vec<String> = if wrapped_preview.len() <= max_preview_lines {
+        wrapped_preview
+    } else {
+        let mut out: Vec<String> = wrapped_preview[..max_preview_lines.saturating_sub(1)]
+            .to_vec();
+        let mut last = wrapped_preview
+            .get(max_preview_lines.saturating_sub(1))
+            .cloned()
+            .unwrap_or_default();
+        // Truncate the last line and add ellipsis.
+        let max_chars = usable_width.saturating_sub(1);
+        if last.chars().count() > max_chars {
+            last = last.chars().take(max_chars).collect();
+        }
+        last.push('…');
+        out.push(last);
+        out
+    };
 
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
 
-    // Clear the area under the modal.
     frame.render_widget(Clear, modal_area);
 
     let block = Block::default()
@@ -211,72 +221,110 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
         ));
 
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("Tool: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&approval.tool_name, Style::default().add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            Span::styled("Preview: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(&truncated_preview),
-        ]),
-        Line::from(vec![
-            Span::styled("Always rule: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&approval.always_rule, Style::default().fg(theme::ACCENT)),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "[y] Allow  ",
-                Style::default().fg(theme::SUCCESS),
-            ),
-            Span::styled(
-                "[a] Always  ",
-                Style::default().fg(theme::ACCENT),
-            ),
-            Span::styled(
-                "[n] Deny",
-                Style::default().fg(theme::ERROR),
-            ),
-        ]),
-    ];
+    // Build the content lines. The "Preview: " prefix goes on the
+    // first preview line; subsequent lines are plain.
+    let mut lines: Vec<Line> = Vec::with_capacity(2 + fixed_inner + display_lines.len());
+    lines.push(Line::from(vec![
+        Span::styled("Tool: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(&approval.tool_name, Style::default().add_modifier(Modifier::BOLD)),
+    ]));
+    for (i, pl) in display_lines.iter().enumerate() {
+        if i == 0 {
+            lines.push(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(Color::DarkGray)),
+                Span::raw(pl.clone()),
+            ]));
+        } else {
+            lines.push(Line::from(Span::raw(pl.clone())));
+        }
+    }
+    lines.push(Line::from(vec![
+        Span::styled("Always rule: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(&approval.always_rule, Style::default().fg(theme::ACCENT)),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("[y] Allow  ", Style::default().fg(theme::SUCCESS)),
+        Span::styled("[a] Always  ", Style::default().fg(theme::ACCENT)),
+        Span::styled("[n] Deny", Style::default().fg(theme::ERROR)),
+    ]));
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap::default());
+    // No Wrap — lines are already pre-wrapped to fit.
+    let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, modal_area);
 }
 
-/// Truncate a multi-line preview to at most `max_lines` visual lines
-/// (after word-wrapping at `width`), appending `…` if truncated.
-fn truncate_preview(preview: &str, max_lines: usize, width: usize) -> String {
-    let mut visual_lines = 0usize;
-    let mut out = String::new();
-    for line in preview.lines() {
-        let wrapped = if line.chars().count() == 0 {
-            1
+/// Word-wrap `text` to at most `width` chars per line. The first line
+/// is shortened by `first_line_indent` to account for a prefix (e.g.
+/// "Preview: "). Returns a `Vec<String>` of pre-wrapped lines.
+fn word_wrap(text: &str, width: usize, first_line_indent: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut result: Vec<String> = Vec::new();
+    let mut first_line_budget = width.saturating_sub(first_line_indent).max(1);
+
+    for (line_idx, raw_line) in text.lines().enumerate() {
+        let budget = if line_idx == 0 {
+            first_line_budget
         } else {
-            ((line.chars().count() + width.saturating_sub(1)) / width.max(1)).max(1)
+            width
         };
-        if visual_lines + wrapped > max_lines {
-            // Fill remaining lines with the start of this line.
-            let remaining = max_lines.saturating_sub(visual_lines);
-            if remaining > 0 {
-                let chars_per_line = width.max(1);
-                let take_chars = remaining * chars_per_line;
-                let truncated: String = line.chars().take(take_chars).collect();
-                out.push_str(&truncated);
-                out.push('…');
-            } else {
-                out.push('…');
-            }
-            break;
+        first_line_budget = width; // only the very first line is shortened
+
+        if raw_line.is_empty() {
+            result.push(String::new());
+            continue;
         }
-        out.push_str(line);
-        out.push('\n');
-        visual_lines += wrapped;
+
+        let mut current = String::new();
+        let mut current_len = 0usize;
+        for word in raw_line.split_whitespace() {
+            let word_len = word.chars().count();
+            if current.is_empty() {
+                if word_len > budget {
+                    // Word longer than the line — hard-break it.
+                    let mut chars = word.chars();
+                    let take: String = chars.by_ref().take(budget).collect();
+                    result.push(take);
+                    let rest: String = chars.collect();
+                    if !rest.is_empty() {
+                        current_len = rest.chars().count();
+                        current = rest;
+                    }
+                } else {
+                    current = word.to_string();
+                    current_len = word_len;
+                }
+            } else if current_len + 1 + word_len > width {
+                // Word doesn't fit — flush current line, start new.
+                result.push(std::mem::take(&mut current));
+                if word_len > width {
+                    let mut chars = word.chars();
+                    let take: String = chars.by_ref().take(width).collect();
+                    result.push(take);
+                    let rest: String = chars.collect();
+                    if !rest.is_empty() {
+                        current_len = rest.chars().count();
+                        current = rest;
+                    }
+                } else {
+                    current = word.to_string();
+                    current_len = word_len;
+                }
+            } else {
+                current.push(' ');
+                current.push_str(word);
+                current_len += 1 + word_len;
+            }
+        }
+        if !current.is_empty() {
+            result.push(current);
+        }
     }
-    out.trim_end_matches('\n').to_string()
+
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
 }
 
 /// Draw the ask-user modal as a centered popup.
