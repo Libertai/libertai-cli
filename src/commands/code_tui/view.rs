@@ -16,6 +16,7 @@ use crate::commands::code_tui::footer;
 use crate::commands::code_tui::input;
 use crate::commands::code_tui::scrollback;
 use crate::commands::code_tui::theme;
+use crate::commands::code_tui::wrap;
 
 /// Draw the full TUI frame.
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -173,7 +174,7 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
     // count predicts (words aren't broken mid-word).
     let prefix = "Preview: ";
     let prefix_len = prefix.chars().count();
-    let wrapped_preview = word_wrap(&approval.preview, usable_width, prefix_len);
+    let wrapped_preview = wrap::word_wrap(&approval.preview, usable_width, prefix_len);
 
     // Fixed lines: tool (1) + always_rule (1) + blank (1) + controls (1) = 4.
     // Plus 2 border rows.
@@ -252,79 +253,6 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
     // No Wrap — lines are already pre-wrapped to fit.
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, modal_area);
-}
-
-/// Word-wrap `text` to at most `width` chars per line. The first line
-/// is shortened by `first_line_indent` to account for a prefix (e.g.
-/// "Preview: "). Returns a `Vec<String>` of pre-wrapped lines.
-fn word_wrap(text: &str, width: usize, first_line_indent: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut result: Vec<String> = Vec::new();
-    let mut first_line_budget = width.saturating_sub(first_line_indent).max(1);
-
-    for (line_idx, raw_line) in text.lines().enumerate() {
-        let budget = if line_idx == 0 {
-            first_line_budget
-        } else {
-            width
-        };
-        first_line_budget = width; // only the very first line is shortened
-
-        if raw_line.is_empty() {
-            result.push(String::new());
-            continue;
-        }
-
-        let mut current = String::new();
-        let mut current_len = 0usize;
-        for word in raw_line.split_whitespace() {
-            let word_len = word.chars().count();
-            if current.is_empty() {
-                if word_len > budget {
-                    // Word longer than the line — hard-break it.
-                    let mut chars = word.chars();
-                    let take: String = chars.by_ref().take(budget).collect();
-                    result.push(take);
-                    let rest: String = chars.collect();
-                    if !rest.is_empty() {
-                        current_len = rest.chars().count();
-                        current = rest;
-                    }
-                } else {
-                    current = word.to_string();
-                    current_len = word_len;
-                }
-            } else if current_len + 1 + word_len > width {
-                // Word doesn't fit — flush current line, start new.
-                result.push(std::mem::take(&mut current));
-                if word_len > width {
-                    let mut chars = word.chars();
-                    let take: String = chars.by_ref().take(width).collect();
-                    result.push(take);
-                    let rest: String = chars.collect();
-                    if !rest.is_empty() {
-                        current_len = rest.chars().count();
-                        current = rest;
-                    }
-                } else {
-                    current = word.to_string();
-                    current_len = word_len;
-                }
-            } else {
-                current.push(' ');
-                current.push_str(word);
-                current_len += 1 + word_len;
-            }
-        }
-        if !current.is_empty() {
-            result.push(current);
-        }
-    }
-
-    if result.is_empty() {
-        result.push(String::new());
-    }
-    result
 }
 
 /// Draw the ask-user modal as a centered popup.

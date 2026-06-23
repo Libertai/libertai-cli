@@ -10,9 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -22,6 +20,7 @@ use ratatui::Terminal;
 use serde_json::json;
 
 use crate::commands::code_factory::Mode;
+use crate::commands::code_tui::terminal::TerminalGuard;
 use crate::commands::code_tui::theme;
 use crate::commands::code_ui::{
     background_agent_status, load_background_agent_records, read_log_tail,
@@ -38,30 +37,6 @@ const PEEK_TAIL_BYTES: usize = 64_000;
 
 /// Content rows in the peek box.
 const PEEK_CONTENT_ROWS: usize = 20;
-
-// ---------------------------------------------------------------------------
-// RAII guard
-// ---------------------------------------------------------------------------
-
-struct TerminalGuard {
-    raw_mode: bool,
-    alt_screen: bool,
-    terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        if let Some(mut terminal) = self.terminal.take() {
-            let _ = terminal.show_cursor();
-            let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
-        } else if self.alt_screen {
-            let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
-        }
-        if self.raw_mode {
-            let _ = disable_raw_mode();
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // View model
@@ -202,11 +177,7 @@ fn print_plain(cwd_filter: Option<&Path>) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn run_tui(config: &ViewConfig) -> Result<()> {
-    let mut guard = TerminalGuard {
-        raw_mode: false,
-        alt_screen: false,
-        terminal: None,
-    };
+    let mut guard = TerminalGuard::new(false);
 
     enable_raw_mode()?;
     guard.raw_mode = true;

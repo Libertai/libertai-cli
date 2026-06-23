@@ -6,5 +6,7 @@ pub mod footer;
 pub mod input;
 pub mod markdown;
 pub mod scrollback;
+pub mod terminal;
 pub mod theme;
+pub mod wrap;
 pub mod view;

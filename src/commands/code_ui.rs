@@ -456,17 +456,18 @@ enum ConfigSettingsTarget {
     Advanced,
 }
 
-/// Process-global because the Ctrl-C handler (spawned by the `ctrlc`
-/// crate on a separate thread) needs to reach both pieces of state
-/// without a reference chain.
+/// Process-global so the terminal render loop and the vim-mode toggle
+/// can reach this state across `run_interactive` invocations without a
+/// reference chain.
 ///
 /// **Caveat for tests / library reuse:** `run_interactive` assumes it
 /// is the sole owner of this process's terminal for its lifetime.
-/// Calling it twice in the same process (e.g. from an integration
-/// test) would share these slots across invocations, and the `ctrlc`
-/// handler installed by the first call outlives the function. If we
-/// ever need that, add a per-invocation reset step and document the
-/// invariant more loudly.
+/// `BAR_STATUS`, `STATUS_LINE_COMMAND_CACHE`, and `VIM_INPUT_ENABLED`
+/// are process globals shared across invocations, so calling
+/// `run_interactive` twice in the same process (e.g. from an
+/// integration test) would carry state from one run into the next.
+/// If we ever need that, add a per-invocation reset step and document
+/// the invariant more loudly.
 static BAR_STATUS: Mutex<Option<BarStatus>> = Mutex::new(None);
 static STATUS_LINE_COMMAND_CACHE: OnceLock<Mutex<Option<StatusLineCommandCache>>> = OnceLock::new();
 static VIM_INPUT_ENABLED: AtomicBool = AtomicBool::new(false);

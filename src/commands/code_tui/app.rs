@@ -8,9 +8,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
 use pi::model::AssistantMessageEvent;
 use pi::sdk::{create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle};
 use ratatui::backend::CrosstermBackend;
@@ -29,6 +27,7 @@ use crate::commands::code_session::{
 use crate::commands::code_skills::{prompt_for_pillar, SkillPillar};
 use crate::commands::code_team::AgentRegistry;
 use crate::commands::code_tui::approvals::RatatuiApprovalUi;
+use crate::commands::code_tui::terminal::TerminalGuard;
 use crate::commands::code_tui::theme;
 use crate::commands::code_tui::view;
 use crate::config::{allow_rules_path, Config as LibertaiConfig};
@@ -376,40 +375,6 @@ impl AskModal {
     /// Current question.
     pub fn current_question(&self) -> &AskQuestion {
         &self.questions[self.current]
-    }
-}
-
-/// RAII guard that restores the terminal on drop — covers early-return
-/// and panic paths between `enable_raw_mode` and the end of `run_loop`.
-///
-/// Tracks which terminal modifications have been applied so far so
-/// that if `enable_raw_mode` succeeds but `Terminal::new` fails, we
-/// still undo raw mode and the alternate screen.
-struct TerminalGuard {
-    raw_mode: bool,
-    alt_screen: bool,
-    terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
-}
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        if let Some(mut terminal) = self.terminal.take() {
-            let _ = terminal.show_cursor();
-            let _ = crossterm::execute!(
-                terminal.backend_mut(),
-                LeaveAlternateScreen,
-                crossterm::event::DisableMouseCapture
-            );
-        } else if self.alt_screen {
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                LeaveAlternateScreen,
-                crossterm::event::DisableMouseCapture
-            );
-        }
-        if self.raw_mode {
-            let _ = disable_raw_mode();
-        }
     }
 }
 
@@ -815,11 +780,7 @@ pub fn run(
 ) -> anyhow::Result<()> {
     // Set up terminal — guard created first so any early-return
     // between enable_raw_mode and the end of run_loop is cleaned up.
-    let mut guard = TerminalGuard {
-        raw_mode: false,
-        alt_screen: false,
-        terminal: None,
-    };
+    let mut guard = TerminalGuard::new(true);
 
     enable_raw_mode()?;
     guard.raw_mode = true;
@@ -1769,6 +1730,29 @@ fn advance_question(app: &mut App) {
         }
     }
 }
+/// Drain the first queued message, if any, into a new turn.
+///
+/// Extracted from the `AgentMsg::TurnEnd` handler so the queued-drain
+/// logic is unit-testable in isolation. Returns `true` if a queued
+/// message was submitted (and the app transitioned back to
+/// `Phase::Streaming`), `false` if the queue was empty.
+fn drain_queued(app: &mut App, cmd_tx: &mpsc::Sender<Cmd>) -> bool {
+    if app.queued.is_empty() {
+        return false;
+    }
+    let next = app.queued.remove(0);
+    app.transcript.push(TranscriptEntry::User(next.clone()));
+    app.transcript.push(TranscriptEntry::Blank);
+    let _ = cmd_tx.send(Cmd::Prompt(next));
+    app.phase = Phase::Streaming;
+    app.turn_started = Some(Instant::now());
+    app.output_chars = 0;
+    app.current_tool = None;
+    app.current_tool_detail = String::new();
+    app.spinner_label = "thinking…";
+    true
+}
+
 fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
     match msg {
         AgentMsg::TextDelta(delta) => {
@@ -1815,18 +1799,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.scroll = 0; // auto-scroll to bottom
 
             // If there are queued messages, submit the first one.
-            if !app.queued.is_empty() {
-                let next = app.queued.remove(0);
-                app.transcript.push(TranscriptEntry::User(next.clone()));
-                app.transcript.push(TranscriptEntry::Blank);
-                let _ = cmd_tx.send(Cmd::Prompt(next));
-                app.phase = Phase::Streaming;
-                app.turn_started = Some(Instant::now());
-                app.output_chars = 0;
-                app.current_tool = None;
-                app.current_tool_detail = String::new();
-                app.spinner_label = "thinking…";
-            }
+            drain_queued(app, cmd_tx);
         }
         AgentMsg::ApprovalRequest {
             tool_name,
@@ -1956,6 +1929,41 @@ mod tests {
         h
     }
 
+    /// Build a minimal `App` for testing pure state transitions. Mirrors
+    /// the construction in `run` but trimmed to the fields the tested
+    /// helpers actually mutate.
+    fn test_app() -> App {
+        App {
+            phase: Phase::Idle,
+            mode: ModeFlag::new(Mode::Normal),
+            transcript: Vec::new(),
+            scroll: 0,
+            spinner_idx: 0,
+            turn_started: None,
+            output_chars: 0,
+            spinner_label: "thinking…",
+            current_tool: None,
+            current_tool_detail: String::new(),
+            queued: Vec::new(),
+            textarea: TextArea::default(),
+            history: VecDeque::new(),
+            history_idx: None,
+            stashed_live: None,
+            approval: None,
+            ask: None,
+            focus: Focus::default(),
+            agent_selection: 0,
+            agent_overlay: None,
+            registry: AgentRegistry::new(),
+            notified_teams: std::collections::HashSet::new(),
+            cfg: Arc::new(LibertaiConfig::default()),
+            bar: BarStatus {
+                model_label: "openai/gpt-4o".to_string(),
+                ..Default::default()
+            },
+        }
+    }
+
     #[test]
     fn active_team_set_lists_only_active_teams() {
         let registry = AgentRegistry::new();
@@ -1993,6 +2001,271 @@ mod tests {
         let completed: Vec<String> =
             prev.keys().filter(|t| !after.contains_key(*t)).cloned().collect();
         assert!(completed.is_empty());
+    }
+
+    // --- Category (1): queued drain ----------------------------------------
+
+    #[test]
+    fn drain_queued_sends_first_queued_prompt_and_clears_queue() {
+        let mut app = test_app();
+        app.queued = vec!["hello".to_string(), "world".to_string()];
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        assert!(drain_queued(&mut app, &cmd_tx));
+
+        // One prompt was sent for the first queued message.
+        let sent = cmd_rx.try_recv().expect("expected a Cmd::Prompt");
+        match sent {
+            Cmd::Prompt(p) => assert_eq!(p, "hello"),
+            other => panic!("expected Cmd::Prompt, got {other:?}"),
+        }
+        // No extra commands.
+        assert!(cmd_rx.try_recv().is_err(), "no extra command expected");
+
+        // The first queued message was removed.
+        assert_eq!(app.queued, vec!["world".to_string()]);
+        // App transitioned to a new streaming turn.
+        assert_eq!(app.phase, Phase::Streaming);
+        assert!(app.turn_started.is_some());
+        assert_eq!(app.output_chars, 0);
+        assert!(app.current_tool.is_none());
+        assert_eq!(app.spinner_label, "thinking…");
+        // The echoed prompt + a blank separator were pushed.
+        let last_two = &app.transcript[app.transcript.len() - 2..];
+        assert!(matches!(last_two[0], TranscriptEntry::User(ref s) if s == "hello"));
+        assert!(matches!(last_two[1], TranscriptEntry::Blank));
+    }
+
+    #[test]
+    fn drain_queued_empty_returns_false_and_is_noop() {
+        let mut app = test_app();
+        app.phase = Phase::Idle;
+        app.queued = Vec::new();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        assert!(!drain_queued(&mut app, &cmd_tx));
+
+        // Nothing sent, nothing appended.
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(app.transcript.is_empty());
+        assert_eq!(app.phase, Phase::Idle);
+        assert!(app.turn_started.is_none());
+    }
+
+    // --- Category (2): handle_agent_msg state transitions ------------------
+
+    #[test]
+    fn handle_agent_msg_textdelta_appends_to_transcript() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_agent_msg(&mut app, AgentMsg::TextDelta("hello".into()), &cmd_tx);
+        // First delta creates a new Assistant entry.
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptEntry::Assistant(ref s)) if s == "hello"
+        ));
+        assert_eq!(app.output_chars, 5);
+        assert_eq!(app.scroll, 0);
+
+        // A second delta appends to the same entry.
+        handle_agent_msg(&mut app, AgentMsg::TextDelta(" world".into()), &cmd_tx);
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptEntry::Assistant(ref s)) if s == "hello world"
+        ));
+        assert_eq!(app.output_chars, 11);
+    }
+
+    #[test]
+    fn handle_agent_msg_toolstart_sets_current_tool() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::ToolStart {
+                tool_call_id: "tc1".into(),
+                tool_name: "bash".into(),
+                args: serde_json::json!({ "command": "echo hi" }),
+            },
+            &cmd_tx,
+        );
+
+        assert_eq!(app.current_tool.as_deref(), Some("bash"));
+        assert_eq!(app.spinner_label, "working…");
+        assert_eq!(app.scroll, 0);
+        // A Tool transcript entry was pushed for the started tool.
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptEntry::Tool { ref name, .. }) if name == "bash"
+        ));
+    }
+
+    #[test]
+    fn handle_agent_msg_toolend_clears_current_tool() {
+        let mut app = test_app();
+        app.current_tool = Some("bash".into());
+        app.current_tool_detail = "echo hi".into();
+        app.spinner_label = "working…";
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::ToolEnd {
+                tool_call_id: "tc1".into(),
+                tool_name: "bash".into(),
+                output: serde_json::Value::Null,
+            },
+            &cmd_tx,
+        );
+
+        assert!(app.current_tool.is_none());
+        assert!(app.current_tool_detail.is_empty());
+        assert_eq!(app.spinner_label, "thinking…");
+    }
+
+    #[test]
+    fn handle_agent_msg_turnend_idles_when_queue_empty() {
+        let mut app = test_app();
+        app.phase = Phase::Streaming;
+        app.turn_started = Some(Instant::now());
+        app.current_tool = Some("bash".into());
+        app.queued = Vec::new();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_agent_msg(&mut app, AgentMsg::TurnEnd { elapsed_secs: 5 }, &cmd_tx);
+
+        assert_eq!(app.phase, Phase::Idle);
+        assert!(app.turn_started.is_none());
+        assert!(app.current_tool.is_none());
+        assert!(cmd_rx.try_recv().is_err(), "no queued prompt to send");
+        // A trailing Blank separator is pushed on turn end.
+        assert!(matches!(app.transcript.last(), Some(TranscriptEntry::Blank)));
+    }
+
+    #[test]
+    fn handle_agent_msg_turnend_drains_queue_into_next_turn() {
+        let mut app = test_app();
+        app.phase = Phase::Streaming;
+        app.queued = vec!["next-prompt".to_string()];
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_agent_msg(&mut app, AgentMsg::TurnEnd { elapsed_secs: 1 }, &cmd_tx);
+
+        // The queued message is promoted to a new streaming turn.
+        assert_eq!(app.phase, Phase::Streaming);
+        assert!(app.turn_started.is_some());
+        assert!(app.queued.is_empty());
+        match cmd_rx.try_recv() {
+            Ok(Cmd::Prompt(p)) => assert_eq!(p, "next-prompt"),
+            other => panic!("expected Cmd::Prompt, got {other:?}"),
+        }
+        // The echoed prompt appears in the transcript (after the turn-end
+        // Blank separator).
+        assert!(app
+            .transcript
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::User(s) if s == "next-prompt")));
+    }
+
+    // --- Category (3): handle_slash_command dispatch -----------------------
+
+    #[test]
+    fn slash_help_pushes_help_text() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/help", &cmd_tx);
+
+        assert!(action.is_none(), "/help does not Quit");
+        // Help text mentions the available commands.
+        assert!(app
+            .transcript
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::System(ref s) if s.contains("Commands:"))));
+    }
+
+    #[test]
+    fn slash_clear_requests_clear_and_returns_clear_action() {
+        let mut app = test_app();
+        app.transcript.push(TranscriptEntry::User("old".into()));
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/clear", &cmd_tx);
+
+        // /clear returns the ClearTranscript action and sends Cmd::Clear.
+        assert!(matches!(action, Some(Action::ClearTranscript)));
+        match cmd_rx.try_recv() {
+            Ok(Cmd::Clear) => {}
+            other => panic!("expected Cmd::Clear, got {other:?}"),
+        }
+        // /clear itself does not mutate the transcript; run_loop clears it.
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptEntry::User(ref s)) if s == "old"
+        ));
+    }
+
+    #[test]
+    fn slash_model_show_reports_current_model() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/model", &cmd_tx);
+
+        assert!(action.is_none());
+        assert!(app
+            .transcript
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::System(ref s) if s.contains("openai/gpt-4o"))));
+    }
+
+    #[test]
+    fn slash_model_set_sends_setmodel_command() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/model anthropic/claude-3.5", &cmd_tx);
+
+        assert!(action.is_none());
+        match cmd_rx.try_recv() {
+            Ok(Cmd::SetModel(provider, model_id)) => {
+                assert_eq!(provider, "anthropic");
+                assert_eq!(model_id, "claude-3.5");
+            }
+            other => panic!("expected Cmd::SetModel, got {other:?}"),
+        }
+        // No further command on the channel.
+        assert!(cmd_rx.try_recv().is_err());
+        assert!(app
+            .transcript
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::System(ref s) if s.contains("setting model"))));
+    }
+
+    #[test]
+    fn slash_unknown_reports_error() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/nope", &cmd_tx);
+
+        assert!(action.is_none());
+        assert!(app
+            .transcript
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::System(ref s) if s.contains("unknown command: /nope"))));
+    }
+
+    #[test]
+    fn slash_quit_returns_quit_action() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/quit", &cmd_tx);
+
+        assert!(matches!(action, Some(Action::Quit)));
     }
 }
 
