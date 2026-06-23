@@ -19,8 +19,8 @@ use async_trait::async_trait;
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{
-    create_agent_session, AgentEvent, Result as PiResult, Tool, ToolExecution, ToolOutput,
-    ToolUpdate,
+    create_agent_session, AbortHandle, AgentEvent, Result as PiResult, Tool, ToolExecution,
+    ToolOutput, ToolUpdate,
 };
 
 use crate::commands::code_agents;
@@ -379,17 +379,28 @@ impl Tool for TaskTool {
                 render_child(event, child_updates.as_deref(), &name_for_render)
             }
         };
-        let assistant = match handle.prompt(prompt, render).await {
+
+        // Create the abort pair up front so the main thread can stop this
+        // child mid-run. The handle lives on the shared `AgentHandle` (so
+        // the TUI's stop command can reach it) and the signal goes to the
+        // child prompt below; `take`ing it on completion (both branches)
+        // guarantees a finished agent can't be aborted afterward.
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        handle_arc.set_abort(abort_handle);
+        let assistant = match handle.prompt_with_abort(prompt, abort_signal, render).await {
             Ok(msg) => {
+                let _ = handle_arc.take_abort();
                 handle_arc.set_status(AgentStatus::Completed);
                 msg
             }
             Err(e) => {
+                let _ = handle_arc.take_abort();
                 handle_arc.set_status(AgentStatus::Failed);
                 self.registry.remove(handle_arc.id);
                 return Ok(err_output(&format!("task: run failed: {e}")));
             }
         };
+        let _ = handle_arc.take_abort();
         self.registry.remove(handle_arc.id);
 
         // Collapse the child assistant's text blocks into a single

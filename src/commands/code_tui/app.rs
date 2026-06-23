@@ -35,7 +35,7 @@ use crate::commands::code_session::{
 };
 use crate::commands::code_skills::{prompt_for_pillar, SkillPillar};
 use crate::commands::code_team::{
-    AgentCapability, AgentRegistry, AgentColor, AgentKind, AgentRegistration, AgentStatus,
+    AgentCapability, AgentId, AgentRegistry, AgentColor, AgentKind, AgentRegistration, AgentStatus,
 };
 use crate::commands::code_team_spawn::{self, TeamManifest};
 use crate::commands::code_tui::approvals::RatatuiApprovalUi;
@@ -183,6 +183,22 @@ pub enum Cmd {
     /// thread owns. The bg thread builds the result text and sends it back
     /// via `AgentMsg::CommandResult`.
     RunReadOnly(BgCommand),
+    /// Stop a specific agent (background agent / teammate / subagent) by
+    /// taking its stored abort handle and calling `.abort()`. Handled on
+    /// the background thread, where the shared registry lives; the abort
+    /// works regardless of which thread issues it because `AbortHandle` is
+    /// just an `AtomicBool` + `Notify`. The result rides back as an
+    /// `AgentMsg::System` ("stopped {name}") so the main thread can push a
+    /// transcript entry (the main thread owns the transcript).
+    StopAgent(AgentId),
+    /// Send a message to a specific agent. There is no pi primitive to
+    /// inject a message into a running child turn, and the TUI has a single
+    /// shared session (not per-agent sessions), so this is an honest stub:
+    /// the background thread echoes it back as an `AgentMsg::System`
+    /// ("reply to {name}: {text} (queued — per-agent reply sessions not
+    /// yet supported)") so the user sees the message was received. Reply is
+    /// deferred until a per-agent session model exists.
+    SendToAgent(AgentId, String),
 }
 
 /// The top-level App state.
@@ -979,6 +995,57 @@ fn spawn_background(
                             let _ = agent_tx.send(AgentMsg::CommandResult(text));
                         }
                     }
+                    Ok(Cmd::StopAgent(id)) => {
+                        // Resolve the handle in the shared registry (keyed
+                        // by id). `AbortHandle.abort()` is an AtomicBool +
+                        // Notify, so this is safe from the bg thread even
+                        // though the handle may have been spawned elsewhere.
+                        // Mirrors the main-turn Ctrl+C path: take the abort
+                        // slot, abort if Some, then mark the agent Stopped
+                        // so the panel/overlay reflect it.
+                        let handle = registry
+                            .snapshot()
+                            .into_iter()
+                            .find(|h| h.id == id);
+                        if let Some(handle) = handle {
+                            let name = handle.name.clone();
+                            if let Some(abort) = handle.take_abort() {
+                                abort.abort();
+                                registry.set_status(id, AgentStatus::Stopped);
+                                let _ = agent_tx
+                                    .send(AgentMsg::System(format!("stopped {name}")));
+                            } else {
+                                // No abort handle: the agent already
+                                // finished (the spawner clears the slot on
+                                // return). Report it rather than silently
+                                // doing nothing.
+                                let _ = agent_tx.send(AgentMsg::System(format!(
+                                    "{name} already finished — nothing to stop"
+                                )));
+                            }
+                        } else {
+                            let _ = agent_tx.send(AgentMsg::System(
+                                "agent not found — nothing to stop".to_string(),
+                            ));
+                        }
+                    }
+                    Ok(Cmd::SendToAgent(id, text)) => {
+                        // Honest stub: there is no pi primitive to inject a
+                        // message into a running child turn, and the TUI
+                        // has a single shared session (not per-agent
+                        // sessions). Echo the message back so the user sees
+                        // it was received; reply is deferred until a
+                        // per-agent session model exists.
+                        let name = registry
+                            .snapshot()
+                            .into_iter()
+                            .find(|h| h.id == id)
+                            .map(|h| h.name.clone())
+                            .unwrap_or_else(|| "<unknown agent>".to_string());
+                        let _ = agent_tx.send(AgentMsg::System(format!(
+                            "reply to {name}: {text} (queued — per-agent reply sessions not yet supported)"
+                        )));
+                    }
                     Err(_) => break, // channel closed — main thread exited
                 }
             }
@@ -1371,7 +1438,7 @@ fn handle_key(
 
     // Agent overlay keys (takes priority over everything).
     if app.agent_overlay.is_some() {
-        return handle_agent_overlay_key(app, key);
+        return handle_agent_overlay_key(app, key, cmd_tx);
     }
 
     // Agent panel browse mode.
@@ -1910,7 +1977,11 @@ fn build_agent_invocation(
 /// need the main loop to act (Quit, Submit), `None` for commands
 /// handled entirely here.
 /// Handle keys when the agent output overlay is open.
-fn handle_agent_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
+fn handle_agent_overlay_key(
+    app: &mut App,
+    key: KeyEvent,
+    cmd_tx: &mpsc::Sender<Cmd>,
+) -> Option<Action> {
     match key.code {
         KeyCode::Esc | KeyCode::Tab => {
             app.agent_overlay = None;
@@ -1930,6 +2001,57 @@ fn handle_agent_overlay_key(app: &mut App, key: KeyEvent) -> Option<Action> {
                 overlay.scroll = overlay.scroll.saturating_sub(3);
                 if overlay.scroll == 0 {
                     overlay.follow = true;
+                }
+            }
+        }
+        // `s` / `x`: stop the viewed agent. This aborts the agent
+        // DIRECTLY on the main thread (which owns `app.registry` and is
+        // never blocked during a turn), mirroring the main-turn Ctrl-C
+        // path that aborts via `shared_abort` from the main thread. This
+        // is critical for timing: the bg thread is blocked inside
+        // `handle.prompt_with_abort(...)` for the whole turn (subagents
+        // run inline inside that), so it cannot drain `cmd_rx` mid-turn —
+        // a `Cmd::StopAgent` sent to the bg thread would sit unprocessed
+        // until the turn ends, defeating the point (the subagent would
+        // already be done). `AbortHandle.abort` is an AtomicBool + Notify,
+        // safe to fire cross-thread from here. The overlay stays open so
+        // the user can watch the stopped agent.
+        KeyCode::Char('s') | KeyCode::Char('x') => {
+            if let Some(overlay) = &app.agent_overlay {
+                let name = overlay.agent_name.clone();
+                if let Some(handle) = app.registry.find_by_name(&name) {
+                    if let Some(abort) = handle.take_abort() {
+                        abort.abort();
+                        handle.set_status(AgentStatus::Stopped);
+                        app.transcript.push(TranscriptEntry::System(format!(
+                            "stopped {name}"
+                        )));
+                    } else {
+                        app.transcript.push(TranscriptEntry::System(format!(
+                            "{name} already finished — nothing to stop"
+                        )));
+                    }
+                } else {
+                    app.transcript.push(TranscriptEntry::System(
+                        "agent not found — nothing to stop".to_string(),
+                    ));
+                }
+            }
+        }
+        // `r`: reply to the viewed agent. There is no pi primitive to
+        // inject a message into a running child turn (the parent turn
+        // owns the child handle and awaits it), and the TUI has a single
+        // shared session rather than per-agent sessions. So this is an
+        // honest stub: take the textarea content as the reply body,
+        // send `Cmd::SendToAgent(id, text)`, and the bg thread echoes it
+        // back as a System line ("reply to {name}: … (queued — per-agent
+        // reply sessions not yet supported)") so the user sees the
+        // message was received. The overlay stays open.
+        KeyCode::Char('r') => {
+            if let Some(overlay) = &app.agent_overlay {
+                let text = app.textarea.lines().join("\n");
+                if let Some(handle) = app.registry.find_by_name(&overlay.agent_name) {
+                    let _ = cmd_tx.send(Cmd::SendToAgent(handle.id, text));
                 }
             }
         }
@@ -4615,13 +4737,14 @@ task = "Do the thing"
     #[test]
     fn handle_agent_overlay_key_up_disables_follow_and_increments_scroll() {
         let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
         app.agent_overlay = Some(AgentOverlay {
             agent_name: "reviewer".into(),
             scroll: 0,
             follow: true,
         });
 
-        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &cmd_tx);
 
         let overlay = app.agent_overlay.as_ref().expect("overlay still open");
         assert!(
@@ -4636,13 +4759,14 @@ task = "Do the thing"
     #[test]
     fn handle_agent_overlay_key_down_to_bottom_re_arms_follow() {
         let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
         app.agent_overlay = Some(AgentOverlay {
             agent_name: "reviewer".into(),
             scroll: 0,
             follow: false,
         });
 
-        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &cmd_tx);
 
         let overlay = app.agent_overlay.as_ref().expect("overlay still open");
         assert_eq!(overlay.scroll, 0, "Down saturating-sub keeps scroll at 0");
@@ -4657,13 +4781,14 @@ task = "Do the thing"
     #[test]
     fn handle_agent_overlay_key_down_off_bottom_does_not_re_arm_follow() {
         let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
         app.agent_overlay = Some(AgentOverlay {
             agent_name: "reviewer".into(),
             scroll: 4,
             follow: false,
         });
 
-        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &cmd_tx);
 
         let overlay = app.agent_overlay.as_ref().expect("overlay still open");
         assert_eq!(overlay.scroll, 1, "Down decrements scroll by 3 (saturating)");
@@ -4677,15 +4802,259 @@ task = "Do the thing"
     #[test]
     fn handle_agent_overlay_key_esc_closes_overlay() {
         let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
         app.agent_overlay = Some(AgentOverlay {
             agent_name: "reviewer".into(),
             scroll: 0,
             follow: true,
         });
 
-        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &cmd_tx);
 
         assert!(app.agent_overlay.is_none(), "Esc should close the overlay");
+    }
+
+    // --- M5b-abort: overlay stop / reply keys -------------------------------
+
+    // (M5b-abort-4a) Pressing `s` on an agent overlay aborts the viewed
+    // agent DIRECTLY on the main thread (not via a Cmd to the bg thread,
+    // which is blocked mid-turn and couldn't drain the channel). It resolves
+    // the overlay's agent_name to a registered handle, takes the abort slot,
+    // fires `.abort()`, marks the agent Stopped, and pushes a "stopped
+    // {name}" System TranscriptEntry. The overlay stays open. Pins the
+    // main-thread abort wiring from the key.
+    #[test]
+    fn overlay_s_aborts_viewed_agent_on_main_thread() {
+        let mut app = test_app();
+        let h = app.registry.register(AgentRegistration {
+            name: "reviewer".to_string(),
+            kind: AgentKind::Subagent { depth: 0, parent: None },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: None,
+            log_path: None,
+        });
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        h.set_abort(abort_handle);
+        assert!(!abort_signal.is_aborted());
+
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "reviewer".into(),
+            scroll: 0,
+            follow: true,
+        });
+
+        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &cmd_tx);
+
+        // No command is sent to the bg thread (the abort is synchronous on
+        // the main thread).
+        assert!(cmd_rx.try_recv().is_err(), "s must not send a Cmd — it aborts inline");
+        // The abort slot was taken and the signal fired cross-thread.
+        assert!(abort_signal.is_aborted(), "s must abort the agent's AbortHandle");
+        assert!(h.take_abort().is_none(), "s must clear the abort slot (taken)");
+        // The agent is marked Stopped and a System notice was pushed.
+        assert_eq!(h.status(), AgentStatus::Stopped, "s must mark the agent Stopped");
+        let last = app.transcript.last().expect("a transcript entry was pushed");
+        let notice = match last { TranscriptEntry::System(s) => s.clone(), _ => String::new() };
+        assert_eq!(notice, "stopped reviewer", "s pushes a 'stopped {{name}}' System line");
+        // The overlay stays open.
+        assert!(app.agent_overlay.is_some(), "s must not close the overlay");
+    }
+
+    // (M5b-abort-4b) `x` is the alias for `s` and runs the same main-thread
+    // abort path. Pins the shared arm of the key match.
+    #[test]
+    fn overlay_x_aborts_viewed_agent_on_main_thread() {
+        let mut app = test_app();
+        let h = app.registry.register(AgentRegistration {
+            name: "reviewer".to_string(),
+            kind: AgentKind::Subagent { depth: 0, parent: None },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: None,
+            log_path: None,
+        });
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        h.set_abort(abort_handle);
+
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "reviewer".into(),
+            scroll: 0,
+            follow: true,
+        });
+
+        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE), &cmd_tx);
+
+        assert!(abort_signal.is_aborted(), "x must abort the agent's AbortHandle");
+        assert_eq!(h.status(), AgentStatus::Stopped, "x must mark the agent Stopped");
+        assert!(app.agent_overlay.is_some(), "x must not close the overlay");
+    }
+
+    // (M5b-abort-4c) `s` on an overlay whose agent_name no longer has a
+    // registered handle (e.g. an in-process subagent that already returned
+    // and was removed) pushes an honest "agent not found" System line and
+    // leaves the overlay open — no crash, no silent no-op. Pins the stale
+    // overlay path.
+    #[test]
+    fn overlay_s_for_unregistered_agent_reports_not_found() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "ghost".into(),
+            scroll: 0,
+            follow: true,
+        });
+
+        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err(), "no Cmd is sent for an unregistered agent");
+        let last = app.transcript.last().expect("a not-found notice was pushed");
+        let notice = match last { TranscriptEntry::System(s) => s.clone(), _ => String::new() };
+        assert_eq!(notice, "agent not found — nothing to stop", "s reports a not-found System line");
+        assert!(app.agent_overlay.is_some(), "overlay must remain open");
+    }
+
+    // (M5b-abort-4d) `s` on a registered agent whose abort slot is already
+    // empty (the agent finished and the spawner cleared the slot) pushes an
+    // honest "already finished" line instead of silently doing nothing.
+    #[test]
+    fn overlay_s_for_finished_agent_reports_already_finished() {
+        let mut app = test_app();
+        let h = app.registry.register(AgentRegistration {
+            name: "done".to_string(),
+            kind: AgentKind::Subagent { depth: 0, parent: None },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: None,
+            log_path: None,
+        });
+        // No set_abort: the slot is None, as it is after a child returns.
+        assert!(h.take_abort().is_none());
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "done".into(),
+            scroll: 0,
+            follow: true,
+        });
+
+        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &cmd_tx);
+
+        assert!(cmd_rx.try_recv().is_err(), "no Cmd is sent for a finished agent");
+        let last = app.transcript.last().expect("an already-finished notice was pushed");
+        let notice = match last { TranscriptEntry::System(s) => s.clone(), _ => String::new() };
+        assert_eq!(notice, "done already finished — nothing to stop");
+        // Status is NOT changed to Stopped for an already-finished agent.
+        assert_ne!(h.status(), AgentStatus::Stopped);
+    }
+
+    // (M5b-abort-5) Pressing `r` on an agent overlay takes the textarea
+    // content as the reply body and sends `Cmd::SendToAgent(id, text)` to the
+    // background thread (an honest stub: the bg thread echoes it back as a
+    // System line so the user sees the message was received). Pins the
+    // honest-stub reply path the ui-task took.
+    #[test]
+    fn overlay_r_sends_send_to_agent_command() {
+        let mut app = test_app();
+        let h = app.registry.register(AgentRegistration {
+            name: "reviewer".to_string(),
+            kind: AgentKind::Subagent { depth: 0, parent: None },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: None,
+            log_path: None,
+        });
+        // Type a reply into the input editor (the overlay reads the textarea
+        // lines for the body).
+        app.textarea.insert_str("please re-run grep");
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "reviewer".into(),
+            scroll: 0,
+            follow: true,
+        });
+
+        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE), &cmd_tx);
+
+        match cmd_rx.try_recv() {
+            Ok(Cmd::SendToAgent(id, text)) => {
+                assert_eq!(id, h.id, "SendToAgent must target the viewed agent");
+                assert_eq!(text, "please re-run grep", "SendToAgent carries the textarea body");
+            }
+            other => panic!("expected Cmd::SendToAgent, got {other:?}"),
+        }
+        assert!(cmd_rx.try_recv().is_err(), "no further command expected");
+        assert!(app.agent_overlay.is_some(), "r must not close the overlay");
+    }
+
+    // (M5b-abort-3) `Cmd::StopAgent(id)` is a real, exhaustively-matchable
+    // variant: constructing one and matching it (the way the bg thread does)
+    // must not panic, and the matched id round-trips. This also pins the
+    // take/abort logic the bg thread runs — replicate it here against a
+    // registered handle whose abort slot is `Some`, assert the slot is taken
+    // (None) and the signal is aborted afterward.
+    #[test]
+    fn cmd_stop_agent_is_exhaustive_and_drives_abort() {
+        // The variant is constructible and round-trips its id.
+        let id = AgentId::new();
+        let cmd = Cmd::StopAgent(id);
+        match cmd {
+            Cmd::StopAgent(matched) => assert_eq!(matched, id),
+            _ => panic!("StopAgent must match its own arm"),
+        }
+
+        // Replicate the bg thread's `Cmd::StopAgent` dispatch (which lives
+        // inline in the spawn closure, so isn't directly callable): resolve
+        // the handle by id, take its abort slot, abort, and mark Stopped.
+        let registry = AgentRegistry::new();
+        let h = registry.register(AgentRegistration {
+            name: "reviewer".to_string(),
+            kind: AgentKind::Subagent { depth: 0, parent: None },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: None,
+            log_path: None,
+        });
+        let (handle, signal) = AbortHandle::new();
+        h.set_abort(handle);
+        assert!(!signal.is_aborted());
+
+        let stop_id = h.id;
+        // The bg-thread take/abort path, verbatim in effect:
+        let found = registry.snapshot().into_iter().find(|h| h.id == stop_id);
+        let found = found.expect("registered agent is resolvable by id");
+        let aborted = if let Some(abort) = found.take_abort() {
+            abort.abort();
+            registry.set_status(stop_id, AgentStatus::Stopped);
+            true
+        } else {
+            false
+        };
+        assert!(aborted, "the Some-branch abort path must run");
+        assert!(signal.is_aborted(), "the abort must propagate to the signal");
+        assert!(h.abort.lock().unwrap().is_none(), "the slot must be cleared after take");
+        assert_eq!(h.status(), AgentStatus::Stopped, "the agent must be marked Stopped");
     }
 }
 

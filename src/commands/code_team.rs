@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
+use pi::sdk::AbortHandle;
+
 use crate::commands::code_agents::AgentDefinition;
 
 /// Stable identifier for one running or recently-finished agent.
@@ -226,6 +228,12 @@ pub struct AgentHandle {
     /// in-process subagents. The TUI reads this to show the agent's
     /// output in the overlay view.
     pub log_path: Option<PathBuf>,
+    /// Per-subagent abort handle. Set by the spawner after the child
+    /// session exists (so the main thread can request a stop), and taken
+    /// (cleared) once the run finishes so a finished agent can't be
+    /// aborted. `Arc<Mutex<Option<_>>>` mirrors the main turn's
+    /// `SharedAbort` so the setter/taker paths line up.
+    pub abort: Arc<Mutex<Option<AbortHandle>>>,
 }
 
 impl AgentHandle {
@@ -243,6 +251,28 @@ impl AgentHandle {
 
     pub fn set_current_tool(&self, tool: Option<String>) {
         *self.current_tool.lock().unwrap() = tool;
+    }
+
+    /// Take ownership of the stored abort handle, if any. Returns the
+    /// handle so the caller can drive the abort, and leaves the slot
+    /// empty. Used by the spawn path after a run finishes so a finished
+    /// agent can't be aborted.
+    pub fn take_abort(&self) -> Option<AbortHandle> {
+        self.abort.lock().unwrap().take()
+    }
+
+    /// Clone of the stored abort handle, if any (cheap — the inner is
+    /// `Arc`). The handle stays in the slot, so the main thread can
+    /// request a stop without the spawner having to coordinate.
+    pub fn abort_handle(&self) -> Option<AbortHandle> {
+        self.abort.lock().unwrap().clone()
+    }
+
+    /// Store the abort handle for a run the spawner just kicked off.
+    /// Called once the child session exists (so a handle to stop it
+    /// exists too).
+    pub fn set_abort(&self, h: AbortHandle) {
+        *self.abort.lock().unwrap() = Some(h);
     }
 
     /// Elapsed since spawn, for the panel's per-row timer.
@@ -337,6 +367,7 @@ impl AgentRegistry {
             parent: reg.parent,
             pid: reg.pid,
             log_path: reg.log_path,
+            abort: Arc::new(Mutex::new(None)),
         });
         self.handles.lock().unwrap().insert(id, Arc::clone(&handle));
         handle
@@ -497,5 +528,76 @@ mod tests {
         assert_eq!(h.current_tool(), Some("read".to_string()));
         h.set_current_tool(None);
         assert_eq!(h.current_tool(), None);
+    }
+
+    // --- M5b-abort: AgentHandle.abort slot --------------------------------
+
+    // (M5b-abort-1a) A freshly-registered agent has no abort handle set —
+    // the spawner stores one only after the child session exists, so the
+    // default is `None`. Pins the `register` contract the spawn path relies
+    // on (it can call `set_abort` without first clearing a stale slot).
+    #[test]
+    fn abort_slot_defaults_to_none_after_register() {
+        let registry = AgentRegistry::new();
+        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        assert!(
+            h.abort.lock().unwrap().is_none(),
+            "a freshly-registered agent must have no abort handle"
+        );
+        // The accessors agree on the default.
+        assert!(h.abort_handle().is_none());
+        assert!(h.take_abort().is_none());
+    }
+
+    // (M5b-abort-1b) `set_abort` stores a handle, `take_abort` clears it
+    // (returning the handle so the caller can drive the abort), and the slot
+    // is empty afterward — the exact lifecycle the spawn path uses so a
+    // finished agent can't be aborted a second time.
+    #[test]
+    fn abort_slot_set_take_clears() {
+        let registry = AgentRegistry::new();
+        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+
+        let (handle, _signal) = AbortHandle::new();
+        h.set_abort(handle);
+        assert!(h.abort.lock().unwrap().is_some(), "set_abort must store the handle");
+        assert!(h.abort_handle().is_some(), "abort_handle must reflect the stored handle");
+
+        let taken = h.take_abort();
+        assert!(taken.is_some(), "take_abort must return the stored handle");
+        assert!(
+            h.abort.lock().unwrap().is_none(),
+            "take_abort must clear the slot so a finished agent can't be aborted"
+        );
+        // A second take is empty — the slot was already drained.
+        assert!(h.take_abort().is_none());
+    }
+
+    // (M5b-abort-2) The cross-thread trigger actually fires: cloning the
+    // handle (as `abort_handle` does — the inner is `Arc`), calling
+    // `.abort()` on the clone, and observing `is_aborted()` true on the
+    // original signal pins the AbortHandle/AbortSignal pairing the spawn
+    // path threads through `prompt_with_abort`. A handle taken off the slot
+    // (the path the bg thread's `Cmd::StopAgent` uses) still aborts.
+    #[test]
+    fn abort_handle_abort_is_observable_via_signal() {
+        let registry = AgentRegistry::new();
+        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+
+        let (handle, signal) = AbortHandle::new();
+        h.set_abort(handle);
+
+        assert!(!signal.is_aborted(), "signal must start clear");
+
+        // The bg thread takes the handle off the slot (its `Cmd::StopAgent`
+        // path) and aborts via the taken handle.
+        let taken = h.take_abort().expect("handle was set");
+        taken.abort();
+
+        assert!(
+            signal.is_aborted(),
+            "aborting a taken handle must mark the paired signal aborted"
+        );
+        assert!(h.abort.lock().unwrap().is_none(), "taking cleared the slot");
     }
 }
