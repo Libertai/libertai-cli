@@ -219,7 +219,7 @@ impl Tool for SpawnTeamTool {
             ));
         }
         summary.push_str(&format!(
-            "\n\nTask list: {}\nTeammates can coordinate via the `team_task` and `mailbox` tools.\nUse `libertai agents` to monitor progress.",
+            "\n\nTask list: {}\nTeammates can coordinate via the `team_task` and `mailbox` tools.\nThe user can monitor progress by pressing [tab] in the REPL.",
             team_dir.display()
         ));
 

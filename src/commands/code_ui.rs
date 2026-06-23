@@ -1326,7 +1326,7 @@ fn spawn_and_announce(
             t.name, t.pid, run_id = t.run_id
         );
     }
-    println!("{DIM}  libertai agents   open the agent view{RESET}");
+    println!("{DIM}  press [tab] in the REPL to browse agents{RESET}");
     Ok(())
 }
 

@@ -161,12 +161,14 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    // Modal size: 70% width, auto height, centered.
+    // Modal size: 70% width, max 80% height, centered.
     let modal_width = (area.width as f32 * 0.7) as u16;
+    let max_modal_height = (area.height as f32 * 0.8) as u16;
+    let usable_width = modal_width.saturating_sub(4) as usize;
+
     // Count wrapped lines for preview — account for both explicit
     // newlines and word-wrap at the usable width.
-    let usable_width = modal_width.saturating_sub(4) as usize;
-    let preview_lines: u16 = approval
+    let preview_line_count: usize = approval
         .preview
         .lines()
         .map(|line| {
@@ -174,14 +176,25 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
             if chars == 0 {
                 1
             } else {
-                ((chars + usable_width.saturating_sub(1)) / usable_width.max(1)).max(1) as u16
+                ((chars + usable_width.saturating_sub(1)) / usable_width.max(1)).max(1)
             }
         })
-        .sum::<u16>()
-        .max(1);
-    // 5 content lines (tool + preview + always_rule + blank + controls)
-    // + 2 border rows = 7, plus preview wrap overflow.
-    let modal_height = (7 + preview_lines.saturating_sub(1)).min(area.height.saturating_sub(2));
+        .sum();
+
+    // Fixed content lines: tool (1) + preview-prefix-line (1) + always_rule (1)
+    // + blank (1) + controls (1) = 5. Plus 2 border rows = 7.
+    let fixed_lines = 7;
+    let needed_height = fixed_lines + preview_line_count.saturating_sub(1);
+    let modal_height = needed_height.min(max_modal_height as usize) as u16;
+
+    // How many preview lines fit without clipping the controls?
+    let inner_height = modal_height.saturating_sub(2) as usize; // minus borders
+    let reserved_lines = 4; // tool + always_rule + blank + controls
+    let max_preview_lines = inner_height.saturating_sub(reserved_lines).max(1);
+
+    // Truncate the preview to fit, appending an ellipsis if cut.
+    let truncated_preview = truncate_preview(&approval.preview, max_preview_lines, usable_width);
+
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
@@ -205,7 +218,7 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
         ]),
         Line::from(vec![
             Span::styled("Preview: ", Style::default().fg(Color::DarkGray)),
-            Span::raw(&approval.preview),
+            Span::raw(&truncated_preview),
         ]),
         Line::from(vec![
             Span::styled("Always rule: ", Style::default().fg(Color::DarkGray)),
@@ -232,6 +245,38 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
         .block(block)
         .wrap(Wrap::default());
     frame.render_widget(paragraph, modal_area);
+}
+
+/// Truncate a multi-line preview to at most `max_lines` visual lines
+/// (after word-wrapping at `width`), appending `…` if truncated.
+fn truncate_preview(preview: &str, max_lines: usize, width: usize) -> String {
+    let mut visual_lines = 0usize;
+    let mut out = String::new();
+    for line in preview.lines() {
+        let wrapped = if line.chars().count() == 0 {
+            1
+        } else {
+            ((line.chars().count() + width.saturating_sub(1)) / width.max(1)).max(1)
+        };
+        if visual_lines + wrapped > max_lines {
+            // Fill remaining lines with the start of this line.
+            let remaining = max_lines.saturating_sub(visual_lines);
+            if remaining > 0 {
+                let chars_per_line = width.max(1);
+                let take_chars = remaining * chars_per_line;
+                let truncated: String = line.chars().take(take_chars).collect();
+                out.push_str(&truncated);
+                out.push('…');
+            } else {
+                out.push('…');
+            }
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+        visual_lines += wrapped;
+    }
+    out.trim_end_matches('\n').to_string()
 }
 
 /// Draw the ask-user modal as a centered popup.
