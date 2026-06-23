@@ -44,10 +44,10 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
 
         // CommonMark tolerates up to 3 leading spaces of indentation
         // before block-structure prefixes (headings, blockquotes, list
-        // markers, hr). Strip them; the consumed width is returned for
-        // M4b nested-list indent detection (unused here in M4a, where
-        // list indent comes from the explicit `list_item` param).
-        let (stripped, _leading) = strip_leading_indent(line);
+        // markers, hr). Strip them; the consumed width is returned as
+        // `leading` and used by M4b nested-list indent detection below
+        // (depth = leading / 2).
+        let (stripped, leading) = strip_leading_indent(line);
 
         // Heading # .. ######
         if let Some(s) = stripped.strip_prefix("# ") {
@@ -95,25 +95,90 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
             continue;
         }
 
-        // Unordered list
+        // Nested-list indent: read leading-space depth from the ORIGINAL
+        // line (strip_leading_indent trims up to 3, returning the raw
+        // count as `leading`). CommonMark's indent step is 2-4; we use 2,
+        // so depth = leading_spaces / 2. Two leading spaces -> one level.
+        let depth = leading / 2;
+
+        // Task-list checkboxes — checked BEFORE the generic `-`/`*` list
+        // branches so `- [x]` / `- [ ]` get a checkbox glyph instead of a
+        // bullet. `[x]`/`[X]` -> ✓ (success), `[ ]` -> ☐ (muted).
+        if let Some(rest) = stripped.strip_prefix("- [") {
+            if let Some(checked) = rest.chars().next() {
+                let after = &rest[checked.len_utf8()..];
+                if let Some(s) = after.strip_prefix("] ") {
+                    let (glyph, style) = match checked {
+                        'x' | 'X' => (theme::glyph::COMPLETED, theme::success()),
+                        _ => (theme::glyph::UNCHECKED, theme::muted()),
+                    };
+                    let prefix = format!("{}{}  ", "  ".repeat(depth), glyph);
+                    lines.extend(wrap_spans(parse_inline(s), &prefix, style, width));
+                    continue;
+                }
+            }
+        }
+        if let Some(rest) = stripped.strip_prefix("* [") {
+            if let Some(checked) = rest.chars().next() {
+                let after = &rest[checked.len_utf8()..];
+                if let Some(s) = after.strip_prefix("] ") {
+                    let (glyph, style) = match checked {
+                        'x' | 'X' => (theme::glyph::COMPLETED, theme::success()),
+                        _ => (theme::glyph::UNCHECKED, theme::muted()),
+                    };
+                    let prefix = format!("{}{}  ", "  ".repeat(depth), glyph);
+                    lines.extend(wrap_spans(parse_inline(s), &prefix, style, width));
+                    continue;
+                }
+            }
+        }
+
+        // Unordered list — pass the nested-list depth through.
         if let Some(s) = stripped.strip_prefix("- ") {
-            lines.extend(list_item("  • ", s, 0, width));
+            lines.extend(list_item("  • ", s, depth, width));
             continue;
         }
         if let Some(s) = stripped.strip_prefix("* ") {
-            lines.extend(list_item("  • ", s, 0, width));
+            lines.extend(list_item("  • ", s, depth, width));
             continue;
         }
 
-        // Ordered list (1. 2. ...)
-        if let Some(after) = stripped.strip_prefix(|c: char| c.is_ascii_digit()) {
-            if let Some(s) = after.strip_prefix(". ") {
-                let num: String = stripped
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect();
-                lines.extend(list_item(&format!("  {num}. "), s, 0, width));
+        // Ordered list (1. 2. ...) — pass the nested-list depth through.
+        // Collect the leading run of digits first: `str::strip_prefix` with
+        // a char predicate strips only ONE digit, so a multi-digit marker
+        // (`12. item`) would otherwise fail the `. ` check and fall through
+        // to the paragraph branch.
+        let digits: String = stripped.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            if let Some(s) = stripped[digits.len()..].strip_prefix(". ") {
+                lines.extend(list_item(&format!("  {digits}. "), s, depth, width));
                 continue;
+            }
+        }
+
+        // GFM table. A header row `^\s*\|.*\|\s*$` must be followed by a
+        // separator row whose cells are dashes/colons only (`---`, `:---`,
+        // `---:`, `:---:`). Detected AFTER the list/HR/blockquote checks
+        // and BEFORE the paragraph fallback; consumes following rows of the
+        // same pipe-delimited shape via the peekable iterator.
+        if is_table_header(stripped) {
+            if let Some(&next) = iter.peek() {
+                if is_table_separator(next) {
+                    let header = stripped;
+                    let sep = next.to_string();
+                    iter.next(); // consume separator
+                    let mut rows = vec![header.to_string(), sep];
+                    while let Some(&row) = iter.peek() {
+                        if is_table_row(row) {
+                            rows.push(row.to_string());
+                            iter.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    lines.extend(render_table(&rows, width));
+                    continue;
+                }
             }
         }
 
@@ -150,8 +215,339 @@ fn strip_leading_indent(line: &str) -> (&str, usize) {
     (&line[consumed..], consumed)
 }
 
+// ---- GFM table detection + rendering (M4b) ----
+//
+// A GFM table is a header row `^\s*\|.*\|\s*$` followed by a separator
+// row whose cells are dashes/colons only. We render it as aligned text
+// (one `Line` per row, cells joined by ` | `) rather than the ratatui
+// `Table` widget, which is awkward to slot into a `Vec<Line>` stream.
+
+/// True if `line` looks like a table header row: optional leading
+/// whitespace, a leading `|`, content, and a trailing `|`.
+fn is_table_header(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') && t.ends_with('|') && t.len() >= 2
+}
+
+/// True if `line` is a table separator row: every cell (split on
+/// unescaped `|`, then trimmed) is non-empty and made of only `-` and
+/// `:` (e.g. `---`, `:---`, `---:`, `:---:`). Surrounding spaces in a
+/// cell are allowed (`| --- | --- |` is valid GFM).
+fn is_table_separator(line: &str) -> bool {
+    if !is_table_header(line) {
+        return false;
+    }
+    let cells = split_table_row(line.trim());
+    if cells.is_empty() {
+        return false;
+    }
+    cells.iter().all(|c| {
+        let t = c.trim();
+        !t.is_empty()
+            && t.chars().all(|ch| ch == '-' || ch == ':')
+            && t.contains('-')
+    })
+}
+
+/// True if `line` has the pipe-delimited row shape (used to gather
+/// body rows after the separator). Less strict than the separator:
+/// only the outer-pipe shape is required.
+fn is_table_row(line: &str) -> bool {
+    is_table_header(line)
+}
+
+/// Split a table row on unescaped `|`. A backslash-escaped pipe
+/// (`\|`) becomes a literal `|` in the cell; the backslash is dropped.
+fn split_table_row(row: &str) -> Vec<String> {
+    // Strip the leading and trailing delimiters, then split on
+    // unescaped pipes. A trailing escaped backslash before the final
+    // pipe is preserved.
+    let t = row.trim();
+    let inner = if t.starts_with('|') && t.ends_with('|') && t.len() >= 2 {
+        &t[1..t.len() - 1]
+    } else {
+        t
+    };
+    let mut cells = Vec::new();
+    let mut cur = String::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                if next == '|' {
+                    chars.next();
+                    cur.push('|');
+                    continue;
+                }
+            }
+            cur.push('\\');
+        } else if c == '|' {
+            cells.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(c);
+        }
+    }
+    cells.push(cur);
+    cells
+}
+
+/// Per-column alignment inferred from a separator cell.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TableAlign {
+    Left,
+    Right,
+    Center,
+}
+
+/// Render a parsed GFM table (rows[0] = header, rows[1] = separator,
+/// rest = body) as aligned text `Line`s. Each cell is `parse_inline`d
+/// so inline formatting works inside cells. Columns are padded to the
+/// max display width per column and aligned per the separator. The last
+/// column is truncated with `…` if the whole table overflows `width`.
+fn render_table(rows: &[String], width: usize) -> Vec<Line<'static>> {
+    if rows.len() < 2 {
+        return Vec::new();
+    }
+    let mut header_cells = split_table_row(&rows[0]);
+    let ncol = header_cells.len().max(1);
+    // GFM trims leading/trailing whitespace in each cell.
+    for c in header_cells.iter_mut() {
+        *c = c.trim().to_string();
+    }
+
+    // Alignments from the separator row (trim each cell — GFM allows
+    // spaces around the dashes, e.g. `| --- | :---: | ---: |`).
+    let sep_cells = split_table_row(&rows[1]);
+    let aligns: Vec<TableAlign> = (0..ncol)
+        .map(|i| {
+            let c = sep_cells
+                .get(i)
+                .map(|s| s.trim())
+                .unwrap_or("");
+            let starts = c.starts_with(':');
+            let ends = c.ends_with(':');
+            match (starts, ends) {
+                (true, true) => TableAlign::Center,
+                (false, true) => TableAlign::Right,
+                _ => TableAlign::Left,
+            }
+        })
+        .collect();
+
+    // Split every row into `ncol` cells (padding short rows with "").
+    // GFM trims leading/trailing whitespace in each cell, so trim here.
+    let mut all_rows: Vec<Vec<String>> = Vec::new();
+    all_rows.push(header_cells);
+    for r in &rows[2..] {
+        let mut cells = split_table_row(r);
+        for c in cells.iter_mut() {
+            *c = c.trim().to_string();
+        }
+        while cells.len() < ncol {
+            cells.push(String::new());
+        }
+        cells.truncate(ncol);
+        all_rows.push(cells);
+    }
+
+    // Render each cell to inline spans and measure display widths.
+    let rendered: Vec<Vec<Vec<Span<'static>>>> = all_rows
+        .iter()
+        .map(|row| {
+            (0..ncol)
+                .map(|i| parse_inline(row.get(i).map(|s| s.as_str()).unwrap_or("")))
+                .collect()
+        })
+        .collect();
+    let cell_text: Vec<Vec<String>> = rendered
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|spans| spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .collect()
+        })
+        .collect();
+    let mut col_widths: Vec<usize> = (0..ncol)
+        .map(|i| {
+            cell_text
+                .iter()
+                .map(|row| row.get(i).map(|s| s.width()).unwrap_or(0))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+
+    // Total = sum(col widths) + (ncol-1)*3 (" | " separators). If that
+    // overflows `width`, shrink the last column to fit (min 1). If the
+    // table STILL overflows (a non-last column is the wide one), iteratively
+    // shave the widest column by one until the total fits — guaranteeing no
+    // row overflows `width` regardless of which column is the long one.
+    let sep_w = 3 * ncol.saturating_sub(1);
+    let total: usize = col_widths.iter().sum::<usize>() + sep_w;
+    if total > width {
+        let used: usize = col_widths.iter().sum::<usize>();
+        let budget = width.saturating_sub(sep_w).max(ncol);
+        if used > budget {
+            let last = col_widths.len().saturating_sub(1);
+            let others: usize = col_widths[..last].iter().sum();
+            col_widths[last] = budget.saturating_sub(others).max(1);
+        }
+        // The last-column shrink alone may not be enough when a non-last
+        // column is the wide one. Keep shaving the current widest column
+        // (min 1 each) until the rendered width fits.
+        while col_widths.iter().sum::<usize>() + sep_w > width {
+            let (mi, _) = col_widths
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, &w)| w)
+                .expect("non-empty col_widths");
+            if col_widths[mi] <= 1 {
+                // Every column is already at the floor (min 1); the table
+                // is irreducibly wider than `width` (tiny width). Stop so
+                // we don't spin; cells will truncate to "…" in table_line.
+                break;
+            }
+            col_widths[mi] -= 1;
+        }
+    }
+
+    let mut out = Vec::with_capacity(all_rows.len() + 1);
+
+    // Header row.
+    out.push(table_line(&rendered[0], &cell_text[0], &col_widths, &aligns));
+
+    // Divider: one `─` run per column, sized to the column width, joined
+    // by `─┼─` so it reads as a table border under the header.
+    let divider: Vec<Span<'static>> = (0..ncol)
+        .map(|i| Span::styled("─".repeat(col_widths[i]), theme::muted()))
+        .collect();
+    let mut div_spans = Vec::with_capacity(divider.len() * 2);
+    for (i, d) in divider.into_iter().enumerate() {
+        if i > 0 {
+            div_spans.push(Span::styled("─┼─".to_string(), theme::muted()));
+        }
+        div_spans.push(d);
+    }
+    out.push(Line::from(div_spans));
+
+    // Body rows.
+    for ri in 1..rendered.len() {
+        out.push(table_line(&rendered[ri], &cell_text[ri], &col_widths, &aligns));
+    }
+
+    out
+}
+
+/// Build one aligned table row `Line` from pre-rendered cell spans.
+/// Cells are padded to `col_widths` per `aligns`; the last column is
+/// truncated with `…` if its text overflows its allotted width.
+fn table_line(
+    cells: &[Vec<Span<'static>>],
+    texts: &[String],
+    col_widths: &[usize],
+    aligns: &[TableAlign],
+) -> Line<'static> {
+    let ncol = col_widths.len();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for i in 0..ncol {
+        if i > 0 {
+            spans.push(Span::raw(" | "));
+        }
+        let cw = col_widths[i];
+        let text = texts.get(i).map(|s| s.as_str()).unwrap_or("");
+        let tw = text.width();
+        let cell_spans = cells.get(i).cloned().unwrap_or_default();
+
+        if tw > cw {
+            // Truncate an overflowing cell with an ellipsis so the row
+            // stays within its column budget. Take chars by display
+            // width (not char count) to respect wide glyphs, reserving
+            // one column for the trailing `…`.
+            let budget = cw.saturating_sub(1);
+            let mut taken = String::new();
+            let mut w = 0usize;
+            for ch in text.chars() {
+                let cw_ch = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if w + cw_ch > budget {
+                    break;
+                }
+                taken.push(ch);
+                w += cw_ch;
+            }
+            if cw == 0 {
+                // No room at all — emit nothing.
+            } else {
+                // budget = cw-1 leaves one column for `…`.
+                spans.push(Span::styled(format!("{taken}…"), theme::muted()));
+            }
+        } else {
+            let pad = cw.saturating_sub(tw);
+            let align = aligns.get(i).copied().unwrap_or(TableAlign::Left);
+            match align {
+                TableAlign::Right => {
+                    spans.push(Span::raw(" ".repeat(pad)));
+                    spans.extend(cell_spans);
+                }
+                TableAlign::Center => {
+                    let left = pad / 2;
+                    let right = pad - left;
+                    spans.push(Span::raw(" ".repeat(left)));
+                    spans.extend(cell_spans);
+                    spans.push(Span::raw(" ".repeat(right)));
+                }
+                TableAlign::Left => {
+                    spans.extend(cell_spans);
+                    spans.push(Span::raw(" ".repeat(pad)));
+                }
+            }
+        }
+    }
+    Line::from(spans)
+}
+
+/// Peek the next two items of a `Peekable` iterator without consuming
+/// them. Returns `(next, next+1)`. Replaces the `chars.clone().nth(1)`
+/// smell with a named, intent-revealing helper. Generic over the inner
+/// iterator so it works with any `Peekable<I: Clone + Iterator>` whose
+/// items are also `Clone` (the blanket `Clone` impl on `Peekable`
+/// requires both). We clone the dereferenced iterator — NOT the shared
+/// `&Peekable` reference — so the clone is a real value copy.
+fn peek2<I>(chars: &std::iter::Peekable<I>) -> (Option<I::Item>, Option<I::Item>)
+where
+    I: Clone + Iterator,
+    I::Item: Clone,
+{
+    // Dereference so we clone the `Peekable<I>` VALUE (the blanket
+    // `Clone for Peekable<I>` impl, which needs `I: Clone + I::Item:
+    // Clone`), not the `&Peekable<I>` reference (which would only ever
+    // produce another shared reference).
+    let mut clone: std::iter::Peekable<I> = (*chars).clone();
+    let first = clone.next();
+    let second = clone.next();
+    (first, second)
+}
+
+/// Layer an outer style onto each of a set of inner spans. Used by the
+/// recursive inline parser: e.g. `**bold *italic* bold**` recurses on the
+/// captured `bold *italic* bold` text, then layers `theme::bold()` (a
+/// modifier-only style) onto each returned span via `patch_style`, so the
+/// inner italic span keeps its own italic AND gains bold.
+fn layer(spans: Vec<Span<'static>>, outer: Style) -> Vec<Span<'static>> {
+    spans
+        .into_iter()
+        .map(|s| s.patch_style(outer))
+        .collect()
+}
+
 /// Render inline markdown (`**bold**`, `*italic*`, `` `code` ``, `~~strike~~`,
 /// `[text](url)`) into styled spans. All spans are `'static` (owned).
+///
+/// Emphasis is recursive: the captured inner text of `**bold**` / `*italic*` /
+/// `~~strike~~` is itself `parse_inline`d, and the outer emphasis style is
+/// layered onto the inner spans via [`layer`] (using `Span::patch_style`,
+/// which unions modifiers while preserving inner fg/bg). So
+/// `**bold *italic* bold**` italicizes the inner word AND keeps it bold, and
+/// `**see [x](u)**` renders a clickable link that is also bold.
 fn parse_inline(text: &str) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut buf = String::new();
@@ -165,6 +561,16 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
 
     while let Some(c) = chars.next() {
         match c {
+            '\\' => {
+                // Escape: next char is literal (e.g. `\*`, `\|`). If there
+                // is no next char, emit the backslash verbatim.
+                if let Some(&next) = chars.peek() {
+                    chars.next();
+                    buf.push(next);
+                } else {
+                    buf.push('\\');
+                }
+            }
             '`' => {
                 flush(&mut buf, &mut spans);
                 let mut code = String::new();
@@ -184,13 +590,17 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                     spans.push(Span::raw(format!("`{code}")));
                 }
             }
-            '*' if chars.peek() == Some(&'*') => {
+            '*' if peek2(&chars).0 == Some('*') => {
+                // `**` opens bold. peek2's first slot is the char
+                // immediately after the consumed `*`; if it's another
+                // `*` we have a bold opener.
                 chars.next(); // consume second '*'
                 flush(&mut buf, &mut spans);
                 let mut bold = String::new();
                 let mut found_close = false;
                 while let Some(&next) = chars.peek() {
-                    if next == '*' && chars.clone().nth(1) == Some('*') {
+                    let (a, b) = peek2(&chars);
+                    if a == Some('*') && b == Some('*') {
                         chars.next();
                         chars.next();
                         found_close = true;
@@ -200,7 +610,7 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                     chars.next();
                 }
                 if found_close {
-                    spans.push(Span::styled(bold, theme::bold()));
+                    spans.extend(layer(parse_inline(&bold), theme::bold()));
                 } else {
                     spans.push(Span::raw(format!("**{bold}")));
                 }
@@ -220,8 +630,8 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                     chars.next();
                 }
                 if found_close {
-                    spans.push(Span::styled(
-                        italic,
+                    spans.extend(layer(
+                        parse_inline(&italic),
                         Style::default().add_modifier(Modifier::ITALIC),
                     ));
                 } else {
@@ -234,7 +644,8 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                 let mut strike = String::new();
                 let mut found_close = false;
                 while let Some(&next) = chars.peek() {
-                    if next == '~' && chars.clone().nth(1) == Some('~') {
+                    let (a, b) = peek2(&chars);
+                    if a == Some('~') && b == Some('~') {
                         chars.next();
                         chars.next();
                         found_close = true;
@@ -244,8 +655,8 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                     chars.next();
                 }
                 if found_close {
-                    spans.push(Span::styled(
-                        strike,
+                    spans.extend(layer(
+                        parse_inline(&strike),
                         Style::default().add_modifier(Modifier::CROSSED_OUT),
                     ));
                 } else {
@@ -276,11 +687,25 @@ fn parse_inline(text: &str) -> Vec<Span<'static>> {
                         url.push(next);
                         chars.next();
                     }
-                    spans.push(Span::styled(
-                        format!("{label} ({url})"),
-                        theme::accent().add_modifier(Modifier::UNDERLINED),
-                    ));
+                    // OSC 8 hyperlink: terminals that support it make the
+                    // label clickable; others render just the label. Fall
+                    // back to the underlined label only if the URL is
+                    // very long (>200) or contains control chars.
+                    let style = theme::accent().add_modifier(Modifier::UNDERLINED);
+                    if url.len() > 200 || url.chars().any(|c| c.is_control()) {
+                        spans.push(Span::styled(label, style));
+                    } else {
+                        let content = format!("\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\");
+                        spans.push(Span::styled(content, style));
+                    }
+                } else if found_label {
+                    // `]` was consumed but no `(` followed: emit the full
+                    // literal `[label]` (the closing bracket too), so a
+                    // non-link bracketed span round-trips verbatim.
+                    spans.push(Span::raw(format!("[{label}]")));
                 } else {
+                    // No closing `]` at all: nothing was consumed beyond
+                    // the label text, so emit `[label` verbatim.
                     spans.push(Span::raw(format!("[{label}")));
                 }
             }
@@ -300,13 +725,12 @@ fn heading(text: &str, level: usize) -> Line<'static> {
 /// Render a list item with the given bullet and indent, pre-wrapped
 /// to `width`.
 ///
-/// `indent` is the number of 2-space units to prefix before the bullet
-/// (so M4b nested lists can pass their depth). Current call sites pass
-/// 0, so behavior is unchanged for now; wiring the param here lets M4b
-/// pass a non-zero value without touching this function again. The
-/// wrapped prefix is `  `.repeat(indent) + bullet.
-fn list_item(bullet: &str, text: &str, _indent: usize, width: usize) -> Vec<Line<'static>> {
-    let prefix = format!("{}{}", "  ".repeat(_indent), bullet);
+/// `indent` is the number of 2-space units to prefix before the bullet.
+/// M4b wires the nested-list depth here (top-level items pass 0; a
+/// 2-space-indented `-` passes 1, etc.). The wrapped prefix is
+/// `  `.repeat(indent) + bullet.
+fn list_item(bullet: &str, text: &str, indent: usize, width: usize) -> Vec<Line<'static>> {
+    let prefix = format!("{}{}", "  ".repeat(indent), bullet);
     wrap_spans(parse_inline(text), &prefix, theme::accent(), width)
 }
 
@@ -606,5 +1030,621 @@ mod tests {
             theme::accent().add_modifier(Modifier::BOLD),
             "inline code is NOT accent+BOLD"
         );
+    }
+
+    // ---- M4b: tables, nested lists, task lists, recursive inline, OSC-8 ----
+
+    #[test]
+    fn renders_gfm_table() {
+        let src = "| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+        let lines = render(src, 80);
+        // header + divider + 1 body row == 3 lines.
+        assert_eq!(lines.len(), 3, "table renders header + divider + body");
+        // Header and body rows join cells with " | "; the divider (line
+        // index 1) uses a border glyph instead, so only check the data
+        // rows (indices 0 and 2).
+        for &i in &[0usize, 2] {
+            let text: String = lines[i].spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                text.contains(" | "),
+                "data row {i} should join cells with ' | ', got {text:?}"
+            );
+        }
+        // Divider line contains the column junction glyph.
+        let div: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(div.contains('┼'), "divider has a column junction glyph: {div:?}");
+    }
+
+    #[test]
+    fn table_requires_separator() {
+        // No separator row after the header -> NOT a table; the header
+        // line renders as a paragraph instead (no divider, no alignment).
+        let src = "| a | b |\nnot a separator\n";
+        let lines = render(src, 80);
+        // Two paragraph lines (no divider line).
+        assert_eq!(lines.len(), 2, "no separator -> 2 paragraph lines, no divider");
+        for line in &lines {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                !text.contains('┼'),
+                "no table divider should be rendered without a separator: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn table_alignment_from_separator() {
+        // Right-aligned second column: cells should be right-padded.
+        let src = "| name | count |\n| :--- | ---: |\n| a | 1 |\n| ab | 22 |\n";
+        let lines = render(src, 80);
+        // header + divider + 2 body rows
+        assert_eq!(lines.len(), 4);
+        // The body rows right-align the "count" column to the max width (2).
+        let row3: String = lines[3].spans.iter().map(|s| s.content.as_ref()).collect();
+        // "22" is already width 2 (max), so no leading pad; "1" gets a
+        // leading space (" 1") to align. Check the second body row's last
+        // cell text contains "22" and the first body row contains " 1".
+        let row2: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(row2.contains(" 1"), "right-aligned short cell is space-padded: {row2:?}");
+        assert!(row3.contains("22"), "right-aligned max-width cell: {row3:?}");
+    }
+
+    #[test]
+    fn table_clips_when_too_wide() {
+        // A 3-col table whose natural width exceeds 20 columns: the last
+        // column is truncated with an ellipsis so the row stays in budget.
+        let src = "| aaaa | bbbb | cccccccccccccccc |\n| --- | --- | --- |\n| 1 | 2 | zzzzzzzzzzzzzzzzzzzzz |\n";
+        let lines = render(src, 20);
+        // header + divider + 1 body row
+        assert_eq!(lines.len(), 3);
+        let body: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            body.contains('…') || body.width() <= 20,
+            "overflowing table clips the last column, got {body:?} (w={})",
+            body.width()
+        );
+    }
+
+    #[test]
+    fn nested_list_indents() {
+        let src = "- top\n  - nested\n";
+        let lines = render(src, 80);
+        assert_eq!(lines.len(), 2);
+        let top: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let nested: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        // The nested item prefix has more leading space than the top one.
+        let top_lead = top.len() - top.trim_start().len();
+        let nested_lead = nested.len() - nested.trim_start().len();
+        assert!(
+            nested_lead > top_lead,
+            "nested list item is indented further: top_lead={top_lead} nested_lead={nested_lead} ({nested:?})"
+        );
+    }
+
+    #[test]
+    fn task_list_checked_uses_success_glyph() {
+        let lines = render("- [x] done\n- [ ] todo\n", 80);
+        assert_eq!(lines.len(), 2);
+        let done: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let todo: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(done.contains(theme::glyph::COMPLETED), "checked item shows ✓: {done:?}");
+        assert!(todo.contains(theme::glyph::UNCHECKED), "unchecked item shows ☐: {todo:?}");
+        // The checked glyph span is styled success; unchecked is muted.
+        assert!(
+            lines[0].spans.iter().any(|s| s.style == theme::success() && s.content.contains(theme::glyph::COMPLETED)),
+            "✓ span is theme::success()"
+        );
+        assert!(
+            lines[1].spans.iter().any(|s| s.style == theme::muted() && s.content.contains(theme::glyph::UNCHECKED)),
+            "☐ span is theme::muted()"
+        );
+    }
+
+    #[test]
+    fn recursive_inline_bold_italic() {
+        // `**bold *italic* bold**` -> the inner italic word keeps italic
+        // AND gains bold (layered modifiers).
+        let lines = render("**bold *italic* bold**", 80);
+        assert_eq!(lines.len(), 1);
+        let italic_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "italic")
+            .expect("inner italic span present");
+        let mods = italic_span.style.add_modifier;
+        assert!(mods.contains(Modifier::ITALIC), "inner word is italic");
+        assert!(mods.contains(Modifier::BOLD), "inner word is ALSO bold (layered)");
+    }
+
+    #[test]
+    fn recursive_inline_link_in_bold() {
+        // `**see [x](u)**` -> the link span is bold AND underlined+accent.
+        let lines = render("**see [x](u)**", 80);
+        assert_eq!(lines.len(), 1);
+        // The label "x" is emitted as a span inside the bold layer.
+        let link_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains('x') && s.content.contains('\x1b'))
+            .expect("OSC-8 link span present inside bold");
+        let mods = link_span.style.add_modifier;
+        assert!(mods.contains(Modifier::BOLD), "link is bold (outer layer)");
+        assert!(mods.contains(Modifier::UNDERLINED), "link is underlined");
+    }
+
+    #[test]
+    fn osc8_hyperlink_emitted() {
+        // `[x](u)` -> span content contains the OSC-8 escape sequence.
+        let lines = render("[label](https://example.com)", 80);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("\x1b]8;;https://example.com\x1b\\"), "OSC-8 opener present: {text:?}");
+        assert!(text.contains("\x1b]8;;\x1b\\"), "OSC-8 closer present: {text:?}");
+        assert!(text.contains("label"), "label is in the span: {text:?}");
+        // The span is underlined + accent.
+        let link = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("\x1b]8;;"))
+            .expect("link span");
+        assert!(link.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(link.style.fg, Some(Color::Cyan));
+    }
+
+    #[test]
+    fn osc8_long_url_falls_back_to_label_only() {
+        // A >200-char URL must NOT embed OSC-8 (control-sequence risk);
+        // it renders the underlined label only.
+        let mut long = "https://example.com/".to_string();
+        long.push_str(&"x".repeat(200));
+        let src = format!("[label]({long})");
+        let lines = render(&src, 80);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains("\x1b]8;;"), "long URL omits OSC-8: {text:?}");
+        assert!(text.contains("label"), "label still shown");
+    }
+
+    #[test]
+    fn unclosed_link_emits_label_fallback() {
+        // `[label`(no closing) -> the `[{label}` literal fallback.
+        let lines = render("[label no close", 80);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("[label"), "unclosed link falls back to literal: {text:?}");
+    }
+
+    // ---- M4b adversarial suite (independent review) ----
+    //
+    // Each test is written to FAIL if its construct is broken, then mentally
+    // verified against the (fixed) implementation. The verifier runs them
+    // for real.
+
+    // (1) Tables ----------------------------------------------------------
+
+    #[test]
+    fn table_header_and_body_cell_counts() {
+        // A 3-row table (header + sep + 1 body) must render header + divider
+        // + body == 3 Lines. Splitting each data row's rendered text on
+        // " | " yields (ncol - 1) separators, i.e. ncol cells = ncol-1+1.
+        let src = "| name | value | note |\n| --- | --- | --- |\n| a | 1 | x |\n";
+        let lines = render(src, 80);
+        assert_eq!(lines.len(), 3, "header + divider + 1 body row");
+        let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let body: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(header.split(" | ").count(), 3, "header has 3 cells: {header:?}");
+        assert_eq!(body.split(" | ").count(), 3, "body has 3 cells: {body:?}");
+        // The header text is exactly the trimmed cells in order.
+        assert_eq!(header.split(" | ").collect::<Vec<_>>(), ["name", "value", "note"]);
+    }
+
+    #[test]
+    fn table_columns_are_width_aligned() {
+        // Every cell in a column must pad out to the column's max width, so
+        // the rendered " | " separators land in the same column on every row.
+        let src = "| a | bbbb |\n| --- | --- |\n| aa | b |\n";
+        let lines = render(src, 80);
+        assert_eq!(lines.len(), 3);
+        // Column widths: col0 = max("a","aa") = 2; col1 = max("bbbb","b") = 4.
+        for &i in &[0usize, 2] {
+            let row: String = lines[i].spans.iter().map(|s| s.content.as_ref()).collect();
+            let cells: Vec<&str> = row.split(" | ").collect();
+            assert_eq!(cells.len(), 2);
+            // col0 cell width == 2 (padded), col1 cell width == 4 (padded).
+            assert_eq!(cells[0].width(), 2, "row {i} col0 width 2: {cells:?}");
+            assert_eq!(cells[1].width(), 4, "row {i} col1 width 4: {cells:?}");
+        }
+        // Sanity: header cells align with body cells at the same columns.
+        let h: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let b: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(h.find('|'), b.find('|'), "separator columns align");
+    }
+
+    #[test]
+    fn table_center_and_right_align_from_separator() {
+        // `:---:` centers, `---:` right-aligns. Use enough width difference
+        // that the alignment is visible (pad >= 2 for centering symmetry).
+        // col0 max width = 4 ("name"); body col0 "ab" (2) -> center pad 2 ->
+        // " ab " (1 + 1). col1 max = 5 ("count"); body col1 "1" (1) ->
+        // right pad 4 -> "    1".
+        let src = "| name | count |\n| :---: | ---: |\n| ab | 1 |\n";
+        let lines = render(src, 80);
+        assert_eq!(lines.len(), 3);
+        let body: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        let cells: Vec<&str> = body.split(" | ").collect();
+        assert_eq!(cells.len(), 2);
+        // Centered "ab" -> leading AND trailing space present.
+        assert!(cells[0].starts_with(' ') && cells[0].ends_with(' '),
+            "col0 centered: {cells:?}");
+        assert_eq!(cells[0].trim(), "ab");
+        // Right-aligned "1" -> leading pad, no trailing pad.
+        assert!(cells[1].starts_with(' ') && !cells[1].ends_with(' '),
+            "col1 right-aligned: {cells:?}");
+        assert_eq!(cells[1].trim(), "1");
+    }
+
+    #[test]
+    fn table_escaped_pipe_is_literal() {
+        // `\|` inside a cell is a literal pipe, NOT a column split. So
+        // `| a \| b | c |` has TWO cells: "a | b" and "c". We verify this
+        // via the SPAN structure, not by splitting the flattened row text —
+        // the rendered cell "a | b" contains a literal `|`, so splitting
+        // the flattened row on " | " would (correctly) conflate it with a
+        // column separator and wrongly report 3 cells. The renderer emits
+        // the column join as a separate `Span::raw(" | ")` between cells,
+        // so grouping spans by those join spans reconstructs the true cells.
+        let src = "| h1 | h2 |\n| --- | --- |\n| a \\| b | c |\n";
+        let lines = render(src, 80);
+        assert_eq!(lines.len(), 3);
+        // Group the body row's spans into cells, splitting on the ` | `
+        // separator spans (content == " | "). The escaped pipe lives
+        // inside a cell span and is never a ` | ` separator span, so it
+        // stays in its cell.
+        let mut cells: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        for s in &lines[2].spans {
+            if s.content.as_ref() == " | " {
+                cells.push(std::mem::take(&mut cur));
+            } else {
+                cur.push_str(s.content.as_ref());
+            }
+        }
+        cells.push(cur);
+        assert_eq!(cells.len(), 2, "escaped pipe does not split a column: {cells:?}");
+        assert_eq!(cells[0], "a | b", "escaped pipe renders as literal '|'");
+        // The last cell may carry a trailing alignment pad; trim it.
+        assert_eq!(cells[1].trim_end(), "c", "second cell is 'c' (padded to col width): {cells:?}");
+    }
+
+    #[test]
+    fn table_clips_wide_non_last_column() {
+        // A table whose WIDE column is the FIRST one (not the last) must
+        // still be clipped to the render width — the old code only shrunk
+        // the last column, leaving a wide first column overflowing.
+        let src = "| aaaaaaaaaaaaaaaa | b |\n| --- | --- |\n| aaaaaaaaaaaaaaaa | b |\n";
+        let lines = render(src, 15);
+        assert_eq!(lines.len(), 3);
+        for (i, line) in lines.iter().enumerate() {
+            let w: usize = line.spans.iter().map(|s| s.content.width()).sum();
+            // The divider uses `─`/`┼` (each 1 cell) so its width matches
+            // the data rows; both must stay within `width`.
+            assert!(w <= 15, "line {i} overflows width 15: w={w}");
+        }
+        // The wide first column was truncated with an ellipsis.
+        let body: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(body.contains('…'), "wide first column is truncated: {body:?}");
+    }
+
+    #[test]
+    fn table_missing_separator_is_not_a_table() {
+        // A header-shaped row NOT followed by a separator must render as
+        // ordinary paragraphs — no divider, no alignment, no " | " join
+        // reformatting (the raw text is preserved as a paragraph).
+        let src = "| a | b |\njust text\n";
+        let lines = render(src, 80);
+        assert_eq!(lines.len(), 2, "two paragraph lines, no divider");
+        let second: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(second, "just text", "second line is the paragraph verbatim");
+        for line in &lines {
+            let t: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(!t.contains('┼'), "no table divider: {t:?}");
+        }
+    }
+
+    #[test]
+    fn table_single_column() {
+        // A one-column table still renders header + divider + body.
+        let src = "| h |\n| --- |\n| d |\n";
+        let lines = render(src, 80);
+        assert_eq!(lines.len(), 3);
+        let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let body: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        // No " | " separator in a single-column table.
+        assert_eq!(header, "h");
+        assert_eq!(body, "d");
+        // The divider is a single `─` run (no junction glyph).
+        let div: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!div.contains('┼'), "single-col table has no junction: {div:?}");
+    }
+
+    #[test]
+    fn table_row_with_trailing_spaces() {
+        // GFM trims trailing whitespace in cells, so trailing spaces must
+        // not throw off column-width alignment.
+        let src = "| a | bb   |\n| --- | --- |\n| a | bb   |\n";
+        let lines = render(src, 80);
+        assert_eq!(lines.len(), 3);
+        for &i in &[0usize, 2] {
+            let row: String = lines[i].spans.iter().map(|s| s.content.as_ref()).collect();
+            let cells: Vec<&str> = row.split(" | ").collect();
+            assert_eq!(cells.len(), 2);
+            assert_eq!(cells[1], "bb", "row {i} col1 trimmed of trailing space: {cells:?}");
+        }
+    }
+
+    // (2) Nested lists ----------------------------------------------------
+
+    #[test]
+    fn nested_unordered_list_indent_differs() {
+        // Top-level and nested items must have DIFFERENT indent prefixes;
+        // the nested item's leading-space count strictly exceeds the top's.
+        let src = "- top\n  - nested\n- top2\n";
+        let lines = render(src, 80);
+        assert_eq!(lines.len(), 3);
+        let lead_of = |line: &Line| -> usize {
+            let t: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            t.len() - t.trim_start().len()
+        };
+        let top = lead_of(&lines[0]);
+        let nested = lead_of(&lines[1]);
+        let top2 = lead_of(&lines[2]);
+        assert!(nested > top, "nested indent > top: {top} vs {nested}");
+        assert_eq!(top, top2, "both top-level items share indent");
+    }
+
+    #[test]
+    fn nested_ordered_list_indent_differs() {
+        // Ordered nested list: `1.` top, `  1.` nested — the nested item's
+        // prefix is indented more than the top item's.
+        let src = "1. top\n  1. nested\n";
+        let lines = render(src, 80);
+        assert_eq!(lines.len(), 2);
+        let top: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let nested: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(top.contains("1."), "top shows its number: {top:?}");
+        assert!(nested.contains("1."), "nested shows its number: {nested:?}");
+        // Both items carry the ordered-list "  N. " prefix, but the nested
+        // one is indented further (depth 1 adds another "  ").
+        let top_lead = top.len() - top.trim_start().len();
+        let nested_lead = nested.len() - nested.trim_start().len();
+        assert!(nested_lead > top_lead, "nested ordered indent > top: {top_lead} vs {nested_lead}");
+        // The nested item is indented at least 4 columns (depth-1 prefix is
+        // "  " + "  1. " = 4 leading spaces) vs the top's 2.
+        assert!(nested_lead >= 4, "nested indent >= 4: {nested_lead}");
+    }
+
+    #[test]
+    fn multi_digit_ordered_list_renders_as_list() {
+        // `12. item` must render as an ordered list item (with the bullet
+        // prefix), NOT fall through to a plain paragraph. The old
+        // strip_prefix(predicate) stripped only one digit, so `12.` failed
+        // the `. ` check after stripping `1`.
+        let lines = render("12. item", 80);
+        assert_eq!(lines.len(), 1, "one list line");
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        // The list-item prefix is "  12. " — the number is preserved and
+        // the line is NOT the raw paragraph "12. item".
+        assert!(text.contains("12."), "number preserved: {text:?}");
+        assert!(
+            lines[0].spans.iter().any(|s| s.content.contains("12.")),
+            "12. appears in a prefix span, not a raw paragraph: {text:?}"
+        );
+    }
+
+    // (3) Checkboxes ------------------------------------------------------
+
+    #[test]
+    fn checkbox_checked_prefix_is_check_glyph() {
+        let lines = render("- [x] done", 80);
+        assert_eq!(lines.len(), 1);
+        // The prefix span content is exactly "<glyph>  " (glyph + 2 spaces).
+        let prefix = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains(theme::glyph::COMPLETED))
+            .expect("✓ prefix span");
+        assert!(
+            prefix.content.starts_with(theme::glyph::COMPLETED),
+            "prefix begins with ✓: {:?}",
+            prefix.content
+        );
+        assert_eq!(prefix.style, theme::success(), "✓ span is success-styled");
+    }
+
+    #[test]
+    fn checkbox_unchecked_prefix_is_box_glyph() {
+        let lines = render("- [ ] todo", 80);
+        assert_eq!(lines.len(), 1);
+        let prefix = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains(theme::glyph::UNCHECKED))
+            .expect("☐ prefix span");
+        assert!(
+            prefix.content.starts_with(theme::glyph::UNCHECKED),
+            "prefix begins with ☐: {:?}",
+            prefix.content
+        );
+        assert_eq!(prefix.style, theme::muted(), "☐ span is muted");
+    }
+
+    #[test]
+    fn checkbox_uppercase_x_is_checked() {
+        // `- [X]` is also a checked item (GFM allows both).
+        let lines = render("- [X] done", 80);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains(theme::glyph::COMPLETED), "[X] -> ✓: {text:?}");
+    }
+
+    #[test]
+    fn list_without_checkbox_uses_bullet() {
+        // A plain `- item` (no `[ ]`/`[x]`) still uses the bullet glyph.
+        let lines = render("- item", 80);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains('•'), "plain list uses bullet: {text:?}");
+        assert!(!text.contains(theme::glyph::COMPLETED), "no check glyph: {text:?}");
+        assert!(!text.contains(theme::glyph::UNCHECKED), "no box glyph: {text:?}");
+    }
+
+    // (4) Recursive inline ------------------------------------------------
+
+    #[test]
+    fn recursive_bold_italic_inner_has_both_modifiers() {
+        // `**bold *italic* bold**` -> inner "italic" is italic AND bold.
+        let lines = render("**bold *italic* bold**", 80);
+        assert_eq!(lines.len(), 1);
+        let italic = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "italic")
+            .expect("inner italic span");
+        let mods = italic.style.add_modifier;
+        assert!(mods.contains(Modifier::ITALIC), "inner is italic");
+        assert!(mods.contains(Modifier::BOLD), "inner is ALSO bold (layered)");
+        // No literal `*` delimiters leaked into any span content.
+        for s in &lines[0].spans {
+            assert!(!s.content.contains('*'), "no literal '*': {:?}", s.content);
+        }
+    }
+
+    #[test]
+    fn recursive_link_in_bold_is_bold_and_underlined() {
+        // `**a [b](u) c**` -> the link label "b" is bold AND underlined.
+        let lines = render("**a [b](u) c**", 80);
+        assert_eq!(lines.len(), 1);
+        // The link span contains the OSC-8 escape and the label "b".
+        let link = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("\x1b]8;;") && s.content.contains('b'))
+            .expect("OSC-8 link span inside bold");
+        let mods = link.style.add_modifier;
+        assert!(mods.contains(Modifier::BOLD), "link is bold (outer layer)");
+        assert!(mods.contains(Modifier::UNDERLINED), "link is underlined");
+        assert_eq!(link.style.fg, Some(Color::Cyan), "link keeps accent fg");
+    }
+
+    #[test]
+    fn unclosed_bold_with_inner_italic_is_safe() {
+        // `**unclosed *italic*` — the outer bold is unclosed. Sensible
+        // behavior: emit the whole thing as a literal (no styling), which
+        // means the inner italic does NOT render as italic. The contract
+        // we test: one line, no panic, and the literal text survives.
+        let lines = render("**unclosed *italic*", 80);
+        assert_eq!(lines.len(), 1, "single line, no panic");
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("italic"), "inner word text survives: {text:?}");
+        // Because bold was unclosed, no span carries the BOLD modifier.
+        assert!(
+            !lines[0].spans.iter().any(|s| s.style.add_modifier.contains(Modifier::BOLD)),
+            "unclosed bold does not apply BOLD: {text:?}"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_inline_does_not_panic() {
+        // Deeply nested / mismatched delimiters must not panic or loop.
+        let deep = "**a *b _c_ b* a**".repeat(5);
+        let lines = render(&deep, 80);
+        // At width 80 this wraps to a handful of lines; the key contract is
+        // that it terminates and produces at least one line.
+        assert!(!lines.is_empty(), "deeply nested inline terminates");
+        // And an inner-most word "c" survives somewhere in the output.
+        let all: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(all.contains('c'), "inner-most content survives: {all:?}");
+    }
+
+    #[test]
+    fn empty_bold_and_italic_delimiters_are_safe() {
+        // Edge inputs that must not infinite-loop or panic: bare `**`, `*`,
+        // `***`, `~~`, nested empty `** **`.
+        for src in &["**", "*", "***", "~~", "** **", "* *", "``", "**``**"] {
+            let lines = render(src, 80);
+            assert!(lines.len() >= 1, "renders >=1 line for {src:?}");
+        }
+    }
+
+    // (5) OSC-8 hyperlinks ------------------------------------------------
+
+    #[test]
+    fn osc8_span_contains_opener_label_and_closer() {
+        // `[x](http://e.com)` -> one span's content contains the OSC-8
+        // opener `\x1b]8;;http://e.com\x1b\\`, the label "x", AND the
+        // closer `\x1b]8;;\x1b\\`.
+        let lines = render("[x](http://e.com)", 80);
+        assert_eq!(lines.len(), 1);
+        let span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("\x1b]8;;"))
+            .expect("OSC-8 span");
+        let c = span.content.as_ref();
+        assert!(c.contains("\x1b]8;;http://e.com\x1b\\"), "opener present: {c:?}");
+        assert!(c.contains("\x1b]8;;\x1b\\"), "closer present: {c:?}");
+        assert!(c.contains('x'), "label 'x' present: {c:?}");
+    }
+
+    #[test]
+    fn osc8_long_url_omits_escape() {
+        // A URL longer than 200 chars must fall back to label-only (no
+        // OSC-8 escape anywhere in the rendered content).
+        let mut long = "http://e.com/".to_string();
+        long.push_str(&"z".repeat(200));
+        let src = format!("[lbl]({long})");
+        let lines = render(&src, 80);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains("\x1b]8;;"), "long URL omits OSC-8: {text:?}");
+        assert!(text.contains("lbl"), "label still shown: {text:?}");
+    }
+
+    #[test]
+    fn osc8_malformed_open_bracket_emits_literal() {
+        // `[x` with no closing `]` emits the literal "[x".
+        let lines = render("[x", 80);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "[x", "malformed link is literal: {text:?}");
+        assert!(!text.contains("\x1b]8;;"), "no OSC-8 for malformed link: {text:?}");
+    }
+
+    #[test]
+    fn bracketed_non_link_emits_full_literal() {
+        // `[label]` (closing bracket but no `(`) must round-trip the FULL
+        // `[label]` including the closing `]` — the old code dropped the
+        // consumed `]`.
+        let lines = render("[label] not a link", 80);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("[label]"), "closing bracket preserved: {text:?}");
+        assert!(!text.contains("\x1b]8;;"), "no OSC-8 for non-link: {text:?}");
+    }
+
+    #[test]
+    fn osc8_url_with_control_char_falls_back_to_label() {
+        // A URL containing a control char must not embed OSC-8 (control
+        // chars inside the escape could corrupt the terminal).
+        let src = "[lbl](http://e.com/\u{0007})";
+        let lines = render(src, 80);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains("\x1b]8;;"), "control-char URL omits OSC-8: {text:?}");
+        assert!(text.contains("lbl"), "label shown: {text:?}");
     }
 }

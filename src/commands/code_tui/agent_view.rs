@@ -651,7 +651,6 @@ fn dispatch(config: &ViewConfig, prompt: &str) -> Result<crate::commands::code_u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn rec(pid: u32, started: u64, cwd: &str, run_id: &str) -> BackgroundAgentRecord {
         BackgroundAgentRecord {

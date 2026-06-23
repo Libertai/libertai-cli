@@ -136,6 +136,8 @@ pub mod glyph {
     pub const NEEDS_INPUT: &str = "⏸";
     pub const IDLE: &str = "∙";
     pub const COMPLETED: &str = "✓";
+    /// Unchecked task-list box (M4b markdown `- [ ]` items).
+    pub const UNCHECKED: &str = "☐";
     pub const FAILED: &str = "✗";
     pub const STOPPED: &str = "⊘";
 
