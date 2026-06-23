@@ -137,6 +137,13 @@ pub enum AgentMsg {
     System(String),
     /// Result from a slash command executed on the background thread.
     CommandResult(String),
+    /// An OSC52 clipboard-write sequence (`\x1b]52;c;<base64>\x07`) assembled
+    /// on the bg thread from the last assistant response. Distinct from
+    /// `CommandResult` (a transcript line): the OSC52 bytes must land on
+    /// stdout RAW, out-of-band from the transcript, so the main thread writes
+    /// them directly (a bg `print!` would race `terminal.draw`'s frame
+    /// buffer). No transcript entry, no `set_dirty`.
+    Osc52(String),
     /// A fully-built prompt (e.g. an expanded custom slash template) that the
     /// main thread should submit as a turn via `Cmd::Prompt`. The bg thread
     /// builds it (it needs the live `AgentSessionHandle` for `${session_id}` /
@@ -1120,6 +1127,110 @@ fn spawn_background(
                                 let _ = agent_tx.send(AgentMsg::PromptReady(prompt));
                                 String::new()
                             }
+                            // `/copy [status|info|json]` — copy the last
+                            // assistant response to the terminal clipboard via
+                            // OSC52, or report copy status. Runs here because
+                            // the transcript is only owned on the bg thread.
+                            // The bare copy (query == "" / "last" / "latest" /
+                            // "response" / "assistant" / "assistant-response")
+                            // READS the text and ships the OSC52 SEQUENCE
+                            // STRING back as `AgentMsg::Osc52` (the write must
+                            // be main-thread — a bg `print!` races the frame
+                            // buffer); it returns `String::new()` so the
+                            // empty-text skip below doesn't double-emit a
+                            // `CommandResult`. The status/info/json
+                            // subcommands return a status string that rides
+                            // back as a `CommandResult` system line (status IS
+                            // a transcript entry). Full JSON output is deferred
+                            // (the legacy `copy_json_payload`/`print_copy_json`
+                            // helpers are print-coupled and dead); a minimal
+                            // status string is built inline.
+                            BgCommand::Copy { query } => {
+                                let q = query.trim().to_ascii_lowercase();
+                                let is_status = matches!(
+                                    q.as_str(),
+                                    "status" | "show" | "info"
+                                );
+                                let is_json = matches!(
+                                    q.as_str(),
+                                    "json" | "--json"
+                                        | "status --json"
+                                        | "show --json"
+                                        | "info --json"
+                                );
+                                if is_status || is_json {
+                                    // Minimal inline status (full JSON deferred):
+                                    // the legacy `print_copy_status` /
+                                    // `copy_json_payload` are print-coupled
+                                    // (println!/eprintln!) and have no live
+                                    // call sites, so reuse would require a
+                                    // string-returning rewrite. Surface a
+                                    // compact status line instead.
+                                    match code_ui::copy_messages(&handle).await {
+                                        Ok(m) => match code_ui::last_assistant_text(&m) {
+                                            Some(t) => {
+                                                let avail =
+                                                    t.len() <= code_ui::OSC52_MAX_TEXT_BYTES;
+                                                let clipboard = if avail {
+                                                    "available via osc52"
+                                                } else {
+                                                    "unavailable (too large)"
+                                                };
+                                                if is_json {
+                                                    format!(
+                                                        "copy: {} bytes available, clipboard {}",
+                                                        t.len(),
+                                                        clipboard,
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "copy: latest assistant response available \
+                                                         ({} bytes, clipboard {})",
+                                                        t.len(),
+                                                        clipboard,
+                                                    )
+                                                }
+                                            }
+                                            None => {
+                                                "copy: no assistant response to copy yet."
+                                                    .to_string()
+                                            }
+                                        },
+                                        Err(e) => {
+                                            format!("/copy: could not read transcript: {e:#}")
+                                        }
+                                    }
+                                } else {
+                                    // Bare copy (or any unrecognized query,
+                                    // treated as the copy action per the legacy
+                                    // `parse_copy_command` LastAssistant arm).
+                                    let msgs = code_ui::copy_messages(&handle).await;
+                                    match msgs {
+                                        Ok(m) => match code_ui::last_assistant_text(&m) {
+                                            Some(t)
+                                                if t.len()
+                                                    <= code_ui::OSC52_MAX_TEXT_BYTES =>
+                                            {
+                                                let seq = code_ui::osc52_sequence(&t);
+                                                let _ = agent_tx.send(AgentMsg::Osc52(seq));
+                                                String::new()
+                                            }
+                                            Some(t) => format!(
+                                                "/copy: response too large ({} bytes, max {})",
+                                                t.len(),
+                                                code_ui::OSC52_MAX_TEXT_BYTES
+                                            ),
+                                            None => {
+                                                "/copy: no assistant response to copy yet."
+                                                    .to_string()
+                                            }
+                                        },
+                                        Err(e) => {
+                                            format!("/copy: could not read transcript: {e:#}")
+                                        }
+                                    }
+                                }
+                            }
                         };
                         if !text.is_empty() {
                             let _ = agent_tx.send(AgentMsg::CommandResult(text));
@@ -1215,11 +1326,21 @@ pub fn run(
     crossterm::execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
     guard.alt_screen = true;
 
+    // Enable bracketed paste (`ESC[?2004h`) last so it is the first thing
+    // torn down. Held as a RAII guard — NOT a bare `execute!` — so its Drop
+    // emits `DisableBracketedPaste` (`ESC[?2004l`) on every exit path,
+    // including a panic mid-`run_loop` (a bare execute would leak the enable
+    // on crash and leave the user's shell wrapping pastes in `ESC[200~`).
+    // Declared after `guard` so Rust drops it first (reverse declaration
+    // order); the success path below also drops it explicitly before `guard`
+    // so `DisableBracketedPaste` leaves the alternate screen while we're still
+    // in it. Terminals without bracketed-paste support ignore the enable and
+    // keep delivering plain key events.
+    let _paste_guard = crate::commands::code_term::BracketedPasteGuard::enter()?;
+
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     guard.terminal = Some(terminal);
-
-    let terminal = guard.terminal.as_mut().unwrap();
 
     let mode = ModeFlag::new(initial_mode);
 
@@ -1340,10 +1461,13 @@ pub fn run(
     app.custom_commands = code_slash_registry::discover(&discover_cwd);
 
     // Run the event loop.
-    let result = run_loop(terminal, &mut app, agent_rx, cmd_tx, &shared_abort);
+    let result = run_loop(&mut guard, &mut app, agent_rx, cmd_tx, &shared_abort);
 
     // Restore terminal (also done by guard on drop, but do it explicitly
-    // on the success path so `result` is returned after cleanup).
+    // on the success path so `result` is returned after cleanup). Drop the
+    // paste guard first so `DisableBracketedPaste` is emitted while still in
+    // the alternate screen (before `guard` leaves it).
+    drop(_paste_guard);
     drop(guard);
     result
 }
@@ -1412,10 +1536,23 @@ fn active_team_set(
     map
 }
 
+/// Apply a bracketed-paste payload to the input textarea.
+///
+/// Extracted from the `Event::Paste` arm of [`run_loop`] so the paste path
+/// (insert the text verbatim — newlines included — without submitting, then
+/// mark the view dirty) is hermetically testable without driving a real
+/// terminal through crossterm. `run_loop`'s `Event::Paste(data)` arm is a
+/// thin wrapper around this; mirroring the legacy input-bar paste behaviour
+/// (multi-line paste edits the textarea instead of firing a prompt).
+fn apply_paste(app: &mut App, data: &str) {
+    app.textarea.insert_str(data);
+    app.set_dirty();
+}
+
 /// Main event loop — polls crossterm events + agent messages,
 /// updates app state, and draws.
 fn run_loop(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    guard: &mut TerminalGuard,
     app: &mut App,
     agent_rx: mpsc::Receiver<AgentMsg>,
     cmd_tx: mpsc::Sender<Cmd>,
@@ -1430,7 +1567,7 @@ fn run_loop(
         // it, so we skip `terminal.draw` and the loop stays near 0% CPU. The
         // flag is cleared after a successful draw.
         if app.dirty {
-            terminal.draw(|frame| view::draw(frame, app))?;
+            guard.terminal.as_mut().unwrap().draw(|frame| view::draw(frame, app))?;
             app.dirty = false;
         }
 
@@ -1463,6 +1600,16 @@ fn run_loop(
                                 app.transcript.clear();
                                 app.scroll = 0;
                             }
+                            Action::OpenEditor => {
+                                // Suspend the TUI, hand the terminal to
+                                // `$VISUAL`/`$EDITOR`/`vi` on a temp file,
+                                // then resume and reload the edited text.
+                                // The guard owns the terminal (this loop
+                                // borrows it via `guard.terminal.as_mut()`),
+                                // so suspend/resume don't drop it — Drop
+                                // still fires on real exit.
+                                open_external_editor(app, guard)?;
+                            }
                         }
                     }
                 }
@@ -1480,6 +1627,17 @@ fn run_loop(
                 }
                 Event::Resize(_, _) => {
                     // ratatui handles resize automatically.
+                }
+                Event::Paste(data) => {
+                    // Bracketed paste (ESC[?2004h, enabled by the guard in
+                    // `run`). crossterm decodes the wrapped payload into a
+                    // single `Event::Paste(String)` once bracketed paste is
+                    // on; without this arm it falls through to `_ => {}` and
+                    // is silently dropped. Insert the text verbatim — newlines
+                    // included — without submitting, mirroring the legacy
+                    // input-bar paste behaviour (multi-line paste edits the
+                    // textarea instead of firing a prompt).
+                    apply_paste(app, &data);
                 }
                 _ => {}
             }
@@ -1506,7 +1664,7 @@ fn run_loop(
                         .push(TranscriptEntry::System(
                             "session ended — background thread exited.".to_string(),
                         ));
-                    terminal.draw(|frame| view::draw(frame, app))?;
+                    guard.terminal.as_mut().unwrap().draw(|frame| view::draw(frame, app))?;
                     return Ok(());
                 }
             }
@@ -1561,6 +1719,11 @@ enum Action {
     Submit(String),
     /// Clear the transcript (for /clear).
     ClearTranscript,
+    /// Open the input-bar contents in the user's external editor (Ctrl+O).
+    /// The run loop suspends the TUI, spawns `$VISUAL`/`$EDITOR`/`vi` on a
+    /// temp file, then resumes and reloads the edited text into the textarea.
+    /// Mirrors Claude Code's Ctrl+O binding.
+    OpenEditor,
 }
 
 /// Handle a keyboard event. Returns `Some(Action)` if the loop should
@@ -1700,6 +1863,14 @@ fn handle_key(
         {
             Some(Action::Quit)
         }
+        // Ctrl+O: open the input-bar contents in the external editor
+        // (`$VISUAL`/`$EDITOR`/`vi`). Matches Claude Code's binding. Only
+        // fires in Idle phase — suspending the TUI mid-stream would freeze
+        // the in-flight turn, so we leave Streaming untouched. The action
+        // match in `run_loop` owns the guard needed to suspend/resume.
+        (KeyCode::Char('o'), KeyModifiers::CONTROL) if app.phase == Phase::Idle => {
+            Some(Action::OpenEditor)
+        }
         (KeyCode::Up, KeyModifiers::NONE) if app.phase == Phase::Idle => {
             // History navigation: go to previous entry.
             // Only intercept when textarea is single-line (cursor on
@@ -1827,6 +1998,49 @@ fn handle_key(
         }
         _ => None,
     }
+}
+
+/// Open the input-bar contents in the user's external editor (Ctrl+O).
+///
+/// Suspends the TUI (leaves alt screen + raw mode + mouse so the editor
+/// runs in cooked mode), spawns `$VISUAL`/`$EDITOR`/`vi` on a temp file
+/// seeded with the current textarea text, waits for it, then resumes the
+/// TUI and reloads the edited text. The temp file is held open for the
+/// duration of the editor (`NamedTempFile` deletes on drop, so it is
+/// dropped LAST — after the read-back — so the file persists through the
+/// editor session). If the editor fails or is cancelled, the textarea is
+/// left unchanged.
+///
+/// `guard` owns the terminal; `suspend`/`resume` do NOT drop it, so
+/// `TerminalGuard::drop` still runs on real exit.
+fn open_external_editor(app: &mut App, guard: &mut TerminalGuard) -> anyhow::Result<()> {
+    let mut tf = tempfile::NamedTempFile::new()?;
+    use std::io::Write;
+    write!(tf, "{}", app.textarea.lines().join("\n"))?;
+    tf.flush()?;
+    let path = tf.path().to_path_buf();
+
+    guard.suspend()?;
+    let editor = code_ui::resolve_editor();
+    let cmd = format!("{editor} {}", code_ui::quote_for_sh(&path));
+    let status = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&cmd)
+        .status();
+    guard.resume()?;
+
+    match status {
+        Ok(s) if s.success() => {
+            let edited = std::fs::read_to_string(&path).unwrap_or_default();
+            set_textarea_text(&mut app.textarea, &edited);
+        }
+        _ => {
+            // Editor failed or was cancelled — leave the textarea unchanged.
+        }
+    }
+    app.set_dirty();
+    drop(tf);
+    Ok(())
 }
 
 /// Set the textarea content and reset cursor to end.
@@ -2399,7 +2613,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
         }
         "/help" => {
             app.transcript.push(TranscriptEntry::System(
-                "Commands: /help /exit /clear /mode /permissions /model [/model list] /status /statusline /statusline-command /output-style /history /usage /doctor /skills list /memory show /skills /memory /review /security-review /mention /ide /hotkeys /theme /vim /bug /hooks /mcp /forget /notify /changelog /tree /pr_comments /team /agent /agents  !<cmd>  !!  custom templates (e.g. /apply)".to_string(),
+                "Commands: /help /exit /clear /mode /permissions /model [/model list] /status /statusline /statusline-command /output-style /history /usage /doctor /skills list /memory show /skills /memory /review /security-review /mention /ide /hotkeys /theme /vim /bug /hooks /mcp /forget /notify /changelog /tree /pr_comments /copy /team /agent /agents  !<cmd>  !!  custom templates (e.g. /apply)".to_string(),
             ));
             app.transcript.push(TranscriptEntry::Blank);
             None
@@ -3181,6 +3395,23 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     None
                 }
             }
+        }
+        "/copy" => {
+            // Tier 2 — `/copy` needs the live transcript (owned by the bg
+            // thread), so route there. The bare copy (no subcommand, or
+            // `last`/`latest`/`response`/`assistant`/`assistant-response`)
+            // ships the OSC52 sequence back as `AgentMsg::Osc52` (the WRITE
+            // is main-thread, out-of-band); the `status`/`show`/`info`/`json`
+            // subcommands return a status string as a `CommandResult` system
+            // line. The bg arm reuses the legacy `parse_copy_command` family's
+            // classification (mirrored inline there) to split the two paths.
+            // `query` carries the raw subcommand remainder verbatim.
+            let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Copy {
+                query: rest.to_string(),
+            }));
+            app.transcript
+                .push(TranscriptEntry::System("copy…".to_string()));
+            None
         }
         "/status" => {
             let mode = app.mode.get();
@@ -4032,6 +4263,20 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.transcript.push(TranscriptEntry::System(text));
             app.transcript.push(TranscriptEntry::Blank);
             app.scroll = 0; // auto-scroll to bottom
+        }
+        AgentMsg::Osc52(seq) => {
+            // Write the OSC52 clipboard sequence RAW to stdout, out-of-band
+            // from the transcript. Terminals read OSC52 from stdout between
+            // frames, so the bytes must land raw — NOT as a transcript line
+            // (which would route them through the renderer) and NOT via a
+            // bg-thread `print!` (which races `terminal.draw`'s frame buffer,
+            // since the bg stdout is shared). No transcript entry, no
+            // `set_dirty` (a redraw would be harmless but unnecessary — the
+            // clipboard write doesn't change visible state).
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(seq.as_bytes());
+            let _ = out.flush();
         }
         AgentMsg::PromptReady(prompt) => {
             // The bg thread finished expanding a custom slash template (with
@@ -6000,6 +6245,9 @@ task = "Do the thing"
             Some(Action::ClearTranscript) => {
                 panic!("expected Action::Submit for /review, got ClearTranscript")
             }
+            Some(Action::OpenEditor) => {
+                panic!("expected Action::Submit for /review, got OpenEditor")
+            }
             None => panic!("expected Action::Submit for /review, got None"),
         };
         assert!(
@@ -6029,6 +6277,7 @@ task = "Do the thing"
             Some(Action::Submit(p)) => p,
             Some(Action::Quit) => panic!("/review: expected Submit, got Quit"),
             Some(Action::ClearTranscript) => panic!("/review: expected Submit, got ClearTranscript"),
+            Some(Action::OpenEditor) => panic!("/review: expected Submit, got OpenEditor"),
             None => panic!("/review: expected Submit, got None"),
         };
 
@@ -6037,6 +6286,9 @@ task = "Do the thing"
             Some(Action::Quit) => panic!("/security-review: expected Submit, got Quit"),
             Some(Action::ClearTranscript) => {
                 panic!("/security-review: expected Submit, got ClearTranscript")
+            }
+            Some(Action::OpenEditor) => {
+                panic!("/security-review: expected Submit, got OpenEditor")
             }
             None => panic!("/security-review: expected Submit, got None"),
         };
@@ -6077,6 +6329,9 @@ task = "Do the thing"
             Some(Action::Quit) => panic!("expected Submit for valid /mention, got Quit"),
             Some(Action::ClearTranscript) => {
                 panic!("expected Submit for valid /mention, got ClearTranscript")
+            }
+            Some(Action::OpenEditor) => {
+                panic!("expected Submit for valid /mention, got OpenEditor")
             }
             None => panic!("expected Submit for valid /mention, got None"),
         };
@@ -6703,6 +6958,334 @@ task = "Do the thing"
         handle_agent_msg(&mut app, AgentMsg::TextDelta("b".into()), &cmd_tx);
         app.set_dirty();
         assert!(app.dirty, "second mutation re-sets dirty");
+    }
+
+    // ── M7a: OSC52 / copy routing, bracketed paste, external editor ────────
+    //
+    // Hermetic tests for the M7a review-round-1 #6 work: `/copy` OSC52
+    // routing (the bare copy ships the OSC52 sequence back as `AgentMsg::Osc52`,
+    // the status/info/json subcommands as `CommandResult`), bracketed paste
+    // (the `Event::Paste` arm, surfaced via the `apply_paste` seam), and the
+    // external-editor action (`Action::OpenEditor` + Ctrl+O binding). No real
+    // terminal is driven: we assert the `Cmd`/`Action`/`AgentMsg` variants
+    // the main-thread arms route, and exercise the pure `apply_paste` seam.
+
+    // (M7a-1) Bare `/copy` routes `Cmd::RunReadOnly(BgCommand::Copy { query:
+    // "" })` to the background thread (the transcript lives there) and pushes a
+    // "copy…" placeholder System entry. It returns `None` (no action) and —
+    // critically — sends NO `Cmd::Prompt` (the OSC52 copy is read-only
+    // routing, not a prompt submission). The OSC52 WRITE itself is main-thread
+    // (the bg arm ships the sequence back as `AgentMsg::Osc52`); here we pin
+    // the main-thread routing that selects that path (query == "" → bare copy).
+    #[test]
+    fn slash_copy_bare_routes_runreadonly_copy_with_empty_query() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/copy", &cmd_tx);
+
+        assert!(action.is_none(), "/copy returns no action");
+        // A "copy…" placeholder System entry was pushed.
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if s == "copy…"
+        )));
+        // The read-only Copy command was routed with an empty query (bare copy).
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::Copy { query })) => {
+                assert!(query.is_empty(), "bare /copy query must be empty, got {query:?}");
+            }
+            other => panic!("expected Cmd::RunReadOnly(Copy{{\"\"}}), got {other:?}"),
+        }
+        // No further command — and explicitly NOT a prompt submission.
+        assert!(cmd_rx.try_recv().is_err(), "/copy sends no further Cmd (no Prompt)");
+    }
+
+    // (M7a-2) `/copy status` (and the info/json aliases) carry the raw
+    // subcommand remainder verbatim as `query` so the bg arm can split the
+    // status/info/json path (→ `CommandResult`) from the bare copy path
+    // (→ `AgentMsg::Osc52`). Assert the query round-trips the subcommand,
+    // distinguishing these from the bare copy's empty query. This pins the
+    // status/info/json → CommandResult routing decision (the bg arm reads
+    // `query`); the Osc52-vs-CommandResult split is owned bg-side, but the
+    // main thread must hand the right query through.
+    #[test]
+    fn slash_copy_status_carries_subcommand_verbatim_in_query() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/copy status", &cmd_tx);
+        assert!(action.is_none());
+
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::Copy { query })) => {
+                assert_eq!(query, "status", "status subcommand must round-trip verbatim");
+            }
+            other => panic!("expected Cmd::RunReadOnly(Copy{{\"status\"}}), got {other:?}"),
+        }
+        assert!(cmd_rx.try_recv().is_err());
+
+        // The json alias also round-trips its remainder.
+        app.transcript.clear();
+        let action = handle_slash_command(&mut app, "/copy json", &cmd_tx);
+        assert!(action.is_none());
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::Copy { query })) => {
+                assert_eq!(query, "json", "json subcommand must round-trip verbatim");
+            }
+            other => panic!("expected Cmd::RunReadOnly(Copy{{\"json\"}}), got {other:?}"),
+        }
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    // (M7a-3) `AgentMsg::Osc52` is a real, exhaustively-matchable variant:
+    // constructing one and matching it (the way `handle_agent_msg` does)
+    // round-trips the sequence string. The bg `BgCommand::Copy` bare-copy arm
+    // ships the OSC52 sequence here; the main-thread `handle_agent_msg::Osc52`
+    // arm writes it raw to stdout (NOT a transcript line). We assert the variant
+    // is constructible + matchable, and that handing it to the REAL
+    // `handle_agent_msg` does NOT push a transcript entry, does NOT change the
+    // phase, and does NOT set dirty (the clipboard write is out-of-band — no
+    // visible state change). The stdout write itself is captured by the test
+    // harness and isn't asserted (writing escape bytes to a captured stdout is
+    // hermetic; the contract under test is the no-transcript/no-dirty routing).
+    #[test]
+    fn agent_msg_osc52_is_matchable_and_writes_out_of_band() {
+        // The variant is constructible and round-trips its payload.
+        let seq = AgentMsg::Osc52("\x1b]52;c;aGk=\x07".to_string());
+        match seq {
+            AgentMsg::Osc52(s) => assert_eq!(s, "\x1b]52;c;aGk=\x07"),
+            other => panic!("Osc52 must match its own arm, got {other:?}"),
+        }
+
+        // The real handler writes the bytes to stdout (out-of-band) and leaves
+        // the transcript + phase + dirty flag untouched — distinguishing it
+        // from CommandResult (a transcript line) and TextDelta (a transcript +
+        // dirty push).
+        let mut app = test_app();
+        app.dirty = false;
+        app.phase = Phase::Idle;
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let before = app.transcript.len();
+
+        handle_agent_msg(&mut app, AgentMsg::Osc52("\x1b]52;c;aGk=\x07".into()), &cmd_tx);
+
+        assert_eq!(
+            app.transcript.len(),
+            before,
+            "Osc52 must NOT push a transcript entry (out-of-band write)"
+        );
+        assert_eq!(app.phase, Phase::Idle, "Osc52 must not change the phase");
+        assert!(
+            !app.dirty,
+            "Osc52 must not set dirty (no visible state change; a redraw would be \
+             harmless but unnecessary)"
+        );
+    }
+
+    // (M7a-4) The bare `/copy` and the `/copy status`/`info`/`json` routes are
+    // NOT prompt submissions: neither sends a `Cmd::Prompt`. This is the
+    // regression guard for the OSC52-vs-CommandResult routing — both flow
+    // through `Cmd::RunReadOnly(BgCommand::Copy)`, never `Cmd::Prompt`. A
+    // bare `/copy` must not accidentally fire a turn.
+    #[test]
+    fn slash_copy_routes_never_send_prompt() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        for input in ["/copy", "/copy status", "/copy info", "/copy json", "/copy last"] {
+            app.transcript.clear();
+            let _ = handle_slash_command(&mut app, input, &cmd_tx);
+            // Each routes exactly one RunReadOnly(Copy) and nothing else.
+            let mut got_prompt = false;
+            let mut got_copy = false;
+            while let Ok(cmd) = cmd_rx.try_recv() {
+                match cmd {
+                    Cmd::RunReadOnly(BgCommand::Copy { .. }) => got_copy = true,
+                    Cmd::Prompt(_) => got_prompt = true,
+                    other => panic!("/{input}: unexpected Cmd {other:?}"),
+                }
+            }
+            assert!(got_copy, "/{input}: expected a RunReadOnly(Copy) Cmd");
+            assert!(!got_prompt, "/{input}: must NOT send a Cmd::Prompt");
+        }
+    }
+
+    // (M7a-5) Bracketed paste via the `apply_paste` seam: a single-line paste
+    // inserts the text into the textarea verbatim and flips the dirty flag
+    // (so the next draw reflects the new input). `run_loop`'s `Event::Paste`
+    // arm is a thin wrapper around this, so the seam IS the production path.
+    #[test]
+    fn apply_paste_inserts_text_and_sets_dirty() {
+        let mut app = test_app();
+        app.dirty = false;
+        assert!(app.textarea.lines().join("\n").is_empty(), "precondition: empty textarea");
+
+        apply_paste(&mut app, "pasted text");
+
+        assert_eq!(
+            app.textarea.lines().join("\n"),
+            "pasted text",
+            "paste must insert the text into the textarea"
+        );
+        assert!(app.dirty, "paste must mark the view dirty");
+    }
+
+    // (M7a-6) A multi-line paste preserves newlines (it edits the textarea
+    // instead of firing a prompt — mirroring the legacy input-bar paste). The
+    // textarea splits on the embedded newlines into multiple lines.
+    #[test]
+    fn apply_paste_preserves_multiline_newlines() {
+        let mut app = test_app();
+        app.dirty = false;
+
+        apply_paste(&mut app, "line one\nline two\nline three");
+
+        let joined = app.textarea.lines().join("\n");
+        assert_eq!(joined, "line one\nline two\nline three", "newlines preserved verbatim");
+        // The textarea actually split into three lines.
+        assert_eq!(app.textarea.lines().len(), 3, "multi-line paste yields 3 textarea lines");
+        assert!(app.dirty, "multi-line paste sets dirty");
+    }
+
+    // (M7a-7) `apply_paste` appends at the cursor (it does not replace): with
+    // pre-existing textarea text, the paste is appended so the existing input
+    // is preserved. This pins the insert (not replace) semantics.
+    #[test]
+    fn apply_paste_appends_to_existing_textarea_content() {
+        let mut app = test_app();
+        app.textarea.insert_str("before ");
+        app.dirty = false;
+
+        apply_paste(&mut app, "after");
+
+        assert_eq!(
+            app.textarea.lines().join("\n"),
+            "before after",
+            "paste must append to existing textarea content, not replace it"
+        );
+        assert!(app.dirty);
+    }
+
+    // (M7a-8) `BracketedPasteGuard` is constructible via `enter()` and drops
+    // cleanly — the RAII seam `run()` uses to enable bracketed paste
+    // (`ESC[?2004h`) and disable it on drop (`ESC[?2004l`), including the
+    // panic path. `enter()`/`Drop` write escape sequences to stdout, which the
+    // test harness captures (hermetic on a pipe); the contract under test is
+    // that the guard constructs and drops without panicking on a non-tty
+    // stdout (the run() path is gated on a real tty, but the guard itself must
+    // not crash when stdout is captured). The `apply_paste` seam above covers
+    // the paste-insert behaviour; this pins the RAII lifecycle.
+    #[test]
+    fn bracketed_paste_guard_constructs_and_drops() {
+        let guard = crate::commands::code_term::BracketedPasteGuard::enter()
+            .expect("enter() must succeed on captured stdout (writes ESC[?2004h)");
+        // Drop runs the DisableBracketedPaste teardown — must not panic.
+        drop(guard);
+    }
+
+    // (M7a-9) `Action::OpenEditor` is a real, exhaustively-matchable variant
+    // (the run_loop Action match has an `OpenEditor` arm that suspends the
+    // TUI and spawns the editor). Constructing and matching it (the way
+    // run_loop does) round-trips. There is no payload — the arm ignores the
+    // variant's value and calls `open_external_editor(app, guard)`. `Action`
+    // is not `Debug`, so the wrong-arm case is described by which arm fired
+    // rather than formatted.
+    #[test]
+    fn action_open_editor_is_matchable() {
+        let action = Action::OpenEditor;
+        match action {
+            Action::OpenEditor => {} // the run_loop arm
+            Action::Quit => panic!("OpenEditor must match its own arm, got Quit"),
+            Action::Submit(_) => panic!("OpenEditor must match its own arm, got Submit"),
+            Action::ClearTranscript => panic!("OpenEditor must match its own arm, got ClearTranscript"),
+        }
+        // It is distinct from the other actions (not Quit / Submit / Clear).
+        assert!(matches!(Action::OpenEditor, Action::OpenEditor));
+        assert!(!matches!(Action::OpenEditor, Action::Quit));
+        assert!(!matches!(Action::OpenEditor, Action::ClearTranscript));
+        assert!(!matches!(Action::OpenEditor, Action::Submit(_)));
+    }
+
+    // (M7a-10) Ctrl+O in Idle returns `Some(Action::OpenEditor)` — the key
+    // binding that opens the external editor. Driven through the real
+    // `handle_key` (the seam run_loop calls), so the binding itself is pinned.
+    // A `SharedAbort` with no handle is safe: the Ctrl+O arm doesn't touch it.
+    #[test]
+    fn handle_key_ctrl_o_in_idle_returns_open_editor() {
+        let mut app = test_app();
+        app.phase = Phase::Idle;
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        match action {
+            Some(Action::OpenEditor) => {}
+            Some(Action::Quit) => panic!("Ctrl+O in Idle must return OpenEditor, got Quit"),
+            Some(Action::Submit(_)) => panic!("Ctrl+O in Idle must return OpenEditor, got Submit"),
+            Some(Action::ClearTranscript) => {
+                panic!("Ctrl+O in Idle must return OpenEditor, got ClearTranscript")
+            }
+            None => panic!("Ctrl+O in Idle must return OpenEditor, got None"),
+        }
+    }
+
+    // (M7a-11) Ctrl+O in Streaming does NOT open the editor — the
+    // `(KeyCode::Char('o'), KeyModifiers::CONTROL) if app.phase == Phase::Idle`
+    // guard fails, so the action is `None` (the key falls through to textarea
+    // input). Suspending the TUI mid-stream would freeze the in-flight turn, so
+    // the binding is intentionally Idle-only.
+    #[test]
+    fn handle_key_ctrl_o_in_streaming_does_not_open_editor() {
+        let mut app = test_app();
+        app.phase = Phase::Streaming;
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        // The action must be None (no editor mid-stream); `Action` is not
+        // Debug, so describe the unexpected variant by which arm fired.
+        match action {
+            None => {}
+            Some(Action::OpenEditor) => panic!("Ctrl+O in Streaming must NOT open the editor"),
+            Some(Action::Quit) => panic!("Ctrl+O in Streaming must NOT return an action (Quit)"),
+            Some(Action::Submit(_)) => {
+                panic!("Ctrl+O in Streaming must NOT return an action (Submit)")
+            }
+            Some(Action::ClearTranscript) => {
+                panic!("Ctrl+O in Streaming must NOT return an action (ClearTranscript)")
+            }
+        }
+    }
+
+    // (M7a-12) `/help` lists `/copy` — the M7a help-string addition. The
+    // bare-copy command must appear in the Commands: line so users discover it.
+    #[test]
+    fn slash_help_lists_copy() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let _ = handle_slash_command(&mut app, "/help", &cmd_tx);
+        let help_line = app
+            .transcript
+            .iter()
+            .find_map(|e| match e {
+                TranscriptEntry::System(s) if s.starts_with("Commands:") => Some(s.clone()),
+                _ => None,
+            })
+            .expect("a Commands: line was pushed");
+        assert!(help_line.contains("/copy"), "/help must list /copy: {help_line}");
     }
 }
 

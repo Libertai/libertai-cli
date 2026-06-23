@@ -70,7 +70,7 @@ const SHELL_ESCAPE_MAX_DISPLAY_BYTES: usize = 256 * 1024;
 const SHELL_ESCAPE_CONTEXT_LIMIT: usize = 5;
 const HISTORY_DEFAULT_LIMIT: usize = 20;
 const HISTORY_MAX_LIMIT: usize = 64;
-const OSC52_MAX_TEXT_BYTES: usize = 128 * 1024;
+pub(crate) const OSC52_MAX_TEXT_BYTES: usize = 128 * 1024;
 const IMAGE_ATTACHMENT_MAX_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) const MENTION_ATTACHMENT_MAX_BYTES: usize = 256 * 1024;
 pub(crate) const TREE_MAX_ENTRIES: usize = 200;
@@ -2500,7 +2500,7 @@ async fn copy_last_assistant(handle: &AgentSessionHandle) {
     println!("{DIM}  copied last assistant response to terminal clipboard.{RESET}");
 }
 
-async fn copy_messages(handle: &AgentSessionHandle) -> Result<Vec<Message>> {
+pub(crate) async fn copy_messages(handle: &AgentSessionHandle) -> Result<Vec<Message>> {
     handle.messages().await.context("reading transcript")
 }
 
@@ -2561,7 +2561,7 @@ async fn print_copy_json(handle: &AgentSessionHandle, query: &str) {
     }
 }
 
-fn last_assistant_text(messages: &[Message]) -> Option<String> {
+pub(crate) fn last_assistant_text(messages: &[Message]) -> Option<String> {
     messages.iter().rev().find_map(|message| {
         let Message::Assistant(assistant) = message else {
             return None;
@@ -2584,7 +2584,7 @@ fn last_assistant_text(messages: &[Message]) -> Option<String> {
     })
 }
 
-fn osc52_sequence(text: &str) -> String {
+pub(crate) fn osc52_sequence(text: &str) -> String {
     format!("\x1b]52;c;{}\x07", BASE64_STANDARD.encode(text.as_bytes()))
 }
 
@@ -10077,9 +10077,7 @@ fn agent_source_label(source: &crate::commands::code_agents::AgentSource) -> Str
 }
 
 fn open_memory_editor(path: &Path) {
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".to_string());
+    let editor = resolve_editor();
     let cmd = format!("{editor} {}", quote_for_sh(path));
     match Command::new("/bin/sh").arg("-c").arg(&cmd).status() {
         Ok(status) if status.success() => {
@@ -10095,11 +10093,27 @@ fn open_memory_editor(path: &Path) {
     }
 }
 
-fn quote_for_sh(path: &Path) -> String {
+/// Resolve the user's preferred external editor: `$VISUAL`, then `$EDITOR`,
+/// then `vi`. Extracted from `open_memory_editor` so the ratatui TUI's
+/// Ctrl+O external-editor flow (`code_tui::app`) can reuse the same
+/// resolution order without duplicating the env-var fallback chain.
+pub(crate) fn resolve_editor() -> String {
+    std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string())
+}
+
+/// Quote a filesystem path for safe interpolation into a POSIX `sh -c` command
+/// line (single-quote wrapping with `'` → `'\''` escaping). Promoted to
+/// `pub(crate)` so the TUI external-editor flow can quote the temp-file path.
+pub(crate) fn quote_for_sh(path: &Path) -> String {
     quote_sh_string(path.to_string_lossy().as_ref())
 }
 
-fn quote_sh_string(raw: &str) -> String {
+/// Quote an arbitrary string for a POSIX `sh -c` command line. Promoted to
+/// `pub(crate)` for reuse by the TUI external-editor flow + the server-args
+/// path below.
+pub(crate) fn quote_sh_string(raw: &str) -> String {
     format!("'{}'", raw.replace('\'', "'\\''"))
 }
 
@@ -20968,5 +20982,188 @@ mod tests {
         );
         assert_eq!(parse_direct_custom_slash("/review"), Some(("review", "")));
         assert_eq!(parse_direct_custom_slash("review"), None);
+    }
+
+    // ── M7a: OSC52 sequence + external-editor pure helpers ────────────────
+    //
+    // Hermetic tests for the pure helpers the M7a clipboard/OSC52 +
+    // external-editor flow (`code_tui::app`) reuses: `osc52_sequence`
+    // (assembles the `\x1b]52;c;<base64>\x07` clipboard-write escape), the
+    // `resolve_editor` env-var precedence (`$VISUAL` → `$EDITOR` → `vi`),
+    // and `quote_for_sh` / `quote_sh_string` (POSIX sh -c single-quoting). No
+    // real terminal, no subprocess. `resolve_editor` reads process-global env
+    // vars, so each env-touching test snapshots + restores VISUAL/EDITOR
+    // (including their prior unset state) to avoid cross-test pollution.
+
+    /// Snapshot the current VISUAL/EDITOR env state as a pair of
+    /// `(Option<String>, Option<String>)` so a test can restore the EXACT
+    /// prior state (set vs unset) on exit. Returns (visual, editor).
+    fn snapshot_editor_env() -> (Option<String>, Option<String>) {
+        (std::env::var("VISUAL").ok(), std::env::var("EDITOR").ok())
+    }
+
+    /// Restore VISUAL/EDITOR to a snapshot taken by `snapshot_editor_env`,
+    /// re-establishing the exact prior set/unset state.
+    fn restore_editor_env((visual, editor): (Option<String>, Option<String>)) {
+        match visual {
+            Some(v) => std::env::set_var("VISUAL", v),
+            None => std::env::remove_var("VISUAL"),
+        }
+        match editor {
+            Some(v) => std::env::set_var("EDITOR", v),
+            None => std::env::remove_var("EDITOR"),
+        }
+    }
+
+    /// Fully clear VISUAL/EDITOR so `resolve_editor` reaches the `vi` fallback.
+    fn clear_editor_env() {
+        std::env::remove_var("VISUAL");
+        std::env::remove_var("EDITOR");
+    }
+
+    /// Serialize the `resolve_editor_*` tests (which mutate the process-global
+    /// VISUAL/EDITOR env vars) so their snapshot/set/assert/restore brackets
+    /// don't race each other under parallel `cargo test` threads. The lock is
+    /// held across the whole mutation window (snapshot → restore), so at most
+    /// one env-touching test observes a stable env at a time.
+    static EDITOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // (M7a-u1) `osc52_sequence` produces the well-formed OSC52 clipboard
+    // escape: `\x1b]52;c;` + base64(payload) + `\x07` (BEL terminator). The
+    // bg `/copy` arm ships this string back as `AgentMsg::Osc52`; the main
+    // thread writes the bytes raw to stdout. Pin the exact framing so a
+    // terminal reads it as a clipboard write (the `c` selection + BEL
+    // terminator are load-bearing — a malformed sequence is silently ignored).
+    #[test]
+    fn osc52_sequence_emits_well_formed_escape() {
+        let seq = osc52_sequence("hi");
+        // OSC52 framing: ESC ] 52 ; c ; <base64> BEL
+        assert!(
+            seq.starts_with("\x1b]52;c;"),
+            "OSC52 must start with ESC]52;c; — the 'c' clipboard selection, got {seq:?}"
+        );
+        assert!(seq.ends_with('\x07'), "OSC52 must end with BEL (\\x07), got {seq:?}");
+        // The middle is the base64 of the payload bytes.
+        let middle = &seq["\x1b]52;c;".len()..seq.len() - 1];
+        assert_eq!(
+            BASE64_STANDARD.decode(middle).unwrap(),
+            b"hi",
+            "OSC52 payload must base64-decode to the input bytes"
+        );
+    }
+
+    // (M7a-u2) `osc52_sequence` is the byte-for-byte path the bg `/copy` arm
+    // uses; an empty payload still produces valid framing (empty base64).
+    // This guards the bare-copy edge case (though the bg arm skips empty text).
+    #[test]
+    fn osc52_sequence_empty_payload_is_well_formed() {
+        let seq = osc52_sequence("");
+        assert_eq!(seq, "\x1b]52;c;\x07", "empty payload → empty base64 + framing");
+    }
+
+    // (M7a-u3) `OSC52_MAX_TEXT_BYTES` is the cap the bg `/copy` arm uses to
+    // decide "available via osc52" vs "unavailable (too large)". Pin the
+    // constant so the size guard doesn't silently change (a regression here
+    // would flip the status path).
+    #[test]
+    fn osc52_max_text_bytes_is_128k() {
+        assert_eq!(OSC52_MAX_TEXT_BYTES, 128 * 1024);
+    }
+
+    // (M7a-u4) `resolve_editor` precedence: `$VISUAL` wins over `$EDITOR`.
+    // Snapshot + restore the env so the test doesn't leak VISUAL/EDITOR into
+    // sibling tests. The `EDITOR_ENV_LOCK` serializes the env-touching tests
+    // (their mutation windows don't race under parallel test threads).
+    #[test]
+    fn resolve_editor_visual_wins_over_editor() {
+        let _guard = EDITOR_ENV_LOCK.lock().unwrap();
+        let snap = snapshot_editor_env();
+        std::env::set_var("VISUAL", "visual-editor");
+        std::env::set_var("EDITOR", "fallback-editor");
+        let resolved = resolve_editor();
+        restore_editor_env(snap);
+        assert_eq!(resolved, "visual-editor", "VISUAL must take precedence over EDITOR");
+    }
+
+    // (M7a-u5) `resolve_editor` falls back to `$EDITOR` when `$VISUAL` is
+    // unset. Pins the second tier of the precedence chain (the TUI Ctrl+O
+    // flow + `open_memory_editor` both rely on this).
+    #[test]
+    fn resolve_editor_falls_back_to_editor_when_visual_unset() {
+        let _guard = EDITOR_ENV_LOCK.lock().unwrap();
+        let snap = snapshot_editor_env();
+        std::env::remove_var("VISUAL");
+        std::env::set_var("EDITOR", "nano");
+        let resolved = resolve_editor();
+        restore_editor_env(snap);
+        assert_eq!(resolved, "nano", "EDITOR must be used when VISUAL is unset");
+    }
+
+    // (M7a-u6) `resolve_editor` falls back to `vi` when neither `$VISUAL` nor
+    // `$EDITOR` is set — the final tier of the precedence chain.
+    #[test]
+    fn resolve_editor_defaults_to_vi_when_neither_set() {
+        let _guard = EDITOR_ENV_LOCK.lock().unwrap();
+        let snap = snapshot_editor_env();
+        clear_editor_env();
+        let resolved = resolve_editor();
+        restore_editor_env(snap);
+        assert_eq!(resolved, "vi", "vi is the final fallback when VISUAL and EDITOR are unset");
+    }
+
+    // (M7a-u7) `quote_for_sh` single-quotes a path so a space-containing temp
+    // path (the Ctrl+O flow's `NamedTempFile` path) round-trips safely through
+    // `sh -c "{editor} {quoted_path}"`. Spaces inside the quotes are literal.
+    #[test]
+    fn quote_for_sh_wraps_path_with_spaces_in_single_quotes() {
+        let path = std::path::Path::new("/tmp/some dir/editor draft.txt");
+        let quoted = quote_for_sh(path);
+        assert!(
+            quoted.starts_with('\'') && quoted.ends_with('\''),
+            "path must be single-quoted, got {quoted:?}"
+        );
+        // The inner content is the raw path (no spaces escaped — they're safe
+        // inside single quotes).
+        let inner = &quoted[1..quoted.len() - 1];
+        assert!(inner.contains("some dir"), "spaces preserved inside quotes: {quoted:?}");
+        assert!(inner.contains("editor draft.txt"), "inner path verbatim: {quoted:?}");
+    }
+
+    // (M7a-u8) `quote_sh_string` escapes embedded single quotes via the
+    // POSIX `'\''` idiom so a path containing a quote (or any attacker-
+    // controlled string) can't break out of the single-quoted context. This
+    // is the injection guard for the `sh -c` editor launch.
+    #[test]
+    fn quote_sh_string_escapes_embedded_single_quotes() {
+        let quoted = quote_sh_string("can't break'; rm -rf /; echo '");
+        // The result is single-quoted; every embedded `'` became `'\''`.
+        assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
+        assert!(
+            quoted.contains("'\\''"),
+            "embedded single quotes must be escaped as '\\'', got {quoted:?}"
+        );
+        // No unescaped single quote survives inside the quoted region that
+        // would terminate the quoting context: the only `'` chars are part of
+        // the `'\''` escape or the wrapping quotes.
+        let inner = &quoted[1..quoted.len() - 1];
+        // After unescaping `'\''` → `'`, the content round-trips to the input.
+        let unescaped = inner.replace("'\\''", "'");
+        assert_eq!(
+            unescaped, "can't break'; rm -rf /; echo '",
+            "the escaped string round-trips to the input (no shell breakout)"
+        );
+    }
+
+    // (M7a-u9) `quote_sh_string` on a plain string with no special chars
+    // still wraps it in single quotes (the consistent quoting the editor
+    // launch relies on — no conditional quoting that an empty/space path
+    // could bypass).
+    #[test]
+    fn quote_sh_string_wraps_plain_string_in_single_quotes() {
+        assert_eq!(quote_sh_string("plain"), "'plain'");
+        assert_eq!(quote_sh_string(""), "''", "empty string → empty single-quotes");
+        // A path with a `$` (shell-significant) is neutralized by the quotes.
+        let quoted = quote_sh_string("/tmp/$HOME/x");
+        assert_eq!(quoted, "'/tmp/$HOME/x'", "dollar is literal inside single quotes");
     }
 }

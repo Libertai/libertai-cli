@@ -155,6 +155,21 @@ pub enum BgCommand {
         /// Free-form PR scope passed verbatim to `build_pr_comments_prompt`.
         scope: String,
     },
+    /// `/copy [status|info|json]` — copy the last assistant response to the
+    /// terminal clipboard via OSC52, or report copy status. Runs on the bg
+    /// thread because it needs the live `AgentSessionHandle` (the transcript
+    /// is only owned there). For the bare copy, the bg arm READS the assistant
+    /// text and ships the OSC52 SEQUENCE STRING back as `AgentMsg::Osc52`
+    /// (the OSC52 WRITE must be main-thread — a bg `print!` would race the
+    /// frame buffer since the bg stdout is shared with `terminal.draw`); the
+    /// status/info/json subcommands return a status string that rides back as
+    /// a `CommandResult` system line (status IS a transcript entry). `query`
+    /// is the raw subcommand remainder (empty = bare copy / `last`).
+    Copy {
+        /// Raw subcommand remainder after `/copy` (`""` for the bare copy,
+        /// `"status"`/`"info"`/`"json"` for the introspection variants).
+        query: String,
+    },
 }
 
 /// Result of a non-printing shell-escape run, for the TUI to render as

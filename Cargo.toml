@@ -129,6 +129,12 @@ tui-textarea-2 = "0.11"
 # declare it explicitly so `use unicode_width::UnicodeWidthStr` resolves
 # cleanly without depending on transitive feature flags.
 unicode-width = "0.2"
+# External-editor flow (`libertai code` Ctrl+O): spawns `$EDITOR` on a
+# `NamedTempFile` so the edited text round-trips back into the input bar.
+# The crate is ALSO pulled in by `tests/probes_*.rs` (dev-only), but the TUI
+# editor path needs it in production code, so it lives here (which also
+# satisfies the dev side — Cargo unifies a single dep + a dev-only dep).
+tempfile = "3"
 
 # Mid-turn input pump (`libertai code` message queueing): needs a
 # cbreak/no-echo terminal mode that crossterm doesn't expose — its raw
