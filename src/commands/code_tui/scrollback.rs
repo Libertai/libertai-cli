@@ -7,8 +7,18 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use unicode_width::UnicodeWidthStr;
 
-use crate::commands::code_tui::app::{App, TranscriptEntry};
+use crate::commands::code_tui::app::{App, SubagentOutcome, TranscriptEntry};
 use crate::commands::code_tui::{markdown, theme, wrap};
+
+/// Marker prefix for a per-tool result line — distinct from the tool-call
+/// `●` so a result reads as a reply rather than another invocation.
+const RESULT_MARKER: &str = "↳ ";
+
+/// Max visual lines of a `ToolResult`'s `output` we render before
+/// collapsing the rest into a "… N more lines" line. Tuned for a scannable
+/// transcript: a tool usually emits a short confirmation; long outputs
+/// (big reads, verbose bash) get a short summary instead of a wall.
+const MAX_RESULT_LINES: usize = 5;
 
 /// Draw the scrollback transcript.
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -118,30 +128,108 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             TranscriptEntry::SubagentTool {
                 agent_name,
                 tool_name,
+                args,
             } => {
                 let color = app
                     .registry
                     .find_by_name(agent_name)
                     .map(|h| theme::agent_color_for(h.color))
                     .unwrap_or(theme::MUTED);
-                lines.push(Line::from(vec![
-                    Span::styled(agent_name.clone(), ratatui::style::Style::default().fg(color).add_modifier(ratatui::style::Modifier::BOLD)),
+                // Reuse the shared preview (not re-implemented here) to get
+                // the per-tool detail string, e.g. "bash cargo test --lib".
+                // `tool_preview` already prefixes the tool name; split off
+                // the detail so we can color the tool name like the main
+                // `Tool` arm (bold) and the detail muted.
+                let preview =
+                    crate::commands::code_tool_preview::tool_preview(tool_name, args);
+                let detail = preview
+                    .strip_prefix(tool_name)
+                    .map(str::trim_start)
+                    .unwrap_or("");
+                let agent_style = ratatui::style::Style::default()
+                    .fg(color)
+                    .add_modifier(ratatui::style::Modifier::BOLD);
+                let marker_style = ratatui::style::Style::default().fg(color);
+                // Mirror the main `Tool` arm: marker + bold tool name +
+                // muted (detail), but agent-colored (marker + agent name).
+                let mut spans = vec![
+                    Span::styled(agent_name.clone(), agent_style),
                     Span::raw(" "),
-                    Span::styled(theme::glyph::TOOL_MARKER, ratatui::style::Style::default().fg(color)),
+                    Span::styled(theme::glyph::TOOL_MARKER, marker_style),
                     Span::raw(" "),
-                    Span::styled(tool_name, theme::muted()),
-                ]));
+                    Span::styled(tool_name, theme::bold()),
+                ];
+                if !detail.is_empty() {
+                    spans.push(Span::styled(format!("({detail})"), theme::muted()));
+                }
+                lines.push(Line::from(spans));
             }
-            TranscriptEntry::SubagentEnd { agent_name } => {
+            TranscriptEntry::SubagentEnd {
+                agent_name,
+                outcome,
+            } => {
                 let color = app
                     .registry
                     .find_by_name(agent_name)
                     .map(|h| theme::agent_color_for(h.color))
                     .unwrap_or(theme::MUTED);
-                lines.push(Line::from(Span::styled(
-                    format!("{agent_name} done"),
-                    ratatui::style::Style::default().fg(color),
-                )));
+                let agent_style = ratatui::style::Style::default()
+                    .fg(color)
+                    .add_modifier(ratatui::style::Modifier::BOLD);
+                // Distinct colors per outcome: Completed → success "done",
+                // Failed → error "failed", Stopped → muted "stopped".
+                let (label, label_style) = match outcome {
+                    SubagentOutcome::Completed => ("done", theme::success()),
+                    SubagentOutcome::Failed => ("failed", theme::error()),
+                    SubagentOutcome::Stopped => ("stopped", theme::muted()),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(agent_name.clone(), agent_style),
+                    Span::raw(" "),
+                    Span::styled(label, label_style),
+                ]));
+            }
+            // M5a: a dim per-tool result line, prefixed with `↳ <name>` and
+            // color-coded by `is_error`. The `output` is already compacted
+            // by `app::render_tool_output` (newlines collapsed, capped at
+            // 200 chars), so we word-wrap it to `usable_width` and cap the
+            // visual lines at [`MAX_RESULT_LINES`], appending a
+            // "… N more lines" line when it overflows.
+            TranscriptEntry::ToolResult {
+                name,
+                output,
+                is_error,
+            } => {
+                let style = if *is_error {
+                    theme::error()
+                } else {
+                    theme::muted()
+                };
+                let prefix = format!("{RESULT_MARKER}{name}");
+                let prefix_w = prefix.chars().count() + 1; // prefix + ": "
+                let body = if output.is_empty() {
+                    prefix
+                } else {
+                    format!("{prefix}: {output}")
+                };
+                // Word-wrap to `usable_width` so a long result doesn't
+                // overflow once Paragraph no longer wraps (M4a pre-wrap).
+                let wrapped = wrap::word_wrap(&body, usable_width, prefix_w);
+                let total = wrapped.len();
+                if total <= MAX_RESULT_LINES {
+                    for chunk in wrapped {
+                        lines.push(Line::from(Span::styled(chunk, style)));
+                    }
+                } else {
+                    for chunk in wrapped.into_iter().take(MAX_RESULT_LINES) {
+                        lines.push(Line::from(Span::styled(chunk, style)));
+                    }
+                    let more = total - MAX_RESULT_LINES;
+                    lines.push(Line::from(Span::styled(
+                        format!("… {more} more line{}", if more == 1 { "" } else { "s" }),
+                        style,
+                    )));
+                }
             }
             TranscriptEntry::AutoAllowed(text) => {
                 lines.push(Line::from(Span::styled(text, theme::muted())));

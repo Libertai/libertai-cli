@@ -642,14 +642,25 @@ fn render_child(event: AgentEvent, on_update: Option<&(dyn Fn(ToolUpdate) + Send
         }
         AgentEvent::ToolExecutionStart { tool_name, args, .. } => {
             eprintln!("\n  \x1b[2m[subagent tool] {tool_name}\x1b[0m");
-            let detail = tool_name.clone();
-            send_child_update(
-                on_update,
-                "subagent_tool_start",
-                &detail,
-                agent_name,
-            );
-            let _ = args; // args available if needed later
+            // Pack the tool args into the details JSON so the TUI can
+            // show what the subagent invoked (the one-shot eprint! path
+            // above is unchanged). Built directly — like the tool_end arm
+            // — so `args` (a serde_json::Value) lands in details.args
+            // rather than being flattened into a single Text block. The
+            // content's first text block stays the bare tool name, since
+            // the TUI's subagent_tool_start arm extracts the name from
+            // content[0] (matching the prior send_child_update behavior).
+            if let Some(on_update) = on_update {
+                on_update(ToolUpdate {
+                    content: vec![ContentBlock::Text(TextContent::new(tool_name.clone()))],
+                    details: Some(serde_json::json!({
+                        "kind": "subagent_tool_start",
+                        "agent": agent_name,
+                        "tool": tool_name,
+                        "args": args,
+                    })),
+                });
+            }
         }
         AgentEvent::ToolExecutionUpdate {
             tool_name,
@@ -691,9 +702,31 @@ fn render_child(event: AgentEvent, on_update: Option<&(dyn Fn(ToolUpdate) + Send
                 });
             }
         }
-        AgentEvent::AgentEnd { .. } => {
+        AgentEvent::AgentEnd { error, .. } => {
             eprintln!();
-            send_child_update(on_update, "subagent_end", "\n[subagent done]\n", agent_name);
+            // Map the child's terminal state to an outcome the TUI can
+            // render. pi's `AgentEnd` carries `error: Option<String>`
+            // (no StopReason/Aborted distinction at this rev), so we
+            // reduce to completed/failed. The one-shot eprint! path
+            // keeps its "[subagent done]" content; the TUI reads
+            // details.outcome.
+            let outcome = if error.is_some() {
+                "failed"
+            } else {
+                "completed"
+            };
+            if let Some(on_update) = on_update {
+                on_update(ToolUpdate {
+                    content: vec![ContentBlock::Text(TextContent::new(
+                        "\n[subagent done]\n".to_string(),
+                    ))],
+                    details: Some(serde_json::json!({
+                        "kind": "subagent_end",
+                        "agent": agent_name,
+                        "outcome": outcome,
+                    })),
+                });
+            }
         }
         _ => {}
     }

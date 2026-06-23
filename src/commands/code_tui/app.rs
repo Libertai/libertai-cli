@@ -51,6 +51,28 @@ const HISTORY_MAX_LIMIT: usize = 64;
 /// to interrupt the background thread's current turn.
 type SharedAbort = Arc<Mutex<Option<AbortHandle>>>;
 
+/// Terminal outcome of a subagent (task-tool child session), reported by
+/// the background thread in `AgentMsg::SubagentEnd`. Mirrors the strings
+/// `code_task.rs` packs into `details.outcome` ("completed"/"failed"; we also
+/// accept "stopped"/"aborted" so a future distinction maps cleanly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentOutcome {
+    Completed,
+    Failed,
+    Stopped,
+}
+
+/// Map a `details.outcome` string to a [`SubagentOutcome`]. Unknown /
+/// missing values default to `Completed`, matching `code_task.rs`'s
+/// `error.is_none()` → "completed" reduction.
+fn parse_outcome(s: &str) -> SubagentOutcome {
+    match s.trim() {
+        "failed" => SubagentOutcome::Failed,
+        "stopped" | "aborted" => SubagentOutcome::Stopped,
+        _ => SubagentOutcome::Completed,
+    }
+}
+
 /// Events sent from the background thread (pi session) to the main
 /// thread (ratatui event loop).
 #[derive(Debug, Clone)]
@@ -117,19 +139,27 @@ pub enum AgentMsg {
         agent_name: String,
         text: String,
     },
-    /// A subagent tool started executing.
+    /// A subagent tool started executing. `args` is the tool's argument
+    /// JSON (from `details.args`), kept so the scrollback renderer can
+    /// reuse `tool_preview` instead of the TUI re-parsing it.
     SubagentToolStart {
         agent_name: String,
         tool_name: String,
+        args: serde_json::Value,
     },
-    /// A subagent tool finished.
+    /// A subagent tool finished. `output` is the joined Text content of
+    /// the child's `partial_result.content`; `is_error` mirrors
+    /// `details.isError`.
     SubagentToolEnd {
         agent_name: String,
         tool_name: String,
+        output: String,
+        is_error: bool,
     },
     /// A subagent finished its turn.
     SubagentEnd {
         agent_name: String,
+        outcome: SubagentOutcome,
     },
     /// Error from the background thread.
     Error(String),
@@ -276,19 +306,29 @@ pub enum TranscriptEntry {
         name: String,
         detail: String,
     },
+    /// Tool result (the output a finished tool produced). Rendered as a
+    /// dim line below the tool marker. `is_error` controls coloring.
+    ToolResult {
+        name: String,
+        output: String,
+        is_error: bool,
+    },
     /// Subagent text (colored agent name prefix).
     SubagentText {
         agent_name: String,
         text: String,
     },
-    /// Subagent tool marker.
+    /// Subagent tool marker. `args` is retained so the scrollback
+    /// renderer can call `tool_preview` rather than re-parsing here.
     SubagentTool {
         agent_name: String,
         tool_name: String,
+        args: serde_json::Value,
     },
     /// Subagent finished.
     SubagentEnd {
         agent_name: String,
+        outcome: SubagentOutcome,
     },
     /// Auto-allow notice (dim).
     AutoAllowed(String),
@@ -627,20 +667,57 @@ fn translate_event(event: &AgentEvent) -> Option<AgentMsg> {
                             _ => None,
                         })
                         .unwrap_or_default();
+                    // `code_task.rs` packs the tool args into details.args
+                    // (a Value) rather than flattening them into the Text
+                    // block. Default Null keeps the entry constructible
+                    // when the field is absent.
+                    let args = details
+                        .get("args")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
                     Some(AgentMsg::SubagentToolStart {
                         agent_name,
                         tool_name: tool_name.trim().to_string(),
+                        args,
                     })
                 }
-                "subagent_tool_end" => Some(AgentMsg::SubagentToolEnd {
-                    agent_name,
-                    tool_name: details
+                "subagent_tool_end" => {
+                    let tool_name = details
                         .get("tool")
                         .and_then(|v| v.as_str())
                         .unwrap_or("tool")
-                        .to_string(),
-                }),
-                "subagent_end" => Some(AgentMsg::SubagentEnd { agent_name }),
+                        .to_string();
+                    // The tool output lives in partial_result.content's Text
+                    // blocks (the child's result content), joined into one
+                    // string. `details.isError` flags error results.
+                    let output = partial_result
+                        .content
+                        .iter()
+                        .filter_map(|c| match c {
+                            pi::model::ContentBlock::Text(t) => Some(t.text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    let is_error = details
+                        .get("isError")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    Some(AgentMsg::SubagentToolEnd {
+                        agent_name,
+                        tool_name,
+                        output,
+                        is_error,
+                    })
+                }
+                "subagent_end" => {
+                    let outcome = details
+                        .get("outcome")
+                        .and_then(|v| v.as_str())
+                        .map(parse_outcome)
+                        .unwrap_or(SubagentOutcome::Completed);
+                    Some(AgentMsg::SubagentEnd { agent_name, outcome })
+                }
                 _ => None,
             }
         }
@@ -1874,13 +1951,24 @@ pub fn agent_transcript(app: &App, agent_name: &str) -> Vec<String> {
             TranscriptEntry::SubagentTool {
                 agent_name: name,
                 tool_name,
+                args,
             } if name == agent_name => {
-                lines.push(format!("● {tool_name}"));
+                // Reuse the shared preview so the overlay's per-tool line
+                // matches the scrollback marker exactly.
+                let preview =
+                    crate::commands::code_tool_preview::tool_preview(tool_name, args);
+                lines.push(format!("● {preview}"));
             }
             TranscriptEntry::SubagentEnd {
                 agent_name: name,
+                outcome,
             } if name == agent_name => {
-                lines.push("done".to_string());
+                let label = match outcome {
+                    SubagentOutcome::Completed => "done",
+                    SubagentOutcome::Failed => "failed",
+                    SubagentOutcome::Stopped => "stopped",
+                };
+                lines.push(label.to_string());
             }
             _ => {}
         }
@@ -2666,6 +2754,98 @@ fn drain_queued(app: &mut App, cmd_tx: &mpsc::Sender<Cmd>) -> bool {
     true
 }
 
+/// Render a pi tool-result `Value` (as packed by `translate_event`'s
+/// `ToolExecutionEnd` arm via `serde_json::to_value(result)`) into a short,
+/// readable string for the transcript `ToolResult` line. Extracts the text
+/// from a Text content block when present; otherwise emits compact JSON so
+/// the line stays one-ish line and cheap to scan. Trailing whitespace is
+/// trimmed and the result is capped to keep the transcript compact.
+fn render_tool_output(value: &serde_json::Value) -> String {
+    // pi tool results commonly carry their payload under a `content` array
+    // of content blocks (mirroring the assistant message shape). Pull the
+    // text out of the first Text block.
+    if let Some(content) = value.get("content").and_then(|v| v.as_array()) {
+        let text: String = content
+            .iter()
+            .filter_map(|c| {
+                (c.get("type").and_then(|t| t.as_str())? == "text").then_some(())?;
+                c.get("text").and_then(|t| t.as_str()).map(String::from)
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        let trimmed = text.trim().to_string();
+        if !trimmed.is_empty() {
+            return compact(&trimmed);
+        }
+    }
+    // Bare string result.
+    if let Some(s) = value.as_str() {
+        let trimmed = s.trim().to_string();
+        if !trimmed.is_empty() {
+            return compact(&trimmed);
+        }
+    }
+    // Fall back to compact JSON for objects/arrays, skipping Null/empty.
+    if value.is_null() {
+        return String::new();
+    }
+    compact(&serde_json::to_string(value).unwrap_or_default())
+}
+
+/// Best-effort error sniff for a pi tool-result `Value`: looks for an
+/// `error`/`is_error` field at the top level or inside a `content` block.
+/// Returns false when nothing error-shaped is found (the common success
+/// path), so non-error results render as normal dim lines.
+fn is_tool_error(value: &serde_json::Value) -> bool {
+    if let Some(b) = value.get("is_error").and_then(|v| v.as_bool()) {
+        return b;
+    }
+    if let Some(b) = value.get("isError").and_then(|v| v.as_bool()) {
+        return b;
+    }
+    if value.get("error").is_some() && !value.get("error").unwrap().is_null() {
+        return true;
+    }
+    // Content blocks may carry their own type="error" marker.
+    if let Some(content) = value.get("content").and_then(|v| v.as_array()) {
+        for c in content {
+            if c.get("type").and_then(|t| t.as_str()) == Some("error") {
+                return true;
+            }
+            if let Some(b) = c.get("is_error").and_then(|v| v.as_bool()) {
+                if b {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Cap a rendered output string to a compact length, collapsing internal
+/// newlines so the transcript line stays scannable. Matches the spirit of
+/// `code_tool_preview`'s MAX field lengths.
+fn compact(s: &str) -> String {
+    const MAX: usize = 200;
+    let collapsed: String = s.chars().fold(String::new(), |mut acc, c| {
+        if c == '\n' || c == '\r' {
+            if !acc.ends_with(' ') {
+                acc.push(' ');
+            }
+        } else {
+            acc.push(c);
+        }
+        acc
+    });
+    let trimmed = collapsed.trim();
+    if trimmed.chars().count() <= MAX {
+        return trimmed.to_string();
+    }
+    let mut out: String = trimmed.chars().take(MAX).collect();
+    out.push('…');
+    out
+}
+
 fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
     match msg {
         AgentMsg::TextDelta(delta) => {
@@ -2698,7 +2878,23 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.spinner_label = "working…";
             app.scroll = 0; // auto-scroll to bottom
         }
-        AgentMsg::ToolEnd { .. } => {
+        AgentMsg::ToolEnd {
+            tool_name,
+            output,
+            ..
+        } => {
+            // Stop dropping tool output: render a dim ToolResult line below
+            // the tool marker. `render_tool_output` extracts a readable
+            // short form from the pi result Value; `is_tool_error` is a
+            // best-effort error sniff.
+            let rendered = render_tool_output(&output);
+            if !rendered.is_empty() {
+                app.transcript.push(TranscriptEntry::ToolResult {
+                    name: tool_name.clone(),
+                    output: rendered,
+                    is_error: is_tool_error(&output),
+                });
+            }
             app.current_tool = None;
             app.current_tool_detail = String::new();
             app.spinner_label = "thinking…";
@@ -2814,25 +3010,44 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
         AgentMsg::SubagentToolStart {
             agent_name,
             tool_name,
+            args,
         } => {
+            // Store args on the entry; the scrollback renderer calls
+            // `tool_preview` (reused, not duplicated) to format the marker.
             app.transcript.push(TranscriptEntry::SubagentTool {
                 agent_name,
                 tool_name,
+                args,
             });
             app.scroll = 0; // auto-scroll to bottom
         }
         AgentMsg::SubagentToolEnd {
             agent_name,
-            tool_name: _,
+            tool_name,
+            output,
+            is_error,
         } => {
-            // Tool end is implicit — the next text or tool start
-            // replaces the current tool. No transcript entry needed,
-            // but we could add a dim "done" marker if desired.
-            let _ = agent_name;
+            // Reuse ToolResult for a dim per-tool result line, prefixing the
+            // tool name with the agent so the line reads "{agent} · {tool}".
+            // Keeps a single result-rendering path (ToolResult) and avoids a
+            // near-duplicate SubagentToolResult variant. An empty/whitespace
+            // result emits no line, matching the prior implicit-end behavior.
+            if output.trim().is_empty() {
+                return;
+            }
+            let name = format!("{agent_name} · {tool_name}");
+            let rendered = render_tool_output(&serde_json::Value::String(output));
+            app.transcript.push(TranscriptEntry::ToolResult {
+                name,
+                output: rendered,
+                is_error,
+            });
+            app.scroll = 0; // auto-scroll to bottom
         }
-        AgentMsg::SubagentEnd { agent_name } => {
+        AgentMsg::SubagentEnd { agent_name, outcome } => {
             app.transcript.push(TranscriptEntry::SubagentEnd {
                 agent_name,
+                outcome,
             });
             app.transcript.push(TranscriptEntry::Blank);
             app.scroll = 0; // auto-scroll to bottom
@@ -3960,6 +4175,217 @@ task = "Do the thing"
         // No spawn: the registry is still empty and no Cmd was sent.
         assert!(app.registry.snapshot().is_empty(), "registry must stay empty on a failed /agent");
         assert!(cmd_rx.try_recv().is_err(), "malformed /agent sends no Cmd");
+    }
+
+    // --- M5a: subagent / tool-result transcript-data path ------------------
+    //
+    // The seam is `translate_event` (pi AgentEvent → AgentMsg) plus the
+    // `handle_agent_msg` arms that push the new transcript variants. We
+    // fabricate the pi `AgentEvent::ToolExecutionUpdate` exactly the way
+    // `code_task.rs`'s `render_child` packs it (details.kind + content
+    // blocks), so the assertions exercise the real reduction path.
+
+    use pi::model::{ContentBlock, TextContent};
+    use pi::sdk::{AgentEvent, ToolOutput};
+
+    /// Build a `ToolExecutionUpdate` mirroring code_task.rs's `render_child`
+    /// packing: `partial_result.content` carries the payload blocks and
+    /// `partial_result.details` carries the `kind` + per-kind fields.
+    fn child_update(content: Vec<ContentBlock>, details: serde_json::Value) -> AgentEvent {
+        AgentEvent::ToolExecutionUpdate {
+            tool_call_id: "child-tc-1".to_string(),
+            tool_name: "task".to_string(),
+            args: serde_json::Value::Null,
+            partial_result: ToolOutput {
+                content,
+                details: Some(details),
+                is_error: false,
+            },
+        }
+    }
+
+    // (1a) subagent_tool_start → AgentMsg::SubagentToolStart carrying args.
+    #[test]
+    fn translate_event_subagent_tool_start_carries_args() {
+        let args = serde_json::json!({ "command": "echo hi", "cwd": "." });
+        let event = child_update(
+            vec![ContentBlock::Text(TextContent::new("bash"))],
+            serde_json::json!({
+                "kind": "subagent_tool_start",
+                "agent": "reviewer",
+                "tool": "bash",
+                "args": args.clone(),
+            }),
+        );
+        match translate_event(&event).expect("subagent_tool_start translates") {
+            AgentMsg::SubagentToolStart {
+                agent_name,
+                tool_name,
+                args: got_args,
+            } => {
+                assert_eq!(agent_name, "reviewer");
+                assert_eq!(tool_name, "bash");
+                assert_eq!(got_args, args, "args echoed from details.args");
+            }
+            other => panic!("expected SubagentToolStart, got {other:?}"),
+        }
+    }
+
+    // (1b) subagent_tool_end with isError=true → SubagentToolEnd {
+    // output, is_error: true }. The joined Text content becomes `output`.
+    #[test]
+    fn translate_event_subagent_tool_end_error_carries_output() {
+        let event = child_update(
+            vec![ContentBlock::Text(TextContent::new("command failed: exit 1"))],
+            serde_json::json!({
+                "kind": "subagent_tool_end",
+                "agent": "coder",
+                "tool": "bash",
+                "toolCallId": "child-tc-1",
+                "isError": true,
+            }),
+        );
+        match translate_event(&event).expect("subagent_tool_end translates") {
+            AgentMsg::SubagentToolEnd {
+                agent_name,
+                tool_name,
+                output,
+                is_error,
+            } => {
+                assert_eq!(agent_name, "coder");
+                assert_eq!(tool_name, "bash");
+                assert_eq!(output, "command failed: exit 1");
+                assert!(is_error, "isError=true should propagate");
+            }
+            other => panic!("expected SubagentToolEnd, got {other:?}"),
+        }
+    }
+
+    // (1c) subagent_end with outcome="failed" → SubagentEnd { outcome: Failed }.
+    #[test]
+    fn translate_event_subagent_end_failed_maps_to_failed() {
+        let event = child_update(
+            vec![ContentBlock::Text(TextContent::new("\n[subagent done]\n"))],
+            serde_json::json!({
+                "kind": "subagent_end",
+                "agent": "reviewer",
+                "outcome": "failed",
+            }),
+        );
+        match translate_event(&event).expect("subagent_end translates") {
+            AgentMsg::SubagentEnd { agent_name, outcome } => {
+                assert_eq!(agent_name, "reviewer");
+                assert_eq!(outcome, SubagentOutcome::Failed);
+            }
+            other => panic!("expected SubagentEnd, got {other:?}"),
+        }
+    }
+
+    // (2) handle_agent_msg on AgentMsg::ToolEnd pushes a TranscriptEntry::ToolResult
+    // (not dropped) with is_error reflecting the output. Assert the last entry is a
+    // ToolResult. A result with `is_error: true` + non-empty content text is both
+    // rendered (non-empty) and flagged as an error.
+    #[test]
+    fn handle_agent_msg_toolend_pushes_toolresult_reflecting_error() {
+        let mut app = test_app();
+        app.current_tool = Some("bash".into());
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::ToolEnd {
+                tool_call_id: "tc1".into(),
+                tool_name: "bash".into(),
+                output: serde_json::json!({
+                    "is_error": true,
+                    "content": [{ "type": "text", "text": "boom: exit 1" }]
+                }),
+            },
+            &cmd_tx,
+        );
+
+        // The tool output was NOT dropped — a ToolResult entry landed.
+        match app.transcript.last() {
+            Some(TranscriptEntry::ToolResult { name, output, is_error }) => {
+                assert_eq!(name, "bash");
+                assert_eq!(output, "boom: exit 1", "rendered text preserved");
+                assert!(*is_error, "is_error should mirror the result");
+            }
+            other => panic!("expected last entry to be ToolResult, got {other:?}"),
+        }
+        // current_tool cleared as part of the ToolEnd reset.
+        assert!(app.current_tool.is_none());
+    }
+
+    // (4) parse_outcome mapping: failed→Failed, completed→Completed,
+    // aborted/stopped→Stopped, unknown→Completed.
+    #[test]
+    fn parse_outcome_maps_known_and_unknown_strings() {
+        assert_eq!(parse_outcome("failed"), SubagentOutcome::Failed);
+        assert_eq!(parse_outcome("completed"), SubagentOutcome::Completed);
+        assert_eq!(parse_outcome("stopped"), SubagentOutcome::Stopped);
+        assert_eq!(parse_outcome("aborted"), SubagentOutcome::Stopped);
+        // Unknown strings default to Completed (matching code_task.rs's
+        // error.is_none() → "completed" reduction).
+        assert_eq!(parse_outcome("nope"), SubagentOutcome::Completed);
+        assert_eq!(parse_outcome(""), SubagentOutcome::Completed);
+        // Whitespace is trimmed before matching.
+        assert_eq!(parse_outcome("  failed  "), SubagentOutcome::Failed);
+    }
+
+    // (5) handle_agent_msg on SubagentEnd { outcome: Failed } pushes a
+    // TranscriptEntry::SubagentEnd { outcome: Failed } (assert the variant).
+    #[test]
+    fn handle_agent_msg_subagent_end_failed_pushes_subagentend_variant() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::SubagentEnd {
+                agent_name: "reviewer".into(),
+                outcome: SubagentOutcome::Failed,
+            },
+            &cmd_tx,
+        );
+
+        // The SubagentEnd variant lands; the trailing Blank separator follows it.
+        let has_end = app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::SubagentEnd { agent_name, outcome }
+                if agent_name == "reviewer" && *outcome == SubagentOutcome::Failed
+        ));
+        assert!(has_end, "expected a SubagentEnd{{Failed}} entry, got {:?}", app.transcript);
+        // A trailing Blank separator is pushed after the end marker.
+        assert!(matches!(app.transcript.last(), Some(TranscriptEntry::Blank)));
+    }
+
+    // (6) SubagentToolStart pushes a SubagentTool with the args echoed (the
+    // renderer tool_previews them; here just assert args is stored).
+    #[test]
+    fn handle_agent_msg_subagent_tool_start_stores_args() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let args = serde_json::json!({ "command": "rg foo" });
+
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::SubagentToolStart {
+                agent_name: "coder".into(),
+                tool_name: "bash".into(),
+                args: args.clone(),
+            },
+            &cmd_tx,
+        );
+
+        match app.transcript.last() {
+            Some(TranscriptEntry::SubagentTool { agent_name, tool_name, args: got }) => {
+                assert_eq!(agent_name, "coder");
+                assert_eq!(tool_name, "bash");
+                assert_eq!(got.clone(), args, "args stored verbatim for the renderer");
+            }
+            other => panic!("expected last entry to be SubagentTool, got {other:?}"),
+        }
     }
 }
 
