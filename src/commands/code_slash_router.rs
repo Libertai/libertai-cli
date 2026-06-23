@@ -170,6 +170,34 @@ pub enum BgCommand {
         /// `"status"`/`"info"`/`"json"` for the introspection variants).
         query: String,
     },
+    /// `/diff [path]` — render the uncommitted diff vs HEAD. Runs on the bg
+    /// thread because `git_diff_in` shells out to `git diff` (blocking I/O).
+    /// Unlike the `CommandResult` variants, the raw diff is NOT a transcript
+    /// line: the bg arm ships it back as `AgentMsg::DiffReady`, and the main
+    /// thread stashes it on `App::pending_diff` and opens the `DiffView`
+    /// overlay (which parses + styles it via `code_tui::diff::parse_diff`).
+    /// `path` is the optional `-- <path>` filter (`None` = all changed files).
+    Diff {
+        /// Optional pathspec limiting the diff (`None` = full working-tree
+        /// diff vs HEAD).
+        path: Option<String>,
+    },
+    /// `/commit [message]` — stage all changes (`git add -A`) and create a
+    /// git commit. This is a **blocking + mutating** subprocess, so it MUST
+    /// run on the bg thread (the main thread owns the render loop; the bg
+    /// thread already runs blocking git via `BgCommand::Changelog`/`Tree`).
+    /// The result text rides back as a `CommandResult` system line
+    /// (RENDERED). `add_all` stages the full working tree before committing
+    /// (the minimal-cut `/commit <message>` path always stages everything);
+    /// the bare `/commit` arm builds a prompt instead (see
+    /// `handle_slash_command`).
+    Commit {
+        /// Conventional commit message body for `git commit -m <message>`.
+        message: String,
+        /// When true, run `git add -A` before `git commit -m <message>`
+        /// (stage the entire working tree).
+        add_all: bool,
+    },
 }
 
 /// Result of a non-printing shell-escape run, for the TUI to render as

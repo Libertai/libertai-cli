@@ -2,6 +2,7 @@ pub mod agent_view;
 pub mod agents_panel;
 pub mod app;
 pub mod approvals;
+pub mod diff;
 pub mod footer;
 pub mod input;
 pub mod markdown;

@@ -28,6 +28,7 @@ use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
 
 use crate::commands::code_aux::{SmartApproval, SmartApprovalVerdict};
+use crate::commands::code_diff::{read_preview_file, EditJournal, JournalEntry};
 use crate::commands::code_factory::{is_path_edit_tool, Mode, ModeFlag};
 
 /// User decision for a single approval prompt.
@@ -687,6 +688,10 @@ pub struct ApprovalTool {
     ui: Arc<dyn ApprovalUi>,
     policy: Option<Arc<dyn ToolPolicy>>,
     smart_approval: Option<Arc<dyn SmartApproval>>,
+    /// Shared edit journal. When set, `execute_inner` records each
+    /// successful mutating tool's before/after content so the main
+    /// thread's `/undo` can revert it. `None` for bare/test tools.
+    journal: Option<Arc<EditJournal>>,
 }
 
 impl ApprovalTool {
@@ -704,6 +709,7 @@ impl ApprovalTool {
             ui,
             policy: None,
             smart_approval: None,
+            journal: None,
         }
     }
 
@@ -722,6 +728,16 @@ impl ApprovalTool {
         self
     }
 
+    /// Attach the shared [`EditJournal`] so `execute_inner` can record each
+    /// successful edit for `/undo`. The journal is `Option` so a bare
+    /// `ApprovalTool::new` (e.g. unit tests) keeps compiling unchanged —
+    /// only the factory wires a real one. Mirrors `with_smart_approval`'s
+    /// builder shape so the ctor signature stays stable.
+    pub fn with_journal(mut self, journal: Arc<EditJournal>) -> Self {
+        self.journal = Some(journal);
+        self
+    }
+
     async fn execute_inner(
         &self,
         tool_call_id: &str,
@@ -733,6 +749,37 @@ impl ApprovalTool {
             crate::commands::code_diff::file_snapshot_before_tool(self.inner.name(), &input, &cwd)
         });
         let result = self.inner.execute(tool_call_id, input, on_update).await;
+
+        // Record the edit for `/undo` BEFORE the post-execution diff is
+        // appended. We only journal a SUCCESSFUL edit — a tool that erred
+        // left the file unchanged (or in an error state the user should
+        // inspect), so pushing an undo entry would let `/undo` revert a
+        // no-op or, worse, clobber a half-applied mutation. Reuses the free
+        // `FileSnapshot` the approval layer already captured (no second
+        // read-before-tool); only the post-content is read, on success.
+        if let Some(j) = &self.journal {
+            if let Some(snap) = &snapshot {
+                let succeeded = matches!(
+                    result.as_ref().ok(),
+                    Some(ToolExecution::Done(output)) if !output.is_error
+                );
+                if succeeded {
+                    // Re-read the post-content from the snapshot's resolved
+                    // path with the same capped-read helper that captured
+                    // `before`, so the entry mirrors the free `FileSnapshot`
+                    // exactly (path, resolved, before, after). We only read
+                    // on success to avoid a wasted file read on a failed edit.
+                    let after = read_preview_file(&snap.resolved);
+                    j.push(JournalEntry {
+                        path: snap.path.clone(),
+                        resolved: snap.resolved.clone(),
+                        before: snap.before.clone(),
+                        after,
+                    });
+                }
+            }
+        }
+
         with_post_execution_diff(result, snapshot.as_ref())
     }
 }
@@ -1406,6 +1453,20 @@ mod tests {
         }
     }
 
+    struct AllowingUi;
+
+    #[async_trait]
+    impl ApprovalUi for AllowingUi {
+        async fn decide(
+            &self,
+            _tool_name: &str,
+            _preview: &str,
+            _always_rule: &str,
+        ) -> PromptChoice {
+            PromptChoice::Allow
+        }
+    }
+
     struct StaticSmartApproval(SmartApprovalVerdict);
 
     #[async_trait]
@@ -1577,6 +1638,156 @@ mod tests {
         assert!(text.contains("Filesystem delta after execution"));
         assert!(text.contains("-before"));
         assert!(text.contains("+after"));
+    }
+
+    // ── EditJournal recording ────────────────────────────────────────
+
+    /// Fake `write`-like tool: writes `input["content"]` to `input["path"]`
+    /// (resolved against cwd) and returns a successful non-error output.
+    /// Used to exercise `execute_inner`'s journal push end-to-end.
+    struct WriteFileTool;
+
+    #[async_trait]
+    impl Tool for WriteFileTool {
+        fn name(&self) -> &str {
+            "write"
+        }
+        fn label(&self) -> &str {
+            "Write"
+        }
+        fn description(&self) -> &str {
+            "fake write tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+        fn is_read_only(&self) -> bool {
+            false
+        }
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            input: serde_json::Value,
+            _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+        ) -> PiResult<ToolExecution> {
+            let path = input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("out.txt");
+            let content = input
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            std::fs::write(path, content).ok();
+            Ok(ToolOutput {
+                content: vec![ContentBlock::Text(TextContent::new("wrote"))],
+                details: None,
+                is_error: false,
+            }
+            .into())
+        }
+    }
+
+    #[test]
+    fn execute_inner_journals_successful_edit_and_skips_failed() {
+        // `execute_inner` resolves the tool path against the process cwd
+        // (it calls `std::env::current_dir()` for the snapshot), so pin the
+        // cwd to a temp dir for the duration of BOTH scenarios. We keep
+        // them in ONE test function so the process-global cwd isn't raced
+        // by a sibling test — there is no `serial_test` in this crate.
+        let temp = tempfile::tempdir().unwrap();
+        let prior_cwd = std::env::current_dir().ok();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        // ── scenario 1: a successful edit is journaled ──
+        let target = temp.path().join("notes.txt");
+        std::fs::write(&target, "before\n").unwrap();
+
+        let journal = Arc::new(crate::commands::code_diff::EditJournal::new());
+        let tool = ApprovalTool::new(
+            Box::new(WriteFileTool),
+            Arc::new(ApprovalState::new()),
+            ModeFlag::new(Mode::Normal),
+            Arc::new(AllowingUi),
+        )
+        .with_base_dir(Some(temp.path().to_path_buf()))
+        .with_journal(Arc::clone(&journal));
+
+        let execution = futures::executor::block_on(tool.execute(
+            "call-1",
+            serde_json::json!({"path":"notes.txt","content":"after\n"}),
+            None,
+        ))
+        .unwrap();
+        assert!(matches!(execution, ToolExecution::Done(_)));
+
+        // The journal captured exactly one entry: before=before, after=after.
+        assert_eq!(journal.len(), 1);
+        let entry = journal.pop().unwrap();
+        assert_eq!(entry.path, "notes.txt");
+        assert_eq!(entry.before.as_deref(), Some("before\n"));
+        assert_eq!(entry.after.as_deref(), Some("after\n"));
+        assert!(journal.is_empty());
+
+        // ── scenario 2: a failed edit is NOT journaled ──
+        // A DeniedTool returns an error output; `execute_inner` must skip
+        // the push so `/undo` never reverts a no-op.
+        struct DeniedTool;
+        #[async_trait]
+        impl Tool for DeniedTool {
+            fn name(&self) -> &str {
+                "write"
+            }
+            fn label(&self) -> &str {
+                "Write"
+            }
+            fn description(&self) -> &str {
+                "fake failing write tool"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type":"object"})
+            }
+            fn is_read_only(&self) -> bool {
+                false
+            }
+            async fn execute(
+                &self,
+                _tool_call_id: &str,
+                _input: serde_json::Value,
+                _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+            ) -> PiResult<ToolExecution> {
+                Ok(ToolOutput {
+                    content: vec![ContentBlock::Text(TextContent::new("boom"))],
+                    details: None,
+                    is_error: true,
+                }
+                .into())
+            }
+        }
+
+        let failing_tool = ApprovalTool::new(
+            Box::new(DeniedTool),
+            Arc::new(ApprovalState::new()),
+            ModeFlag::new(Mode::Normal),
+            Arc::new(AllowingUi),
+        )
+        .with_base_dir(Some(temp.path().to_path_buf()))
+        .with_journal(Arc::clone(&journal));
+
+        let _ = futures::executor::block_on(failing_tool.execute(
+            "call-2",
+            serde_json::json!({"path":"notes.txt","content":"after\n"}),
+            None,
+        ))
+        .unwrap();
+
+        assert!(journal.is_empty(), "a failed edit must not be journaled");
+
+        // Restore the process cwd so we don't perturb sibling tests in the
+        // same binary that happen to read it.
+        if let Some(p) = prior_cwd {
+            let _ = std::env::set_current_dir(p);
+        }
     }
 
     #[test]

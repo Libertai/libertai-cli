@@ -19,6 +19,7 @@ use tui_textarea::TextArea;
 use anyhow::Context;
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
+use crate::commands::code_diff::EditJournal;
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
 use crate::commands::code_slash_registry;
 use crate::commands::code_slash_router::{self, BgCommand, CustomResolveResult};
@@ -152,6 +153,19 @@ pub enum AgentMsg {
     /// `/apply`, not the expansion) and then drives the turn through the normal
     /// `Cmd::Prompt` path (full turn-guidance + hook plumbing).
     PromptReady(String),
+    /// The bg thread finished shelling out `git diff` for `/diff` (M7b). The
+    /// raw diff string rides back here (NOT as a `CommandResult` transcript
+    /// line — a large diff would flood the transcript); the main thread stashes
+    /// it on `App::pending_diff` and opens the `DiffView` overlay. `path` is
+    /// the optional pathspec filter (echoed in the viewer title).
+    DiffReady {
+        /// Optional pathspec the diff was scoped to (`None` = all changed files).
+        path: Option<String>,
+        /// Raw `git diff --no-color HEAD [-- <path>]` stdout (trimmed; empty
+        /// means clean — the bg arm short-circuits to a `CommandResult` line
+        /// in that case, so this is only sent for a non-empty diff).
+        diff: String,
+    },
     /// Streaming text delta from a subagent (task tool child session).
     SubagentText {
         agent_name: String,
@@ -263,6 +277,14 @@ pub struct App {
     pub agent_selection: usize,
     /// Agent output overlay (if active).
     pub agent_overlay: Option<AgentOverlay>,
+    /// Diff viewer overlay (if active) — M7b `/diff`. Mirrors
+    /// [`agent_overlay`]'s scroll/follow shape.
+    pub diff_view: Option<DiffView>,
+    /// Raw diff string stashed by the `AgentMsg::DiffReady` handler; consumed
+    /// by `view::draw_diff_view` via `diff::parse_diff` each frame. Kept on
+    /// `App` (not `DiffView`) so a re-open keeps the text the overlay is
+    /// currently rendering; cleared (`None`) when the viewer closes.
+    pub pending_diff: Option<String>,
     /// Live agent registry.
     pub registry: Arc<AgentRegistry>,
     /// Teams we've already fired a completion notification for, so a
@@ -275,6 +297,13 @@ pub struct App {
     /// rules the live session honors. Cloned from the `approvals` Arc built
     /// in `run()` before it's moved into the bg thread.
     pub approvals: Arc<ApprovalState>,
+    /// Shared edit journal — the same `Arc<EditJournal>` the background
+    /// session's tool factory uses, so `/undo` (main thread) `pop`s the
+    /// most-recent edit the live session's `ApprovalTool::execute_inner`
+    /// (background thread) `push`ed. Cloned from the journal Arc built in
+    /// `run()` before it's moved into the App ctor; the same clone is
+    /// handed to the bg factory at spawn. Mirrors the `approvals` threading.
+    pub edit_journal: Arc<EditJournal>,
     /// Status bar info.
     pub bar: BarStatus,
     /// Last reported turn usage (stop reason + ctx-in + out tokens),
@@ -357,6 +386,23 @@ pub struct AgentOverlay {
     /// Auto-tail: when true, new output resets `scroll` to 0 (stick to
     /// bottom). Flipped to false the moment the user scrolls up, and
     /// re-armed when they scroll back to the bottom.
+    pub follow: bool,
+}
+
+/// In-TUI diff viewer state (M7b `/diff`). Mirrors [`AgentOverlay`]'s
+/// scroll/follow shape so the viewer scrolls the same way. The raw diff
+/// string the bg thread shells out is stored separately on
+/// [`App::pending_diff`] (not here) so re-opening the viewer for a new path
+/// doesn't drop the currently-displayed one mid-render.
+pub struct DiffView {
+    /// Optional pathspec filter the diff was scoped to (`None` = all changed
+    /// files vs HEAD). Echoed in the overlay title.
+    pub path: Option<String>,
+    /// Scroll position within the viewer (0 = bottom), same convention as
+    /// [`AgentOverlay::scroll`].
+    pub scroll: u16,
+    /// Auto-tail: when true, sticks to the bottom. Re-armed when the user
+    /// scrolls back to scroll 0; flipped false on scroll-up.
     pub follow: bool,
 }
 
@@ -571,6 +617,7 @@ async fn build_session(
     bash_command_wrapper: Option<Vec<String>>,
     agent_tx: &mpsc::Sender<AgentMsg>,
     approvals: Arc<ApprovalState>,
+    edit_journal: Arc<EditJournal>,
 ) -> anyhow::Result<AgentSessionHandle> {
     let initial_mode = mode.get();
     let ui: Arc<dyn ApprovalUi> = Arc::new(RatatuiApprovalUi::new(agent_tx.clone()));
@@ -583,7 +630,10 @@ async fn build_session(
             Some(Arc::clone(&cfg)),
         )
         .with_tool_policy(tool_policy_from_config(Arc::clone(&cfg)))
-        .with_registry(registry),
+        .with_registry(registry)
+        // Inject the shared journal so the bg session's ApprovalTool
+        // records edits for `/undo` on the main thread.
+        .with_journal(edit_journal),
     );
     let persistence = match resume_path {
         Some(p) => SessionPersistence::Resume(p),
@@ -812,6 +862,7 @@ fn spawn_background(
     resume_path: Option<PathBuf>,
     bash_command_wrapper: Option<Vec<String>>,
     approvals: Arc<ApprovalState>,
+    edit_journal: Arc<EditJournal>,
     cwd: PathBuf,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
@@ -844,6 +895,7 @@ fn spawn_background(
                 bash_command_wrapper.clone(),
                 &agent_tx,
                 Arc::clone(&approvals),
+                Arc::clone(&edit_journal),
             )
             .await
             {
@@ -1001,6 +1053,7 @@ fn spawn_background(
                             bash_command_wrapper.clone(),
                             &agent_tx,
                             Arc::clone(&approvals),
+                            Arc::clone(&edit_journal),
                         )
                         .await
                         {
@@ -1231,6 +1284,90 @@ fn spawn_background(
                                     }
                                 }
                             }
+                            // `/diff [path]` (M7b) — shell out to
+                            // `git -C <cwd> diff --no-color HEAD [-- <path>]`
+                            // (blocking) and ship the raw diff back as
+                            // `AgentMsg::DiffReady` (NOT a `CommandResult`
+                            // transcript line — a large diff would flood the
+                            // transcript; the viewer owns rendering via
+                            // `diff::parse_diff`). An empty diff (clean tree)
+                            // short-circuits to a `CommandResult` system line
+                            // and returns `String::new()` here so the
+                            // empty-text skip below doesn't double-emit.
+                            BgCommand::Diff { path } => {
+                                match code_ui::git_diff_in(&cwd, path.as_deref()) {
+                                    Ok(d) if d.is_empty() => {
+                                        "/diff: no changes.".to_string()
+                                    }
+                                    Ok(d) => {
+                                        let _ = agent_tx.send(AgentMsg::DiffReady {
+                                            path,
+                                            diff: d,
+                                        });
+                                        String::new()
+                                    }
+                                    Err(e) => format!("/diff: {e:#}"),
+                                }
+                            }
+                            // `/commit [message]` (M7b) — stage all changes
+                            // (`git add -A`) and create a git commit. This is a
+                            // BLOCKING + MUTATING subprocess, so it runs on the
+                            // bg thread (the main thread owns the render loop).
+                            // The result text rides back as a `CommandResult`
+                            // system line (RENDERED). `add_all` stages the full
+                            // working tree before committing. The agent is NOT
+                            // allowed to run git commit via bash — `/commit`
+                            // routes exclusively through this arm.
+                            BgCommand::Commit { message, add_all } => {
+                                // Stage the whole working tree first if asked.
+                                // A failed `git add` short-circuits: its stderr
+                                // becomes the result string that rides back as a
+                                // `CommandResult` line. We must NOT `return` from
+                                // the bg task here (the result would be dropped
+                                // AND the thread would exit); the value flows
+                                // through `text` like every other arm, so it
+                                // reaches the `CommandResult` send below.
+                                let stage_err = if add_all {
+                                    match std::process::Command::new("git")
+                                        .arg("-C")
+                                        .arg(&cwd)
+                                        .arg("add")
+                                        .arg("-A")
+                                        .output()
+                                    {
+                                        Ok(o) if !o.status.success() => Some(format!(
+                                            "commit failed: {}",
+                                            String::from_utf8_lossy(&o.stderr).trim()
+                                        )),
+                                        Ok(_) => None,
+                                        Err(e) => Some(format!("commit failed: {e:#}")),
+                                    }
+                                } else {
+                                    None
+                                };
+                                if let Some(err) = stage_err {
+                                    err
+                                } else {
+                                    match std::process::Command::new("git")
+                                        .arg("-C")
+                                        .arg(&cwd)
+                                        .arg("commit")
+                                        .arg("-m")
+                                        .arg(&message)
+                                        .output()
+                                    {
+                                        Ok(o) if o.status.success() => format!(
+                                            "committed: {}",
+                                            String::from_utf8_lossy(&o.stdout).trim()
+                                        ),
+                                        Ok(o) => format!(
+                                            "commit failed: {}",
+                                            String::from_utf8_lossy(&o.stderr).trim()
+                                        ),
+                                        Err(e) => format!("commit failed: {e:#}"),
+                                    }
+                                }
+                            }
                         };
                         if !text.is_empty() {
                             let _ = agent_tx.send(AgentMsg::CommandResult(text));
@@ -1362,6 +1499,13 @@ pub fn run(
     );
     let approvals_for_bg = Arc::clone(&approvals);
 
+    // Shared edit journal: same Arc+clone pattern as `approvals` above.
+    // The bg session's `ApprovalTool::execute_inner` `push`es after each
+    // successful edit; `/undo` on the main thread `pop`s. Built once here,
+    // cloned into the bg factory (below) and into the App.
+    let edit_journal = Arc::new(EditJournal::new());
+    let edit_journal_for_bg = Arc::clone(&edit_journal);
+
     // Spawn the background thread (asupersync runtime + pi session).
     // Clone the wrapper first so the App field can keep a copy for the
     // `!`/`!!` shell escape (which honors `--sandbox=strict` like the
@@ -1383,6 +1527,7 @@ pub fn run(
         resume_path,
         bash_command_wrapper,
         approvals_for_bg,
+        edit_journal_for_bg,
         session_cwd,
     );
 
@@ -1419,10 +1564,13 @@ pub fn run(
             focus: Focus::default(),
             agent_selection: 0,
             agent_overlay: None,
+            diff_view: None,
+            pending_diff: None,
         registry,
         notified_teams: std::collections::HashSet::new(),
         cfg,
         approvals,
+        edit_journal,
         bar: BarStatus {
             // Seed the model label + context window at startup (#20) so the
             // ctx% chip is correct from the very first frame. Without this,
@@ -1742,6 +1890,13 @@ fn handle_key(
     // If ask-user modal is active, keys go to it.
     if app.ask.is_some() {
         return handle_ask_key(app, key);
+    }
+
+    // Diff viewer overlay (M7b `/diff`) takes priority over scrollback
+    // navigation + Tab/agents-panel: like the agent overlay, it owns Esc/
+    // Tab/Up/Down/PageUp/PageDown while open.
+    if app.diff_view.is_some() {
+        return handle_diff_view_key(app, key, cmd_tx);
     }
 
     // Scrollback navigation works in all phases.
@@ -2481,6 +2636,47 @@ fn handle_agent_overlay_key(
     None
 }
 
+/// Handle keys while the diff viewer overlay (`DiffView`, M7b `/diff`) is
+/// open. Cloned from [`handle_agent_overlay_key`] minus the agent-specific
+/// `s`/`x` stop and `r` reply arms (a diff has no associated agent to stop or
+/// reply to). Esc/Tab close the viewer (and clear `pending_diff`); Up/PageUp
+/// scroll away from the bottom and disable follow; Down/PageDown scroll back
+/// down, re-arming follow when the bottom (scroll 0) is reached.
+fn handle_diff_view_key(
+    app: &mut App,
+    key: KeyEvent,
+    _cmd_tx: &mpsc::Sender<Cmd>,
+) -> Option<Action> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Tab => {
+            app.diff_view = None;
+            app.pending_diff = None;
+            app.set_dirty();
+        }
+        // Scrolling up leaves the bottom: stop auto-tailing.
+        KeyCode::Up | KeyCode::PageUp => {
+            if let Some(view) = &mut app.diff_view {
+                view.follow = false;
+                view.scroll = view.scroll.saturating_add(3);
+            }
+            app.set_dirty();
+        }
+        // Scrolling down decrements the offset; reaching the bottom
+        // (scroll == 0) re-arms auto-tail.
+        KeyCode::Down | KeyCode::PageDown => {
+            if let Some(view) = &mut app.diff_view {
+                view.scroll = view.scroll.saturating_sub(3);
+                if view.scroll == 0 {
+                    view.follow = true;
+                }
+            }
+            app.set_dirty();
+        }
+        _ => {}
+    }
+    None
+}
+
 /// Collect output for a specific agent (by name). For background
 /// agents with a `log_path`, reads the log file (each raw line wrapped
 /// as a [`TranscriptEntry::System`] so the overlay can render it
@@ -2613,7 +2809,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
         }
         "/help" => {
             app.transcript.push(TranscriptEntry::System(
-                "Commands: /help /exit /clear /mode /permissions /model [/model list] /status /statusline /statusline-command /output-style /history /usage /doctor /skills list /memory show /skills /memory /review /security-review /mention /ide /hotkeys /theme /vim /bug /hooks /mcp /forget /notify /changelog /tree /pr_comments /copy /team /agent /agents  !<cmd>  !!  custom templates (e.g. /apply)".to_string(),
+                "Commands: /help /exit /clear /mode /permissions /model [/model list] /status /statusline /statusline-command /output-style /history /usage /doctor /skills list /memory show /skills /memory /review /security-review /mention /ide /hotkeys /theme /vim /bug /hooks /mcp /forget /undo /notify /changelog /tree /pr_comments /copy /diff /commit /team /agent /agents  !<cmd>  !!  custom templates (e.g. /apply)".to_string(),
             ));
             app.transcript.push(TranscriptEntry::Blank);
             None
@@ -3086,6 +3282,41 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             app.transcript.push(TranscriptEntry::Blank);
             None
         }
+        "/undo" => {
+            // Tier 1 — main-thread: revert the most recent journaled edit.
+            // The `edit_journal` Arc is shared with the bg session's
+            // `ApprovalTool::execute_inner`, which `push`ed an entry after
+            // every successful edit; here we `pop` the last one (LIFO) and
+            // restore the filesystem to its pre-edit state. Pure std::fs —
+            // no git — so it works for untracked files too. `before = None`
+            // means the edit had CREATED the file, so we delete it.
+            match app.edit_journal.pop() {
+                Some(e) => {
+                    match &e.before {
+                        Some(before) => {
+                            let _ = std::fs::write(&e.resolved, before);
+                        }
+                        None => {
+                            if e.resolved.exists() {
+                                let _ = std::fs::remove_file(&e.resolved);
+                            }
+                        }
+                    }
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "reverted {}",
+                        e.path
+                    )));
+                    app.transcript.push(TranscriptEntry::Blank);
+                    app.set_dirty();
+                }
+                None => {
+                    app.transcript
+                        .push(TranscriptEntry::System("/undo: nothing to undo.".to_string()));
+                    app.transcript.push(TranscriptEntry::Blank);
+                }
+            }
+            None
+        }
         "/notify" | "/notifications" => {
             // Tier 1 — main-thread: parse, toggle config (persisting), test
             // the terminal notification, or render status/json. No BgCommand.
@@ -3261,6 +3492,108 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             app.transcript
                 .push(TranscriptEntry::System("tree…".to_string()));
             None
+        }
+        "/diff" => {
+            // `/diff [path]` — render the uncommitted diff vs HEAD. Shells out
+            // to `git diff` (blocking) on the bg thread, so route there. With
+            // no arg, ALL changed files are shown (parse_diff handles the
+            // full multi-file diff, not one file). The bg arm ships the raw
+            // diff back as `AgentMsg::DiffReady`, which opens the `DiffView`
+            // overlay; an empty diff surfaces as a `CommandResult` "no
+            // changes" line.
+            let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Diff {
+                path: if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.to_string())
+                },
+            }));
+            app.transcript
+                .push(TranscriptEntry::System("diff…".to_string()));
+            None
+        }
+        "/commit" => {
+            // `/commit [message]` (M7b) — create a git commit. `git commit`
+            // is a blocking + mutating subprocess, so it MUST run on the bg
+            // thread (the main thread owns the render loop); the result rides
+            // back as `AgentMsg::CommandResult` (a System line). The agent is
+            // NOT allowed to run git commit via bash — `/commit` routes
+            // exclusively through `BgCommand::Commit`.
+            //
+            // Two cuts:
+            //  - `/commit <message>`: stage the full working tree
+            //    (`add_all = true`) and commit immediately on the bg thread.
+            //  - bare `/commit` (no message): the PROMPT-BASED minimal cut —
+            //    build a prompt from the current diff (`git_diff_in`) asking
+            //    the agent to draft a conventional commit message, and submit
+            //    it as a turn (mirrors `/review`: record the raw `/commit` in
+            //    history, then `Action::Submit`). The user re-runs
+            //    `/commit <message>` with the suggested message to actually
+            //    commit. `git_diff_in` shells out (blocking), so read the diff
+            //    on the main thread only for the prompt — the actual commit
+            //    still goes to the bg thread.
+            if !rest.is_empty() {
+                let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Commit {
+                    message: rest.to_string(),
+                    add_all: true,
+                }));
+                app.transcript
+                    .push(TranscriptEntry::System("committing…".to_string()));
+                None
+            } else {
+                // Resolve cwd on the main thread (git_diff_in takes a &Path
+                // cwd). On failure surface a system line + bail.
+                let cwd = match std::env::current_dir() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        app.transcript.push(TranscriptEntry::System(format!(
+                            "/commit: could not resolve cwd: {e}"
+                        )));
+                        app.transcript.push(TranscriptEntry::Blank);
+                        return None;
+                    }
+                };
+                let diff = match code_ui::git_diff_in(&cwd, None) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        app.transcript
+                            .push(TranscriptEntry::System(format!("/commit: {e:#}")));
+                        app.transcript.push(TranscriptEntry::Blank);
+                        return None;
+                    }
+                };
+                let prompt = if diff.trim().is_empty() {
+                    "There are no uncommitted changes to commit. Do nothing and \
+                     tell the user the working tree is clean."
+                        .to_string()
+                } else {
+                    format!(
+                        "Below is the uncommitted diff vs HEAD for this repository. \
+                         Draft a single conventional commit message (a concise \
+                         summary line in the form `type(scope): subject`, followed \
+                         by an optional blank line and a short body explaining the \
+                         *why*). Respond with ONLY the commit message — no \
+                         explanation, no code blocks, no surrounding quotes. The \
+                         user will then re-run `/commit <message>` to commit it.\n\n\
+                         ```diff\n{diff}\n```"
+                    )
+                };
+                if app.history.back().is_none_or(|last| last != input) {
+                    app.history.push_back(input.to_string());
+                    if app.history.len() > HISTORY_MAX_LIMIT {
+                        app.history.pop_front();
+                    }
+                }
+                app.history_idx = None;
+                app.stashed_live = None;
+                app.transcript.push(TranscriptEntry::System(
+                    "drafting a commit message from the current diff… \
+                     re-run `/commit <message>` to commit."
+                        .to_string(),
+                ));
+                app.transcript.push(TranscriptEntry::Blank);
+                Some(Action::Submit(prompt))
+            }
         }
         "/pr_comments" | "/pr-comments" => {
             // Tiered PR-review-comments dispatch.
@@ -4299,6 +4632,19 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.spinner_label = "thinking…";
             app.scroll = 0; // auto-scroll to bottom
         }
+        AgentMsg::DiffReady { path, diff } => {
+            // Stash the raw diff and open the viewer. `pending_diff` is the
+            // source `draw_diff_view` parses each frame; the viewer scrolls
+            // like the agent overlay (follow=true at the bottom). No
+            // transcript entry — a large diff would flood the scrollback.
+            app.pending_diff = Some(diff);
+            app.diff_view = Some(DiffView {
+                path,
+                scroll: 0,
+                follow: true,
+            });
+            app.set_dirty();
+        }
         AgentMsg::SubagentText { agent_name, text } => {
             // Append to last subagent text from same agent, or create new entry.
             if let Some(TranscriptEntry::SubagentText {
@@ -4432,10 +4778,13 @@ mod tests {
             focus: Focus::default(),
             agent_selection: 0,
             agent_overlay: None,
+            diff_view: None,
+            pending_diff: None,
             registry: AgentRegistry::new(),
             notified_teams: std::collections::HashSet::new(),
             cfg: Arc::new(LibertaiConfig::default()),
             approvals: Arc::new(ApprovalState::new()),
+            edit_journal: Arc::new(EditJournal::new()),
             bar: BarStatus {
                 model_label: "openai/gpt-4o".to_string(),
                 ..Default::default()
@@ -6494,6 +6843,97 @@ task = "Do the thing"
         );
     }
 
+    // (6b) /undo reverts the most recent journaled edit. Seed the shared
+    // edit_journal with a JournalEntry (simulating an edit the bg session's
+    // ApprovalTool pushed), call /undo, and assert the file content is
+    // restored to `before`. Pure std::fs — works for untracked files.
+    #[test]
+    fn slash_undo_restores_before_content_of_last_edit() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("notes.txt");
+        // The edit had changed "before\n" -> "after\n"; the journal entry
+        // captured both.
+        std::fs::write(&target, "after\n").unwrap();
+        app.edit_journal.push(crate::commands::code_diff::JournalEntry {
+            path: "notes.txt".to_string(),
+            resolved: target.clone(),
+            before: Some("before\n".to_string()),
+            after: Some("after\n".to_string()),
+        });
+
+        handle_slash_command(&mut app, "/undo", &cmd_tx);
+
+        // File content restored to `before`.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "before\n");
+        // The journal entry was consumed (LIFO pop).
+        assert!(app.edit_journal.is_empty());
+        let lines = system_lines(&app);
+        assert!(
+            lines.iter().any(|s| s.contains("reverted notes.txt")),
+            "/undo should report 'reverted notes.txt', got: {lines:?}"
+        );
+    }
+
+    // (6b) /undo deletes a file when the journaled edit had created it
+    // (`before` was None). Confirms the new-file branch.
+    #[test]
+    fn slash_undo_deletes_file_when_edit_created_it() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("brand_new.txt");
+        std::fs::write(&target, "created\n").unwrap();
+        app.edit_journal.push(crate::commands::code_diff::JournalEntry {
+            path: "brand_new.txt".to_string(),
+            resolved: target.clone(),
+            before: None,
+            after: Some("created\n".to_string()),
+        });
+
+        handle_slash_command(&mut app, "/undo", &cmd_tx);
+
+        assert!(!target.exists(), "/undo must delete a created file");
+        assert!(app.edit_journal.is_empty());
+        let lines = system_lines(&app);
+        assert!(
+            lines.iter().any(|s| s.contains("reverted brand_new.txt")),
+            "/undo should report 'reverted brand_new.txt', got: {lines:?}"
+        );
+    }
+
+    // (6b) /undo with an empty journal reports "nothing to undo" and
+    // does not touch the filesystem.
+    #[test]
+    fn slash_undo_reports_nothing_when_journal_empty() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        assert!(app.edit_journal.is_empty());
+        handle_slash_command(&mut app, "/undo", &cmd_tx);
+        let lines = system_lines(&app);
+        assert!(
+            lines.iter().any(|s| s == "/undo: nothing to undo."),
+            "/undo on empty journal should report nothing to undo, got: {lines:?}"
+        );
+    }
+
+    // (6b) /help lists /undo so users discover it.
+    #[test]
+    fn help_lists_undo_command() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        handle_slash_command(&mut app, "/help", &cmd_tx);
+        let lines = system_lines(&app);
+        assert!(
+            lines.iter().any(|s| s.contains("/undo")),
+            "/help must list /undo: {lines:?}"
+        );
+    }
+
     // (7) /notify on/off calls set_turn_notifications (asserting
     // app.cfg.code_turn_notifications flips) + pushes a System line. This
     // path persists config via `crate::config::save`, which writes to
@@ -7286,6 +7726,389 @@ task = "Do the thing"
             })
             .expect("a Commands: line was pushed");
         assert!(help_line.contains("/copy"), "/help must list /copy: {help_line}");
+    }
+
+    // ── M7b: /diff + /commit routing + DiffView overlay ─────────────────────
+    //
+    // These mirror the existing /changelog /tree /pr_comments routing tests:
+    // assert the Cmd variant that the slash arm sends WITHOUT exercising the
+    // blocking git subprocess on the bg thread (the bg arms shell out to real
+    // git, which isn't hermetic; routing is the testable seam). The bare
+    // `/commit` prompt path does shell out to `git_diff_in` on the main
+    // thread — that's exercised against a throwaway temp git repo so the test
+    // is hermetic and deterministic.
+
+    // (M7b-diff-1) Bare `/diff` routes `Cmd::RunReadOnly(BgCommand::Diff {
+    // path: None })` (all changed files vs HEAD) and pushes a "diff…" system
+    // line. It must NOT return an action (the viewer opens later via
+    // `AgentMsg::DiffReady`, not synchronously).
+    #[test]
+    fn slash_diff_bare_routes_diff_bg_command_with_no_path() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/diff", &cmd_tx);
+
+        assert!(action.is_none(), "bare /diff must not return an action");
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::Diff { path })) => {
+                assert!(
+                    path.is_none(),
+                    "bare /diff scopes to all changed files (path None), got {path:?}"
+                );
+            }
+            other => panic!("expected Cmd::RunReadOnly(BgCommand::Diff), got {other:?}"),
+        }
+        assert!(cmd_rx.try_recv().is_err(), "no further command expected");
+        // The placeholder system line was pushed so the user sees "diff…".
+        assert!(
+            system_lines(&app).iter().any(|s| s.contains("diff")),
+            "/diff should push a 'diff…' placeholder, got: {:?}",
+            system_lines(&app)
+        );
+    }
+
+    // (M7b-diff-2) `/diff src/foo.rs` routes `BgCommand::Diff { path:
+    // Some("src/foo.rs") }`, forwarding the pathspec verbatim to the bg arm
+    // (which passes it as `git diff -- <path>`).
+    #[test]
+    fn slash_diff_with_path_routes_diff_bg_command_with_path() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/diff src/foo.rs", &cmd_tx);
+
+        assert!(action.is_none(), "/diff <path> must not return an action");
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::Diff { path })) => {
+                assert_eq!(
+                    path.as_deref(),
+                    Some("src/foo.rs"),
+                    "pathspec must round-trip to the bg arm, got {path:?}"
+                );
+            }
+            other => panic!("expected Cmd::RunReadOnly(BgCommand::Diff), got {other:?}"),
+        }
+        assert!(cmd_rx.try_recv().is_err(), "no further command expected");
+    }
+
+    // (M7b-diff-3) `AgentMsg::DiffReady` stashes the raw diff on
+    // `pending_diff` and opens a `DiffView` overlay anchored at the bottom
+    // (scroll 0, follow true). The path is echoed into the viewer state.
+    // No transcript entry is pushed (a large diff would flood the scrollback).
+    #[test]
+    fn diff_ready_message_opens_diff_view_and_stashes_diff() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let before_len = app.transcript.len();
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::DiffReady {
+                path: Some("src/lib.rs".to_string()),
+                diff: "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+                    .to_string(),
+            },
+            &cmd_tx,
+        );
+
+        let view = app.diff_view.as_ref().expect("DiffView overlay opened");
+        assert_eq!(view.path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(view.scroll, 0, "viewer opens anchored at the bottom");
+        assert!(view.follow, "viewer opens with auto-tail armed");
+        assert_eq!(
+            app.pending_diff.as_deref(),
+            Some("diff --git a/src/lib.rs b/src/lib.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"),
+            "raw diff must be stashed on pending_diff for the renderer"
+        );
+        assert_eq!(
+            app.transcript.len(),
+            before_len,
+            "DiffReady must NOT push a transcript entry (would flood scrollback)"
+        );
+    }
+
+    // (M7b-diff-4) Esc closes the DiffView overlay and clears the stashed
+    // diff (mirrors the agent-overlay Esc test). A fresh channel satisfies
+    // the cmd_tx param the handler doesn't actually use.
+    #[test]
+    fn handle_diff_view_key_esc_closes_overlay_and_clears_pending_diff() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        app.diff_view = Some(DiffView {
+            path: None,
+            scroll: 0,
+            follow: true,
+        });
+        app.pending_diff = Some("diff --git a/x b/x\n".to_string());
+
+        handle_diff_view_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+
+        assert!(app.diff_view.is_none(), "Esc must close the diff viewer");
+        assert!(
+            app.pending_diff.is_none(),
+            "Esc must clear the stashed diff so it isn't re-rendered"
+        );
+    }
+
+    // (M7b-diff-5) Tab also closes the overlay (same as Esc) — the viewer
+    // yields focus back to the agents panel.
+    #[test]
+    fn handle_diff_view_key_tab_closes_overlay() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        app.diff_view = Some(DiffView {
+            path: None,
+            scroll: 0,
+            follow: true,
+        });
+
+        handle_diff_view_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+
+        assert!(app.diff_view.is_none(), "Tab must close the diff viewer");
+    }
+
+    // (M7b-diff-6) Up arrow leaves the bottom: flips follow to false (so
+    // subsequent re-parses won't yank the user back) and increments scroll.
+    #[test]
+    fn handle_diff_view_key_up_disables_follow_and_increments_scroll() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        app.diff_view = Some(DiffView {
+            path: None,
+            scroll: 0,
+            follow: true,
+        });
+
+        handle_diff_view_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+
+        let view = app.diff_view.as_ref().expect("overlay still open");
+        assert!(
+            !view.follow,
+            "scrolling up must disable auto-tail (follow=false)"
+        );
+        assert!(view.scroll > 0, "scroll should increment on Up");
+    }
+
+    // (M7b-diff-7) Down arrow reaching the bottom (scroll 0) re-arms auto-tail
+    // (follow true) so the user re-sticks to the bottom.
+    #[test]
+    fn handle_diff_view_key_down_to_bottom_re_arms_follow() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        app.diff_view = Some(DiffView {
+            path: None,
+            scroll: 0,
+            follow: false,
+        });
+
+        handle_diff_view_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+
+        let view = app.diff_view.as_ref().expect("overlay still open");
+        assert_eq!(view.scroll, 0, "Down saturating-sub keeps scroll at 0");
+        assert!(
+            view.follow,
+            "reaching the bottom must re-arm follow (auto-tail)"
+        );
+    }
+
+    // (M7b-diff-8) Down arrow still off the bottom (scroll > 0) does NOT
+    // re-arm follow — only reaching the very bottom does. Mirrors the agent
+    // overlay test.
+    #[test]
+    fn handle_diff_view_key_down_off_bottom_does_not_re_arm_follow() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        app.diff_view = Some(DiffView {
+            path: None,
+            scroll: 4,
+            follow: false,
+        });
+
+        handle_diff_view_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+
+        let view = app.diff_view.as_ref().expect("overlay still open");
+        assert_eq!(view.scroll, 1, "Down decrements scroll by 3 (saturating)");
+        assert!(
+            !view.follow,
+            "still off-bottom must keep follow=false"
+        );
+    }
+
+    // (M7b-commit-1) `/commit <message>` routes
+    // `Cmd::RunReadOnly(BgCommand::Commit { message, add_all: true })` — the
+    // minimal cut that stages the whole tree and commits immediately on the
+    // bg thread. Asserts the variant + `add_all=true` + message round-trips,
+    // WITHOUT running real git (the bg arm isn't exercised; routing only).
+    #[test]
+    fn slash_commit_with_message_routes_commit_bg_command_staging_all() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/commit feat: add thing", &cmd_tx);
+
+        assert!(
+            action.is_none(),
+            "/commit <message> commits on the bg thread (no prompt action)"
+        );
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::Commit { message, add_all })) => {
+                assert_eq!(
+                    message, "feat: add thing",
+                    "commit message must round-trip to the bg arm"
+                );
+                assert!(
+                    add_all,
+                    "/commit <message> must stage the whole tree (add_all=true)"
+                );
+            }
+            other => panic!("expected Cmd::RunReadOnly(BgCommand::Commit), got {other:?}"),
+        }
+        assert!(cmd_rx.try_recv().is_err(), "no further command expected");
+        assert!(
+            system_lines(&app)
+                .iter()
+                .any(|s| s.contains("committing")),
+            "/commit <message> should push a 'committing…' placeholder, got: {:?}",
+            system_lines(&app)
+        );
+    }
+
+    // (M7b-commit-2) Bare `/commit` (no message) builds a commit-message
+    // DRAFT prompt from the current diff and returns `Action::Submit`. To
+    // keep this hermetic we point the process cwd at a throwaway temp git
+    // repo with one uncommitted modification, so `git_diff_in` returns a
+    // known non-empty diff and the prompt-building arm fires. The original
+    // cwd is restored afterwards so other tests are unaffected. The bg arm
+    // (real `git commit`) is NOT exercised — this asserts the main-thread
+    // prompt path only.
+    #[test]
+    fn slash_commit_bare_builds_commit_draft_prompt_from_diff() {
+        // Save + restore the process cwd because the bare /commit arm reads
+        // `std::env::current_dir()` (not the app cwd). Mutating the process
+        // cwd is process-global, so this test must not run concurrently with
+        // other cwd-sensitive tests; the restore guard keeps the window
+        // tiny.
+        let original_cwd = std::env::current_dir().expect("read cwd");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path();
+
+        // Init a fresh git repo + configure an identity so commit/diff work.
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .expect("git runs")
+        };
+        assert!(git(&["init", "-q"]).status.success(), "git init");
+        git(&["config", "user.email", "t@t.test"]);
+        git(&["config", "user.name", "Test"]);
+
+        // Commit a baseline file, then modify it so `git diff HEAD` is
+        // non-empty (the prompt arm reads this diff).
+        std::fs::write(repo.join("README.md"), "baseline\n").expect("write baseline");
+        assert!(git(&["add", "-A"]).status.success(), "stage baseline");
+        assert!(
+            git(&["commit", "-q", "-m", "init"]).status.success(),
+            "commit baseline"
+        );
+        std::fs::write(repo.join("README.md"), "baseline\nchanged\n").expect("modify");
+
+        std::env::set_current_dir(repo).expect("set cwd to temp repo");
+
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let action = handle_slash_command(&mut app, "/commit", &cmd_tx);
+
+        // Restore the process cwd BEFORE any assertion so a panic can't leak
+        // the temp cwd to other tests.
+        std::env::set_current_dir(&original_cwd).expect("restore cwd");
+
+        let prompt = match action {
+            Some(Action::Submit(p)) => p,
+            None => panic!("bare /commit must return Action::Submit (the draft prompt)"),
+            Some(Action::Quit) => panic!("expected Action::Submit for bare /commit, got Quit"),
+            Some(Action::ClearTranscript) => {
+                panic!("expected Action::Submit for bare /commit, got ClearTranscript")
+            }
+            Some(Action::OpenEditor) => {
+                panic!("expected Action::Submit for bare /commit, got OpenEditor")
+            }
+        };
+        // The prompt carries commit-drafting guidance + the diff fence.
+        assert!(
+            prompt.to_lowercase().contains("commit"),
+            "draft prompt should mention 'commit', got: {prompt}"
+        );
+        assert!(
+            prompt.contains("```diff"),
+            "draft prompt should embed the diff in a fenced block, got: {prompt}"
+        );
+        // The prompt arm sends NO BgCommand (the user re-runs
+        // `/commit <message>` to actually commit).
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "bare /commit must not send a BgCommand (prompt path)"
+        );
+    }
+
+    // (M7b-help-1) `/help` lists `/diff` so users discover the viewer.
+    #[test]
+    fn slash_help_lists_diff_command() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let _ = handle_slash_command(&mut app, "/help", &cmd_tx);
+        let help_line = app
+            .transcript
+            .iter()
+            .find_map(|e| match e {
+                TranscriptEntry::System(s) if s.starts_with("Commands:") => Some(s.clone()),
+                _ => None,
+            })
+            .expect("a Commands: line was pushed");
+        assert!(help_line.contains("/diff"), "/help must list /diff: {help_line}");
+    }
+
+    // (M7b-help-2) `/help` lists `/commit` so users discover the command.
+    #[test]
+    fn slash_help_lists_commit_command() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let _ = handle_slash_command(&mut app, "/help", &cmd_tx);
+        let help_line = app
+            .transcript
+            .iter()
+            .find_map(|e| match e {
+                TranscriptEntry::System(s) if s.starts_with("Commands:") => Some(s.clone()),
+                _ => None,
+            })
+            .expect("a Commands: line was pushed");
+        assert!(
+            help_line.contains("/commit"),
+            "/help must list /commit: {help_line}"
+        );
     }
 }
 

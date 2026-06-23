@@ -2449,6 +2449,30 @@ pub(crate) fn recent_git_commits_in(cwd: &Path, limit: usize) -> Result<Vec<Stri
         .collect())
 }
 
+/// Run `git -C <cwd> diff --no-color HEAD [-- <path>]` and return the trimmed
+/// stdout. Empty output means the tree is clean (no changes vs HEAD). Used by
+/// the TUI `/diff` command (M7b): the bg thread shells out here (blocking) and
+/// ships the raw diff string back as `AgentMsg::DiffReady`, where the in-TUI
+/// viewer parses it into styled lines. Mirrors `git_status_short_in` /
+/// `recent_git_commits_in` (same `git -C` + error-surfacing shape).
+pub(crate) fn git_diff_in(cwd: &Path, path: Option<&str>) -> Result<String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(cwd).arg("diff").arg("--no-color").arg("HEAD");
+    if let Some(p) = path {
+        cmd.arg("--").arg(p);
+    }
+    let output = cmd.output().context("run git diff")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = stderr.trim();
+        if message.is_empty() {
+            anyhow::bail!("not a git repository");
+        }
+        anyhow::bail!("{}", message);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 fn git_status_short_in(cwd: &Path) -> Result<Vec<String>> {
     let output = Command::new("git")
         .arg("-C")

@@ -69,6 +69,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.agent_overlay.is_some() {
         draw_agent_overlay(frame, area, app);
     }
+
+    // Draw diff viewer overlay if active (M7b `/diff`).
+    if app.diff_view.is_some() {
+        draw_diff_view(frame, area, app);
+    }
 }
 
 /// Agent row count for the footer's agents panel, clamped to a third of
@@ -517,6 +522,88 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
     // No `.wrap()`: content is already pre-wrapped to usable_width, and
     // leaving wrap off stops ratatui from double-counting (and drifting
     // the scroll position against the row count above).
+    let para = Paragraph::new(lines)
+        .block(block)
+        .scroll((scroll_from_top as u16, 0));
+    frame.render_widget(para, overlay_area);
+}
+
+/// Draw the in-TUI diff viewer overlay (M7b `/diff`). Cloned from
+/// [`draw_agent_overlay`] minus the agent-color/transcript plumbing: the
+/// content is the styled unified diff parsed from `app.pending_diff` via
+/// [`crate::commands::code_tui::diff::parse_diff`]. Reuses the same
+/// centered-rect + `Clear` + rounded `Block` + `Paragraph` + scroll-from-top
+/// math so it scrolls identically to the agent overlay.
+fn draw_diff_view(frame: &mut Frame, area: Rect, app: &App) {
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::Span;
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+    use unicode_width::UnicodeWidthStr;
+
+    let Some(view) = &app.diff_view else {
+        return;
+    };
+
+    // Overlay: 80% width, 80% height, centered — same as the agent overlay.
+    let overlay_width = (area.width as f32 * 0.8) as u16;
+    let overlay_height = (area.height as f32 * 0.8) as u16;
+    let overlay_x = area.x + (area.width.saturating_sub(overlay_width)) / 2;
+    let overlay_y = area.y + (area.height.saturating_sub(overlay_height)) / 2;
+    let overlay_area = Rect::new(overlay_x, overlay_y, overlay_width, overlay_height);
+
+    frame.render_widget(Clear, overlay_area);
+
+    // Title: " diff — esc/tab to close " plus the pathspec if one was given.
+    let title = match &view.path {
+        Some(p) if !p.is_empty() => format!(" diff {p} — esc/tab to close "),
+        _ => " diff — esc/tab to close ".to_string(),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme::MUTED))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    // Usable text width inside the bordered overlay (Borders::ALL = 1 col
+    // each side). Diff lines are emitted raw (no markdown wrap), so wide
+    // lines may overflow — consistent with the agent overlay's code-block
+    // behavior.
+    let usable_width = overlay_width.saturating_sub(2) as usize;
+
+    let mut lines = crate::commands::code_tui::diff::parse_diff(
+        app.pending_diff.as_deref().unwrap_or(""),
+    );
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(no changes)",
+            Style::default().fg(theme::MUTED),
+        )));
+    }
+
+    // Scroll calculation (same bottom-anchoring as the agent overlay).
+    let total_visual: usize = lines
+        .iter()
+        .map(|l| {
+            let w: usize = l.spans.iter().map(|s| s.content.width()).sum();
+            if w == 0 {
+                1
+            } else {
+                ((w + usable_width.saturating_sub(1)) / usable_width.max(1)).max(1)
+            }
+        })
+        .sum();
+    let inner_height = overlay_height.saturating_sub(2) as usize; // minus borders
+    let max_from_top = total_visual.saturating_sub(inner_height);
+    let scroll_from_top = max_from_top
+        .saturating_sub(view.scroll as usize)
+        .min(max_from_top);
+
     let para = Paragraph::new(lines)
         .block(block)
         .scroll((scroll_from_top as u16, 0));

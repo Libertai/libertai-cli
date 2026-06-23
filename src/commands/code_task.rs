@@ -233,6 +233,11 @@ impl Tool for TaskTool {
             tool_policy: None,
             smart_approval: crate::commands::code_aux::smart_approval_from_config(Arc::clone(&cfg)),
             safe_root_override: None,
+            // Subagents run in an isolated worktree (see below), so they
+            // get their own edit journal rather than sharing the parent
+            // session's — `/undo` on the parent reverts parent-session
+            // edits only, not subagent worktree mutations.
+            edit_journal: Arc::new(crate::commands::code_diff::EditJournal::new()),
             team: None,
             teammate_name: None,
         }

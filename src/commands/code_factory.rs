@@ -26,6 +26,7 @@ use pi::sdk::{default_tool_registry, Config as PiConfig, Tool, ToolFactory, Tool
 use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi, ToolPolicy};
 use crate::commands::code_ask_user::AskUserTool;
 use crate::commands::code_aux::{smart_approval_from_config, SmartApproval};
+use crate::commands::code_diff::EditJournal;
 use crate::commands::code_guardrail::{GuardrailTool, ToolGuardrailState};
 use crate::commands::code_mcp_tool::{cached_mcp_context_tools, named_mcp_tools, McpCallTool};
 use crate::commands::code_notification::PushNotificationTool;
@@ -180,6 +181,13 @@ pub struct LibertaiToolFactory {
     pub ui: Arc<dyn ApprovalUi>,
     pub depth: u8,
     pub features: FactoryFeatures,
+    /// Shared edit journal — the same `Arc<EditJournal>` the REPL's `App`
+    /// holds so `/undo` (main thread) `pop`s entries the live session's
+    /// `ApprovalTool::execute_inner` (background thread) `push`ed. Mirrors
+    /// the `approvals` Arc threading: built once on the main thread, cloned
+    /// into the bg factory at spawn, and cloned into every `ApprovalTool`
+    /// via the `with_journal` builder so the ctor signature stays stable.
+    pub edit_journal: Arc<EditJournal>,
     /// Shared live-agent registry. In-process subagents spawned by the
     /// `task` tool register here, as do background runs launched from
     /// the REPL, so the live panel and agent view see one table. A
@@ -239,6 +247,7 @@ impl LibertaiToolFactory {
             tool_policy: None,
             smart_approval: None,
             safe_root_override: None,
+            edit_journal: Arc::new(EditJournal::new()),
             team,
             teammate_name,
         }
@@ -268,6 +277,7 @@ impl LibertaiToolFactory {
             tool_policy: None,
             smart_approval,
             safe_root_override: None,
+            edit_journal: Arc::new(EditJournal::new()),
             team,
             teammate_name,
         }
@@ -300,6 +310,7 @@ impl LibertaiToolFactory {
             tool_policy: None,
             smart_approval,
             safe_root_override: None,
+            edit_journal: Arc::new(EditJournal::new()),
             team,
             teammate_name,
         }
@@ -333,6 +344,17 @@ impl LibertaiToolFactory {
         self
     }
 
+    /// Attach an externally-created edit journal, overriding the fresh one
+    /// a bare constructor created. Used by the REPL so the bg factory and
+    /// the main-thread `App` share the SAME `Arc<EditJournal>` — `/undo`
+    /// (main thread) sees the entries the bg session's `ApprovalTool`
+    /// (background thread) `push`ed. Mirrors `with_registry`'s override
+    /// shape.
+    pub fn with_journal(mut self, journal: Arc<EditJournal>) -> Self {
+        self.edit_journal = journal;
+        self
+    }
+
     /// Factory for a child session spawned by the Task tool. Inherits
     /// the parent's mode flag (so a Shift+Tab in the parent REPL
     /// affects in-flight subagents too — desired), approval state,
@@ -350,6 +372,7 @@ impl LibertaiToolFactory {
             tool_policy: self.tool_policy.clone(),
             smart_approval: self.smart_approval.clone(),
             safe_root_override: self.safe_root_override.clone(),
+            edit_journal: Arc::clone(&self.edit_journal),
             team: self.team.clone(),
             teammate_name: self.teammate_name.clone(),
         }
@@ -389,7 +412,8 @@ impl ToolFactory for LibertaiToolFactory {
             // `src/foo.ts` the same as `/project/src/foo.ts`.
             .with_base_dir(Some(cwd.to_path_buf()))
             .with_policy(self.tool_policy.clone())
-            .with_smart_approval(self.smart_approval.clone());
+            .with_smart_approval(self.smart_approval.clone())
+            .with_journal(Arc::clone(&self.edit_journal));
             wrapped.push(Box::new(approval_tool));
         }
 
@@ -442,7 +466,8 @@ impl ToolFactory for LibertaiToolFactory {
             )
             .with_base_dir(Some(cwd.to_path_buf()))
             .with_policy(self.tool_policy.clone())
-            .with_smart_approval(self.smart_approval.clone());
+            .with_smart_approval(self.smart_approval.clone())
+            .with_journal(Arc::clone(&self.edit_journal));
             wrapped.push(Box::new(spawn_team));
         }
 
@@ -462,7 +487,8 @@ impl ToolFactory for LibertaiToolFactory {
             )
             .with_base_dir(Some(cwd.to_path_buf()))
             .with_policy(self.tool_policy.clone())
-            .with_smart_approval(self.smart_approval.clone());
+            .with_smart_approval(self.smart_approval.clone())
+            .with_journal(Arc::clone(&self.edit_journal));
             wrapped.push(Box::new(team_task));
 
             //    - `mailbox`: file-based messaging between teammates.
@@ -477,7 +503,8 @@ impl ToolFactory for LibertaiToolFactory {
             )
             .with_base_dir(Some(cwd.to_path_buf()))
             .with_policy(self.tool_policy.clone())
-            .with_smart_approval(self.smart_approval.clone());
+            .with_smart_approval(self.smart_approval.clone())
+            .with_journal(Arc::clone(&self.edit_journal));
             wrapped.push(Box::new(mailbox));
         }
 
@@ -504,7 +531,8 @@ impl ToolFactory for LibertaiToolFactory {
                         Arc::clone(&self.ui),
                     )
                     .with_policy(self.tool_policy.clone())
-                    .with_smart_approval(self.smart_approval.clone());
+                    .with_smart_approval(self.smart_approval.clone())
+                    .with_journal(Arc::clone(&self.edit_journal));
                     wrapped.push(Box::new(mcp_call));
                     for tool in named_mcp_tools(Arc::clone(cfg)) {
                         let named = ApprovalTool::new(
@@ -514,7 +542,8 @@ impl ToolFactory for LibertaiToolFactory {
                             Arc::clone(&self.ui),
                         )
                         .with_policy(self.tool_policy.clone())
-                        .with_smart_approval(self.smart_approval.clone());
+                        .with_smart_approval(self.smart_approval.clone())
+                        .with_journal(Arc::clone(&self.edit_journal));
                         wrapped.push(Box::new(named));
                     }
                     for tool in cached_mcp_context_tools(Arc::clone(cfg)) {
@@ -538,7 +567,8 @@ impl ToolFactory for LibertaiToolFactory {
             )
             .with_base_dir(Some(cwd.to_path_buf()))
             .with_policy(self.tool_policy.clone())
-            .with_smart_approval(self.smart_approval.clone());
+            .with_smart_approval(self.smart_approval.clone())
+            .with_journal(Arc::clone(&self.edit_journal));
             wrapped.push(Box::new(notebook_edit));
             let notebook_execute = ApprovalTool::new(
                 self.wrap_path_safety(
@@ -552,7 +582,8 @@ impl ToolFactory for LibertaiToolFactory {
             )
             .with_base_dir(Some(cwd.to_path_buf()))
             .with_policy(self.tool_policy.clone())
-            .with_smart_approval(self.smart_approval.clone());
+            .with_smart_approval(self.smart_approval.clone())
+            .with_journal(Arc::clone(&self.edit_journal));
             wrapped.push(Box::new(notebook_execute));
         }
 
