@@ -17,7 +17,7 @@ use ratatui::widgets::Paragraph;
 use crate::commands::code_factory::Mode;
 use crate::commands::code_tui::app::App;
 use crate::commands::code_tui::theme;
-use crate::commands::code_ui::{context_percent, expand_status_line_template};
+use crate::commands::code_ui::{context_percent, expand_status_line_template, status_line_command_text};
 use crate::commands::code_ui::BarStatus as LegacyBarStatus;
 
 /// Draw the spinner line: `⠋ label…  ●tool(detail)`.
@@ -83,6 +83,18 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
         status_line_command: app.bar.status_line_command.clone(),
         estimated_cost: app.bar.estimated_cost,
     };
+
+    // Status-line command (highest precedence): `/statusline-command <cmd>`
+    // stores a shell command whose stdout replaces the rule line. Render it as
+    // a single muted Span line, same as the template branch below. Legacy
+    // precedence: command > template > default.
+    if !app.bar.status_line_command.is_empty() {
+        if let Some(rendered) = status_line_command_text(&app.bar.status_line_command) {
+            let line = Line::from(vec![Span::styled(rendered, theme::muted())]);
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
+    }
 
     // Custom /statusline template overrides the default chips.
     if !app.bar.status_line_template.is_empty() {

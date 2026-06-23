@@ -45,6 +45,9 @@
 // `code_ui` for the same ratatui migration. Match `code_ui`'s convention.
 #![allow(dead_code)]
 
+use std::path::Path;
+
+use crate::commands::code_factory::Mode;
 use crate::commands::code_skills::SkillPillar;
 use crate::commands::code_ui;
 use crate::commands::code_slash_registry::CustomCommand;
@@ -95,13 +98,12 @@ pub enum BgCommand {
         /// Glob patterns restricting the listing (empty = all models).
         scoped_patterns: Vec<String>,
     },
-    /// `/skills` — render the active code-pillar skill inventory as text.
-    SkillsList,
-    /// `/memory show` — render the current project memory state as text.
-    MemoryShow,
     /// A custom slash template command. The bg thread expands the template
     /// against the live `AgentSessionHandle` (async) and sends the resulting
     /// prompt back; the TUI then submits it via `Cmd::Prompt`.
+    ///
+    /// (Batch B replaces the temporary `String::new()` stub with the real
+    /// template expansion.)
     CustomPrompt {
         /// Command name (without leading `/`), already resolved to a hit by
         /// [`resolve_custom`].
@@ -109,14 +111,49 @@ pub enum BgCommand {
         /// Raw argument string to interpolate into the template.
         args: String,
     },
-    /// A `!`/`!!` shell escape. The bg thread runs the command and returns
-    /// the captured stdout/stderr/exit for rendering plus the prompt-context
-    /// string for `pending_shell_contexts`.
-    ShellEscape {
-        /// Shell command line to execute.
-        command: String,
-        /// Optional argv prefix wrapping the shell (e.g. a sandbox wrapper).
-        wrapper: Option<Vec<String>>,
+    /// `/compact [notes]` — force-compaction of the conversation history now,
+    /// optionally with user-supplied summarization notes. Runs on the bg
+    /// thread (it needs the live `AgentSessionHandle` and emits compaction
+    /// `AgentEvent`s, which `translate_event` maps to `AgentMsg::System` so
+    /// compaction progress surfaces in the transcript with no new render
+    /// code). `notes` carries the free-form instruction string; `None`/empty
+    /// means compaction with no extra instructions. The status/json/preview
+    /// sub-commands of `/compact` are handled synchronously on the main thread
+    /// (they only need the config), so they never produce this variant.
+    Compact {
+        /// Optional user notes / summarization instructions for the
+        /// compaction pass. `None` or empty → no extra instructions.
+        notes: Option<String>,
+    },
+    /// `/changelog [count|json]` — render recent git commits as text or
+    /// JSON. Runs on the bg thread because `recent_git_commits_in` shells
+    /// out to `git log` (blocking I/O). The result text is rendered as a
+    /// `CommandResult` system entry.
+    Changelog {
+        /// Parsed commit limit (clamped to `CHANGELOG_*_LIMIT`).
+        limit: usize,
+        /// Whether to emit the JSON payload instead of the text listing.
+        json: bool,
+    },
+    /// `/tree [path|json]` — render the project tree as text or JSON. Runs on
+    /// the bg thread because `render_project_tree` walks the filesystem
+    /// (blocking I/O). The result text is rendered as a `CommandResult`
+    /// system entry.
+    Tree {
+        /// Optional subdirectory to root the tree at (`None` = cwd).
+        path: Option<String>,
+        /// Whether to emit the JSON payload instead of the text tree.
+        json: bool,
+    },
+    /// `/pr_comments [scope]` (bare inspect) — collect the GitHub PR snapshot
+    /// (blocking `gh` calls) on the bg thread and build the inspection
+    /// prompt. Unlike the other variants, the result is a **prompt**, shipped
+    /// back as `AgentMsg::PromptReady` (the main thread submits it as a turn),
+    /// NOT a `CommandResult` render. `scope` is the free-form PR selector
+    /// (number/URL/branch hint; empty = infer the current branch's PR).
+    PrCommentsInspect {
+        /// Free-form PR scope passed verbatim to `build_pr_comments_prompt`.
+        scope: String,
     },
 }
 
@@ -252,6 +289,340 @@ pub fn memory_show_text() -> String {
             out
         }
         Err(e) => format!("  /memory show: {e:#}"),
+    }
+}
+
+// ── M6a: pure status/template text builders for the main-thread slash arms ──
+//
+// Each mirrors the matching `print_*` body in `code_ui` but returns the text
+// instead of printing it (no ANSI escapes — the TUI renders these as a plain
+// `TranscriptEntry::System` line). The router's main-thread `handle_slash`
+// arms call these for the `status`/empty sub-commands and the bumped
+// `*_json_payload` for the `json` sub-commands.
+
+/// `/ide` status text (mirrors `print_ide_status` Status branch).
+pub fn ide_status_text() -> String {
+    let mut out = String::new();
+    out.push_str("ide\n");
+    out.push_str("  status: no dedicated VS Code / JetBrains integration is bundled today.\n");
+    out.push_str(
+        "  terminal: run libertai code inside your project, or use the desktop workspace for project navigation.\n",
+    );
+    out
+}
+
+/// `/ide` open hint (mirrors `print_ide_status` Open branch).
+pub fn ide_open_text() -> String {
+    let mut out = String::new();
+    out.push_str("ide\n");
+    out.push_str("  /ide open: no IDE bridge is available to open from the terminal CLI yet.\n");
+    out.push_str(
+        "  desktop: use the desktop app workspace and external editor integration for project files.\n",
+    );
+    out
+}
+
+/// `/ide` usage text.
+pub fn ide_usage_text() -> String {
+    format!("  usage: {}\n", code_ui::IDE_USAGE)
+}
+
+/// `/hotkeys` status text (mirrors `print_hotkeys`, folding the bumped
+/// `hotkey_lines`).
+pub fn hotkeys_text() -> String {
+    let mut out = String::new();
+    out.push_str("hotkeys\n");
+    for line in code_ui::hotkey_lines() {
+        out.push_str(&format!("  {line}\n"));
+    }
+    out
+}
+
+/// `/hotkeys` usage text.
+pub fn hotkeys_usage_text() -> String {
+    format!("  usage: {}\n", code_ui::hotkeys_usage_text())
+}
+
+/// `/theme` status text (mirrors `print_theme_status` Status branch).
+pub fn theme_status_text() -> String {
+    let mut out = String::new();
+    out.push_str("theme\n");
+    out.push_str("  desktop: /theme system|dark|light|high-contrast updates the app appearance.\n");
+    out.push_str("  terminal: colors are controlled by your terminal emulator; libertai code uses ANSI styling only.\n");
+    out.push_str("  status aliases: /theme status, /theme show, /theme current, /theme info, /theme json\n");
+    out
+}
+
+/// `/theme` requested text (mirrors `print_theme_status` Requested branch).
+pub fn theme_requested_text(requested: &str) -> String {
+    if requested.is_empty() {
+        return theme_status_text();
+    }
+    format!("theme\n  requested theme: {requested}\n")
+}
+
+/// `/vim` status text (mirrors `print_vim_status` Status branch).
+pub fn vim_status_text() -> String {
+    let mut out = String::new();
+    out.push_str("vim\n");
+    out.push_str(&format!(
+        "  status: {}\n",
+        if code_ui::vim_input_enabled() { "on" } else { "off" }
+    ));
+    out.push_str(
+        "  terminal: Vim input supports insert/normal mode: Esc, i/a/I/A, h/l/0/$, x, and Enter.\n",
+    );
+    out
+}
+
+/// `/vim` usage text.
+pub fn vim_usage_text() -> String {
+    format!("  usage: {}\n", code_ui::VIM_USAGE)
+}
+
+/// `/bug` template text (mirrors `print_bug_template`), threading the live
+/// provider/model/mode/output-style from the App's status bar.
+pub fn bug_template_text(provider: &str, model: &str, mode: Mode, output_style: Option<&str>) -> String {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|e| format!("unavailable: {e}"));
+    let mut out = String::new();
+    out.push_str("bug report\n");
+    out.push_str("Include this diagnostic block with the issue:\n");
+    out.push('\n');
+    out.push_str("- app: libertai-cli\n");
+    out.push_str("- branch: integrated-code\n");
+    out.push_str(&format!("- provider: {provider}\n"));
+    out.push_str(&format!("- model: {model}\n"));
+    out.push_str(&format!("- mode: {}\n", code_ui::mode_label(mode)));
+    out.push_str(&format!("- output-style: {}\n", output_style.unwrap_or("default")));
+    out.push_str(&format!("- cwd: {cwd}\n"));
+    out.push('\n');
+    out.push_str("Describe:\n");
+    out.push_str("- What you expected\n");
+    out.push_str("- What happened\n");
+    out.push_str("- The last command or prompt you ran\n");
+    out.push_str("- Whether it reproduces in a fresh `libertai code` session\n");
+    out.push('\n');
+    out
+}
+
+/// `/bug` usage text.
+pub fn bug_usage_text() -> String {
+    let mut out = String::new();
+    out.push_str("bug report\n");
+    out.push_str(&format!("  usage: {}\n", code_ui::BUG_USAGE));
+    out
+}
+
+/// `/hooks` status text (mirrors `print_hooks_status`): one section per
+/// hook event, then the footer notes. Reuses the bumped `hook_event_rows` +
+/// `hook_section_text`.
+pub fn hooks_status_text(cfg: &LibertaiConfig) -> String {
+    let mut out = String::new();
+    out.push_str("hooks\n");
+    for (event, hooks) in code_ui::hook_event_rows(cfg) {
+        out.push_str(&code_ui::hook_section_text(event, hooks));
+    }
+    out.push_str("  UserPromptSubmit hooks run before the prompt reaches the agent and may block it.\n");
+    out.push_str("  PreToolUse hooks may return permissionDecision allow|ask|defer|deny.\n");
+    out.push_str("  PostToolUse hooks run after tool execution and cannot alter the result.\n");
+    out.push_str("  SubagentStop hooks run after task-tool subagents finish.\n");
+    out.push_str("  Notification hooks run after agent-requested push notifications.\n");
+    out.push_str("  lifecycle hooks warn on nonzero exit and do not block the session.\n");
+    out.push_str("  command, HTTP, MCP-tool, prompt, and agent hook handlers are executed natively.\n");
+    out.push_str(&format!("  usage: {}\n", code_ui::HOOKS_USAGE));
+    out.push('\n');
+    out
+}
+
+/// `/hooks` open hint (mirrors `print_hooks_open_hint`).
+pub fn hooks_open_text() -> String {
+    let mut out = String::new();
+    out.push_str("hooks\n");
+    out.push_str("  /hooks open: open Desktop Settings > Hooks for graphical hook management.\n");
+    out.push_str("  terminal: edit hook rows in the LibertAI config file; /hooks status shows the active rows.\n");
+    out.push('\n');
+    out
+}
+
+/// `/hooks` usage text.
+pub fn hooks_usage_text() -> String {
+    let mut out = String::new();
+    out.push_str("hooks\n");
+    out.push_str(&format!("  usage: {}\n", code_ui::HOOKS_USAGE));
+    out.push('\n');
+    out
+}
+
+/// `/mcp` status text (mirrors `print_mcp_status` Status branch), loading
+/// the config fresh (same as the legacy path) so the count + exposure match.
+pub fn mcp_status_text() -> String {
+    let mut out = String::new();
+    out.push_str("mcp\n");
+    out.push_str("  terminal registry: stdio, Streamable HTTP, and legacy SSE mcpServers from config.toml are available to MCP-tool hooks, mcp_call, and cached named MCP tools\n");
+    out.push_str("  native CLI tools: generic mcp_call is registered when mcpServers exist; cached tools[] register as mcp__server__tool names, resources[] as mcp_read_resource, and prompts[] as mcp_get_prompt\n");
+    match crate::config::load() {
+        Ok(cfg) if cfg.mcp_servers.is_empty() => {
+            out.push_str("  configured servers: 0\n");
+        }
+        Ok(cfg) => {
+            let exposure = code_ui::mcp_exposure_summary(&cfg);
+            out.push_str(&format!("  configured servers: {}\n", cfg.mcp_servers.len()));
+            out.push_str(&format!(
+                "  native exposure: mcp_call {}, {} named MCP tool(s), mcp_read_resource {}, mcp_get_prompt {}, {} resource subscription candidate(s)\n",
+                if exposure.mcp_call { "on" } else { "off" },
+                exposure.named_tools,
+                if exposure.resource_reader { "on" } else { "off" },
+                if exposure.prompt_getter { "on" } else { "off" },
+                exposure.subscription_candidates
+            ));
+        }
+        Err(e) => {
+            out.push_str(&format!("  configured servers: config load failed: {e:#}\n"));
+        }
+    }
+    out.push_str("  desktop: Settings > MCP owns stdio/HTTP/SSE server discovery, probing, and richer cache management\n");
+    out.push_str("  tools: CLI executes generic mcp_call, cached named mcp__server__tool entries, mcp_read_resource, mcp_get_prompt, and MCP-tool hook handlers from mcpServers\n");
+    out.push_str(&format!("  usage: {}\n", code_ui::MCP_USAGE));
+    out
+}
+
+/// `/mcp` open hint (mirrors `print_mcp_status` Open branch).
+pub fn mcp_open_text() -> String {
+    "mcp\n  /mcp open: open Desktop Settings > MCP for live server management. The terminal CLI has no MCP settings pane.\n".to_string()
+}
+
+/// `/mcp` usage text.
+pub fn mcp_usage_text() -> String {
+    format!("mcp\n  usage: {}\n", code_ui::MCP_USAGE)
+}
+
+/// `/mcp show <server>` text: resolve the server against the loaded config
+/// (exact then prefix match) and render via the bumped
+/// `format_mcp_server_details`. Mirrors `print_mcp_server_details`.
+pub fn mcp_show_text(name: &str) -> String {
+    let cfg = match crate::config::load() {
+        Ok(cfg) => cfg,
+        Err(e) => return format!("  /mcp: config load failed: {e:#}\n"),
+    };
+    let Some((server_name, server)) = cfg
+        .mcp_servers
+        .iter()
+        .find(|(server_name, _)| server_name.as_str() == name)
+        .or_else(|| {
+            cfg.mcp_servers
+                .iter()
+                .find(|(server_name, _)| server_name.starts_with(name))
+        })
+    else {
+        return format!("  /mcp: no configured server found for `{name}`\n");
+    };
+    code_ui::format_mcp_server_details(server_name, server)
+}
+
+/// `/forget` status text (mirrors `print_forget_status`).
+pub fn forget_status_text(approvals: &crate::commands::code_approvals::ApprovalState) -> String {
+    format!(
+        "  /forget: ready. Running `/forget` with no arguments clears {} saved allow rule(s); read-only tools stay auto-approved.\n",
+        approvals.always_rules().len()
+    )
+}
+
+/// `/forget` usage text.
+pub fn forget_usage_text() -> String {
+    format!("  usage: {}\n", code_ui::forget_usage_text())
+}
+
+/// `/notify` status text (mirrors `print_notify_status`).
+pub fn notify_status_text(cfg: &LibertaiConfig) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "  turn notifications: {}\n",
+        if cfg.code_turn_notifications { "on" } else { "off" }
+    ));
+    out.push_str("  agent push notifications: terminal bell + visible notification block\n");
+    out.push_str(&format!("  usage: {}\n", code_ui::notify_usage_text()));
+    out
+}
+
+/// `/notify` usage text.
+pub fn notify_usage_text() -> String {
+    format!("  usage: {}\n", code_ui::notify_usage_text())
+}
+
+// ── M6a Batch C: /changelog + /tree text builders (mirrors the matching
+// `print_*` bodies in `code_ui`, but returns the text instead of printing —
+// no ANSI escapes; the TUI renders these as a `CommandResult` system entry).
+// The bg thread calls these from the `BgCommand::Changelog` / `BgCommand::Tree`
+// dispatch arms. `cwd` is threaded in (the bg thread captures it at spawn
+// time) so the pure `*_in(cwd, …)` helpers don't re-resolve `current_dir`.
+
+/// `/changelog` text listing (mirrors `print_changelog`): a `changelog`
+/// header followed by one indented line per recent commit. On an empty
+/// result emits the "no commits found" line; on an error surfaces it
+/// prefixed like the legacy `eprintln`.
+pub fn changelog_text(cwd: &Path, limit: usize) -> String {
+    match code_ui::recent_git_commits_in(cwd, limit) {
+        Ok(lines) if lines.is_empty() => {
+            "  /changelog: no commits found.\n".to_string()
+        }
+        Ok(lines) => {
+            let mut out = String::new();
+            out.push_str("changelog\n");
+            for line in lines {
+                out.push_str(&format!("  {line}\n"));
+            }
+            out
+        }
+        Err(e) => format!("  /changelog: {e:#}\n"),
+    }
+}
+
+/// `/changelog json` payload (mirrors `print_changelog_json`): pretty-prints
+/// the bumped `changelog_json_payload` built from `recent_git_commits_in`.
+/// `query` is the parsed json request arg (often empty); on an error it
+/// surfaces the message like the legacy path.
+pub fn changelog_json_text(cwd: &Path, limit: usize, query: &str) -> String {
+    match code_ui::recent_git_commits_in(cwd, limit) {
+        Ok(lines) => {
+            match serde_json::to_string_pretty(&code_ui::changelog_json_payload(limit, query, lines))
+            {
+                Ok(raw) => raw,
+                Err(e) => format!("  /changelog json: {e:#}\n"),
+            }
+        }
+        Err(e) => format!("  /changelog: {e:#}\n"),
+    }
+}
+
+/// `/tree` text listing (mirrors `print_project_tree`): the rendered tree
+/// (a bold root line + children). On an error surfaces it prefixed like the
+/// legacy `eprintln`.
+pub fn tree_text(path: Option<&str>) -> String {
+    match code_ui::tree_root(path) {
+        Ok(root) => match code_ui::render_project_tree(&root, code_ui::TREE_MAX_ENTRIES) {
+            Ok(tree) => tree,
+            Err(e) => format!("  /tree: {e:#}\n"),
+        },
+        Err(e) => format!("  /tree: {e:#}\n"),
+    }
+}
+
+/// `/tree json` payload (mirrors `print_project_tree_json`): pretty-prints
+/// the bumped `project_tree_json_payload`. `query` is the parsed json
+/// request arg (often empty).
+pub fn tree_json_text(path: Option<&str>, query: &str) -> String {
+    match code_ui::tree_root(path) {
+        Ok(root) => match code_ui::project_tree_json_payload(&root, code_ui::TREE_MAX_ENTRIES, query)
+        {
+            Ok(payload) => match serde_json::to_string_pretty(&payload) {
+                Ok(raw) => raw,
+                Err(e) => format!("  /tree json: {e:#}\n"),
+            },
+            Err(e) => format!("  /tree json: {e:#}\n"),
+        },
+        Err(e) => format!("  /tree json: {e:#}\n"),
     }
 }
 

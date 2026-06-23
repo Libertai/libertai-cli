@@ -23,13 +23,15 @@ use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, 
 use crate::commands::code_slash_registry;
 use crate::commands::code_slash_router::{self, BgCommand, CustomResolveResult};
 use crate::commands::code_ui::{
-    apply_pending_shell_context, context_percent, context_tokens, context_window_for,
-    shell_escape_command, start_background_agent, stop_line_text, usage_summary,
-    BackgroundAgentLaunch, ShellEscapeAction, UsageRecord,
+    self, apply_pending_shell_context, context_percent, context_tokens, context_window_for,
+    shell_escape_command, stage_pr_comment_draft, start_background_agent, stop_line_text,
+    truncate_chars, usage_summary, BackgroundAgentLaunch, PrCommentDraft, ShellEscapeAction,
+    UsageRecord,
 };
 use crate::commands::code_hooks::{tool_policy_from_config, run_post_tool_hooks, run_stop_hooks, run_user_prompt_submit_hooks, SessionHookGuard};
 use crate::commands::code_identity_prompt;
 use crate::commands::code_mode_prompt;
+use crate::commands::code_pr_comments;
 use crate::commands::code_session::{
     build_session_options, CodeSessionConfig, DEFAULT_MAX_TOKENS, SessionPersistence,
 };
@@ -134,6 +136,14 @@ pub enum AgentMsg {
     System(String),
     /// Result from a slash command executed on the background thread.
     CommandResult(String),
+    /// A fully-built prompt (e.g. an expanded custom slash template) that the
+    /// main thread should submit as a turn via `Cmd::Prompt`. The bg thread
+    /// builds it (it needs the live `AgentSessionHandle` for `${session_id}` /
+    /// `${effort}` context) and ships the ready prompt here; the main thread
+    /// records the *raw* `/cmd` invocation in history (so up-arrow recalls
+    /// `/apply`, not the expansion) and then drives the turn through the normal
+    /// `Cmd::Prompt` path (full turn-guidance + hook plumbing).
+    PromptReady(String),
     /// Streaming text delta from a subagent (task tool child session).
     SubagentText {
         agent_name: String,
@@ -252,6 +262,11 @@ pub struct App {
     pub notified_teams: std::collections::HashSet<String>,
     /// Config.
     pub cfg: Arc<LibertaiConfig>,
+    /// Shared approval state — the same `Arc<ApprovalState>` the background
+    /// session's tool factory uses, so `/forget` (main thread) clears the
+    /// rules the live session honors. Cloned from the `approvals` Arc built
+    /// in `run()` before it's moved into the bg thread.
+    pub approvals: Arc<ApprovalState>,
     /// Status bar info.
     pub bar: BarStatus,
     /// Last reported turn usage (stop reason + ctx-in + out tokens),
@@ -277,6 +292,11 @@ pub struct App {
     /// resolves against this cache. A `/reload` could re-discover later
     /// (out of scope for M3a).
     pub custom_commands: Vec<code_slash_registry::CustomCommand>,
+    /// Staged PR-review comment drafts (`/pr_comments draft <path>:<line>
+    /// <body>`). Tier-2 local drafts — main-thread only, no network; the
+    /// GitHub mutations (`drafts submit`, `reply`, `resolve`, …) are deferred
+    /// (Tier 3). Mirrors the legacy REPL's per-session `drafts` vec.
+    pub(crate) pr_comment_drafts: Vec<PrCommentDraft>,
 }
 
 /// REPL phases.
@@ -524,9 +544,9 @@ async fn build_session(
     resume_path: Option<PathBuf>,
     bash_command_wrapper: Option<Vec<String>>,
     agent_tx: &mpsc::Sender<AgentMsg>,
+    approvals: Arc<ApprovalState>,
 ) -> anyhow::Result<AgentSessionHandle> {
     let initial_mode = mode.get();
-    let approvals = Arc::new(ApprovalState::with_persistent_store(allow_rules_path()?)?);
     let ui: Arc<dyn ApprovalUi> = Arc::new(RatatuiApprovalUi::new(agent_tx.clone()));
     let factory = Arc::new(
         LibertaiToolFactory::new_with_features(
@@ -765,6 +785,8 @@ fn spawn_background(
     registry: Arc<AgentRegistry>,
     resume_path: Option<PathBuf>,
     bash_command_wrapper: Option<Vec<String>>,
+    approvals: Arc<ApprovalState>,
+    cwd: PathBuf,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let reactor = match asupersync::runtime::reactor::create_reactor() {
@@ -795,6 +817,7 @@ fn spawn_background(
                 resume_path,
                 bash_command_wrapper.clone(),
                 &agent_tx,
+                Arc::clone(&approvals),
             )
             .await
             {
@@ -951,6 +974,7 @@ fn spawn_background(
                             None, // fresh session
                             bash_command_wrapper.clone(),
                             &agent_tx,
+                            Arc::clone(&approvals),
                         )
                         .await
                         {
@@ -981,13 +1005,100 @@ fn spawn_background(
                             BgCommand::ModelList { scoped_patterns } => {
                                 code_slash_router::model_list_text(&cfg, &scoped_patterns)
                             }
-                            BgCommand::SkillsList => code_slash_router::skills_list_text(),
-                            BgCommand::MemoryShow => code_slash_router::memory_show_text(),
-                            // CustomPrompt + ShellEscape are dispatched on the
-                            // main thread (Tier 3 / the `!` escape); they are
-                            // never sent as RunReadOnly. Bind to keep the match
-                            // exhaustive and emit nothing if ever reached.
-                            BgCommand::CustomPrompt { .. } | BgCommand::ShellEscape { .. } => {
+                            // Tier 3 custom template expansion: build the
+                            // prompt against the live handle so `${session_id}`
+                            // / `${effort}` resolve from real session state
+                            // (fixes #3 — the inline path used
+                            // `ExpansionContext::default()`, dropping those
+                            // vars). On a hit, ship the ready prompt back as
+                            // `AgentMsg::PromptReady` (the main thread records
+                            // the raw `/cmd` in history and submits it as a
+                            // turn via `Cmd::Prompt`); on a miss/ambiguity/
+                            // error, surface a `CommandResult` system line.
+                            // Returns `String::new()` so the empty-text skip
+                            // below doesn't double-emit a CommandResult.
+                            BgCommand::CustomPrompt { name, args } => {
+                                match code_ui::build_custom_slash_prompt(&name, &args, &handle)
+                                    .await
+                                {
+                                    Ok(Some(prompt)) => {
+                                        let _ = agent_tx.send(AgentMsg::PromptReady(prompt));
+                                        String::new()
+                                    }
+                                    Ok(None) => format!("custom command not found: {name}"),
+                                    Err(e) => format!("{e:#}"),
+                                }
+                            }
+                            // `/compact [notes]` — force-compaction now. Runs
+                            // here (needs `&mut handle`); compaction
+                            // `AgentEvent`s are forwarded through
+                            // `translate_event` via a cloned `agent_tx`, so
+                            // AutoCompactionStart/End surface in the transcript
+                            // as `AgentMsg::System` with zero new render code
+                            // (same pattern as the prompt_with_abort closure).
+                            // The returned status string rides back as a
+                            // `CommandResult` system line.
+                            BgCommand::Compact { notes } => {
+                                let tx = agent_tx.clone();
+                                let instructions = notes
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty());
+                                let ok = handle
+                                    .compact_force_with_instructions(instructions, move |ev| {
+                                        if let Some(msg) = translate_event(&ev) {
+                                            let _ = tx.send(msg);
+                                        }
+                                    })
+                                    .await
+                                    .is_ok();
+                                format!("compact {}", if ok { "complete" } else { "failed" })
+                            }
+                            // `/changelog [count|json]` — render recent git
+                            // commits. `recent_git_commits_in` shells out to
+                            // `git log -C <cwd>` (blocking), hence the bg
+                            // thread. The text/json builder returns a string
+                            // that rides back as a `CommandResult` system line
+                            // (RENDERED, not submitted).
+                            BgCommand::Changelog { limit, json } => {
+                                if json {
+                                    code_slash_router::changelog_json_text(&cwd, limit, "")
+                                } else {
+                                    code_slash_router::changelog_text(&cwd, limit)
+                                }
+                            }
+                            // `/tree [path|json]` — render the project tree.
+                            // `render_project_tree` / `project_tree_json_payload`
+                            // walk the filesystem (blocking), hence the bg
+                            // thread. The text/json builder returns a string
+                            // that rides back as a `CommandResult` system line
+                            // (RENDERED, not submitted).
+                            BgCommand::Tree { path, json } => {
+                                if json {
+                                    code_slash_router::tree_json_text(path.as_deref(), "")
+                                } else {
+                                    code_slash_router::tree_text(path.as_deref())
+                                }
+                            }
+                            // `/pr_comments [scope]` (bare inspect) — collect
+                            // the GitHub PR snapshot (BLOCKING `gh` calls via
+                            // `collect_pr_comments_snapshot`) and build the
+                            // inspection prompt. The result is a PROMPT, so it
+                            // is SUBMITTED via `AgentMsg::PromptReady` (the
+                            // main thread records the raw `/pr_comments`
+                            // invocation in history and submits the built
+                            // prompt as a turn through `Cmd::Prompt`), NOT
+                            // rendered. Returns `String::new()` so the
+                            // empty-text skip below doesn't double-emit a
+                            // `CommandResult`.
+                            BgCommand::PrCommentsInspect { scope } => {
+                                let snapshot =
+                                    code_pr_comments::collect_pr_comments_snapshot(&cwd, &scope);
+                                let prompt = code_pr_comments::build_pr_comments_prompt(
+                                    &scope,
+                                    Some(&snapshot),
+                                );
+                                let _ = agent_tx.send(AgentMsg::PromptReady(prompt));
                                 String::new()
                             }
                         };
@@ -1094,11 +1205,26 @@ pub fn run(
     // Shared abort handle for Ctrl+C to interrupt the current turn.
     let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
 
+    // Shared approval state: built on the main thread so the App (which owns
+    // `/forget`) and the background session's tool factory share the SAME
+    // `Arc<ApprovalState>` — a `/forget` on the main thread clears the rules
+    // the live session honors. The clone below goes to the bg thread; the
+    // original moves into the App ctor.
+    let approvals = Arc::new(
+        ApprovalState::with_persistent_store(allow_rules_path()?)
+            .context("build approval state")?,
+    );
+    let approvals_for_bg = Arc::clone(&approvals);
+
     // Spawn the background thread (asupersync runtime + pi session).
     // Clone the wrapper first so the App field can keep a copy for the
     // `!`/`!!` shell escape (which honors `--sandbox=strict` like the
     // bg-thread bash tool).
     let bash_command_wrapper_for_app = bash_command_wrapper.clone();
+    // Capture the session cwd once (we don't follow `cd`) so the bg thread's
+    // read-only slash arms (`/changelog`, `/tree`, `/pr_comments`) shell out
+    // against a stable path instead of re-resolving `current_dir()` per call.
+    let session_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let _bg_thread = spawn_background(
         agent_tx,
         cmd_rx,
@@ -1110,6 +1236,8 @@ pub fn run(
         Arc::clone(&registry),
         resume_path,
         bash_command_wrapper,
+        approvals_for_bg,
+        session_cwd,
     );
 
     // Build initial app state.
@@ -1148,6 +1276,7 @@ pub fn run(
         registry,
         notified_teams: std::collections::HashSet::new(),
         cfg,
+        approvals,
         bar: BarStatus {
             model_label: format!("{provider}/{model}"),
             status_line_template,
@@ -1159,6 +1288,7 @@ pub fn run(
         pending_shell_contexts: Vec::new(),
         bash_command_wrapper: bash_command_wrapper_for_app,
         custom_commands: Vec::new(),
+        pr_comment_drafts: Vec::new(),
     };
 
     // Seed the cwd + git-branch chips for the footer. These never change
@@ -2192,7 +2322,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
         }
         "/help" => {
             app.transcript.push(TranscriptEntry::System(
-                "Commands: /help /exit /clear /mode /model [/model list] /status /statusline /statusline-command /output-style /history /usage /doctor /skills list /memory show /skills /memory /team /agent /agents  !<cmd>  !!  custom templates (e.g. /apply)".to_string(),
+                "Commands: /help /exit /clear /mode /permissions /model [/model list] /status /statusline /statusline-command /output-style /history /usage /doctor /skills list /memory show /skills /memory /review /security-review /mention /ide /hotkeys /theme /vim /bug /hooks /mcp /forget /notify /changelog /tree /pr_comments /team /agent /agents  !<cmd>  !!  custom templates (e.g. /apply)".to_string(),
             ));
             app.transcript.push(TranscriptEntry::Blank);
             None
@@ -2202,6 +2332,17 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             Some(Action::ClearTranscript)
         }
         "/mode" | "/permissions" => {
+            // /permissions forget|clear|reset alias → clear saved allow rules
+            // on the shared ApprovalState (same path as bare /forget).
+            if cmd == "/permissions" && matches!(rest, "forget" | "clear" | "reset") {
+                let cleared = app.approvals.always_rules().len();
+                app.approvals.forget();
+                app.transcript.push(TranscriptEntry::System(format!(
+                    "cleared {cleared} saved allow rule(s)"
+                )));
+                app.transcript.push(TranscriptEntry::Blank);
+                return None;
+            }
             if rest.is_empty() || rest == "show" || rest == "status" {
                 let mode = app.mode.get();
                 let label = match mode {
@@ -2330,6 +2471,379 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             }
             None
         }
+        "/review" | "/security-review" => {
+            // Tier 1 — reuse-as-is: build the review/security-review prompt
+            // from the pure `code_ui::review_prompt` and submit it as a turn.
+            // Mirrors the custom-hit submit path: record the raw invocation in
+            // history (so up-arrow recalls `/review`, not the expansion), then
+            // return Submit — run_loop echoes the prompt as the User line and
+            // sends Cmd::Prompt.
+            let security = cmd == "/security-review";
+            let prompt = code_ui::review_prompt(security, rest);
+            if app.history.back().is_none_or(|last| last != input) {
+                app.history.push_back(input.to_string());
+                if app.history.len() > HISTORY_MAX_LIMIT {
+                    app.history.pop_front();
+                }
+            }
+            app.history_idx = None;
+            app.stashed_live = None;
+            Some(Action::Submit(prompt))
+        }
+        "/mention" => {
+            // Tier 1 — reuse-as-is: attach a file as context and submit the
+            // built prompt. `mention_command_arg` guards the `/mention ` prefix.
+            match code_ui::mention_command_arg(trimmed) {
+                Some(rest) => {
+                    match code_ui::build_mention_prompt(rest, app.bar.output_style.as_deref()) {
+                        Ok(prompt) => {
+                            if app.history.back().is_none_or(|last| last != input) {
+                                app.history.push_back(input.to_string());
+                                if app.history.len() > HISTORY_MAX_LIMIT {
+                                    app.history.pop_front();
+                                }
+                            }
+                            app.history_idx = None;
+                            app.stashed_live = None;
+                            Some(Action::Submit(prompt))
+                        }
+                        Err(e) => {
+                            app.transcript
+                                .push(TranscriptEntry::System(format!("/mention: {e:#}")));
+                            app.transcript.push(TranscriptEntry::Blank);
+                            None
+                        }
+                    }
+                }
+                None => {
+                    app.transcript
+                        .push(TranscriptEntry::System("usage: /mention <path> [prompt]".to_string()));
+                    app.transcript.push(TranscriptEntry::Blank);
+                    None
+                }
+            }
+        }
+        "/ide" => {
+            // Tier 1 — thin adapter over the pure `parse_ide_command`.
+            match code_ui::parse_ide_command(rest) {
+                code_ui::IdeCommand::Status => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::ide_status_text()));
+                }
+                code_ui::IdeCommand::Json => {
+                    let payload = code_ui::ide_json_payload(rest);
+                    app.transcript.push(TranscriptEntry::System(
+                        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                    ));
+                }
+                code_ui::IdeCommand::Open => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::ide_open_text()));
+                }
+                code_ui::IdeCommand::Usage => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::ide_usage_text()));
+                }
+            }
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
+        "/hotkeys" => {
+            match code_ui::parse_hotkeys_command(rest) {
+                code_ui::HotkeysCommand::Show => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::hotkeys_text()));
+                }
+                code_ui::HotkeysCommand::Json => {
+                    let payload = code_ui::hotkeys_json_payload(rest);
+                    app.transcript.push(TranscriptEntry::System(
+                        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                    ));
+                }
+                code_ui::HotkeysCommand::Usage => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::hotkeys_usage_text()));
+                }
+            }
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
+        "/theme" => {
+            match code_ui::parse_theme_command(rest) {
+                code_ui::ThemeCommand::Status => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::theme_status_text()));
+                }
+                code_ui::ThemeCommand::Json => {
+                    let payload = code_ui::theme_json_payload(rest);
+                    app.transcript.push(TranscriptEntry::System(
+                        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                    ));
+                }
+                code_ui::ThemeCommand::Requested(requested) => {
+                    app.transcript.push(TranscriptEntry::System(
+                        code_slash_router::theme_requested_text(&requested),
+                    ));
+                }
+            }
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
+        "/vim" => {
+            // Tier 1 — `/vim on/off` stores the process-global vim-input flag
+            // on the UI thread (Relaxed, mirroring the legacy store ordering);
+            // the input layer reads it on its own polling cadence. status/json
+            // reuse the bumped payload/text builders.
+            match code_ui::parse_vim_command(rest) {
+                code_ui::VimCommand::Status => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::vim_status_text()));
+                }
+                code_ui::VimCommand::Json => {
+                    let payload = code_ui::vim_json_payload(rest);
+                    app.transcript.push(TranscriptEntry::System(
+                        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                    ));
+                }
+                code_ui::VimCommand::Enable => {
+                    code_ui::set_vim_input_enabled(true);
+                    app.transcript.push(TranscriptEntry::System(
+                        "vim input enabled for this terminal session.".to_string(),
+                    ));
+                    app.transcript.push(TranscriptEntry::System(
+                        "  input starts in insert mode; press Esc for normal mode.".to_string(),
+                    ));
+                }
+                code_ui::VimCommand::Disable => {
+                    code_ui::set_vim_input_enabled(false);
+                    app.transcript.push(TranscriptEntry::System(
+                        "vim input disabled for this terminal session.".to_string(),
+                    ));
+                }
+                code_ui::VimCommand::Usage => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::vim_usage_text()));
+                }
+            }
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
+        "/bug" => {
+            // Tier 1 — thread the live provider/model/mode/output-style from
+            // the status bar into the bug template/json.
+            let (provider, model) = app_provider_model(app);
+            let mode = app.mode.get();
+            match code_ui::parse_bug_command(rest) {
+                code_ui::BugCommand::Template => {
+                    app.transcript.push(TranscriptEntry::System(
+                        code_slash_router::bug_template_text(
+                            &provider,
+                            &model,
+                            mode,
+                            app.bar.output_style.as_deref(),
+                        ),
+                    ));
+                }
+                code_ui::BugCommand::Json => {
+                    let payload = code_ui::bug_json_payload(
+                        &provider,
+                        &model,
+                        mode,
+                        app.bar.output_style.as_deref(),
+                        rest,
+                    );
+                    app.transcript.push(TranscriptEntry::System(
+                        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                    ));
+                }
+                code_ui::BugCommand::Usage => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::bug_usage_text()));
+                }
+            }
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
+        "/hooks" => {
+            // Tier 1 — status/json reuse the bumped payloads; `show <event>`
+            // reuses `format_hook_event_details`; `open` is a desktop hint;
+            // `reset` mutates the hook/MCP cache — deferred (not yet supported
+            // in the TUI).
+            if rest == "reset" || rest == "reset-sessions" {
+                app.transcript.push(TranscriptEntry::System(
+                    "reset not yet supported in TUI".to_string(),
+                ));
+                app.transcript.push(TranscriptEntry::Blank);
+                return None;
+            }
+            match code_ui::parse_hooks_command(rest) {
+                code_ui::HooksCommand::Status => {
+                    app.transcript.push(TranscriptEntry::System(
+                        code_slash_router::hooks_status_text(&app.cfg),
+                    ));
+                }
+                code_ui::HooksCommand::Json => {
+                    let payload = code_ui::hooks_json_payload(&app.cfg, rest);
+                    app.transcript.push(TranscriptEntry::System(
+                        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                    ));
+                }
+                code_ui::HooksCommand::Open => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::hooks_open_text()));
+                }
+                code_ui::HooksCommand::Show(event) => {
+                    match code_ui::hooks_for_event(&app.cfg, &event) {
+                        Some((canonical, hooks)) => {
+                            app.transcript.push(TranscriptEntry::System(
+                                code_ui::format_hook_event_details(canonical, hooks),
+                            ));
+                        }
+                        None => {
+                            app.transcript.push(TranscriptEntry::System(format!(
+                                "/hooks: no known hook event `{event}`"
+                            )));
+                            app.transcript.push(TranscriptEntry::System(
+                                "  events: UserPromptSubmit, PreToolUse, PostToolUse, SubagentStop, SessionStart, Stop, SessionEnd, Notification".to_string(),
+                            ));
+                        }
+                    }
+                }
+                // Unknown sub-command — show usage.
+                code_ui::HooksCommand::Usage => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::hooks_usage_text()));
+                }
+            }
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
+        "/mcp" => {
+            // Tier 1 — status/json/show reuse the bumped payloads/details;
+            // `reset`/`probe --save` mutate MCP state — deferred.
+            match code_ui::parse_mcp_command(rest) {
+                code_ui::McpCommand::Status => {
+                    app.transcript.push(TranscriptEntry::System(
+                        code_slash_router::mcp_status_text(),
+                    ));
+                }
+                code_ui::McpCommand::Json => {
+                    let cfg = crate::config::load().unwrap_or_else(|_| app.cfg.as_ref().clone());
+                    let payload = code_ui::mcp_json_payload(&cfg, rest);
+                    app.transcript.push(TranscriptEntry::System(
+                        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                    ));
+                }
+                code_ui::McpCommand::Show(name) => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::mcp_show_text(&name)));
+                }
+                code_ui::McpCommand::Open => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::mcp_open_text()));
+                }
+                code_ui::McpCommand::Probe | code_ui::McpCommand::ProbeSave => {
+                    app.transcript.push(TranscriptEntry::System(
+                        "/mcp probe not yet supported in TUI".to_string(),
+                    ));
+                }
+                code_ui::McpCommand::Reset => {
+                    app.transcript.push(TranscriptEntry::System(
+                        "/mcp reset not yet supported in TUI".to_string(),
+                    ));
+                }
+                code_ui::McpCommand::Usage => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::mcp_usage_text()));
+                }
+            }
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
+        "/forget" => {
+            // Tier 1 — /forget: a BARE /forget (no args) clears the saved
+            // allow rules on the shared ApprovalState — the same Arc the bg
+            // session's factory uses. `status|show|info|preview` shows the
+            // status text; `json` renders the bumped payload; anything else
+            // is usage. (/permissions forget|clear|reset aliases are handled
+            // by the /mode | /permissions arm upstream.)
+            if rest.is_empty() {
+                let cleared = app.approvals.always_rules().len();
+                app.approvals.forget();
+                app.transcript.push(TranscriptEntry::System(format!(
+                    "cleared {cleared} saved allow rule(s)"
+                )));
+            } else {
+                match code_ui::parse_forget_command(rest) {
+                    code_ui::ForgetCommand::Status => {
+                        app.transcript.push(TranscriptEntry::System(
+                            code_slash_router::forget_status_text(&app.approvals),
+                        ));
+                    }
+                    code_ui::ForgetCommand::Json => {
+                        let payload = code_ui::forget_json_payload(&app.approvals, rest);
+                        app.transcript.push(TranscriptEntry::System(
+                            serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                        ));
+                    }
+                    code_ui::ForgetCommand::Usage => {
+                        app.transcript
+                            .push(TranscriptEntry::System(code_slash_router::forget_usage_text()));
+                    }
+                }
+            }
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
+        "/notify" | "/notifications" => {
+            // Tier 1 — main-thread: parse, toggle config (persisting), test
+            // the terminal notification, or render status/json. No BgCommand.
+            match code_ui::parse_notify_command(rest) {
+                code_ui::NotifyCommand::Status => {
+                    app.transcript.push(TranscriptEntry::System(
+                        code_slash_router::notify_status_text(&app.cfg),
+                    ));
+                }
+                code_ui::NotifyCommand::Json => {
+                    let payload = code_ui::notify_json_payload(&app.cfg, rest);
+                    app.transcript.push(TranscriptEntry::System(
+                        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                    ));
+                }
+                code_ui::NotifyCommand::On => {
+                    match code_ui::set_turn_notifications(&mut app.cfg, true) {
+                        Ok(()) => app.transcript.push(TranscriptEntry::System(
+                            "turn notifications enabled".to_string(),
+                        )),
+                        Err(e) => app.transcript.push(TranscriptEntry::System(format!(
+                            "/notify: {e:#}"
+                        ))),
+                    }
+                }
+                code_ui::NotifyCommand::Off => {
+                    match code_ui::set_turn_notifications(&mut app.cfg, false) {
+                        Ok(()) => app.transcript.push(TranscriptEntry::System(
+                            "turn notifications disabled".to_string(),
+                        )),
+                        Err(e) => app.transcript.push(TranscriptEntry::System(format!(
+                            "/notify: {e:#}"
+                        ))),
+                    }
+                }
+                code_ui::NotifyCommand::Test => {
+                    crate::commands::code_term::notify_terminal("LibertAI Code", "Notification test");
+                    app.transcript.push(TranscriptEntry::System(
+                        "notification test sent".to_string(),
+                    ));
+                }
+                code_ui::NotifyCommand::Usage => {
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::notify_usage_text()));
+                }
+            }
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
         "/usage" | "/cost" => {
             // Tier 2 — `/usage` needs the session's accumulated usage records,
             // which live on the bg thread. Route there and let it build the
@@ -2346,6 +2860,250 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             app.transcript
                 .push(TranscriptEntry::System("doctor…".to_string()));
             None
+        }
+        "/compact" => {
+            // `/compact` splits into read-only preview sub-commands (handled
+            // here on the main thread — they only need the config) and the
+            // real compaction (routed to the bg thread, which owns the
+            // `AgentSessionHandle` and forwards compaction `AgentEvent`s
+            // through `translate_event`).
+            //
+            // The bumped `code_ui` parse helpers take the *full* `/compact …`
+            // string, so reconstruct it from `cmd` + `rest`.
+            let full = if rest.is_empty() {
+                cmd.to_string()
+            } else {
+                format!("{cmd} {rest}")
+            };
+            if let Some(preview_rest) = code_ui::compact_preview_arg(&full) {
+                // Status / json / preview family — render synchronously.
+                match code_ui::parse_compact_preview_command(preview_rest) {
+                    code_ui::CompactPreviewCommand::Usage => {
+                        app.transcript.push(TranscriptEntry::System(
+                            code_ui::compact_usage_text().to_string(),
+                        ));
+                    }
+                    code_ui::CompactPreviewCommand::Json
+                    | code_ui::CompactPreviewCommand::Status => {
+                        // The status/show/info/preview and json/--json variants
+                        // all surface the compact payload (the
+                        // machine-readable status). Render it pretty.
+                        let payload = code_ui::compact_json_payload(&app.cfg, preview_rest);
+                        app.transcript.push(TranscriptEntry::System(
+                            serde_json::to_string_pretty(&payload).unwrap_or_default(),
+                        ));
+                    }
+                }
+                app.transcript.push(TranscriptEntry::Blank);
+                return None;
+            }
+            // Real compaction: `compact_command_notes` returns the free-form
+            // notes (`/compact keep setup` → `Some("keep setup")`), or `None`
+            // for a bare `/compact` (compaction with no extra instructions).
+            let notes = code_ui::compact_command_notes(&full).map(str::to_string);
+            let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Compact { notes }));
+            app.transcript
+                .push(TranscriptEntry::System("compacting…".to_string()));
+            None
+        }
+        "/changelog" => {
+            // Tier 2 — `recent_git_commits_in` shells out to `git log`
+            // (blocking), so route to the bg thread. Detect the json variant
+            // via `changelog_json_request_arg` (returns `Some(query)` for the
+            // `json`/`--json`/`<count> --json` family — the query is the
+            // optional count, e.g. `json 5` → `"5"`); otherwise parse the limit
+            // (`parse_changelog_limit` clamps to the changelog bounds). The
+            // result text is RENDERED back as a `CommandResult` system entry.
+            if let Some(query) = code_ui::changelog_json_request_arg(rest) {
+                // For `<count> --json` the query carries the count; parse it
+                // through `parse_changelog_limit` (default + clamp), falling
+                // back to the default limit on a bare `json`.
+                let limit = code_ui::parse_changelog_limit(&query)
+                    .unwrap_or(code_ui::CHANGELOG_DEFAULT_LIMIT);
+                let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Changelog {
+                    limit,
+                    json: true,
+                }));
+            } else {
+                let limit = match code_ui::parse_changelog_limit(rest) {
+                    Ok(limit) => limit,
+                    Err(e) => {
+                        app.transcript
+                            .push(TranscriptEntry::System(format!("/changelog: {e:#}")));
+                        app.transcript.push(TranscriptEntry::Blank);
+                        return None;
+                    }
+                };
+                let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Changelog {
+                    limit,
+                    json: false,
+                }));
+            }
+            app.transcript
+                .push(TranscriptEntry::System("changelog…".to_string()));
+            None
+        }
+        "/tree" => {
+            // Tier 2 — `render_project_tree` / `project_tree_json_payload`
+            // walk the filesystem (blocking), so route to the bg thread.
+            // Split json vs path via `tree_json_request_arg`: a `Some(path)`
+            // means json (the returned string is the optional path — empty
+            // for a bare `json`, or the path for `json <path>`/`<path>
+            // --json`); `None` means the text tree (rest is the optional
+            // path). The result text is RENDERED back as a `CommandResult`
+            // system entry.
+            if let Some(path) = code_ui::tree_json_request_arg(rest) {
+                let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Tree {
+                    path: Some(path.trim())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    json: true,
+                }));
+            } else {
+                let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Tree {
+                    path: Some(rest.trim())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    json: false,
+                }));
+            }
+            app.transcript
+                .push(TranscriptEntry::System("tree…".to_string()));
+            None
+        }
+        "/pr_comments" | "/pr-comments" => {
+            // Tiered PR-review-comments dispatch.
+            //
+            // Tier 1 — bare inspect (`/pr_comments [scope]` with no
+            // subcommand): collect the GitHub PR snapshot (BLOCKING `gh`
+            // calls) on the bg thread and build the inspection prompt. The
+            // result is SUBMITTED via `AgentMsg::PromptReady` (the main
+            // thread records the raw `/pr_comments` in history and submits
+            // the built prompt as a turn), NOT rendered.
+            //
+            // Tier 2 — local drafts (main-thread, no network):
+            //   `/pr_comments draft <path>:<line> <body>` stages a draft;
+            //   `/pr_comments drafts` lists/clears the staged drafts.
+            //
+            // Tier 3 — GitHub mutations (reply/resolve/unresolve/reopen/
+            // viewed/unviewed/thread/comment/edit/review/submit/drafts
+            // submit): DEFERRED — surface a "not yet supported in TUI"
+            // system line. Do NOT call `run_gh` (those need gh-CLI plumbing
+            // + the network, which the TUI background thread doesn't own).
+            let first = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            match first.as_str() {
+                "drafts" => {
+                    // `/pr_comments drafts [list|clear|state|status|submit|…]`
+                    let rest_after_drafts = rest
+                        .strip_prefix("drafts")
+                        .map(str::trim)
+                        .unwrap_or("");
+                    let action = rest_after_drafts
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if matches!(action.as_str(), "submit" | "publish") {
+                        // Tier 3 — publishes queued drafts via `gh` (network).
+                        app.transcript.push(TranscriptEntry::System(
+                            "drafts submit not yet supported in TUI (GitHub mutations need gh-CLI plumbing)".to_string(),
+                        ));
+                    } else if action == "clear" {
+                        let count = app.pr_comment_drafts.len();
+                        app.pr_comment_drafts.clear();
+                        app.transcript.push(TranscriptEntry::System(format!(
+                            "/pr_comments drafts: cleared {count} draft thread{}.",
+                            if count == 1 { "" } else { "s" }
+                        )));
+                    } else {
+                        // list / state / status / empty — mirror
+                        // `print_pr_comment_drafts` as System entries (the
+                        // legacy fn prints to stdout; we replicate its
+                        // user-facing lines here instead of calling it).
+                        if app.pr_comment_drafts.is_empty() {
+                            app.transcript.push(TranscriptEntry::System(
+                                "/pr_comments drafts: no queued draft review threads.".to_string(),
+                            ));
+                        } else {
+                            app.transcript.push(TranscriptEntry::System(format!(
+                                "/pr_comments drafts: {} queued thread(s):",
+                                app.pr_comment_drafts.len()
+                            )));
+                            for (idx, draft) in app.pr_comment_drafts.iter().enumerate() {
+                                app.transcript.push(TranscriptEntry::System(format!(
+                                    "  {}. {}:{} - {}",
+                                    idx + 1,
+                                    draft.path,
+                                    draft.line,
+                                    truncate_chars(&draft.body, 80)
+                                )));
+                            }
+                        }
+                    }
+                    app.transcript.push(TranscriptEntry::Blank);
+                    None
+                }
+                "draft" => {
+                    // Tier 2 — stage a local draft review thread. The bumped
+                    // `stage_pr_comment_draft` parses `<path>:<line> <body>`,
+                    // pushes into `app.pr_comment_drafts`, and returns the
+                    // draft so we can format the staged confirmation as a
+                    // System entry (the legacy fn printed it).
+                    let rest_after_draft = rest
+                        .strip_prefix("draft")
+                        .map(str::trim)
+                        .unwrap_or("");
+                    match stage_pr_comment_draft(rest_after_draft, &mut app.pr_comment_drafts) {
+                        Ok(draft) => {
+                            app.transcript.push(TranscriptEntry::System(format!(
+                                "staged PR review draft {}:{}",
+                                draft.path, draft.line
+                            )));
+                        }
+                        Err(e) => {
+                            app.transcript
+                                .push(TranscriptEntry::System(format!("/pr_comments: {e:#}")));
+                        }
+                    }
+                    app.transcript.push(TranscriptEntry::Blank);
+                    None
+                }
+                // Tier 3 — GitHub mutations (all need `gh` + the network).
+                "reply" | "resolve" | "unresolve" | "reopen" | "viewed" | "view" | "unviewed"
+                | "unview" | "thread" | "comment" | "edit" | "review" | "submit" => {
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "{first} not yet supported in TUI (GitHub mutations need gh-CLI plumbing)"
+                    )));
+                    app.transcript.push(TranscriptEntry::Blank);
+                    None
+                }
+                _ => {
+                    // Tier 1 — bare inspect. `rest` (possibly empty) is the
+                    // free-form PR scope (number/URL/branch hint). Record the
+                    // raw invocation in history (so up-arrow recalls
+                    // `/pr_comments`, not the built prompt), then hand it to
+                    // the bg thread, which collects the snapshot and ships the
+                    // built prompt back as `AgentMsg::PromptReady`.
+                    if app.history.back().is_none_or(|last| last != input) {
+                        app.history.push_back(input.to_string());
+                        if app.history.len() > HISTORY_MAX_LIMIT {
+                            app.history.pop_front();
+                        }
+                    }
+                    app.history_idx = None;
+                    app.stashed_live = None;
+                    let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::PrCommentsInspect {
+                        scope: rest.to_string(),
+                    }));
+                    app.transcript
+                        .push(TranscriptEntry::System("pr_comments…".to_string()));
+                    None
+                }
+            }
         }
         "/status" => {
             let mode = app.mode.get();
@@ -2647,23 +3405,25 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
         _ => {
             // Tier 3 — custom templates: before the unknown fallback, try
             // `code_slash_router::resolve_custom` against the cached
-            // discovered commands. On a unique hit, expand the template
-            // (synchronous — uses the pure `code_slash_registry::expand`)
-            // and submit it as a prompt via `Cmd::Prompt`. On ambiguity,
-            // list the matching invocations. On a miss, fall through to the
-            // Tier 4 unknown message so a valid custom template never shows
-            // "unknown command".
+            // discovered commands. On a unique hit, the template expansion is
+            // ASYNC (it needs the live `AgentSessionHandle` for
+            // `${session_id}` / `${effort}` context), so we hand it to the
+            // background thread as `BgCommand::CustomPrompt`. The bg thread
+            // expands with `code_ui::build_custom_slash_prompt` (which builds a
+            // session-aware `ExpansionContext` — fixing #3, where the old
+            // inline path used `ExpansionContext::default()` and dropped
+            // `session_id`/`effort`) and ships the ready prompt back as
+            // `AgentMsg::PromptReady`, which the main thread submits as a turn
+            // via `Cmd::Prompt`. On ambiguity, list the matching invocations.
+            // On a miss, fall through to the Tier 4 unknown message so a valid
+            // custom template never shows "unknown command".
             match code_slash_router::resolve_custom(&app.custom_commands, cmd) {
                 CustomResolveResult::Hit(hit) => {
-                    let expanded = code_slash_registry::expand_with_context(
-                        hit,
-                        rest,
-                        &code_slash_registry::ExpansionContext::default(),
-                    );
                     // Record the raw invocation in history (so up-arrow
-                    // recalls `/apply`, not the expansion), then submit the
-                    // expanded prompt. run_loop echoes the expanded prompt
-                    // as the User line — i.e. what's actually sent.
+                    // recalls `/apply`, not the expansion). The expanded prompt
+                    // is echoed as the User transcript line by the
+                    // `AgentMsg::PromptReady` handler — i.e. what's actually
+                    // sent — while history keeps the raw `/cmd`.
                     if app.history.back().is_none_or(|last| last != input) {
                         app.history.push_back(input.to_string());
                         if app.history.len() > HISTORY_MAX_LIMIT {
@@ -2672,7 +3432,15 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     }
                     app.history_idx = None;
                     app.stashed_live = None;
-                    Some(Action::Submit(expanded))
+                    let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::CustomPrompt {
+                        name: hit.name.clone(),
+                        args: rest.to_string(),
+                    }));
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "{}/... (expanding)",
+                        hit.name
+                    )));
+                    None
                 }
                 CustomResolveResult::Ambiguous(names) => {
                     app.transcript.push(TranscriptEntry::System(format!(
@@ -3171,6 +3939,27 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.transcript.push(TranscriptEntry::Blank);
             app.scroll = 0; // auto-scroll to bottom
         }
+        AgentMsg::PromptReady(prompt) => {
+            // The bg thread finished expanding a custom slash template (with
+            // the live session_id / effort context). The raw `/cmd` invocation
+            // was already recorded in history by the CustomResolveResult::Hit
+            // arm in `handle_slash_command` (so up-arrow recalls `/apply`, not
+            // the expansion); here we only echo the *expanded* prompt as the
+            // User transcript line (what's actually sent) and drive the turn
+            // through the normal Cmd::Prompt path — the same full plumbing as a
+            // hand-typed prompt (turn guidance + user-prompt-submit hooks +
+            // post-tool hooks). Mirrors the run_loop `Action::Submit` path.
+            app.transcript.push(TranscriptEntry::User(prompt.clone()));
+            app.transcript.push(TranscriptEntry::Blank);
+            let _ = cmd_tx.send(Cmd::Prompt(prompt));
+            app.phase = Phase::Streaming;
+            app.turn_started = Some(Instant::now());
+            app.output_chars = 0;
+            app.current_tool = None;
+            app.current_tool_detail = String::new();
+            app.spinner_label = "thinking…";
+            app.scroll = 0; // auto-scroll to bottom
+        }
         AgentMsg::SubagentText { agent_name, text } => {
             // Append to last subagent text from same agent, or create new entry.
             if let Some(TranscriptEntry::SubagentText {
@@ -3307,6 +4096,7 @@ mod tests {
             registry: AgentRegistry::new(),
             notified_teams: std::collections::HashSet::new(),
             cfg: Arc::new(LibertaiConfig::default()),
+            approvals: Arc::new(ApprovalState::new()),
             bar: BarStatus {
                 model_label: "openai/gpt-4o".to_string(),
                 ..Default::default()
@@ -3316,6 +4106,7 @@ mod tests {
             pending_shell_contexts: Vec::new(),
             bash_command_wrapper: None,
             custom_commands: Vec::new(),
+            pr_comment_drafts: Vec::new(),
         }
     }
 
@@ -5055,6 +5846,568 @@ task = "Do the thing"
         assert!(signal.is_aborted(), "the abort must propagate to the signal");
         assert!(h.abort.lock().unwrap().is_none(), "the slot must be cleared after take");
         assert_eq!(h.status(), AgentStatus::Stopped, "the agent must be marked Stopped");
+    }
+
+    // ── M6a: slash-command wiring + dead-code regression tests ──────────────
+    //
+    // These exercise the main-thread `handle_slash_command` arms the M6a
+    // batches wired (/review, /security-review, /mention, the status arms,
+    // /vim toggle, /forget, /notify, /compact, /changelog, /tree, /pr_comments,
+    // and the custom-template Tier-3 hit) plus the dead-code regressions for
+    // #15 (no BgCommand::SkillsList/MemoryShow/ShellEscape) and #7
+    // (status_line_command_text). All hermetic: no network, no real config
+    // dir, no real git/gh. The only subprocess spawned is `echo`/`true`/`false`
+    // (POSIX-guaranteed) for the shell-escape + status-command paths.
+
+    /// Build a `CustomCommand` for the Tier-3 custom-template tests (mirrors
+    /// the helper in `code_slash_router::tests`).
+    fn custom_cmd(name: &str, namespace: Option<&str>) -> code_slash_registry::CustomCommand {
+        code_slash_registry::CustomCommand {
+            name: name.to_string(),
+            namespace: namespace.map(String::from),
+            description: None,
+            arg_hint: None,
+            argument_names: Vec::new(),
+            body: String::new(),
+            source: code_slash_registry::CommandSource::Project,
+            path: PathBuf::from("/tmp"),
+        }
+    }
+
+    /// Collect every `TranscriptEntry::System` text pushed by a slash arm.
+    fn system_lines(app: &App) -> Vec<String> {
+        app.transcript
+            .iter()
+            .filter_map(|e| match e {
+                TranscriptEntry::System(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // (1) /review builds a review prompt and returns Action::Submit. The
+    // prompt reuses `code_ui::review_prompt`, which carries the "Review the
+    // current code changes" title + the git-inspection rule ("git status
+    // --short", "git diff"). Asserting the action is Submit AND the prompt
+    // contains a review title + a git marker locks the wiring.
+    #[test]
+    fn slash_review_returns_submit_with_git_inspection_prompt() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/review", &cmd_tx);
+
+        let prompt = match action {
+            Some(Action::Submit(p)) => p,
+            // `Action` isn't Debug, so describe the unexpected variant by
+            // which arm fired rather than formatting it.
+            Some(Action::Quit) => panic!("expected Action::Submit for /review, got Quit"),
+            Some(Action::ClearTranscript) => {
+                panic!("expected Action::Submit for /review, got ClearTranscript")
+            }
+            None => panic!("expected Action::Submit for /review, got None"),
+        };
+        assert!(
+            prompt.contains("Review the current code changes"),
+            "/review prompt missing review title: {prompt}"
+        );
+        assert!(
+            prompt.contains("git status --short"),
+            "/review prompt missing git-inspection marker: {prompt}"
+        );
+        assert!(
+            prompt.contains("git diff"),
+            "/review prompt missing git diff marker: {prompt}"
+        );
+        // A review submission does NOT route a background command.
+        assert!(cmd_rx.try_recv().is_err(), "/review sends no Cmd");
+    }
+
+    // (2) /security-review returns Submit with the security flag set, and the
+    // prompt differs from /review (it carries the security focus block).
+    #[test]
+    fn slash_security_review_returns_submit_with_security_flag() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let review_prompt = match handle_slash_command(&mut app, "/review", &cmd_tx) {
+            Some(Action::Submit(p)) => p,
+            Some(Action::Quit) => panic!("/review: expected Submit, got Quit"),
+            Some(Action::ClearTranscript) => panic!("/review: expected Submit, got ClearTranscript"),
+            None => panic!("/review: expected Submit, got None"),
+        };
+
+        let security_prompt = match handle_slash_command(&mut app, "/security-review", &cmd_tx) {
+            Some(Action::Submit(p)) => p,
+            Some(Action::Quit) => panic!("/security-review: expected Submit, got Quit"),
+            Some(Action::ClearTranscript) => {
+                panic!("/security-review: expected Submit, got ClearTranscript")
+            }
+            None => panic!("/security-review: expected Submit, got None"),
+        };
+
+        // The security title differs from the plain review title.
+        assert!(
+            security_prompt.contains("security review"),
+            "security prompt missing security title: {security_prompt}"
+        );
+        assert_ne!(
+            review_prompt, security_prompt,
+            "/security-review prompt must differ from /review"
+        );
+        // The security focus block names the security concern categories.
+        assert!(
+            security_prompt.contains("Injection"),
+            "security prompt missing the security-focus block: {security_prompt}"
+        );
+    }
+
+    // (3) /mention with a path returns Submit; /mention with a missing path
+    // pushes a System error (build_mention_prompt returns Err on a failed
+    // read); bare /mention pushes the usage System line.
+    #[test]
+    fn slash_mention_with_path_returns_submit_missing_path_pushes_system_error() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        // Valid path: a temp file resolves and the prompt is submitted.
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("ctx.txt");
+        std::fs::write(&file, "context body").unwrap();
+        // Quote the path so a temp dir containing spaces still parses.
+        let input = format!("/mention \"{}\" summarize this", file.display());
+        let action = handle_slash_command(&mut app, &input, &cmd_tx);
+        let prompt = match action {
+            Some(Action::Submit(p)) => p,
+            Some(Action::Quit) => panic!("expected Submit for valid /mention, got Quit"),
+            Some(Action::ClearTranscript) => {
+                panic!("expected Submit for valid /mention, got ClearTranscript")
+            }
+            None => panic!("expected Submit for valid /mention, got None"),
+        };
+        assert!(prompt.contains("summarize this"), "mention prompt missing user text: {prompt}");
+        assert!(prompt.contains("Mentioned file:"), "mention prompt missing file header: {prompt}");
+
+        // Missing path: build_mention_prompt fails to read → System error,
+        // NOT a Submit. No Cmd is sent.
+        app.transcript.clear();
+        let action = handle_slash_command(&mut app, "/mention /no/such/file_xyz_123.txt", &cmd_tx);
+        assert!(action.is_none(), "missing-path /mention must not Submit");
+        let lines = system_lines(&app);
+        assert!(
+            lines.iter().any(|s| s.starts_with("/mention:")),
+            "missing-path /mention should push a '/mention: <error>' System line, got: {lines:?}"
+        );
+        assert!(cmd_rx.try_recv().is_err(), "missing-path /mention sends no Cmd");
+
+        // Bare /mention (no path) → usage System line, no Submit.
+        app.transcript.clear();
+        let action = handle_slash_command(&mut app, "/mention", &cmd_tx);
+        assert!(action.is_none(), "bare /mention must not Submit");
+        let lines = system_lines(&app);
+        assert!(
+            lines.iter().any(|s| s.contains("usage:") && s.contains("/mention")),
+            "bare /mention should push the usage System line, got: {lines:?}"
+        );
+    }
+
+    // (4) /ide /theme /hotkeys /vim /bug status arms render non-empty System
+    // text. At least three of these; here all five. Each pushes a System
+    // entry whose text contains an expected keyword and sends no Cmd.
+    #[test]
+    fn slash_status_arms_render_nonempty_system_text() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        // /ide → "ide" header.
+        handle_slash_command(&mut app, "/ide", &cmd_tx);
+        assert!(
+            system_lines(&app).iter().any(|s| s.starts_with("ide")),
+            "/ide should render an 'ide' status block"
+        );
+
+        // /theme → "theme" header.
+        app.transcript.clear();
+        handle_slash_command(&mut app, "/theme", &cmd_tx);
+        assert!(
+            system_lines(&app).iter().any(|s| s.starts_with("theme")),
+            "/theme should render a 'theme' status block"
+        );
+
+        // /hotkeys → "hotkeys" header with the hotkey rows.
+        app.transcript.clear();
+        handle_slash_command(&mut app, "/hotkeys", &cmd_tx);
+        assert!(
+            system_lines(&app).iter().any(|s| s.starts_with("hotkeys")),
+            "/hotkeys should render a 'hotkeys' block"
+        );
+
+        // /vim → "vim" header + status line.
+        app.transcript.clear();
+        handle_slash_command(&mut app, "/vim", &cmd_tx);
+        assert!(
+            system_lines(&app).iter().any(|s| s.starts_with("vim") && s.contains("status")),
+            "/vim status should render a 'vim' block with a status line"
+        );
+
+        // /bug → "bug report" header.
+        app.transcript.clear();
+        handle_slash_command(&mut app, "/bug", &cmd_tx);
+        assert!(
+            system_lines(&app).iter().any(|s| s.contains("bug report")),
+            "/bug should render a 'bug report' template"
+        );
+
+        // None of these status arms route a background command.
+        assert!(cmd_rx.try_recv().is_err(), "status arms send no Cmd");
+    }
+
+    // (5) /vim on/off toggles the process-global VIM_INPUT_ENABLED AtomicBool.
+    // The flag is process-global, so capture + restore the prior value to
+    // avoid cross-test pollution.
+    #[test]
+    fn slash_vim_on_off_toggles_process_global_flag() {
+        let prior = crate::commands::code_ui::vim_input_enabled();
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        // Ensure a known starting state (off).
+        crate::commands::code_ui::set_vim_input_enabled(false);
+        assert!(!crate::commands::code_ui::vim_input_enabled());
+
+        // /vim on flips it on and pushes a confirmation System line.
+        handle_slash_command(&mut app, "/vim on", &cmd_tx);
+        assert!(
+            crate::commands::code_ui::vim_input_enabled(),
+            "/vim on must set VIM_INPUT_ENABLED"
+        );
+        assert!(
+            system_lines(&app).iter().any(|s| s.contains("vim input enabled")),
+            "/vim on should confirm enabling"
+        );
+
+        // /vim off flips it back off.
+        app.transcript.clear();
+        handle_slash_command(&mut app, "/vim off", &cmd_tx);
+        assert!(
+            !crate::commands::code_ui::vim_input_enabled(),
+            "/vim off must clear VIM_INPUT_ENABLED"
+        );
+        assert!(
+            system_lines(&app).iter().any(|s| s.contains("vim input disabled")),
+            "/vim off should confirm disabling"
+        );
+
+        // Restore the prior process-global value.
+        crate::commands::code_ui::set_vim_input_enabled(prior);
+    }
+
+    // (6) /forget clears app.approvals: register a saved-allow rule, call the
+    // bare /forget arm, assert the rule count cleared to 0 and a
+    // "cleared N saved allow rule(s)" System line was pushed. The status
+    // sub-command renders the forget status text instead of clearing.
+    #[test]
+    fn slash_forget_clears_saved_allow_rules_and_reports_count() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        // Register two saved-allow rules on the shared ApprovalState.
+        app.approvals
+            .record_always(crate::commands::code_approvals::AllowRule::exact("bash", "npm test"));
+        app.approvals
+            .record_always(crate::commands::code_approvals::AllowRule::exact("edit", "README.md"));
+        assert_eq!(app.approvals.always_rules().len(), 2);
+
+        // Bare /forget clears them and reports the count.
+        handle_slash_command(&mut app, "/forget", &cmd_tx);
+        assert_eq!(
+            app.approvals.always_rules().len(),
+            0,
+            "bare /forget must clear saved allow rules"
+        );
+        let lines = system_lines(&app);
+        assert!(
+            lines
+                .iter()
+                .any(|s| s.contains("cleared 2 saved allow rule(s)")),
+            "/forget should report 'cleared 2 saved allow rule(s)', got: {lines:?}"
+        );
+
+        // /forget status (with no rules) renders the status text without
+        // clearing (there is nothing to clear) — it routes, not errors.
+        app.transcript.clear();
+        handle_slash_command(&mut app, "/forget status", &cmd_tx);
+        let lines = system_lines(&app);
+        assert!(
+            lines.iter().any(|s| s.contains("/forget: ready")),
+            "/forget status should render the ready status text, got: {lines:?}"
+        );
+    }
+
+    // (7) /notify on/off calls set_turn_notifications (asserting
+    // app.cfg.code_turn_notifications flips) + pushes a System line. This
+    // path persists config via `crate::config::save`, which writes to
+    // `~/.config/libertai/config.toml` — redirect it to a throwaway temp
+    // dir via `XDG_CONFIG_HOME` so the test never touches the real user
+    // config. The env var is process-global, so it is set only for the
+    // duration of this test and restored afterward.
+    #[test]
+    fn slash_notify_on_off_flips_code_turn_notifications() {
+        let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let temp = tempfile::tempdir().unwrap();
+        // SAFETY (env): no other test in this suite reads or writes the
+        // LibertAI config dir concurrently (the only config-touching code is
+        // production handlers, which no test drives), so flipping
+        // XDG_CONFIG_HOME for the duration of this test is race-free.
+        std::env::set_var("XDG_CONFIG_HOME", temp.path());
+
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        // test_app() seeds cfg from LibertaiConfig::default(), where the flag
+        // defaults to false.
+        assert!(!app.cfg.code_turn_notifications);
+
+        // /notify on flips the flag on and pushes a confirmation System line.
+        handle_slash_command(&mut app, "/notify on", &cmd_tx);
+        assert!(
+            app.cfg.code_turn_notifications,
+            "/notify on must set code_turn_notifications"
+        );
+        assert!(
+            system_lines(&app)
+                .iter()
+                .any(|s| s.contains("turn notifications enabled")),
+            "/notify on should confirm enabling"
+        );
+
+        // /notify off flips it back off.
+        app.transcript.clear();
+        handle_slash_command(&mut app, "/notify off", &cmd_tx);
+        assert!(
+            !app.cfg.code_turn_notifications,
+            "/notify off must clear code_turn_notifications"
+        );
+        assert!(
+            system_lines(&app)
+                .iter()
+                .any(|s| s.contains("turn notifications disabled")),
+            "/notify off should confirm disabling"
+        );
+
+        // Restore the prior env value.
+        match prior_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    // (8) #15 regression: BgCommand no longer has SkillsList/MemoryShow/
+    // ShellEscape variants. Construct the survivors (Usage, CustomPrompt) and
+    // match them so the build fails if those variants are referenced after a
+    // deletion. Also assert /skills and /memory STILL work inline (push System
+    // text, send no Cmd::RunReadOnly).
+    #[test]
+    fn bg_command_survivors_construct_and_skills_memory_inline() {
+        // The survivors are constructible + matchable. If a deleted variant
+        // (SkillsList/MemoryShow/ShellEscape) were still referenced anywhere,
+        // this match would fail to compile.
+        let survivors = [
+            BgCommand::Usage,
+            BgCommand::CustomPrompt {
+                name: "apply".to_string(),
+                args: "fix".to_string(),
+            },
+        ];
+        for cmd in survivors {
+            match cmd {
+                BgCommand::Usage => {}
+                BgCommand::CustomPrompt { ref name, ref args } => {
+                    assert_eq!(name, "apply");
+                    assert_eq!(args, "fix");
+                }
+                // The deleted variants deliberately have NO arm here — if
+                // they still existed, the compiler would warn the match is
+                // non-exhaustive (or fail to build if referenced).
+                _ => panic!("unexpected BgCommand survivor variant"),
+            }
+        }
+
+        // /skills and /memory STILL work inline: push a non-empty System
+        // entry and send NO Cmd::RunReadOnly (they are synchronous).
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_slash_command(&mut app, "/skills", &cmd_tx);
+        assert!(
+            system_lines(&app).iter().any(|s| !s.is_empty()),
+            "/skills should push a non-empty System entry"
+        );
+
+        app.transcript.clear();
+        handle_slash_command(&mut app, "/memory", &cmd_tx);
+        assert!(
+            system_lines(&app).iter().any(|s| !s.is_empty()),
+            "/memory should push a non-empty System entry"
+        );
+
+        // Neither routes a background command.
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "/skills and /memory must send no Cmd::RunReadOnly (they run inline)"
+        );
+    }
+
+    // (9) #7: status_line_command_text returns Some for a trivial echo
+    // command ("echo hi") and None for an empty command. The footer's
+    // draw_rule path calls this when `bar.status_line_command` is set; the
+    // full terminal render isn't unit-testable here, so we lock the pure
+    // helper the rule path delegates to. (`echo` is a POSIX-guaranteed
+    // builtin, so the spawned shell is deterministic and hermetic.)
+    #[test]
+    fn status_line_command_text_some_for_echo_none_for_empty() {
+        use crate::commands::code_ui::status_line_command_text;
+        // Empty / whitespace → None without spawning a shell.
+        assert!(status_line_command_text("").is_none());
+        assert!(status_line_command_text("   ").is_none());
+        // A trivial echo command → Some (the captured stdout, "hi").
+        let out = status_line_command_text("echo hi");
+        assert!(out.is_some(), "echo hi should yield Some stdout");
+        let out = out.unwrap();
+        assert!(
+            out.contains("hi"),
+            "echo hi stdout should contain 'hi', got: {out}"
+        );
+    }
+
+    // (10) #3: the CustomResolveResult::Hit arm sends
+    // Cmd::RunReadOnly(BgCommand::CustomPrompt{..}) — NOT Action::Submit —
+    // so the session-aware template expansion runs on the bg thread. We
+    // stage a custom command in `app.custom_commands` and dispatch it.
+    #[test]
+    fn custom_template_hit_routes_to_bg_customprompt_not_submit() {
+        let mut app = test_app();
+        app.custom_commands = vec![custom_cmd("apply", None)];
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/apply fix the bug", &cmd_tx);
+
+        // The Hit arm returns None (it hands off to the bg thread), NOT
+        // Action::Submit — the session-aware expansion runs there.
+        assert!(
+            action.is_none(),
+            "custom-template Hit must NOT return Action::Submit (bg-thread expansion)"
+        );
+        // It routed a RunReadOnly(CustomPrompt) carrying the resolved name
+        // + raw args (NOT a Cmd::Prompt).
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::CustomPrompt { name, args })) => {
+                assert_eq!(name, "apply", "CustomPrompt name should be the resolved command");
+                assert_eq!(args, "fix the bug", "CustomPrompt args should be the raw arg string");
+            }
+            other => panic!(
+                "expected Cmd::RunReadOnly(BgCommand::CustomPrompt), got {other:?}"
+            ),
+        }
+        // No further command (no Cmd::Prompt).
+        assert!(cmd_rx.try_recv().is_err(), "no Cmd::Prompt expected for a custom hit");
+        // The raw invocation was recorded in history (up-arrow recalls
+        // `/apply …`, not the expansion).
+        assert!(
+            app.history.back().is_some_and(|last| last.starts_with("/apply")),
+            "custom hit should record the raw `/apply …` in history"
+        );
+    }
+
+    // (11) /compact: bare `/compact` routes a `BgCommand::Compact` to the bg
+    // thread; the `status` sub-command renders synchronously (no Cmd).
+    #[test]
+    fn slash_compact_bare_routes_to_bg_status_renders() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        // Bare /compact → BgCommand::Compact { notes: None }.
+        let action = handle_slash_command(&mut app, "/compact", &cmd_tx);
+        assert!(action.is_none(), "/compact returns no action");
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::Compact { notes })) => {
+                assert!(
+                    notes.is_none(),
+                    "bare /compact should carry no notes, got {notes:?}"
+                );
+            }
+            other => panic!("expected Cmd::RunReadOnly(BgCommand::Compact), got {other:?}"),
+        }
+
+        // /compact status → renders the compact payload synchronously, no Cmd.
+        app.transcript.clear();
+        let action = handle_slash_command(&mut app, "/compact status", &cmd_tx);
+        assert!(action.is_none(), "/compact status returns no action");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "/compact status renders synchronously and sends no Cmd"
+        );
+        // The status render pushes a non-empty System entry (the JSON payload).
+        assert!(
+            system_lines(&app).iter().any(|s| !s.is_empty()),
+            "/compact status should push a non-empty System entry"
+        );
+    }
+
+    // (12) /changelog /tree /pr_comments (bare) send their BgCommand variants;
+    // /pr_comments draft stages a draft into app.pr_comment_drafts.
+    #[test]
+    fn slash_changelog_tree_pr_comments_route_and_draft_stages() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        // /changelog (bare) → BgCommand::Changelog { limit: default, json: false }.
+        handle_slash_command(&mut app, "/changelog", &cmd_tx);
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::Changelog { limit, json })) => {
+                assert!(!json, "bare /changelog is the text listing");
+                assert!(limit >= 1, "changelog limit should be a positive default");
+            }
+            other => panic!("expected RunReadOnly(Changelog), got {other:?}"),
+        }
+
+        // /tree (bare) → BgCommand::Tree { path: None, json: false }.
+        handle_slash_command(&mut app, "/tree", &cmd_tx);
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::Tree { path, json })) => {
+                assert!(path.is_none(), "bare /tree should root at cwd (path None)");
+                assert!(!json, "bare /tree is the text tree");
+            }
+            other => panic!("expected RunReadOnly(Tree), got {other:?}"),
+        }
+
+        // /pr_comments (bare inspect) → BgCommand::PrCommentsInspect { scope }.
+        handle_slash_command(&mut app, "/pr_comments", &cmd_tx);
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::PrCommentsInspect { scope })) => {
+                assert!(scope.is_empty(), "bare /pr_comments scope is empty (infer current PR)");
+            }
+            other => panic!("expected RunReadOnly(PrCommentsInspect), got {other:?}"),
+        }
+
+        // /pr_comments draft <path>:<line> <body> stages a draft into
+        // app.pr_comment_drafts (no network, no Cmd).
+        app.transcript.clear();
+        let action = handle_slash_command(&mut app, "/pr_comments draft src/foo.rs:12 looks off", &cmd_tx);
+        assert!(action.is_none(), "/pr_comments draft returns no action");
+        assert!(cmd_rx.try_recv().is_err(), "/pr_comments draft sends no Cmd");
+        assert_eq!(app.pr_comment_drafts.len(), 1, "a draft should be staged");
+        let draft = &app.pr_comment_drafts[0];
+        assert_eq!(draft.path, "src/foo.rs");
+        assert_eq!(draft.line, 12);
+        assert_eq!(draft.body, "looks off");
+        // The staged confirmation landed as a System entry.
+        assert!(
+            system_lines(&app)
+                .iter()
+                .any(|s| s.contains("staged PR review draft") && s.contains("src/foo.rs:12")),
+            "/pr_comments draft should confirm staging, got: {:?}",
+            system_lines(&app)
+        );
     }
 }
 

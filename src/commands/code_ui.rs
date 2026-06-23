@@ -72,10 +72,10 @@ const HISTORY_DEFAULT_LIMIT: usize = 20;
 const HISTORY_MAX_LIMIT: usize = 64;
 const OSC52_MAX_TEXT_BYTES: usize = 128 * 1024;
 const IMAGE_ATTACHMENT_MAX_BYTES: usize = 10 * 1024 * 1024;
-const MENTION_ATTACHMENT_MAX_BYTES: usize = 256 * 1024;
-const TREE_MAX_ENTRIES: usize = 200;
-const CHANGELOG_DEFAULT_LIMIT: usize = 10;
-const CHANGELOG_MAX_LIMIT: usize = 50;
+pub(crate) const MENTION_ATTACHMENT_MAX_BYTES: usize = 256 * 1024;
+pub(crate) const TREE_MAX_ENTRIES: usize = 200;
+pub(crate) const CHANGELOG_DEFAULT_LIMIT: usize = 10;
+pub(crate) const CHANGELOG_MAX_LIMIT: usize = 50;
 const LOOP_DEFAULT_TURNS: usize = 3;
 const LOOP_MAX_TURNS: usize = 10;
 const AUTO_DEFAULT_TURNS: usize = 10;
@@ -176,10 +176,10 @@ struct StoredScheduledRun {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PrCommentDraft {
-    path: String,
-    line: u64,
-    body: String,
+pub(crate) struct PrCommentDraft {
+    pub(crate) path: String,
+    pub(crate) line: u64,
+    pub(crate) body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,7 +232,7 @@ struct AutoJsonPayload {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NotifyCommand {
+pub(crate) enum NotifyCommand {
     Status,
     Json,
     On,
@@ -242,7 +242,7 @@ enum NotifyCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum McpCommand {
+pub(crate) enum McpCommand {
     Status,
     Json,
     Show(String),
@@ -254,7 +254,7 @@ enum McpCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VimCommand {
+pub(crate) enum VimCommand {
     Status,
     Json,
     Enable,
@@ -263,7 +263,7 @@ enum VimCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IdeCommand {
+pub(crate) enum IdeCommand {
     Status,
     Json,
     Open,
@@ -271,7 +271,7 @@ enum IdeCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BugCommand {
+pub(crate) enum BugCommand {
     Template,
     Json,
     Usage,
@@ -286,7 +286,7 @@ enum CopyCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HotkeysCommand {
+pub(crate) enum HotkeysCommand {
     Show,
     Json,
     Usage,
@@ -330,7 +330,7 @@ enum ScopedModelsCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ThemeCommand {
+pub(crate) enum ThemeCommand {
     Status,
     Json,
     Requested(String),
@@ -472,6 +472,21 @@ enum ConfigSettingsTarget {
 static BAR_STATUS: Mutex<Option<BarStatus>> = Mutex::new(None);
 static STATUS_LINE_COMMAND_CACHE: OnceLock<Mutex<Option<StatusLineCommandCache>>> = OnceLock::new();
 static VIM_INPUT_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Read the process-global vim-input flag. Shared with the ratatui TUI input
+/// layer, so the `/vim` slash command status reflects the live state without
+/// exposing the `AtomicBool` itself.
+pub(crate) fn vim_input_enabled() -> bool {
+    VIM_INPUT_ENABLED.load(Ordering::SeqCst)
+}
+
+/// Store the process-global vim-input flag from the UI thread. Used by the
+/// ratatui `/vim on`/`/vim off` slash arms. `Relaxed` mirrors the legacy
+/// `print_vim_status` store ordering — the input layer reads it on its own
+/// polling cadence and does not require acquire/release synchronization.
+pub(crate) fn set_vim_input_enabled(enabled: bool) {
+    VIM_INPUT_ENABLED.store(enabled, Ordering::Relaxed);
+}
 
 fn update_bar_status(mut update: impl FnMut(&mut BarStatus)) {
     if let Ok(mut g) = BAR_STATUS.lock() {
@@ -923,7 +938,7 @@ fn parse_init_section_indexes(input: &str) -> Option<Vec<usize>> {
     (!indexes.is_empty()).then_some(indexes)
 }
 
-fn truncate_chars(text: &str, max: usize) -> String {
+pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
     let mut out = String::new();
     for (idx, ch) in text.chars().enumerate() {
         if idx >= max {
@@ -1682,13 +1697,13 @@ fn print_clear_json(command: &str, provider: &str, model: &str, mode: Mode, quer
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ForgetCommand {
+pub(crate) enum ForgetCommand {
     Status,
     Json,
     Usage,
 }
 
-fn forget_usage_text() -> &'static str {
+pub(crate) fn forget_usage_text() -> &'static str {
     "/forget [status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json]"
 }
 
@@ -1699,7 +1714,7 @@ fn forget_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
-fn parse_forget_command(input: &str) -> ForgetCommand {
+pub(crate) fn parse_forget_command(input: &str) -> ForgetCommand {
     match normalize_help_command_arg(input).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" => ForgetCommand::Status,
         "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
@@ -1708,7 +1723,7 @@ fn parse_forget_command(input: &str) -> ForgetCommand {
     }
 }
 
-fn forget_json_payload(approvals: &ApprovalState, query: &str) -> serde_json::Value {
+pub(crate) fn forget_json_payload(approvals: &ApprovalState, query: &str) -> serde_json::Value {
     let allow_rules_path = crate::config::allow_rules_path()
         .ok()
         .map(|path| path.display().to_string());
@@ -1814,7 +1829,7 @@ fn scoped_models_usage_text() -> &'static str {
     "/scoped-models <status|show|json|--json|status --json|show --json|patterns|clear|reset|off> — filter /model list and /model next|prev"
 }
 
-fn hotkey_lines() -> &'static [&'static str] {
+pub(crate) fn hotkey_lines() -> &'static [&'static str] {
     &[
         "Shift+Tab — cycle normal / accept-edits / plan modes",
         "Up / Down — move between draft lines, then walk submitted prompt history",
@@ -1840,7 +1855,7 @@ fn print_hotkeys() {
     }
 }
 
-fn hotkeys_json_payload(query: &str) -> serde_json::Value {
+pub(crate) fn hotkeys_json_payload(query: &str) -> serde_json::Value {
     let shortcuts: Vec<serde_json::Value> = hotkey_lines()
         .iter()
         .map(|line| {
@@ -1882,7 +1897,7 @@ fn print_project_tree(path: Option<&str>) {
     }
 }
 
-fn tree_json_request_arg(input: &str) -> Option<String> {
+pub(crate) fn tree_json_request_arg(input: &str) -> Option<String> {
     let raw = input.trim();
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
@@ -1915,7 +1930,7 @@ fn print_project_tree_json(path: Option<&str>, query: &str) {
     }
 }
 
-fn tree_root(path: Option<&str>) -> Result<PathBuf> {
+pub(crate) fn tree_root(path: Option<&str>) -> Result<PathBuf> {
     let raw = path.unwrap_or("").trim();
     if raw.is_empty() {
         return std::env::current_dir().context("resolve current directory");
@@ -1923,7 +1938,7 @@ fn tree_root(path: Option<&str>) -> Result<PathBuf> {
     Ok(PathBuf::from(raw))
 }
 
-fn render_project_tree(root: &Path, max_entries: usize) -> Result<String> {
+pub(crate) fn render_project_tree(root: &Path, max_entries: usize) -> Result<String> {
     let meta = std::fs::metadata(root).with_context(|| format!("read {}", root.display()))?;
     if !meta.is_dir() {
         anyhow::bail!("{} is not a directory", root.display());
@@ -1944,7 +1959,7 @@ fn render_project_tree(root: &Path, max_entries: usize) -> Result<String> {
     Ok(out)
 }
 
-fn project_tree_json_payload(
+pub(crate) fn project_tree_json_payload(
     root: &Path,
     max_entries: usize,
     query: &str,
@@ -2126,7 +2141,7 @@ fn should_skip_tree_entry(name: &str) -> bool {
     )
 }
 
-fn parse_changelog_limit(input: &str) -> Result<usize> {
+pub(crate) fn parse_changelog_limit(input: &str) -> Result<usize> {
     let value = input.trim();
     if value.is_empty() || is_default_list_alias(value) {
         return Ok(CHANGELOG_DEFAULT_LIMIT);
@@ -2155,7 +2170,7 @@ fn print_changelog(limit: usize) {
     }
 }
 
-fn changelog_json_request_arg(input: &str) -> Option<String> {
+pub(crate) fn changelog_json_request_arg(input: &str) -> Option<String> {
     let raw = input.trim();
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
@@ -2169,7 +2184,11 @@ fn changelog_json_request_arg(input: &str) -> Option<String> {
     }
 }
 
-fn changelog_json_payload(limit: usize, query: &str, lines: Vec<String>) -> serde_json::Value {
+pub(crate) fn changelog_json_payload(
+    limit: usize,
+    query: &str,
+    lines: Vec<String>,
+) -> serde_json::Value {
     let commits = lines
         .into_iter()
         .map(|line| {
@@ -2404,7 +2423,7 @@ fn recent_git_commits(limit: usize) -> Result<Vec<String>> {
     recent_git_commits_in(&cwd, limit)
 }
 
-fn recent_git_commits_in(cwd: &Path, limit: usize) -> Result<Vec<String>> {
+pub(crate) fn recent_git_commits_in(cwd: &Path, limit: usize) -> Result<Vec<String>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -2722,14 +2741,14 @@ fn image_command_arg(trimmed: &str) -> Option<(&'static str, &str)> {
     None
 }
 
-fn mention_command_arg(trimmed: &str) -> Option<&str> {
+pub(crate) fn mention_command_arg(trimmed: &str) -> Option<&str> {
     trimmed
         .strip_prefix("/mention")
         .filter(|rest| rest.starts_with(char::is_whitespace))
         .map(str::trim_start)
 }
 
-fn build_mention_prompt(input: &str, output_style: Option<&str>) -> Result<String> {
+pub(crate) fn build_mention_prompt(input: &str, output_style: Option<&str>) -> Result<String> {
     let (path, prompt) = parse_mention_prompt(input)?;
     let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     if bytes.len() > MENTION_ATTACHMENT_MAX_BYTES {
@@ -4107,17 +4126,17 @@ async fn compact_transcript(handle: &mut AgentSessionHandle, notes: Option<&str>
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CompactPreviewCommand {
+pub(crate) enum CompactPreviewCommand {
     Status,
     Json,
     Usage,
 }
 
-fn compact_usage_text() -> &'static str {
+pub(crate) fn compact_usage_text() -> &'static str {
     "/compact [status|state|show|info|preview|json|--json|status --json|state --json|show --json|info --json|preview --json|notes]"
 }
 
-fn compact_preview_arg(trimmed: &str) -> Option<&str> {
+pub(crate) fn compact_preview_arg(trimmed: &str) -> Option<&str> {
     let rest = trimmed.strip_prefix("/compact ")?.trim();
     match normalize_help_command_arg(rest).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" | "json" | "--json"
@@ -4127,7 +4146,7 @@ fn compact_preview_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
-fn parse_compact_preview_command(input: &str) -> CompactPreviewCommand {
+pub(crate) fn parse_compact_preview_command(input: &str) -> CompactPreviewCommand {
     match normalize_help_command_arg(input).as_str() {
         "" | "status" | "state" | "show" | "info" | "preview" => CompactPreviewCommand::Status,
         "json" | "--json" | "status --json" | "state --json" | "show --json" | "info --json"
@@ -4136,7 +4155,7 @@ fn parse_compact_preview_command(input: &str) -> CompactPreviewCommand {
     }
 }
 
-fn compact_json_payload(cfg: &LibertaiConfig, query: &str) -> serde_json::Value {
+pub(crate) fn compact_json_payload(cfg: &LibertaiConfig, query: &str) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "compact",
@@ -4328,7 +4347,7 @@ fn publish_gist(content: &str, public: bool, filename: &str, desc: &str) -> Resu
     Ok(stdout.trim().to_string())
 }
 
-fn compact_command_notes(trimmed: &str) -> Option<&str> {
+pub(crate) fn compact_command_notes(trimmed: &str) -> Option<&str> {
     trimmed.strip_prefix("/compact ").map(str::trim)
 }
 
@@ -4439,7 +4458,7 @@ fn theme_command_arg(trimmed: &str) -> Option<&str> {
     }
 }
 
-fn parse_theme_command(rest: &str) -> ThemeCommand {
+pub(crate) fn parse_theme_command(rest: &str) -> ThemeCommand {
     let requested = rest.trim();
     match requested.to_ascii_lowercase().as_str() {
         "" | "status" | "show" | "current" | "info" => ThemeCommand::Status,
@@ -4514,7 +4533,7 @@ fn abort_command_arg(trimmed: &str) -> Option<&str> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum HooksCommand {
+pub(crate) enum HooksCommand {
     Status,
     Json,
     Open,
@@ -4522,7 +4541,7 @@ enum HooksCommand {
     Usage,
 }
 
-fn parse_hooks_command(input: &str) -> HooksCommand {
+pub(crate) fn parse_hooks_command(input: &str) -> HooksCommand {
     let raw = input.trim();
     let normalized = raw.to_ascii_lowercase();
     if matches!(
@@ -4557,7 +4576,7 @@ fn parse_hooks_command(input: &str) -> HooksCommand {
     }
 }
 
-fn parse_mcp_command(input: &str) -> McpCommand {
+pub(crate) fn parse_mcp_command(input: &str) -> McpCommand {
     let raw = input.trim();
     let normalized = raw.to_ascii_lowercase();
     if matches!(
@@ -4597,7 +4616,7 @@ fn parse_mcp_command(input: &str) -> McpCommand {
     }
 }
 
-fn parse_vim_command(input: &str) -> VimCommand {
+pub(crate) fn parse_vim_command(input: &str) -> VimCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "state" | "show" | "current" | "info" => VimCommand::Status,
         "json" | "--json" | "status --json" | "state --json" | "show --json" | "current --json"
@@ -4608,7 +4627,7 @@ fn parse_vim_command(input: &str) -> VimCommand {
     }
 }
 
-fn parse_ide_command(input: &str) -> IdeCommand {
+pub(crate) fn parse_ide_command(input: &str) -> IdeCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "state" | "show" => IdeCommand::Status,
         "json" | "--json" | "status --json" | "state --json" | "show --json" => IdeCommand::Json,
@@ -4617,7 +4636,7 @@ fn parse_ide_command(input: &str) -> IdeCommand {
     }
 }
 
-fn parse_bug_command(input: &str) -> BugCommand {
+pub(crate) fn parse_bug_command(input: &str) -> BugCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "report" | "template" | "status" | "show" => BugCommand::Template,
         "json" | "--json" | "status --json" | "show --json" | "template --json"
@@ -4641,7 +4660,7 @@ fn copy_usage_text() -> &'static str {
     "/copy [status|show|info|json|--json|status --json|show --json|info --json|last|latest|response|assistant|assistant-response]"
 }
 
-fn parse_hotkeys_command(input: &str) -> HotkeysCommand {
+pub(crate) fn parse_hotkeys_command(input: &str) -> HotkeysCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "show" | "list" | "help" => HotkeysCommand::Show,
         "json" | "--json" | "status --json" | "show --json" | "list --json" => HotkeysCommand::Json,
@@ -4649,7 +4668,7 @@ fn parse_hotkeys_command(input: &str) -> HotkeysCommand {
     }
 }
 
-fn hotkeys_usage_text() -> &'static str {
+pub(crate) fn hotkeys_usage_text() -> &'static str {
     "/hotkeys [status|show|list|help|json|--json|status --json|show --json|list --json]"
 }
 
@@ -4707,7 +4726,7 @@ fn abort_usage_text() -> &'static str {
     "/abort [status|state|show|info|json|--json|status --json|state --json|show --json|info --json|cancel|stop|interrupt]"
 }
 
-fn parse_notify_command(input: &str) -> NotifyCommand {
+pub(crate) fn parse_notify_command(input: &str) -> NotifyCommand {
     match input.trim().to_ascii_lowercase().as_str() {
         "" | "status" | "state" | "show" => NotifyCommand::Status,
         "json" | "--json" | "status --json" | "state --json" | "show --json" => NotifyCommand::Json,
@@ -4740,7 +4759,7 @@ fn handle_notify_command(raw: &str, cfg: &mut Arc<LibertaiConfig>) -> Result<()>
     Ok(())
 }
 
-fn set_turn_notifications(cfg: &mut Arc<LibertaiConfig>, enabled: bool) -> Result<()> {
+pub(crate) fn set_turn_notifications(cfg: &mut Arc<LibertaiConfig>, enabled: bool) -> Result<()> {
     let mut next = cfg.as_ref().clone();
     next.code_turn_notifications = enabled;
     crate::config::save(&next).context("save config")?;
@@ -4761,11 +4780,11 @@ fn print_notify_status(cfg: &LibertaiConfig) {
     println!("{DIM}  usage:{RESET} {}", notify_usage_text());
 }
 
-fn notify_usage_text() -> &'static str {
+pub(crate) fn notify_usage_text() -> &'static str {
     "/notify [on|enable|enabled|off|disable|disabled|clear|status|state|show|json|--json|status --json|state --json|show --json|test|ping]"
 }
 
-fn notify_json_payload(cfg: &LibertaiConfig, query: &str) -> serde_json::Value {
+pub(crate) fn notify_json_payload(cfg: &LibertaiConfig, query: &str) -> serde_json::Value {
     json!({
         "command": "notify",
         "surface": "terminal",
@@ -4950,7 +4969,7 @@ fn print_theme_status_json(query: &str) {
     }
 }
 
-fn theme_json_payload(query: &str) -> serde_json::Value {
+pub(crate) fn theme_json_payload(query: &str) -> serde_json::Value {
     json!({
         "surface": "terminal",
         "command": "theme",
@@ -4981,11 +5000,11 @@ fn theme_json_payload(query: &str) -> serde_json::Value {
     })
 }
 
-const VIM_USAGE: &str =
+pub(crate) const VIM_USAGE: &str =
     "/vim [status|state|show|current|info|json|--json|status --json|state --json|show --json|current --json|info --json|on|enable|enabled|true|off|disable|disabled|false]";
-const IDE_USAGE: &str =
+pub(crate) const IDE_USAGE: &str =
     "/ide [status|state|show|json|--json|status --json|state --json|show --json|open|settings|edit]";
-const BUG_USAGE: &str =
+pub(crate) const BUG_USAGE: &str =
     "/bug [report|template|status|show|json|--json|status --json|show --json|template --json|report --json]";
 
 fn print_vim_status(command: VimCommand, query: &str) {
@@ -5019,7 +5038,7 @@ fn print_vim_status(command: VimCommand, query: &str) {
     }
 }
 
-fn vim_json_payload(query: &str) -> serde_json::Value {
+pub(crate) fn vim_json_payload(query: &str) -> serde_json::Value {
     json!({
         "command": "vim",
         "surface": "terminal",
@@ -5065,7 +5084,7 @@ fn print_ide_status(command: IdeCommand, query: &str) {
     }
 }
 
-fn ide_json_payload(query: &str) -> serde_json::Value {
+pub(crate) fn ide_json_payload(query: &str) -> serde_json::Value {
     json!({
         "command": "ide",
         "surface": "terminal",
@@ -8574,7 +8593,7 @@ fn build_review_slash_prompt(command: &str, scope: &str) -> Result<String> {
     }
 }
 
-fn review_prompt(security: bool, scope: &str) -> String {
+pub(crate) fn review_prompt(security: bool, scope: &str) -> String {
     let scope = scope.trim();
     let scope_line = if scope.is_empty() {
         "User-requested scope: current repository changes.".to_string()
@@ -9082,20 +9101,13 @@ fn mark_all_pr_comment_files(viewed: bool) {
     }
 }
 
-fn stage_pr_comment_draft(input: &str, drafts: &mut Vec<PrCommentDraft>) {
-    match parse_pr_comment_draft(input) {
-        Ok(draft) => {
-            println!(
-                "{DIM}  staged PR review draft {}:{}. Use /pr_comments drafts submit to publish queued thread(s).{RESET}",
-                draft.path, draft.line
-            );
-            drafts.push(draft);
-        }
-        Err(e) => eprintln!("{DIM}  /pr_comments: {e:#}{RESET}"),
-    }
+pub(crate) fn stage_pr_comment_draft(input: &str, drafts: &mut Vec<PrCommentDraft>) -> Result<PrCommentDraft> {
+    let draft = parse_pr_comment_draft(input)?;
+    drafts.push(draft.clone());
+    Ok(draft)
 }
 
-fn print_pr_comment_drafts(drafts: &[PrCommentDraft]) {
+pub(crate) fn print_pr_comment_drafts(drafts: &[PrCommentDraft]) {
     if drafts.is_empty() {
         println!("{DIM}  /pr_comments drafts: no queued draft review threads.{RESET}");
         return;
@@ -9115,7 +9127,7 @@ fn print_pr_comment_drafts(drafts: &[PrCommentDraft]) {
     }
 }
 
-fn handle_pr_comment_drafts(input: &str, drafts: &mut Vec<PrCommentDraft>) {
+pub(crate) fn handle_pr_comment_drafts(input: &str, drafts: &mut Vec<PrCommentDraft>) {
     let trimmed = input.trim();
     let action = trimmed
         .split_whitespace()
@@ -11784,9 +11796,9 @@ fn unset_repl_config_value(cfg: &mut Arc<LibertaiConfig>, key: &str) -> Result<(
     Ok(())
 }
 
-const HOOKS_USAGE: &str =
+pub(crate) const HOOKS_USAGE: &str =
     "/hooks [status|list|state|diagnostics|diag|json|--json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|show|event|inspect <event>|open|settings|edit]";
-const MCP_USAGE: &str = "/mcp [status|list|state|show|json|--json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|server|inspect <server>|probe|probes|probe --save|probe save|probe --write|probe write|refresh|diagnostics|diag|reset|reset-sessions|open|settings|edit]";
+pub(crate) const MCP_USAGE: &str = "/mcp [status|list|state|show|json|--json|status --json|list --json|state --json|diagnostics --json|diag --json|show --json|server|inspect <server>|probe|probes|probe --save|probe save|probe --write|probe write|refresh|diagnostics|diag|reset|reset-sessions|open|settings|edit]";
 
 fn print_hooks_command(cfg: &LibertaiConfig, query: &str, command: HooksCommand) {
     match command {
@@ -11827,7 +11839,7 @@ fn print_hooks_status(cfg: &LibertaiConfig) {
     println!();
 }
 
-fn hook_event_rows(
+pub(crate) fn hook_event_rows(
     cfg: &LibertaiConfig,
 ) -> [(&'static str, &[crate::config::HookCommandConfig]); 8] {
     [
@@ -11890,7 +11902,7 @@ fn hook_json_row(
     })
 }
 
-fn hooks_json_payload(cfg: &LibertaiConfig, query: &str) -> serde_json::Value {
+pub(crate) fn hooks_json_payload(cfg: &LibertaiConfig, query: &str) -> serde_json::Value {
     let mut rows = Vec::new();
     let mut events = Vec::new();
     let mut enabled_total = 0usize;
@@ -11945,7 +11957,7 @@ fn print_hook_event_details(cfg: &LibertaiConfig, event: &str) {
     }
 }
 
-fn hooks_for_event<'a>(
+pub(crate) fn hooks_for_event<'a>(
     cfg: &'a LibertaiConfig,
     event: &str,
 ) -> Option<(&'static str, &'a [crate::config::HookCommandConfig])> {
@@ -12092,7 +12104,7 @@ fn mcp_server_json_row(name: &str, server: &crate::config::McpServerConfig) -> s
     })
 }
 
-fn mcp_json_payload(cfg: &LibertaiConfig, query: &str) -> serde_json::Value {
+pub(crate) fn mcp_json_payload(cfg: &LibertaiConfig, query: &str) -> serde_json::Value {
     let exposure = mcp_exposure_summary(cfg);
     let mut servers: Vec<serde_json::Value> = cfg
         .mcp_servers
@@ -12158,7 +12170,10 @@ fn print_mcp_server_details(name: &str) {
     print!("{}", format_mcp_server_details(server_name, server));
 }
 
-fn format_mcp_server_details(name: &str, server: &crate::config::McpServerConfig) -> String {
+pub(crate) fn format_mcp_server_details(
+    name: &str,
+    server: &crate::config::McpServerConfig,
+) -> String {
     let transport = if server.transport.trim().is_empty() {
         "stdio"
     } else {
@@ -12307,15 +12322,15 @@ fn append_mcp_prompt_details(out: &mut String, prompts: &[crate::config::McpProm
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct McpExposureSummary {
-    mcp_call: bool,
-    named_tools: usize,
-    resource_reader: bool,
-    prompt_getter: bool,
-    subscription_candidates: usize,
+pub(crate) struct McpExposureSummary {
+    pub(crate) mcp_call: bool,
+    pub(crate) named_tools: usize,
+    pub(crate) resource_reader: bool,
+    pub(crate) prompt_getter: bool,
+    pub(crate) subscription_candidates: usize,
 }
 
-fn mcp_exposure_summary(cfg: &LibertaiConfig) -> McpExposureSummary {
+pub(crate) fn mcp_exposure_summary(cfg: &LibertaiConfig) -> McpExposureSummary {
     let mut named_tools = 0usize;
     let mut enabled_resources = 0usize;
     let mut enabled_prompts = 0usize;
@@ -12633,7 +12648,124 @@ fn print_hook_section(event: &str, hooks: &[crate::config::HookCommandConfig]) {
     }
 }
 
-fn format_hook_event_details(event: &str, hooks: &[crate::config::HookCommandConfig]) -> String {
+/// Non-printing twin of [`print_hook_section`]: builds the same per-event
+/// hook listing text but returns it instead of printing. Reused by the
+/// ratatui `/hooks` status adapter (which renders the string into the
+/// transcript).
+pub(crate) fn hook_section_text(event: &str, hooks: &[crate::config::HookCommandConfig]) -> String {
+    if hooks.is_empty() {
+        return format!("  no {event} hooks configured\n");
+    }
+    let mut out = String::new();
+    for (idx, hook) in hooks.iter().enumerate() {
+        let marker = if hook.enabled { "on" } else { "off" };
+        let matcher = if hook.matcher.trim().is_empty() {
+            "*"
+        } else {
+            hook.matcher.trim()
+        };
+        let timeout = hook
+            .timeout
+            .map(|secs| format!(", timeout={secs}s"))
+            .unwrap_or_default();
+        let hook_type_key = normalized_hook_type(&hook.hook_type);
+        let shell = if hook.shell.trim().is_empty()
+            || hook_type_key == "http"
+            || hook_type_key == "prompt"
+            || hook_type_key == "agent"
+            || hook_type_key == "mcp_tool"
+        {
+            String::new()
+        } else {
+            format!(", shell={}", hook.shell.trim())
+        };
+        let async_flag = if hook.async_hook { ", async" } else { "" };
+        let once_flag = if hook.once { ", once" } else { "" };
+        let async_rewake = if hook.async_rewake {
+            ", asyncRewake"
+        } else {
+            ""
+        };
+        let source = if hook.source.trim().is_empty() {
+            String::new()
+        } else {
+            format!(", source={}", hook.source.trim())
+        };
+        let status_message = if hook.status_message.trim().is_empty() {
+            String::new()
+        } else {
+            format!(", statusMessage={}", hook.status_message.trim())
+        };
+        let review_policy = if hook.review_policy.trim().is_empty() {
+            String::new()
+        } else {
+            format!(", reviewPolicy={}", hook.review_policy.trim())
+        };
+        let metadata = hook_extra_metadata_label(hook);
+        let if_condition = if hook.if_condition.trim().is_empty() {
+            String::new()
+        } else {
+            format!(", if={}", hook.if_condition.trim())
+        };
+        let continue_on_block = if hook.continue_on_block {
+            ", continueOnBlock"
+        } else {
+            ""
+        };
+        let hook_type = if hook.hook_type.trim().is_empty() {
+            "command"
+        } else {
+            hook_type_key.as_str()
+        };
+        let target = if hook_type_key == "http" {
+            if hook.url.trim().is_empty() {
+                "(no url)".to_string()
+            } else {
+                hook.url.trim().to_string()
+            }
+        } else if hook_type_key == "prompt" || hook_type_key == "agent" {
+            if hook.prompt.trim().is_empty() {
+                "(no prompt)".to_string()
+            } else {
+                hook.prompt.trim().to_string()
+            }
+        } else if hook_type_key == "mcp_tool" {
+            if hook.server.trim().is_empty() || hook.tool.trim().is_empty() {
+                "(no mcp tool)".to_string()
+            } else {
+                format!("{}:{}", hook.server.trim(), hook.tool.trim())
+            }
+        } else if hook.command.trim().is_empty() {
+            "(no command)".to_string()
+        } else {
+            crate::commands::code_hooks::hook_command_display(hook)
+        };
+        // Build the per-hook line incrementally (the legacy `print_hook_section`
+        // formats it in one shot with `{DIM}`/`{RESET}` ANSI wrappers; here we
+        // emit plain text, so assemble the same fields in order without ANSI).
+        let mut line = String::new();
+        line.push_str(&format!("  {}. {} [{}] type={} matcher={}", idx + 1, event, marker, hook_type, matcher));
+        line.push_str(&timeout);
+        line.push_str(&shell);
+        line.push_str(async_flag);
+        line.push_str(once_flag);
+        line.push_str(async_rewake);
+        line.push_str(&source);
+        line.push_str(&status_message);
+        line.push_str(&review_policy);
+        line.push_str(&metadata);
+        line.push_str(&if_condition);
+        line.push_str(continue_on_block);
+        line.push_str(&format!(": {target}\n"));
+        out.push_str(&line);
+    }
+    out
+}
+
+pub(crate) fn format_hook_event_details(
+    event: &str,
+    hooks: &[crate::config::HookCommandConfig],
+) -> String {
     let enabled = hooks.iter().filter(|hook| hook.enabled).count();
     let async_count = hooks.iter().filter(|hook| hook.async_hook).count();
     let once_count = hooks.iter().filter(|hook| hook.once).count();
@@ -13030,7 +13162,7 @@ fn print_bug_template(provider: &str, model: &str, mode: Mode, output_style: Opt
     println!();
 }
 
-fn bug_json_payload(
+pub(crate) fn bug_json_payload(
     provider: &str,
     model: &str,
     mode: Mode,
@@ -13081,7 +13213,7 @@ fn print_bug_json(
     }
 }
 
-fn mode_label(mode: Mode) -> &'static str {
+pub(crate) fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => "normal",
         Mode::AcceptEdits => "accept-edits",
