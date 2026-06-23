@@ -30,6 +30,7 @@ pub mod code_sandbox_cli;
 pub mod code_session;
 pub mod code_skills;
 pub mod code_slash_registry;
+pub mod code_slash_router;
 pub mod code_task;
 pub mod code_team;
 pub mod code_team_spawn;

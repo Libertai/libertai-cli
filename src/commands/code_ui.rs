@@ -118,31 +118,31 @@ struct StatusLineCommandCache {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct UsageRecord {
-    provider: String,
-    model: String,
-    input: u64,
-    output: u64,
-    context_window: u32,
+pub(crate) struct UsageRecord {
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) input: u64,
+    pub(crate) output: u64,
+    pub(crate) context_window: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct UsageSummary {
-    turns: usize,
-    last_input: u64,
-    last_output: u64,
-    output_total: u64,
-    context_high_water: u64,
-    context_window: u32,
-    provider: String,
-    model: String,
+pub(crate) struct UsageSummary {
+    pub(crate) turns: usize,
+    pub(crate) last_input: u64,
+    pub(crate) last_output: u64,
+    pub(crate) output_total: u64,
+    pub(crate) context_high_water: u64,
+    pub(crate) context_window: u32,
+    pub(crate) provider: String,
+    pub(crate) model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ToolActivitySummary {
-    tool_name: String,
-    count: u64,
-    total_duration: Duration,
+pub(crate) struct ToolActivitySummary {
+    pub(crate) tool_name: String,
+    pub(crate) count: u64,
+    pub(crate) total_duration: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3773,11 +3773,11 @@ fn print_model_list(cfg: &LibertaiConfig, scoped_model_patterns: &[String]) {
     }
 }
 
-fn model_list_source(cfg: &LibertaiConfig) -> String {
+pub(crate) fn model_list_source(cfg: &LibertaiConfig) -> String {
     format!("{}/v1/models", cfg.api_base.trim_end_matches('/'))
 }
 
-fn model_list_provider() -> &'static str {
+pub(crate) fn model_list_provider() -> &'static str {
     "libertai"
 }
 
@@ -9325,13 +9325,13 @@ fn custom_slash_starts_with(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum CustomSlashResolve<'a> {
+pub(crate) enum CustomSlashResolve<'a> {
     Hit(&'a crate::commands::code_slash_registry::CustomCommand),
     NotFound,
     Ambiguous(Vec<String>),
 }
 
-fn resolve_custom_slash<'a>(
+pub(crate) fn resolve_custom_slash<'a>(
     commands: &'a [crate::commands::code_slash_registry::CustomCommand],
     name: &str,
 ) -> CustomSlashResolve<'a> {
@@ -9378,7 +9378,7 @@ fn unique_custom_slash_match<'a>(
     }
 }
 
-async fn build_custom_slash_prompt(
+pub(crate) async fn build_custom_slash_prompt(
     name: &str,
     args: &str,
     handle: &AgentSessionHandle,
@@ -10092,19 +10092,19 @@ fn quote_sh_string(raw: &str) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ShellEscapeResult {
-    stdout: String,
-    stderr: String,
-    exit_code: Option<i32>,
+pub(crate) struct ShellEscapeResult {
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) exit_code: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ShellEscapeAction {
+pub(crate) enum ShellEscapeAction {
     Run(String),
     Usage(&'static str),
 }
 
-fn shell_escape_command(rest: &str, last: Option<&str>) -> ShellEscapeAction {
+pub(crate) fn shell_escape_command(rest: &str, last: Option<&str>) -> ShellEscapeAction {
     let command = rest.trim();
     if command.is_empty() {
         return ShellEscapeAction::Usage(
@@ -10141,7 +10141,7 @@ fn run_shell_escape(command: &str, wrapper: Option<&[String]>) -> Option<String>
     }
 }
 
-fn execute_shell_escape(
+pub(crate) fn execute_shell_escape(
     cwd: &Path,
     command: &str,
     wrapper: Option<&[String]>,
@@ -10176,7 +10176,7 @@ fn shell_escape_argv(wrapper: Option<&[String]>) -> Vec<String> {
     }
 }
 
-fn shell_escape_prompt_context(command: &str, result: &ShellEscapeResult) -> String {
+pub(crate) fn shell_escape_prompt_context(command: &str, result: &ShellEscapeResult) -> String {
     let mut out = String::new();
     out.push_str("Local shell command run before this prompt:\n");
     out.push_str("$ ");
@@ -10203,7 +10203,7 @@ fn shell_escape_prompt_context(command: &str, result: &ShellEscapeResult) -> Str
     out
 }
 
-fn apply_pending_shell_context(contexts: &[String], prompt: &str) -> String {
+pub(crate) fn apply_pending_shell_context(contexts: &[String], prompt: &str) -> String {
     if contexts.is_empty() {
         return prompt.to_string();
     }
@@ -10942,7 +10942,7 @@ fn format_memory_reference_summary(
     )
 }
 
-fn usage_summary(records: &[UsageRecord]) -> Option<UsageSummary> {
+pub(crate) fn usage_summary(records: &[UsageRecord]) -> Option<UsageSummary> {
     let last = records.last()?;
     Some(UsageSummary {
         turns: records.len(),

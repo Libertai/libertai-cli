@@ -18,8 +18,11 @@ use tui_textarea::TextArea;
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
+use crate::commands::code_slash_registry;
+use crate::commands::code_slash_router::{self, BgCommand, CustomResolveResult};
 use crate::commands::code_ui::{
-    context_percent, context_tokens, context_window_for, stop_line_text,
+    apply_pending_shell_context, context_percent, context_tokens, context_window_for,
+    shell_escape_command, stop_line_text, usage_summary, ShellEscapeAction, UsageRecord,
 };
 use crate::commands::code_hooks::{tool_policy_from_config, run_post_tool_hooks, run_stop_hooks, run_user_prompt_submit_hooks, SessionHookGuard};
 use crate::commands::code_identity_prompt;
@@ -139,6 +142,11 @@ pub enum Cmd {
     SetModel(String, String),
     /// Clear the session and start fresh.
     Clear,
+    /// Run a read-only slash command on the background thread (e.g.
+    /// `/usage`, `/doctor`) — the ones that need session state only the bg
+    /// thread owns. The bg thread builds the result text and sends it back
+    /// via `AgentMsg::CommandResult`.
+    RunReadOnly(BgCommand),
 }
 
 /// The top-level App state.
@@ -201,6 +209,22 @@ pub struct App {
     /// later turn-end without a preceding Usage (e.g. an error path)
     /// simply omits the line.
     pub last_usage: Option<(StopReason, u64, u64)>,
+    /// Last shell command run via the `!`/`!!` escape, so `!!` can repeat
+    /// it. Mirrors the legacy REPL's `last_shell_command`.
+    pub last_shell_command: Option<String>,
+    /// Pending shell-escape output contexts (`!cmd`) waiting to prefix the
+    /// next real prompt. Drained + prepended on the next `Action::Submit`.
+    pub pending_shell_contexts: Vec<String>,
+    /// Optional argv prefix wrapping the shell (e.g. a `--sandbox=strict`
+    /// wrapper), honored by both the bg-thread bash tool and the `!`
+    /// shell escape. Seeded in `run()` from the same local passed to
+    /// `spawn_background`/`build_session`.
+    pub bash_command_wrapper: Option<Vec<String>>,
+    /// Custom slash commands discovered at startup via
+    /// `code_slash_registry::discover`. Tier 3 of `handle_slash_command`
+    /// resolves against this cache. A `/reload` could re-discover later
+    /// (out of scope for M3a).
+    pub custom_commands: Vec<code_slash_registry::CustomCommand>,
 }
 
 /// REPL phases.
@@ -687,6 +711,11 @@ fn spawn_background(
             let mut current_model = model.clone();
             let hook_cfg = Arc::clone(&cfg);
 
+            // Per-turn usage records accumulated on this thread, so `/usage`
+            // can build its summary from the same source as the legacy REPL
+            // (the records live where the handle lives).
+            let mut records: Vec<UsageRecord> = Vec::new();
+
             loop {
                 match cmd_rx.recv() {
                     Ok(Cmd::Prompt(prompt)) => {
@@ -751,6 +780,16 @@ fn spawn_background(
                                     cost_total: msg.usage.cost.total,
                                     stop_reason: msg.stop_reason,
                                 });
+                                // Accumulate this turn's usage so `/usage`
+                                // (routed as Cmd::RunReadOnly(BgCommand::Usage))
+                                // can summarize it with code_ui::usage_summary.
+                                records.push(UsageRecord {
+                                    provider: msg.provider.clone(),
+                                    model: msg.model.clone(),
+                                    input: input_tokens,
+                                    output: msg.usage.output,
+                                    context_window,
+                                });
                                 let _ =
                                     agent_tx.send(AgentMsg::TurnEnd { elapsed_secs: elapsed });
                                 run_stop_hooks(cfg.as_ref());
@@ -814,6 +853,7 @@ fn spawn_background(
                         {
                             Ok(new_handle) => {
                                 handle = new_handle;
+                                records.clear();
                                 let _ = agent_tx.send(AgentMsg::CommandResult(
                                     "→ fresh session.".to_string(),
                                 ));
@@ -821,6 +861,35 @@ fn spawn_background(
                             Err(e) => {
                                 let _ = agent_tx.send(AgentMsg::Error(format!("{e:#}")));
                             }
+                        }
+                    }
+                    Ok(Cmd::RunReadOnly(bg)) => {
+                        // Dispatch a read-only slash command on this thread,
+                        // where the handle + accumulated usage records live.
+                        // The result text rides back as `AgentMsg::CommandResult`
+                        // (handled by the existing CommandResult arm, which
+                        // pushes a System entry + blank separator).
+                        let text = match bg {
+                            BgCommand::Usage => usage_text(&records),
+                            BgCommand::Doctor => {
+                                doctor_text(&handle, &current_provider, &current_model, &cfg)
+                                    .await
+                            }
+                            BgCommand::ModelList { scoped_patterns } => {
+                                code_slash_router::model_list_text(&cfg, &scoped_patterns)
+                            }
+                            BgCommand::SkillsList => code_slash_router::skills_list_text(),
+                            BgCommand::MemoryShow => code_slash_router::memory_show_text(),
+                            // CustomPrompt + ShellEscape are dispatched on the
+                            // main thread (Tier 3 / the `!` escape); they are
+                            // never sent as RunReadOnly. Bind to keep the match
+                            // exhaustive and emit nothing if ever reached.
+                            BgCommand::CustomPrompt { .. } | BgCommand::ShellEscape { .. } => {
+                                String::new()
+                            }
+                        };
+                        if !text.is_empty() {
+                            let _ = agent_tx.send(AgentMsg::CommandResult(text));
                         }
                     }
                     Err(_) => break, // channel closed — main thread exited
@@ -872,6 +941,10 @@ pub fn run(
     let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
 
     // Spawn the background thread (asupersync runtime + pi session).
+    // Clone the wrapper first so the App field can keep a copy for the
+    // `!`/`!!` shell escape (which honors `--sandbox=strict` like the
+    // bg-thread bash tool).
+    let bash_command_wrapper_for_app = bash_command_wrapper.clone();
     let _bg_thread = spawn_background(
         agent_tx,
         cmd_rx,
@@ -928,6 +1001,10 @@ pub fn run(
             ..Default::default()
         },
         last_usage: None,
+        last_shell_command: None,
+        pending_shell_contexts: Vec::new(),
+        bash_command_wrapper: bash_command_wrapper_for_app,
+        custom_commands: Vec::new(),
     };
 
     // Seed the cwd + git-branch chips for the footer. These never change
@@ -936,6 +1013,13 @@ pub fn run(
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     app.bar.git_branch = current_git_branch();
+
+    // Discover custom slash commands once at startup (cheap filesystem
+    // scan) so Tier 3 of `handle_slash_command` can resolve them without a
+    // per-`!command` re-scan. A `/reload` could re-discover later — out of
+    // scope for M3a.
+    let discover_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    app.custom_commands = code_slash_registry::discover(&discover_cwd);
 
     // Run the event loop.
     let result = run_loop(terminal, &mut app, agent_rx, cmd_tx, &shared_abort);
@@ -1322,6 +1406,17 @@ fn handle_key(
                 // Clear the textarea.
                 app.textarea = TextArea::default();
                 reset_textarea_style(&mut app.textarea);
+                // Shell escape (`!`/`!!`) runs on the MAIN thread
+                // synchronously before the `/` slash check. The underlying
+                // `run_shell_escape_tui` spawns a subprocess that blocks
+                // until it exits — acceptable for a quick command the user
+                // explicitly invoked (the legacy REPL did the same). A
+                // long-running command will block the UI briefly; that
+                // matches legacy behavior and is fine for M3a.
+                if prompt.starts_with('!') {
+                    handle_shell_escape(app, &prompt);
+                    return None;
+                }
                 // Check for slash commands.
                 if prompt.starts_with('/') {
                     handle_slash_command(app, &prompt, cmd_tx)
@@ -1334,6 +1429,12 @@ fn handle_key(
                     }
                     app.history_idx = None;
                     app.stashed_live = None;
+                    // Apply pending shell-escape output contexts (`!cmd`)
+                    // as a prefix to the next real prompt, mirroring the
+                    // legacy REPL, then drain them.
+                    let prompt =
+                        apply_pending_shell_context(&app.pending_shell_contexts, &prompt);
+                    app.pending_shell_contexts.clear();
                     Some(Action::Submit(prompt))
                 }
             } else {
@@ -1384,6 +1485,166 @@ fn reset_textarea_style(ta: &mut TextArea<'static>) {
     ta.set_cursor_line_style(Style::default());
     ta.set_placeholder_text("type your message…");
     ta.set_placeholder_style(Style::default().fg(Color::DarkGray));
+}
+
+/// Handle a `!`/`!!` shell escape on the main thread, synchronously.
+///
+/// `!` runs the trailing command via `code_slash_router::run_shell_escape_tui`
+/// (which spawns a subprocess and blocks until it exits — acceptable for a
+/// quick command the user explicitly invoked, matching the legacy REPL).
+/// `!!` repeats the last shell command (`app.last_shell_command`). The
+/// captured stdout/stderr/exit is rendered as transcript lines and the
+/// `prompt_context` is stashed for the next real prompt
+/// (`app.pending_shell_contexts`). Honors `app.bash_command_wrapper` so the
+/// escape respects `--sandbox=strict` like the bg-thread bash tool.
+fn handle_shell_escape(app: &mut App, prompt: &str) {
+    let action = shell_escape_command(&prompt[1..], app.last_shell_command.as_deref());
+    match action {
+        ShellEscapeAction::Usage(msg) => {
+            app.transcript.push(TranscriptEntry::System(msg.to_string()));
+            app.transcript.push(TranscriptEntry::Blank);
+            app.scroll = 0;
+        }
+        ShellEscapeAction::Run(cmd) => {
+            let res = code_slash_router::run_shell_escape_tui(
+                &cmd,
+                app.bash_command_wrapper.as_deref(),
+            );
+            // Record the last shell command so `!!` can repeat it.
+            app.last_shell_command = Some(cmd.clone());
+            // Render the result as transcript: a `$ cmd` header, then stdout
+            // and stderr (each trimmed of trailing whitespace), then the exit
+            // code when non-zero.
+            app.transcript.push(TranscriptEntry::System(format!("$ {cmd}")));
+            if !res.stdout.is_empty() {
+                app.transcript
+                    .push(TranscriptEntry::System(res.stdout.trim_end().to_string()));
+            }
+            if !res.stderr.is_empty() {
+                app.transcript
+                    .push(TranscriptEntry::System(res.stderr.trim_end().to_string()));
+            }
+            if let Some(code) = res.exit_code {
+                if code != 0 {
+                    app.transcript
+                        .push(TranscriptEntry::System(format!("exit {code}")));
+                }
+            }
+            // Stash the prompt context for the next real prompt — only when
+            // the command actually ran (exit code present), mirroring the
+            // legacy REPL which discards context on spawn failure.
+            if res.exit_code.is_some() {
+                app.pending_shell_contexts.push(res.prompt_context);
+            }
+            app.transcript.push(TranscriptEntry::Blank);
+            app.scroll = 0;
+        }
+    }
+}
+
+/// Humanize a token count like the legacy `human_tokens` (private in
+/// `code_ui`): `>=1k` → `12.3k`, else the bare number. Inlined here so the
+/// `/usage` text can reuse the same formatting without re-exporting the
+/// private helper.
+fn human_tokens(n: u64) -> String {
+    if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Build the `/usage` text from the bg thread's accumulated usage records,
+/// reusing `code_ui::usage_summary`. Mirrors the key lines of the legacy
+/// `print_usage_summary` (which prints to stdout) but returns a plain string
+/// for the transcript.
+fn usage_text(records: &[UsageRecord]) -> String {
+    match usage_summary(records) {
+        Some(summary) => {
+            let mut out = String::new();
+            out.push_str("usage\n");
+            out.push_str(&format!("  provider/model: {}/{}\n", summary.provider, summary.model));
+            out.push_str(&format!("  turns: {}\n", summary.turns));
+            out.push_str(&format!(
+                "  last turn: {} in · {} out\n",
+                human_tokens(summary.last_input),
+                human_tokens(summary.last_output)
+            ));
+            out.push_str(&format!(
+                "  session output total: {}\n",
+                human_tokens(summary.output_total)
+            ));
+            if summary.context_window > 0 {
+                let pct = ((summary.context_high_water as f64
+                    / f64::from(summary.context_window))
+                    * 100.0)
+                    .round()
+                    .min(100.0) as u32;
+                out.push_str(&format!(
+                    "  context high-water: {pct}% · {} / {}\n",
+                    human_tokens(summary.context_high_water),
+                    human_tokens(u64::from(summary.context_window))
+                ));
+            } else {
+                out.push_str(&format!(
+                    "  context high-water: {}\n",
+                    human_tokens(summary.context_high_water)
+                ));
+            }
+            out
+        }
+        None => "usage\n  no usage recorded yet — send a prompt first.\n".to_string(),
+    }
+}
+
+/// Build the `/doctor` text on the bg thread, reusing the live
+/// `AgentSessionHandle::state` snapshot + the session config. Mirrors a
+/// trimmed subset of the legacy `print_doctor` (which prints to stdout) —
+/// enough to surface cwd, provider/model, mode, session id, persistence,
+/// transcript size, auth, and config path. Async because `state()` is async.
+async fn doctor_text(
+    handle: &AgentSessionHandle,
+    provider: &str,
+    model: &str,
+    cfg: &LibertaiConfig,
+) -> String {
+    let mut out = String::new();
+    out.push_str("doctor\n");
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|e| format!("unavailable: {e}"));
+    out.push_str(&format!("  cwd: {cwd}\n"));
+    out.push_str(&format!("  provider/model: {provider}/{model}\n"));
+    match handle.state().await {
+        Ok(state) => {
+            out.push_str(&format!(
+                "  pi session: {}\n",
+                state.session_id.as_deref().unwrap_or("not persisted")
+            ));
+            out.push_str(&format!(
+                "  session persistence: {}\n",
+                if state.save_enabled { "enabled" } else { "disabled" }
+            ));
+            out.push_str(&format!("  transcript: {} message(s)\n", state.message_count));
+            if let Some(level) = state.thinking_level {
+                out.push_str(&format!("  thinking: {level}\n"));
+            }
+        }
+        Err(e) => out.push_str(&format!("  pi session: {e}\n")),
+    }
+    out.push_str(&format!(
+        "  LibertAI auth: {}\n",
+        cfg.auth
+            .api_key
+            .as_deref()
+            .map(|_| "logged in")
+            .unwrap_or("not logged in")
+    ));
+    match crate::config::config_path() {
+        Ok(path) => out.push_str(&format!("  config path: {}\n", path.display())),
+        Err(e) => out.push_str(&format!("  config path: {e}\n")),
+    }
+    out
 }
 
 /// Handle a slash command. Returns `Some(Action)` for commands that
@@ -1497,7 +1758,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
         }
         "/help" => {
             app.transcript.push(TranscriptEntry::System(
-                "Commands: /help /exit /clear /mode /model /status /statusline /statusline-command /output-style /history".to_string(),
+                "Commands: /help /exit /clear /mode /model [/model list] /status /statusline /statusline-command /output-style /history /usage /doctor /skills list /memory show /skills /memory  !<cmd>  !!  custom templates (e.g. /apply)".to_string(),
             ));
             app.transcript.push(TranscriptEntry::Blank);
             None
@@ -1559,6 +1820,23 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             None
         }
         "/model" => {
+            // Tier 2 — `/model list [patterns…]`: route to the bg thread,
+            // which fetches the catalog via `code_slash_router::model_list_text`
+            // (a network call) and sends the listing back as
+            // `AgentMsg::CommandResult`.
+            if rest == "list" || rest.starts_with("list ") {
+                let scoped_patterns: Vec<String> = rest
+                    .strip_prefix("list")
+                    .map(|s| s.split_whitespace().map(String::from).collect())
+                    .unwrap_or_default();
+                let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::ModelList {
+                    scoped_patterns,
+                }));
+                app.transcript.push(TranscriptEntry::System(
+                    "listing models…".to_string(),
+                ));
+                return None;
+            }
             if rest.is_empty() || rest == "show" || rest == "status" {
                 app.transcript.push(TranscriptEntry::System(
                     format!("model: {}", app.bar.model_label),
@@ -1588,6 +1866,51 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     ));
                 }
             }
+            None
+        }
+        "/skills" => {
+            // Tier 2 — `/skills` or `/skills list`: list the active code-pillar
+            // skills synchronously (pure read-only I/O) via the router adapter.
+            if rest.is_empty() || rest == "list" || rest == "show" {
+                let text = code_slash_router::skills_list_text();
+                app.transcript.push(TranscriptEntry::System(text));
+                app.transcript.push(TranscriptEntry::Blank);
+            } else {
+                app.transcript.push(TranscriptEntry::System(format!(
+                    "unknown /skills subcommand: {rest}  (try /skills list)",
+                )));
+            }
+            None
+        }
+        "/memory" => {
+            // Tier 2 — `/memory` or `/memory show`: render the current project
+            // memory state synchronously via the router adapter.
+            if rest.is_empty() || rest == "show" || rest == "status" {
+                let text = code_slash_router::memory_show_text();
+                app.transcript.push(TranscriptEntry::System(text));
+                app.transcript.push(TranscriptEntry::Blank);
+            } else {
+                app.transcript.push(TranscriptEntry::System(format!(
+                    "unknown /memory subcommand: {rest}  (try /memory show)",
+                )));
+            }
+            None
+        }
+        "/usage" | "/cost" => {
+            // Tier 2 — `/usage` needs the session's accumulated usage records,
+            // which live on the bg thread. Route there and let it build the
+            // summary text (sent back as `AgentMsg::CommandResult`).
+            let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Usage));
+            app.transcript
+                .push(TranscriptEntry::System("usage…".to_string()));
+            None
+        }
+        "/doctor" => {
+            // Tier 2 — `/doctor` needs the live `AgentSessionHandle::state`
+            // snapshot, owned by the bg thread. Route there.
+            let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Doctor));
+            app.transcript
+                .push(TranscriptEntry::System("doctor…".to_string()));
             None
         }
         "/status" => {
@@ -1719,10 +2042,51 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             None
         }
         _ => {
-            app.transcript.push(TranscriptEntry::System(format!(
-                "unknown command: {cmd}  (try /help)",
-            )));
-            None
+            // Tier 3 — custom templates: before the unknown fallback, try
+            // `code_slash_router::resolve_custom` against the cached
+            // discovered commands. On a unique hit, expand the template
+            // (synchronous — uses the pure `code_slash_registry::expand`)
+            // and submit it as a prompt via `Cmd::Prompt`. On ambiguity,
+            // list the matching invocations. On a miss, fall through to the
+            // Tier 4 unknown message so a valid custom template never shows
+            // "unknown command".
+            match code_slash_router::resolve_custom(&app.custom_commands, cmd) {
+                CustomResolveResult::Hit(hit) => {
+                    let expanded = code_slash_registry::expand_with_context(
+                        hit,
+                        rest,
+                        &code_slash_registry::ExpansionContext::default(),
+                    );
+                    // Record the raw invocation in history (so up-arrow
+                    // recalls `/apply`, not the expansion), then submit the
+                    // expanded prompt. run_loop echoes the expanded prompt
+                    // as the User line — i.e. what's actually sent.
+                    if app.history.back().is_none_or(|last| last != input) {
+                        app.history.push_back(input.to_string());
+                        if app.history.len() > HISTORY_MAX_LIMIT {
+                            app.history.pop_front();
+                        }
+                    }
+                    app.history_idx = None;
+                    app.stashed_live = None;
+                    Some(Action::Submit(expanded))
+                }
+                CustomResolveResult::Ambiguous(names) => {
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "ambiguous command: {cmd} — {}",
+                        names.join(", "),
+                    )));
+                    app.transcript.push(TranscriptEntry::Blank);
+                    None
+                }
+                CustomResolveResult::NotFound => {
+                    // Tier 4 — only fires after tiers 1-3 all miss.
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "unknown command: {cmd}  (try /help)",
+                    )));
+                    None
+                }
+            }
         }
     }
 }
@@ -2199,6 +2563,10 @@ mod tests {
                 ..Default::default()
             },
             last_usage: None,
+            last_shell_command: None,
+            pending_shell_contexts: Vec::new(),
+            bash_command_wrapper: None,
+            custom_commands: Vec::new(),
         }
     }
 
@@ -2504,6 +2872,134 @@ mod tests {
         let action = handle_slash_command(&mut app, "/quit", &cmd_tx);
 
         assert!(matches!(action, Some(Action::Quit)));
+    }
+
+    // --- M3a: router dispatch for read-only / background-thread commands ----
+
+    // `/model list` is a Tier 2 read-only command: the catalog fetch runs on
+    // the background thread (network), so on the main thread we only push a
+    // "listing models…" placeholder System entry and route a
+    // `Cmd::RunReadOnly(BgCommand::ModelList)`. Crucially it must NOT send a
+    // `Cmd::Prompt` (it's not a prompt submission).
+    #[test]
+    fn slash_model_list_pushes_placeholder_and_routes_to_bg() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/model list", &cmd_tx);
+
+        assert!(action.is_none(), "/model list does not return an action");
+        // A non-empty System entry was pushed (the listing placeholder).
+        assert!(app.transcript.iter().any(|e| matches!(
+            e,
+            TranscriptEntry::System(ref s) if !s.is_empty()
+        )));
+        // A read-only command was routed to the background thread…
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::ModelList { scoped_patterns })) => {
+                assert!(
+                    scoped_patterns.is_empty(),
+                    "no patterns expected for bare `/model list`, got {scoped_patterns:?}"
+                );
+            }
+            other => panic!("expected Cmd::RunReadOnly(ModelList), got {other:?}"),
+        }
+        // …and, importantly, NO Cmd::Prompt was sent.
+        assert!(cmd_rx.try_recv().is_err(), "no further command expected");
+    }
+
+    // `/skills list` runs the synchronous read-only skills inventory via the
+    // router adapter and pushes the rendered text as a (non-empty) System
+    // entry. Even in a test cwd with no skills the adapter returns a
+    // non-empty "skills: none active…" body, so the entry is never blank.
+    #[test]
+    fn slash_skills_list_pushes_nonempty_system_entry() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/skills list", &cmd_tx);
+
+        assert!(action.is_none());
+        // A non-empty System entry was pushed — either the skills body (which
+        // starts with "skills") or, on an inventory error, the adapter's
+        // "/skills: <error>" line. Both are non-empty, so the requirement is
+        // simply that some System entry landed (and no Cmd::Prompt was sent).
+        let skills_entry = app
+            .transcript
+            .iter()
+            .find_map(|e| match e {
+                TranscriptEntry::System(s) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            })
+            .expect("a non-empty /skills System entry was pushed");
+        assert!(!skills_entry.is_empty());
+        // /skills list is synchronous — it sends no command to the bg thread.
+        assert!(cmd_rx.try_recv().is_err(), "/skills list sends no Cmd");
+    }
+
+    // --- M3a: pending_shell_contexts prefix the next prompt -----------------
+    //
+    // `!echo hi` runs a shell escape synchronously: it renders transcript
+    // lines and stashes the prompt-context block in
+    // `app.pending_shell_contexts`. The next real prompt is then prefixed
+    // with that context (via `apply_pending_shell_context`) and the contexts
+    // are cleared — exactly the run_loop Submit path. We drive the shell
+    // escape through the real `handle_shell_escape` helper, then assert the
+    // prefix-apply directly (the pure helper `handle_key` calls).
+
+    #[test]
+    fn shell_escape_stashes_context_then_prefixes_next_prompt() {
+        let mut app = test_app();
+
+        // `!echo hi` runs the shell escape and stashes the captured context.
+        handle_shell_escape(&mut app, "!echo hi");
+        assert_eq!(
+            app.last_shell_command.as_deref(),
+            Some("echo hi"),
+            "last shell command should be recorded for `!!`"
+        );
+        assert!(
+            !app.pending_shell_contexts.is_empty(),
+            "pending_shell_contexts should be populated after a successful `!cmd`"
+        );
+        // The stashed context carries the captured stdout.
+        let stashed = app.pending_shell_contexts.join("\n");
+        assert!(stashed.contains("hi"), "stashed context missing stdout: {stashed}");
+
+        // The next real prompt is prefixed with the stashed context.
+        let prefixed = apply_pending_shell_context(&app.pending_shell_contexts, "summarize this");
+        assert!(
+            prefixed.starts_with("Context from local shell escape commands"),
+            "expected the shell-escape context header, got: {prefixed}"
+        );
+        assert!(
+            prefixed.contains("User prompt:\nsummarize this"),
+            "expected the user prompt appended after the context, got: {prefixed}"
+        );
+
+        // After applying, run_loop clears the contexts — verify the clear is a
+        // noop once empty (the next prompt passes through unmodified).
+        app.pending_shell_contexts.clear();
+        let passthrough = apply_pending_shell_context(&app.pending_shell_contexts, "next prompt");
+        assert_eq!(passthrough, "next prompt", "empty contexts should pass the prompt through");
+    }
+
+    // `!!` repeats the last shell command: after `!echo hi`, a bare `!!` (rest
+    // `!`, last = "echo hi") re-runs it. This exercises the
+    // `shell_escape_command` repeat path through `handle_shell_escape`.
+    #[test]
+    fn shell_escape_repeat_runs_last_command() {
+        let mut app = test_app();
+        handle_shell_escape(&mut app, "!echo first");
+        let first = app.last_shell_command.clone();
+        assert_eq!(first.as_deref(), Some("echo first"));
+
+        // `!!` → rest is `!` with the recorded last command.
+        handle_shell_escape(&mut app, "!!");
+        // The repeated command is what `!!` re-ran (re-recorded as last).
+        assert_eq!(app.last_shell_command.as_deref(), Some("echo first"));
+        // Two contexts now stashed: one per run.
+        assert_eq!(app.pending_shell_contexts.len(), 2);
     }
 
     // --- M2: cost / context / template / stop-line / statusline / output-style
