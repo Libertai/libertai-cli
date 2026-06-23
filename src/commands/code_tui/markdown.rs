@@ -447,16 +447,17 @@ fn table_line(
     col_widths: &[usize],
     aligns: &[TableAlign],
 ) -> Line<'static> {
-    let ncol = col_widths.len();
     let mut spans: Vec<Span<'static>> = Vec::new();
-    for i in 0..ncol {
+    let rows = col_widths
+        .iter()
+        .zip(texts.iter().map(|s| s.as_str()))
+        .zip(cells.iter().cloned())
+        .zip(aligns.iter().copied());
+    for (i, (((&cw, text), cell_spans), align)) in rows.enumerate() {
         if i > 0 {
             spans.push(Span::raw(" | "));
         }
-        let cw = col_widths[i];
-        let text = texts.get(i).map(|s| s.as_str()).unwrap_or("");
         let tw = text.width();
-        let cell_spans = cells.get(i).cloned().unwrap_or_default();
 
         if tw > cw {
             // Truncate an overflowing cell with an ellipsis so the row
@@ -482,7 +483,6 @@ fn table_line(
             }
         } else {
             let pad = cw.saturating_sub(tw);
-            let align = aligns.get(i).copied().unwrap_or(TableAlign::Left);
             match align {
                 TableAlign::Right => {
                     spans.push(Span::raw(" ".repeat(pad)));

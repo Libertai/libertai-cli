@@ -210,7 +210,7 @@ pub fn skills_list_text() -> String {
                 let state = if entry.enabled { "on" } else { "off" };
                 let name_line = format!("  - {} [{}]", entry.name, state);
                 match entry.description.trim() {
-                    desc if desc.is_empty() => out.push_str(&format!("{name_line}\n")),
+                    "" => out.push_str(&format!("{name_line}\n")),
                     desc => out.push_str(&format!("{name_line} — {desc}\n")),
                 }
             }

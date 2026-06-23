@@ -1,3 +1,7 @@
 /target
 /.claude
 /.review-*.md
+
+# libertai CLI runtime scratch — per-session task queues + team mailboxes
+# written by `libertai agents`/`/team` test sessions and background runs.
+/.libertai
