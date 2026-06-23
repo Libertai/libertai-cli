@@ -761,12 +761,35 @@ pub fn run_shell_escape_tui(command: &str, wrapper: Option<&[String]>) -> ShellE
 /// namespace is set, otherwise the bare `name`. Mirrors the module-private
 /// `code_ui::custom_slash_invocation_name`, built here from `CustomCommand`'s
 /// public fields.
-fn invocation_name(cmd: &CustomCommand) -> String {
+pub(crate) fn invocation_name(cmd: &CustomCommand) -> String {
     cmd.namespace
         .as_deref()
         .filter(|namespace| !namespace.trim().is_empty())
         .map(|namespace| format!("{namespace}/{}", cmd.name))
         .unwrap_or_else(|| cmd.name.clone())
+}
+
+/// The slash-palette entries (`(invocation_name, description)`) for a set of
+/// custom commands, in discovery order. Each invocation name is the same
+/// `namespace/name` (or bare `name`) that [`resolve_custom`] matches against,
+/// so a palette selection round-trips cleanly through the resolver. A missing
+/// description falls back to a placeholder so the palette row is never blank.
+pub(crate) fn custom_invocation_names(
+    commands: &[CustomCommand],
+) -> Vec<(String, String)> {
+    commands
+        .iter()
+        .map(|cmd| {
+            let name = invocation_name(cmd);
+            let desc = cmd
+                .description
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("custom command")
+                .to_string();
+            (name, desc)
+        })
+        .collect()
 }
 
 /// Pick a unique match from a filtered slice, mirroring

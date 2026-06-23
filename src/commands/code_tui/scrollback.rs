@@ -20,6 +20,32 @@ const RESULT_MARKER: &str = "↳ ";
 /// (big reads, verbose bash) get a short summary instead of a wall.
 const MAX_RESULT_LINES: usize = 5;
 
+/// Count the visual rows the wrap-off `Paragraph` renderer will produce for
+/// `lines`.
+///
+/// COUNT MODEL: wrap-off + flat count. `draw` renders the transcript with
+/// `.wrap()` OFF, so ratatui 0.30's `LineTruncator` truncates each input
+/// `Line` to exactly ONE visual row — it never soft-wraps. The row-count
+/// model must therefore agree: every `Line` (empty OR over-wide) is exactly
+/// one row, i.e. `lines.len()`.
+///
+/// The previous model ceil-divided each line's display width by
+/// `usable_width`, which OVER-COUNTED over-wide lines (headings, code-block
+/// lines, single-line transcript entries): counted rows > rendered rows,
+/// inflating `max_from_top` / `scroll_from_top` and leaving blank rows above
+/// the latest content plus a misplaced scrollbar thumb at the bottom. The
+/// flat count matches the truncating renderer exactly.
+///
+/// Lines that legitimately want to wrap are PRE-WRAPPED upstream (in `draw`
+/// via `markdown::render` — headings, code blocks, paragraphs — and
+/// `wrap::word_wrap` for User / `ToolResult` text), so each pre-wrapped
+/// chunk is its own `Line` and the flat 1-per-`Line` count is correct for
+/// those too. Single-line entries (Tool / SubagentTool / SubagentEnd /
+/// System / AutoAllowed / Blank) are intentionally truncated, counted as 1.
+pub(crate) fn visual_line_count(lines: &[Line]) -> usize {
+    lines.len()
+}
+
 /// Draw the scrollback transcript.
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
@@ -206,7 +232,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
                     theme::muted()
                 };
                 let prefix = format!("{RESULT_MARKER}{name}");
-                let prefix_w = prefix.chars().count() + 1; // prefix + ": "
+                let prefix_w = prefix.width() + 2; // prefix + ": " (2 display cols)
                 let body = if output.is_empty() {
                     prefix
                 } else {
@@ -237,32 +263,39 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             TranscriptEntry::System(text) => {
                 lines.push(Line::from(Span::styled(text, theme::muted())));
             }
+            // (MED-9) Errors render in the error color, not dim — mirrors the
+            // ToolResult `is_error` styling above so failures are visible.
+            TranscriptEntry::Error(text) => {
+                lines.push(Line::from(Span::styled(text, theme::error())));
+            }
             TranscriptEntry::Blank => {
                 lines.push(Line::from(""));
             }
         }
     }
 
-    // Paragraph no longer wraps (markdown::render pre-wraps; User text is
-    // pre-wrapped above).  We must still count *visual* rows for the scroll
-    // calculation: a pre-wrapped markdown Line already fits usable_width so
-    // it is exactly one row, but the single-Line entries (Tool / System /
-    // AutoAllowed / SubagentTool / SubagentEnd) are NOT pre-wrapped and may
-    // still exceed usable_width.  Use DISPLAY width (not char count) so
-    // wide CJK / emoji glyphs do not throw the count off, and ceil-divide by
-    // usable_width — minimum 1, consistent with the pre-wrapped markdown
-    // Lines whose width is <= usable_width (rows == 1).
-    let total_visual_lines: usize = lines
-        .iter()
-        .map(|line| {
-            let w: usize = line.spans.iter().map(|s| s.content.width()).sum();
-            if w == 0 {
-                1
-            } else {
-                ((w + usable_width.saturating_sub(1)) / usable_width.max(1)).max(1)
-            }
-        })
-        .sum();
+    // COUNT MODEL: wrap-off + flat count.  Paragraph below renders with
+    // `.wrap()` OFF, so ratatui 0.30's LineTruncator truncates each input
+    // `Line` to exactly ONE visual row regardless of its display width —
+    // it never soft-wraps.  The row-count model MUST therefore agree: every
+    // `Line` (empty OR over-wide) contributes exactly one visual row.  The
+    // previous ceil(width/usable_width) count OVER-COUNTED over-wide lines
+    // (headings, code-block lines, single-line transcript entries): counted
+    // rows > rendered rows, inflating max_from_top / scroll_from_top and
+    // leaving blank rows above the latest content + a misplaced scrollbar
+    // thumb at the bottom.  The flat count below matches the truncating
+    // renderer exactly.
+    //
+    // Lines that legitimately want to wrap are PRE-WRAPPED upstream so they
+    // never reach the truncator over-wide: `markdown::render` (headings via
+    // `heading()`, code blocks via `render_code_block`, paragraphs via
+    // `wrap_spans`) and the `wrap::word_wrap` calls above for User /
+    // ToolResult text.  Each pre-wrapped chunk is its own `Line`, so the
+    // flat 1-per-Line count is also correct for those.  The remaining
+    // single-Line entries (Tool / SubagentTool / SubagentEnd / System /
+    // AutoAllowed / Blank) are intentionally truncated, counted as 1 —
+    // matching the render.
+    let total_visual_lines: usize = visual_line_count(&lines);
 
     // `app.scroll` is "offset from bottom" (0 = latest).  But
     // `Paragraph::scroll()` expects "offset from top" in *visual* lines.
@@ -291,4 +324,118 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         Rect::new(area.right().saturating_sub(1), area.y, 1, area.height),
         &mut scrollbar_state,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::code_tui::markdown;
+    use ratatui::text::Span;
+    use unicode_width::UnicodeWidthStr;
+
+    /// Build a transcript-shaped `lines` Vec the way `draw` does — a
+    /// markdown-rendered assistant heading (pre-wrapped) followed by a
+    /// single-line `Tool` entry — and assert the flat row count matches the
+    /// wrap-off renderer's row count (one row per `Line`). This is the
+    /// HIGH-1 invariant: the count model must agree with the truncating
+    /// renderer so scroll-to-bottom leaves no phantom blank rows.
+    #[test]
+    fn flat_count_matches_wrap_off_renderer() {
+        // Narrow width so a long heading must pre-wrap to several rows.
+        let usable_width = 20usize;
+
+        // A long heading with spaces — pre-wraps to several rows at width 20
+        // (each row fits the budget, so the wrap-off renderer does NOT
+        // truncate any of them). markdown::render strips the "# " prefix and
+        // word-wraps the body.
+        let heading_text = format!("# {}", "word ".repeat(17).trim_end());
+        let md_lines = markdown::render(&heading_text, usable_width);
+        assert!(
+            md_lines.len() > 1,
+            "long heading must pre-wrap to >1 row at width 20, got {}",
+            md_lines.len()
+        );
+        for (i, line) in md_lines.iter().enumerate() {
+            let w: usize = line.spans.iter().map(|s| s.content.width()).sum();
+            assert!(
+                w <= usable_width,
+                "heading row {i} ({w} cols) must fit width {usable_width} so the \
+                 wrap-off renderer does not truncate it"
+            );
+        }
+        let heading_rows = md_lines.len();
+
+        // A long single-line Tool entry — NOT pre-wrapped, so it overflows
+        // usable_width. The wrap-off renderer truncates it to ONE row; the
+        // flat count must count it as 1 (NOT ceil(width/usable_width)).
+        let tool_line = Line::from(vec![
+            Span::styled(theme::glyph::TOOL_MARKER, theme::accent()),
+            Span::raw(" "),
+            Span::styled("bash", theme::bold()),
+            Span::styled("(cargo test --lib --features very-long-flag-name)", theme::muted()),
+        ]);
+        let tool_w: usize = tool_line.spans.iter().map(|s| s.content.width()).sum();
+        assert!(
+            tool_w > usable_width,
+            "tool line ({tool_w} cols) must overflow width {usable_width} to exercise the \
+             over-wide single-line case"
+        );
+
+        let mut lines: Vec<Line> = Vec::new();
+        lines.extend(md_lines);
+        lines.push(tool_line);
+
+        // The flat count is one row per Line: heading rows + 1 tool row.
+        let expected = heading_rows + 1;
+        let total = visual_line_count(&lines);
+        assert_eq!(
+            total, expected,
+            "flat count must equal rendered rows (1 per Line); the old ceil-division \
+             model would over-count the over-wide tool line to \
+             ceil({tool_w}/{usable_width}) extra rows and drift the scroll"
+        );
+        // Explicitly: the over-wide tool line is counted as 1, not its
+        // ceil-division (the HIGH-1 regression).
+        let old_tool_rows = ((tool_w + usable_width - 1) / usable_width).max(1);
+        assert!(
+            old_tool_rows > 1,
+            "sanity: old model over-counts the tool line to {old_tool_rows} rows"
+        );
+        assert_eq!(
+            total - heading_rows, 1,
+            "the over-wide tool line contributes exactly 1 row under the flat model, \
+             not {old_tool_rows}"
+        );
+
+        // Scrolling to the bottom must leave no phantom blank rows: with a
+        // viewport >= total, max_from_top is 0 and scroll_from_top clamps
+        // to 0 — the latest content sits flush at the bottom with no blank
+        // rows above it (the bug the old over-count produced).
+        let viewport = total; // viewport exactly fits all rows
+        let max_from_top = total.saturating_sub(viewport);
+        assert_eq!(max_from_top, 0, "max_from_top is 0 when viewport fits all rows");
+        let scroll_from_top = max_from_top.saturating_sub(0).min(max_from_top);
+        assert_eq!(scroll_from_top, 0, "scroll_from_top clamps to 0 at the bottom");
+    }
+
+    /// A blank/empty `Line` is still one visual row (the renderer reserves
+    /// a row for it). The flat count must NOT collapse empty lines to 0.
+    #[test]
+    fn empty_line_is_one_row() {
+        let lines = vec![Line::from(""), Line::from(""), Line::from("x")];
+        assert_eq!(visual_line_count(&lines), 3);
+    }
+
+    /// An over-wide single line is counted as ONE row, matching the
+    /// truncating renderer — not ceil-divided. This is the core regression
+    /// guard: the old model counted this as 4 rows (61/20).
+    #[test]
+    fn over_wide_single_line_counts_as_one_row() {
+        let usable_width = 20usize;
+        let line = Line::from(Span::raw("x".repeat(61)));
+        assert_eq!(visual_line_count(std::slice::from_ref(&line)), 1);
+        // Sanity: this is the case the old ceil-division got wrong.
+        let old_count = ((61 + usable_width - 1) / usable_width).max(1);
+        assert_eq!(old_count, 4, "old model over-counted to 4, flat count is 1");
+    }
 }

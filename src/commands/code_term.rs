@@ -139,6 +139,28 @@ pub(crate) fn notify_terminal(title: &str, body: &str) -> NotifyOutcome {
     NotifyOutcome::Sent
 }
 
+/// TUI-only bell: writes a single `\x07` (BEL) RAW to stdout, out-of-band
+/// from the frame buffer, so the alt-screen never shows the line-oriented
+/// `notification` block that `notify_terminal` (a legacy-REPL primitive)
+/// splatters via `eprintln!`. Terminals read the BEL between frames, and
+/// the visible message already lives as a `TranscriptEntry::System` line in
+/// the transcript — so the bell is all that's needed. Mirrors the OSC52
+/// out-of-band write pattern in `app::handle_agent_msg`'s `AgentMsg::Osc52`
+/// arm (`stdout().write_all(...) + flush`).
+///
+/// This is the SINGLE bell mechanism for the ratatui TUI, used by the
+/// team-complete, per-agent-exit, and inline-subagent-end notify paths
+/// (each gated on `code_turn_notifications` by its caller via the
+/// `*_bell_enabled` helpers). `notify_terminal` is left intact for the
+/// legacy REPL + the `/notify` self-test.
+pub(crate) fn tui_bell() {
+    // Best-effort: a failed stdout write (rare — e.g. a closed pipe) must
+    // not crash the TUI; the bell is cosmetic.
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\x07");
+    let _ = out.flush();
+}
+
 /// One-line summary printed *instead of* an interactive prompt when a
 /// persisted allow-rule (chosen via "always allow" in a past session)
 /// resolves an approval without user input. Rendered dim by the caller.

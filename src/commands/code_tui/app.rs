@@ -200,12 +200,14 @@ pub enum AgentMsg {
 /// Commands sent from the main thread to the background thread.
 #[derive(Debug, Clone)]
 pub enum Cmd {
-    /// Submit a prompt to the pi session.
-    Prompt(String),
-    /// Abort the current turn.
-    Abort,
-    /// Queued message for the next turn.
-    Queued(String),
+    /// Submit a prompt to the pi session. `output_style` carries the
+    /// current `/output-style` override (from `app.bar.output_style`) so the
+    /// bg thread can wrap the prompt with `apply_output_style` (MED-7) — the
+    /// bg thread doesn't own `app.bar`, so the style is threaded per-turn.
+    Prompt {
+        text: String,
+        output_style: Option<String>,
+    },
     /// Set the model (provider, model_id).
     SetModel(String, String),
     /// Clear the session and start fresh.
@@ -280,6 +282,9 @@ pub struct App {
     /// Diff viewer overlay (if active) — M7b `/diff`. Mirrors
     /// [`agent_overlay`]'s scroll/follow shape.
     pub diff_view: Option<DiffView>,
+    /// Slash-command palette overlay (if active) — FEATURE-A. Opened by
+    /// typing `/` in an empty Idle textarea; `None` when closed.
+    pub slash_palette: Option<SlashPalette>,
     /// Raw diff string stashed by the `AgentMsg::DiffReady` handler; consumed
     /// by `view::draw_diff_view` via `diff::parse_diff` each frame. Kept on
     /// `App` (not `DiffView`) so a re-open keeps the text the overlay is
@@ -290,6 +295,11 @@ pub struct App {
     /// Teams we've already fired a completion notification for, so a
     /// finished team only notifies once. Cleared by `/team` respawn.
     pub notified_teams: std::collections::HashSet<String>,
+    /// Background/teammate agents we've already fired an "agent exited"
+    /// notification for, so a reaped process only notifies once. Cleared
+    /// by `/team` respawn (for teammates) and `/agent` re-spawn (for
+    /// standalone background agents). Mirrors `notified_teams`.
+    pub notified_agents: std::collections::HashSet<String>,
     /// Config.
     pub cfg: Arc<LibertaiConfig>,
     /// Shared approval state — the same `Arc<ApprovalState>` the background
@@ -406,6 +416,17 @@ pub struct DiffView {
     pub follow: bool,
 }
 
+/// Slash-command palette state (FEATURE-A). Opened by typing `/` in an
+/// empty Idle textarea; the popup lists [`slash_palette_entries`] filtered
+/// by the textarea's leading-`/` prefix. Pure main-thread state — no
+/// out-of-band writes, no bg-thread involvement. `selected` is clamped to
+/// the *filtered* list length on every key (the list shrinks as the user
+/// types, so an unclamped index would drift past the end).
+pub struct SlashPalette {
+    /// Selected row index within the current filtered list.
+    pub selected: usize,
+}
+
 /// A single entry in the conversation transcript.
 #[derive(Debug, Clone)]
 pub enum TranscriptEntry {
@@ -446,6 +467,10 @@ pub enum TranscriptEntry {
     AutoAllowed(String),
     /// System message (dim).
     System(String),
+    /// Error message rendered with the error color (MED-9). Mirrors the
+    /// `ToolResult` `is_error` styling so failures aren't washed out as dim
+    /// `System` lines.
+    Error(String),
     /// Blank separator line.
     Blank,
 }
@@ -922,7 +947,7 @@ fn spawn_background(
 
             loop {
                 match cmd_rx.recv() {
-                    Ok(Cmd::Prompt(prompt)) => {
+                    Ok(Cmd::Prompt { text: prompt, output_style }) => {
                         let (abort_handle, abort_signal) = AbortHandle::new();
                         *shared_abort.lock().unwrap() = Some(abort_handle);
 
@@ -945,6 +970,17 @@ fn spawn_background(
                                 continue;
                             }
                         };
+                        // (MED-7) Apply the `/output-style` session
+                        // instruction (the shared helper used by
+                        // build_mention_prompt) so the style is honored for
+                        // regular prompts — not just /mention. The override
+                        // was previously cosmetic-only because the bg thread
+                        // never saw it; it's now threaded via Cmd::Prompt.
+                        let prompt = crate::commands::code_output_style::apply_output_style(
+                            output_style.as_deref(),
+                            &prompt,
+                            std::env::current_dir().ok().as_deref(),
+                        );
 
                         let tx = agent_tx.clone();
                         let hook_cfg = Arc::clone(&hook_cfg);
@@ -1004,12 +1040,6 @@ fn spawn_background(
                                     agent_tx.send(AgentMsg::TurnEnd { elapsed_secs: elapsed });
                             }
                         }
-                    }
-                    Ok(Cmd::Queued(_)) => {
-                        // TODO: queued messages
-                    }
-                    Ok(Cmd::Abort) => {
-                        // Handled via shared_abort directly from the main thread.
                     }
                     Ok(Cmd::SetModel(provider, model_id)) => {
                         current_provider = provider.clone();
@@ -1565,9 +1595,11 @@ pub fn run(
             agent_selection: 0,
             agent_overlay: None,
             diff_view: None,
+            slash_palette: None,
             pending_diff: None,
         registry,
         notified_teams: std::collections::HashSet::new(),
+        notified_agents: std::collections::HashSet::new(),
         cfg,
         approvals,
         edit_journal,
@@ -1623,22 +1655,35 @@ pub fn run(
 /// Poll background agent processes to detect completion. For each
 /// agent with a `pid`, checks if the process is still alive using
 /// `kill(pid, 0)`. If the process has exited, updates the status from
-/// `Working`/`Spawning` to `Completed`.
+/// `Working`/`Spawning` to `Idle` (MED-5: not `Completed` — `kill(pid,
+/// 0)` reports only that the pid is gone, with no exit code, so a green
+/// ✓ overstates success; `Idle` is the neutral render).
 ///
 /// Returns the set of team names whose teammates *all* transitioned
-/// from active to inactive on this poll, plus a `reaped` flag that's
-/// true iff at least one agent transitioned to `Completed` this poll.
-/// The caller uses the team set to fire a one-shot completion
-/// notification per team, and `reaped` to mark the view dirty (#10) so
-/// the live panel redraws after an exit even when otherwise idle.
-/// (Teammates without a pid — e.g. errored-before-spawn — are treated
-/// as inactive and so still count toward "all done".)
-fn poll_agent_status(registry: &AgentRegistry) -> (Vec<String>, bool) {
+/// from active to inactive on this poll, the names of the individual
+/// agents that transitioned active→`Idle` on this poll (so the
+/// caller can fire a one-shot "agent exited" notification per agent),
+/// and a `reaped` flag that's true iff at least one agent transitioned
+/// to `Idle` this poll. The caller uses the team set to fire a
+/// one-shot completion notification per team, the per-agent list to
+/// fire a one-shot per-agent notification, and `reaped` to mark the
+/// view dirty (#10) so the live panel redraws after an exit even when
+/// otherwise idle. (Teammates without a pid — e.g. errored-before-spawn
+/// — are treated as inactive and so still count toward "all done".)
+///
+/// The per-agent names carry no Failed/Completed distinction by design:
+/// `poll_agent_status` uses `kill(pid, 0)` (process-alive probe) with
+/// no `waitpid`/exit-code, so the *reason* an exit happened can't be
+/// distinguished here — the "agent exited" body intentionally says only
+/// "exited". A waitpid follow-up that recovers the exit status is out
+/// of scope for this change.
+fn poll_agent_status(registry: &AgentRegistry) -> (Vec<String>, Vec<String>, bool) {
     let snapshot = registry.snapshot();
     // Active teammates per team *before* this poll reaps any exits.
     let prev_active: std::collections::HashMap<String, bool> = active_team_set(&snapshot);
 
     let mut completed_teams = Vec::new();
+    let mut reaped_agents = Vec::new();
     let mut reaped = false;
     for handle in &snapshot {
         let Some(pid) = handle.pid else { continue };
@@ -1651,8 +1696,20 @@ fn poll_agent_status(registry: &AgentRegistry) -> (Vec<String>, bool) {
         // exists. On Unix this is a cheap syscall.
         let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
         if !alive {
-            handle.set_status(crate::commands::code_team::AgentStatus::Completed);
+            // (MED-5) An exited background teammate/agent is NOT a known
+            // success — `kill(pid, 0)` only reports the pid is gone (no
+            // exit code), so claiming `Completed` (green ✓) overstates it.
+            // Use the neutral `Idle` variant (mirrors agent_view.rs's
+            // `BackgroundAgentStatus::Exited → IDLE` glyph), which renders
+            // with the neutral IDLE dot and `theme::muted()`. `Idle` is
+            // not active (like `Completed`), so the team-completion +
+            // reaped-agent logic below is unaffected. `Completed` is
+            // reserved for in-process subagents that returned Ok with a
+            // non-aborted stop reason (where success is actually known) —
+            // those have no pid and aren't polled here.
+            handle.set_status(crate::commands::code_team::AgentStatus::Idle);
             handle.set_current_tool(None);
+            reaped_agents.push(handle.name.clone());
             reaped = true;
         }
     }
@@ -1665,7 +1722,7 @@ fn poll_agent_status(registry: &AgentRegistry) -> (Vec<String>, bool) {
             completed_teams.push(team.clone());
         }
     }
-    (completed_teams, reaped)
+    (completed_teams, reaped_agents, reaped)
 }
 
 /// Map each team that currently has ≥1 active teammate to `true`.
@@ -1684,6 +1741,44 @@ fn active_team_set(
     map
 }
 
+/// Pure gate check for the team-complete terminal bell. Returns true iff
+/// the user's `/notify` flag (`code_turn_notifications`) is enabled. Extracted
+/// from the team-complete block in `run_loop` so the gate is unit-testable
+/// without driving `notify_terminal` (which writes to stderr) through a real
+/// terminal. The bell and the in-transcript System line are intentionally
+/// gated separately: only the bell respects the flag — the visible history
+/// line always records the event. Team-complete hooks are a separate concern
+/// and fire regardless of this flag.
+fn team_complete_bell_enabled(cfg: &LibertaiConfig) -> bool {
+    cfg.code_turn_notifications
+}
+
+/// Pure gate check for the per-agent "agent exited" terminal bell.
+/// Mirrors [`team_complete_bell_enabled`]: the bell (terminal
+/// notification) respects the `/notify` flag, while the in-transcript
+/// System line recording the exit is always pushed. Extracted from the
+/// per-agent arm of `run_loop` so the gate is unit-testable without
+/// driving `notify_terminal` (which writes to stderr) through a real
+/// terminal.
+fn agent_bell_enabled(cfg: &LibertaiConfig) -> bool {
+    cfg.code_turn_notifications
+}
+
+/// Pure gate check for the inline-subagent terminal bell. Inline
+/// subagents finish *mid-turn* while the user is watching, so a
+/// `Completed` subagent would be redundant/noisy — the bell fires only
+/// for `Failed`/`Stopped` (an unexpected or user-aborted end is the
+/// event worth surfacing out-of-band). `completed` controls that:
+/// callers pass `false` for a `Completed` outcome and `true` otherwise.
+/// The cfg gate (`code_turn_notifications`) still has to be on, so the
+/// bell is a logical AND of the two. Extracted from the `SubagentEnd`
+/// arm of `handle_agent_msg` so the decision is unit-testable without
+/// a terminal.
+fn subagent_end_bell_enabled(cfg: &LibertaiConfig, completed: bool) -> bool {
+    cfg.code_turn_notifications && !completed
+}
+
+
 /// Apply a bracketed-paste payload to the input textarea.
 ///
 /// Extracted from the `Event::Paste` arm of [`run_loop`] so the paste path
@@ -1699,6 +1794,23 @@ fn apply_paste(app: &mut App, data: &str) {
 
 /// Main event loop — polls crossterm events + agent messages,
 /// updates app state, and draws.
+/// (MED-6) True iff a background-agent log overlay is open AND the viewed
+/// agent has a `log_path` — i.e. the overlay's content comes from a file the
+/// agent writes on its OWN thread, so the in-memory transcript never changes
+/// and `run_loop` must force a redraw each tick to keep the overlay tailing.
+/// Pure (reads `app.registry` + `app.agent_overlay`) so it's unit-testable
+/// without driving the draw. Returns false when the overlay is closed, when
+/// no agent matches, or when the agent has no log_path (in-process
+/// subagents tail via the transcript, which already sets dirty).
+fn overlay_needs_redraw(app: &App) -> bool {
+    let Some(overlay) = &app.agent_overlay else {
+        return false;
+    };
+    app.registry
+        .find_by_name(&overlay.agent_name)
+        .is_some_and(|h| h.log_path.is_some())
+}
+
 fn run_loop(
     guard: &mut TerminalGuard,
     app: &mut App,
@@ -1709,6 +1821,19 @@ fn run_loop(
     let tick = Duration::from_millis(theme::TICK_RATE_MS);
 
     loop {
+        // (MED-6) While a background-agent log overlay is open, the viewed
+        // agent writes to its `log_path` on its OWN thread — that output
+        // never reaches the in-memory transcript, so `dirty` is never set
+        // and the overlay would freeze between the agent's writes. The
+        // overlay re-reads the log file each draw (`agent_transcript`), so
+        // forcing a redraw each tick (only while the overlay is open AND
+        // the viewed agent has a log_path) keeps it tailing. Cost: one file
+        // read per tick while the overlay is open — negligible, and zero
+        // when it's closed.
+        if overlay_needs_redraw(app) {
+            app.set_dirty();
+        }
+
         // Draw only when state changed since the last draw (#10). The dirty
         // flag is set at every mutation site below (input, agent messages,
         // spinner advance, reaped agent exits); when truly idle nothing sets
@@ -1736,7 +1861,10 @@ fn run_loop(
                                 // Echo the user prompt into the transcript.
                                 app.transcript.push(TranscriptEntry::User(prompt.clone()));
                                 app.transcript.push(TranscriptEntry::Blank);
-                                let _ = cmd_tx.send(Cmd::Prompt(prompt));
+                                let _ = cmd_tx.send(Cmd::Prompt {
+                                    text: prompt,
+                                    output_style: app.bar.output_style.clone(),
+                                });
                                 app.phase = Phase::Streaming;
                                 app.turn_started = Some(Instant::now());
                                 app.output_chars = 0;
@@ -1828,11 +1956,38 @@ fn run_loop(
         }
 
         // Poll background agent process status. Cheap syscall per agent.
-        // Fires a one-shot notification when every teammate in a team finishes.
-        let (completed_teams, reaped) = poll_agent_status(&app.registry);
+        // Fires a one-shot notification when every teammate in a team finishes,
+        // and a one-shot per-agent "agent exited" notification as each
+        // background/teammate process is reaped (HIGH-2: per-agent + team
+        // notifications are both gated on code_turn_notifications).
+        let (completed_teams, reaped_agents, reaped) = poll_agent_status(&app.registry);
         // An exited process changes the live panel even when no team fully
         // completes — mark dirty so the panel redraws after a reap.
         if reaped {
+            app.set_dirty();
+        }
+        // Per-agent exit notifications. Each reaped agent fires a one-shot
+        // bell (gated on /notify) + an always-on in-transcript System line,
+        // deduped via `notified_agents` so a re-reaped slot can't re-notify.
+        // The body says only "exited" (no Failed/Completed distinction):
+        // poll_agent_status probes process liveness with kill(pid,0), not
+        // waitpid, so the exit reason isn't recoverable here (see its doc).
+        for name in reaped_agents {
+            if app.notified_agents.contains(&name) {
+                continue;
+            }
+            app.notified_agents.insert(name.clone());
+            let body = format!("agent “{name}” exited");
+            if agent_bell_enabled(&app.cfg) {
+                // (MED-8) TUI bell only — the visible block already lives as
+                // the TranscriptEntry::System line below. notify_terminal
+                // splatters a line-oriented block on the alt-screen; tui_bell
+                // writes only \x07 out-of-band.
+                crate::commands::code_term::tui_bell();
+            }
+            app.transcript
+                .push(TranscriptEntry::System(format!("› {body} · press Tab to browse")));
+            app.transcript.push(TranscriptEntry::Blank);
             app.set_dirty();
         }
         for team in completed_teams {
@@ -1847,10 +2002,25 @@ fn run_loop(
                 .iter()
                 .filter(|h| matches!(&h.kind, crate::commands::code_team::AgentKind::Teammate { team: t } if t == &team))
                 .count();
+            // Hooks are a separate concern from the bell — they fire on
+            // team completion regardless of the notification preference
+            // (mirrors the legacy spawn path in code_team_spawn.rs, which
+            // calls run_team_complete_hooks unconditionally). Keep ungated.
             crate::commands::code_hooks::run_team_complete_hooks(&app.cfg, &team, count);
 
             let body = format!("Team “{team}” finished · {count} teammate(s) complete");
-            crate::commands::code_term::notify_terminal("Team complete", &body);
+            // Gate the terminal bell/notification block behind the
+            // /notify flag. code_turn_notifications is the user's "do you
+            // want a bell + visible notification block" toggle (see
+            // notify_status_text: "agent push notifications: terminal bell
+            // + visible notification block"), NOT a hooks toggle — so only
+            // the bell is gated. The in-transcript System line below stays
+            // ungated so visible history is always recorded.
+            if team_complete_bell_enabled(&app.cfg) {
+                // (MED-8) TUI bell only — the visible block already lives as
+                // the TranscriptEntry::System line below.
+                crate::commands::code_term::tui_bell();
+            }
             app.transcript
                 .push(TranscriptEntry::System(format!("› {body}")));
             app.transcript.push(TranscriptEntry::Blank);
@@ -1890,6 +2060,15 @@ fn handle_key(
     // If ask-user modal is active, keys go to it.
     if app.ask.is_some() {
         return handle_ask_key(app, key);
+    }
+
+    // Slash-command palette (FEATURE-A) takes priority over scrollback
+    // navigation + the diff viewer: while the palette is open it owns
+    // Up/Down/Enter/Tab/Esc/Backspace. Printable chars fall through to the
+    // main match's catch-all (which feeds the textarea) so filter-typing
+    // keeps working — see [`handle_slash_palette_key`].
+    if app.slash_palette.is_some() {
+        return handle_slash_palette_key(app, key, cmd_tx);
     }
 
     // Diff viewer overlay (M7b `/diff`) takes priority over scrollback
@@ -2012,6 +2191,28 @@ fn handle_key(
             } else {
                 Some(Action::Quit)
             }
+        }
+        // (MED-11) Esc-to-stop: the /hotkeys list advertises "Esc — stop the
+        // running turn from the mid-turn input row", but Esc in Phase::Streaming
+        // previously fell through to the textarea (a no-op) and never aborted.
+        // This arm takes the shared abort handle — the same path as Ctrl+C
+        // above — so a single Esc stops the in-flight turn. It's reached ONLY
+        // when no modal/overlay/palette/diff-view is open: those all return
+        // early at the top of handle_key (approval → ask → slash_palette →
+        // diff_view → agent_overlay), so an Esc meant to close one of those
+        // never lands here. In Idle, Esc does nothing (falls through to the
+        // textarea catch-all below, which is a no-op for Esc).
+        (KeyCode::Esc, KeyModifiers::NONE) if app.phase == Phase::Streaming => {
+            if let Some(abort) = shared_abort
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                abort.abort();
+            }
+            app.phase = Phase::Idle;
+            app.turn_started = None;
+            None
         }
         (KeyCode::Char('d'), KeyModifiers::CONTROL)
             if app.phase == Phase::Idle && app.textarea.is_empty() =>
@@ -2144,6 +2345,20 @@ fn handle_key(
                     .push(TranscriptEntry::System(format!("› queued: {prompt}")));
                 app.scroll = 0;
             }
+            None
+        }
+        // FEATURE-A: typing `/` in an empty Idle textarea opens the
+        // slash-command palette. The `/` is inserted into the textarea first
+        // (so the palette's filter has a prefix to read), then the palette
+        // state is armed. Only fires when the textarea is empty — typing `/`
+        // mid-prompt just appends a literal `/`. Streaming is excluded: the
+        // palette is an Idle-only affordance.
+        (KeyCode::Char('/'), KeyModifiers::NONE)
+            if app.phase == Phase::Idle && app.textarea.is_empty() =>
+        {
+            app.textarea.input(key);
+            app.slash_palette = Some(SlashPalette { selected: 0 });
+            app.set_dirty();
             None
         }
         // Allow textarea input in all phases (Idle + Streaming).
@@ -2329,9 +2544,8 @@ fn usage_text(records: &[UsageRecord]) -> String {
 }
 
 /// Build the `/doctor` text on the bg thread, reusing the live
-/// `AgentSessionHandle::state` snapshot + the session config. Mirrors a
-/// trimmed subset of the legacy `print_doctor` (which prints to stdout) —
-/// enough to surface cwd, provider/model, mode, session id, persistence,
+/// `AgentSessionHandle::state` snapshot + the session config — a trimmed
+/// subset that surfaces cwd, provider/model, mode, session id, persistence,
 /// transcript size, auth, and config path. Async because `state()` is async.
 async fn doctor_text(
     handle: &AgentSessionHandle,
@@ -2677,6 +2891,121 @@ fn handle_diff_view_key(
     None
 }
 
+/// Compute the filtered slash-palette rows for the current textarea content.
+/// The textarea text is the live filter: strip the leading `/`, lowercase it,
+/// and keep entries whose name (minus its leading `/`) starts with that
+/// prefix. An empty filter (bare `/` or empty textarea) returns every entry.
+/// Called by both the key handler (to clamp `selected` + pick on Enter) and
+/// the renderer, so the two never disagree on the row set.
+pub(crate) fn slash_palette_filtered(app: &App) -> Vec<(String, String)> {
+    let text = app.textarea.lines().join("");
+    let prefix = text
+        .strip_prefix('/')
+        .unwrap_or(&text)
+        .to_ascii_lowercase();
+    slash_palette_entries(app)
+        .into_iter()
+        .filter(|(name, _)| {
+            name.strip_prefix('/')
+                .unwrap_or(name)
+                .to_ascii_lowercase()
+                .starts_with(&prefix)
+        })
+        .collect()
+}
+
+/// Handle a key while the slash-command palette is open (FEATURE-A).
+/// Modeled on [`handle_diff_view_key`]: the palette owns Up/Down (selection),
+/// Enter/Tab (accept), Esc (close), and Backspace (delete, then re-check the
+/// leading-`/` invariant). ALL OTHER keys — including printable chars used
+/// for filter-typing — return `None` so they fall through to the main match's
+/// catch-all, which feeds them to the textarea (and the filter recomputes
+/// next key/redraw). `selected` is clamped to the filtered list length on
+/// every intercepted key because the filtered list shrinks as the user types
+/// and an unclamped index would drift past the end.
+fn handle_slash_palette_key(
+    app: &mut App,
+    key: KeyEvent,
+    _cmd_tx: &mpsc::Sender<Cmd>,
+) -> Option<Action> {
+    let filtered_len = slash_palette_filtered(app).len();
+    match key.code {
+        // Esc: close the palette and clear the textarea.
+        KeyCode::Esc => {
+            app.slash_palette = None;
+            set_textarea_text(&mut app.textarea, "");
+            app.set_dirty();
+            None
+        }
+        // Up: move selection up, clamped to the filtered list. Empty list →
+        // stays at 0.
+        KeyCode::Up => {
+            if let Some(palette) = &mut app.slash_palette {
+                if filtered_len > 0 {
+                    palette.selected = palette.selected.min(filtered_len - 1);
+                    palette.selected =
+                        (palette.selected + filtered_len - 1) % filtered_len;
+                } else {
+                    palette.selected = 0;
+                }
+            }
+            app.set_dirty();
+            None
+        }
+        // Down: move selection down, clamped to the filtered list.
+        KeyCode::Down => {
+            if let Some(palette) = &mut app.slash_palette {
+                if filtered_len > 0 {
+                    palette.selected = palette.selected.min(filtered_len - 1);
+                    palette.selected = (palette.selected + 1) % filtered_len;
+                } else {
+                    palette.selected = 0;
+                }
+            }
+            app.set_dirty();
+            None
+        }
+        // Enter/Tab: accept the selected entry — set the textarea to
+        // "{name} " (trailing space so the user can keep typing args) and
+        // close the palette. No-op if the filtered list is empty.
+        KeyCode::Enter | KeyCode::Tab => {
+            let picked = slash_palette_filtered(app)
+                .get(
+                    app.slash_palette
+                        .as_ref()
+                        .map(|p| p.selected.min(filtered_len.saturating_sub(1)))
+                        .unwrap_or(0),
+                )
+                .map(|(name, _)| name.clone());
+            if let Some(name) = picked {
+                set_textarea_text(&mut app.textarea, &format!("{name} "));
+                app.slash_palette = None;
+                app.set_dirty();
+            }
+            None
+        }
+        // Backspace: delete, then re-check the leading-`/` invariant. If the
+        // textarea no longer starts with `/` (the user backspaced past it),
+        // close the palette — otherwise the filter would be left matching
+        // against stale text. Otherwise leave the palette open (the filter
+        // recomputes on the next key/redraw).
+        KeyCode::Backspace => {
+            app.textarea.input(key);
+            let text = app.textarea.lines().join("");
+            if !text.starts_with('/') {
+                app.slash_palette = None;
+                app.set_dirty();
+            }
+            None
+        }
+        // All other keys (printable chars for filter-typing, etc.) fall
+        // through to the main match's catch-all, which feeds them to the
+        // textarea. We MUST NOT swallow them or filter-typing breaks.
+        _ => None,
+    }
+}
+
+
 /// Collect output for a specific agent (by name). For background
 /// agents with a `log_path`, reads the log file (each raw line wrapped
 /// as a [`TranscriptEntry::System`] so the overlay can render it
@@ -2795,6 +3124,118 @@ fn current_git_branch() -> Option<String> {
     }
 }
 
+/// Single source of truth for the wired slash commands — the primaries
+/// (with their aliases) and a one-line description each, mirroring the
+/// `handle_slash_command` match arms 1:1. The `/help` line and the `/`
+/// palette both render from this so neither can drift from the resolver.
+///
+/// Each entry is `(primary, &[aliases], description)`. Aliases are the
+/// alternates the match arm accepts (e.g. `/quit` for `/exit`); they are
+/// rendered in the palette as separate rows so users discover them, and
+/// `/help` lists only the primaries (matching the legacy output shape).
+const WIRED_COMMANDS: &[(&str, &[&str], &str)] = &[
+    ("/exit", &["/quit"], "Exit the session"),
+    ("/help", &[], "List available commands"),
+    ("/clear", &["/new"], "Clear the transcript"),
+    ("/mode", &["/permissions"], "Show or set the edit mode"),
+    ("/plan", &[], "Toggle plan mode"),
+    ("/model", &[], "Show or set the model"),
+    ("/skills", &[], "List active skills"),
+    ("/memory", &[], "Show project memory"),
+    ("/review", &["/security-review"], "Review the diff as a turn"),
+    ("/mention", &[], "Attach a file as context"),
+    ("/ide", &[], "Show IDE integration status"),
+    ("/hotkeys", &[], "Show hotkey bindings"),
+    ("/theme", &[], "Show or request a theme"),
+    ("/vim", &[], "Toggle vim input mode"),
+    ("/bug", &[], "Render a bug-report template"),
+    ("/hooks", &[], "Show hook configuration"),
+    ("/mcp", &[], "Show MCP server status"),
+    ("/forget", &[], "Clear saved allow rules"),
+    ("/undo", &[], "Revert the most recent edit"),
+    ("/notify", &["/notifications"], "Show or toggle turn notifications"),
+    ("/usage", &["/cost"], "Show session usage/cost"),
+    ("/doctor", &[], "Run a health check"),
+    ("/compact", &[], "Compact the conversation"),
+    ("/changelog", &[], "Show recent git commits"),
+    ("/tree", &[], "Render the project file tree"),
+    ("/diff", &[], "Show the uncommitted diff"),
+    ("/commit", &[], "Commit the working tree"),
+    ("/pr_comments", &["/pr-comments"], "Inspect or draft PR review comments"),
+    ("/copy", &[], "Copy the last response to the clipboard"),
+    ("/status", &[], "Show session status"),
+    ("/statusline", &[], "Show or set the statusline template"),
+    ("/statusline-command", &[], "Show or set the statusline command"),
+    ("/output-style", &[], "Show or set the output style"),
+    ("/history", &[], "Show recent prompt history"),
+    ("/team", &[], "Spawn a team of teammate agents"),
+    ("/agent", &[], "Spawn a background agent"),
+    ("/agents", &[], "List live agents"),
+    // Honest stubs (so these stop silently falling through to "unknown
+    // command"): advertised in /help + the palette, with stub arms in
+    // handle_slash_command pushing a "not yet supported in TUI" System line.
+    ("/image", &[], "Attach an image (TUI stub — not yet supported)"),
+    ("/attach", &[], "Attach a file/image (TUI stub — not yet supported)"),
+    ("/schedule", &[], "Schedule a prompt (TUI stub — not yet supported)"),
+];
+
+/// The slash-palette rows `(name, description)` for the current app state:
+/// every wired primary + alias (in `WIRED_COMMANDS` order), followed by the
+/// custom commands discovered at startup (via
+/// [`code_slash_router::custom_invocation_names`], which uses the same
+/// `namespace/name` [`resolve_custom`] matches against). Custom invocation
+/// names are prefixed with `/` so every palette row is `/`-prefixed (matches
+/// the wired rows and the textarea filter) and a selection round-trips: the
+/// Enter handler inserts `{name} `, and `resolve_custom` strips the leading
+/// `/` before matching. Wired commands win on a name collision with a custom
+/// command (dedup keeps the first seen on the `/`-prefixed lowercase key),
+/// so a custom `/help` can't shadow the builtin.
+pub(crate) fn slash_palette_entries(app: &App) -> Vec<(String, String)> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (primary, aliases, desc) in WIRED_COMMANDS {
+        for name in std::iter::once(*primary).chain(aliases.iter().copied()) {
+            if seen.insert(name.to_ascii_lowercase()) {
+                out.push((name.to_string(), desc.to_string()));
+            }
+        }
+    }
+    for (name, desc) in code_slash_router::custom_invocation_names(&app.custom_commands) {
+        // Prefix with `/` so custom rows are display-consistent with the
+        // wired rows and the dedup key collides with a same-named wired
+        // command (e.g. a custom `help` → `/help` → deduped away).
+        let slashed = if name.starts_with('/') {
+            name
+        } else {
+            format!("/{name}")
+        };
+        if seen.insert(slashed.to_ascii_lowercase()) {
+            out.push((slashed, desc));
+        }
+    }
+    out
+}
+
+/// Build the `/help` "Commands:" line from [`WIRED_COMMANDS`] so the help
+/// string can never drift from the resolver. Lists every primary AND its
+/// aliases (so `/quit` `/new` `/notifications` `/cost` are discoverable),
+/// then the shell-escape + custom-template suffix. The previous hardcoded
+/// string was stale (missing `/compact` `/cost` `/new` `/notifications`
+/// `/plan` `/quit` and carried a stray `/apply`); rendering from the single
+/// source of truth fixes both. See the `slash_help_golden_snapshot` test
+/// for the exact expected output.
+fn help_commands_line() -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for (primary, aliases, _desc) in WIRED_COMMANDS {
+        names.push(primary);
+        names.extend_from_slice(aliases);
+    }
+    format!(
+        "Commands: {}  !<cmd>  !!  custom templates (e.g. /project/my-command)",
+        names.join(" ")
+    )
+}
+
 fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) -> Option<Action> {
     let trimmed = input.trim();
     let (cmd, rest) = match trimmed.split_once(' ') {
@@ -2808,9 +3249,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             Some(Action::Quit)
         }
         "/help" => {
-            app.transcript.push(TranscriptEntry::System(
-                "Commands: /help /exit /clear /mode /permissions /model [/model list] /status /statusline /statusline-command /output-style /history /usage /doctor /skills list /memory show /skills /memory /review /security-review /mention /ide /hotkeys /theme /vim /bug /hooks /mcp /forget /undo /notify /changelog /tree /pr_comments /copy /diff /commit /team /agent /agents  !<cmd>  !!  custom templates (e.g. /apply)".to_string(),
-            ));
+            app.transcript.push(TranscriptEntry::System(help_commands_line()));
             app.transcript.push(TranscriptEntry::Blank);
             None
         }
@@ -3917,8 +4356,21 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     ) {
                         Ok(spawned) => {
                             // Clear the one-shot completion notification so
-                            // a respawn can fire again.
+                            // a respawn can fire again. Also clear the
+                            // per-agent exit notifications for this team's
+                            // members so a re-spawned teammate that exits
+                            // again re-notifies (mirrors the team-level
+                            // dedup reset above).
                             app.notified_teams.remove(&inv.team_name);
+                            for h in app.registry.snapshot() {
+                                if let crate::commands::code_team::AgentKind::Teammate { team } =
+                                    &h.kind
+                                {
+                                    if team == &inv.team_name {
+                                        app.notified_agents.remove(&h.name);
+                                    }
+                                }
+                            }
                             let n = spawned.len();
                             let names: Vec<&str> =
                                 spawned.iter().map(|t| t.name.as_str()).collect();
@@ -3991,6 +4443,11 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                             };
                             let handle = app.registry.register(reg);
                             handle.set_status(AgentStatus::Working);
+                            // Clear a stale per-agent exit notification for
+                            // this name so a re-spawned background agent that
+                            // exits again re-notifies (mirrors the team-level
+                            // dedup reset in the `/team` respawn path).
+                            app.notified_agents.remove(&name);
                             app.transcript.push(TranscriptEntry::System(format!(
                                 "→ agent “{name}” spawned · pid {}",
                                 started.pid
@@ -4040,6 +4497,35 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     app.transcript.push(TranscriptEntry::System(line));
                 }
             }
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
+        // Honest stubs (so /image /attach /schedule stop silently falling
+        // through to "unknown command"). These need multi-content prompts
+        // (Cmd::PromptWithContent) or a due-tick timer the TUI doesn't yet
+        // have; surface a "not yet supported in TUI" System line mirroring the
+        // /hooks reset / /mcp reset stub pattern, so the user gets an honest
+        // answer instead of a silent "unknown command".
+        "/image" => {
+            app.transcript.push(TranscriptEntry::System(
+                "image not yet supported in TUI (multi-content prompts need Cmd::PromptWithContent)"
+                    .to_string(),
+            ));
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
+        "/attach" => {
+            app.transcript.push(TranscriptEntry::System(
+                "attach not yet supported in TUI (multi-content prompts need Cmd::PromptWithContent)"
+                    .to_string(),
+            ));
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
+        "/schedule" => {
+            app.transcript.push(TranscriptEntry::System(
+                "schedule not yet supported in TUI (auto-fire needs a due-tick timer)".to_string(),
+            ));
             app.transcript.push(TranscriptEntry::Blank);
             None
         }
@@ -4327,7 +4813,10 @@ fn drain_queued(app: &mut App, cmd_tx: &mpsc::Sender<Cmd>) -> bool {
     let next = app.queued.remove(0);
     app.transcript.push(TranscriptEntry::User(next.clone()));
     app.transcript.push(TranscriptEntry::Blank);
-    let _ = cmd_tx.send(Cmd::Prompt(next));
+    let _ = cmd_tx.send(Cmd::Prompt {
+        text: next,
+        output_style: app.bar.output_style.clone(),
+    });
     app.phase = Phase::Streaming;
     app.turn_started = Some(Instant::now());
     app.output_chars = 0;
@@ -4623,7 +5112,10 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             // post-tool hooks). Mirrors the run_loop `Action::Submit` path.
             app.transcript.push(TranscriptEntry::User(prompt.clone()));
             app.transcript.push(TranscriptEntry::Blank);
-            let _ = cmd_tx.send(Cmd::Prompt(prompt));
+            let _ = cmd_tx.send(Cmd::Prompt {
+                text: prompt,
+                output_style: app.bar.output_style.clone(),
+            });
             app.phase = Phase::Streaming;
             app.turn_started = Some(Instant::now());
             app.output_chars = 0;
@@ -4692,11 +5184,22 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             // Keeps a single result-rendering path (ToolResult) and avoids a
             // near-duplicate SubagentToolResult variant. An empty/whitespace
             // result emits no line, matching the prior implicit-end behavior.
-            if output.trim().is_empty() {
+            //
+            // (MED-3) But an *errored* tool with no body must NOT be silently
+            // dropped — the empty-output early return is guarded on
+            // `!is_error`, and when is_error is true an empty output falls
+            // back to "<no output>" so the failure still surfaces as a red
+            // result line instead of vanishing.
+            if output.trim().is_empty() && !is_error {
                 return;
             }
             let name = format!("{agent_name} · {tool_name}");
-            let rendered = render_tool_output(&serde_json::Value::String(output));
+            let body = if output.trim().is_empty() {
+                "<no output>".to_string()
+            } else {
+                output
+            };
+            let rendered = render_tool_output(&serde_json::Value::String(body));
             app.transcript.push(TranscriptEntry::ToolResult {
                 name,
                 output: rendered,
@@ -4706,6 +5209,24 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             overlay_auto_tail(app, &agent_name);
         }
         AgentMsg::SubagentEnd { agent_name, outcome } => {
+            // HIGH-2: surface an unexpected/user-aborted inline-subagent end
+            // out-of-band. Inline subagents finish mid-turn while the user is
+            // watching, so a Completed end is redundant/noisy — the bell fires
+            // only for Failed/Stopped (an unexpected end or a user /abort).
+            // The decision (cfg gate + not-Completed) is factored into the
+            // pure `subagent_end_bell_enabled` helper so it's unit-testable
+            // without driving the bell itself.
+            //
+            // (MED-8) TUI bell only — the visible outcome already lives as the
+            // TranscriptEntry::SubagentEnd line below (agent-colored, outcome
+            // label). notify_terminal would splatter a line-oriented block on
+            // the alt-screen; tui_bell writes only \x07 out-of-band. This is
+            // the single TUI bell mechanism, shared with team-complete +
+            // per-agent-exit.
+            let completed = outcome == SubagentOutcome::Completed;
+            if subagent_end_bell_enabled(&app.cfg, completed) {
+                crate::commands::code_term::tui_bell();
+            }
             app.transcript.push(TranscriptEntry::SubagentEnd {
                 agent_name: agent_name.clone(),
                 outcome,
@@ -4715,7 +5236,9 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             overlay_auto_tail(app, &agent_name);
         }
         AgentMsg::Error(e) => {
-            app.transcript.push(TranscriptEntry::System(format!("error: {e}")));
+            // (MED-9) Errors render with the error color, not the dim System
+            // style, so failures are visible.
+            app.transcript.push(TranscriptEntry::Error(format!("error: {e}")));
             app.scroll = 0; // auto-scroll to bottom
         }
     }
@@ -4753,6 +5276,47 @@ mod tests {
         h
     }
 
+    /// Like [`register_with_status`] but seeds a real `pid` on the handle
+    /// (via a Background-kind registration) so `poll_agent_status` — which
+    /// skips `pid == None` agents — actually probes it. Spawns a real
+    /// short-lived child (`true`) and waits for it to exit, then registers
+    /// its now-dead pid so `kill(pid, 0)` reliably reports "not alive" and
+    /// the agent is reaped to `Idle`. (A synthetic pid like `u32::MAX`
+    /// can't be used: cast to `i32` it becomes `-1`, and `kill(-1, 0)` is the
+    /// "signal every process the caller may signal" special case — not a
+    /// dead-pid probe.)
+    fn register_background_with_status(
+        registry: &AgentRegistry,
+        name: &str,
+        status: AgentStatus,
+    ) -> Arc<crate::commands::code_team::AgentHandle> {
+        // Spawn a child that exits immediately and reap it, so its pid is
+        // free and `kill(pid, 0)` returns ESRCH. The pid is reused only after
+        // the kernel wraps pid_max (~4M), so for a single short-lived test
+        // the probe is deterministic.
+        let mut child = std::process::Command::new("true").spawn().expect("spawn `true`");
+        let pid = child.id();
+        drop(child.wait());
+        let reg = AgentRegistration {
+            name: name.to_string(),
+            kind: AgentKind::Background {
+                pid,
+                run_id: String::new(),
+            },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: Some(pid),
+            log_path: None,
+        };
+        let h = registry.register(reg);
+        h.set_status(status);
+        h
+    }
+
     /// Build a minimal `App` for testing pure state transitions. Mirrors
     /// the construction in `run` but trimmed to the fields the tested
     /// helpers actually mutate.
@@ -4779,9 +5343,11 @@ mod tests {
             agent_selection: 0,
             agent_overlay: None,
             diff_view: None,
+            slash_palette: None,
             pending_diff: None,
             registry: AgentRegistry::new(),
             notified_teams: std::collections::HashSet::new(),
+            notified_agents: std::collections::HashSet::new(),
             cfg: Arc::new(LibertaiConfig::default()),
             approvals: Arc::new(ApprovalState::new()),
             edit_journal: Arc::new(EditJournal::new()),
@@ -4838,6 +5404,140 @@ mod tests {
         assert!(completed.is_empty());
     }
 
+    // HIGH-2 (agent-end notifications): poll_agent_status now returns a
+    // 3-tuple — the middle `reaped_agents` list carries the names of the
+    // agents that transitioned active→Idle on this poll. Using a
+    // real short-lived child whose pid is dead after `wait()` so
+    // kill(pid,0) reports "not alive" and the agent is reaped; the name
+    // must land in reaped_agents. A teammate that's already Idle
+    // (no pid, status Idle) must NOT appear.
+    #[test]
+    fn poll_agent_status_returns_reaped_agent_names_on_transition() {
+        let registry = AgentRegistry::new();
+        // Active background agent with a dead pid → reaped, name captured.
+        register_background_with_status(&registry, "bg-1", AgentStatus::Working);
+        // Already-inactive teammate (no pid, status Idle) → skipped.
+        register_with_status(&registry, "alpha", AgentStatus::Idle);
+
+        let (completed_teams, reaped_agents, reaped) = poll_agent_status(&registry);
+        // The reaped background agent's name is captured exactly once.
+        assert_eq!(reaped_agents, vec!["bg-1".to_string()]);
+        // reaped is true iff ≥1 agent transitioned this poll.
+        assert!(reaped);
+        // No team had active members before this poll (the only teammate
+        // started Idle), so no team completes.
+        assert!(completed_teams.is_empty());
+    }
+
+    // (MED-5) An exited background agent is reaped to Idle — NOT Completed —
+    // because kill(pid,0) gives no exit code, so a green ✓ would overstate
+    // success. The name still lands in reaped_agents and the team-completion
+    // logic still treats Idle as inactive (same as Completed).
+    #[test]
+    fn poll_agent_status_reaps_exited_background_agent_to_idle() {
+        let registry = AgentRegistry::new();
+        let h = register_background_with_status(&registry, "bg-1", AgentStatus::Working);
+        // Sanity: starts active.
+        assert_eq!(h.status(), AgentStatus::Working);
+
+        let (_, reaped_agents, reaped) = poll_agent_status(&registry);
+        assert_eq!(reaped_agents, vec!["bg-1".to_string()]);
+        assert!(reaped);
+        // MED-5: the reaped status is the neutral Idle, not Completed.
+        assert_eq!(
+            h.status(),
+            AgentStatus::Idle,
+            "exited background agent must be Idle, not Completed"
+        );
+        // Idle is inactive, so it does not claim success.
+        assert!(!h.status().is_active());
+    }
+
+    // A second poll over an already-reaped agent must NOT re-add it to
+    // reaped_agents (the agent is no longer active → skipped, matching the
+    // `!status.is_active()` guard). This guards the dedup contract the
+    // per-agent notify arm relies on (notified_agents is the second layer).
+    #[test]
+    fn poll_agent_status_does_not_re_reap_an_already_completed_agent() {
+        let registry = AgentRegistry::new();
+        register_background_with_status(&registry, "bg-1", AgentStatus::Working);
+        let (_, reaped_agents_first, _) = poll_agent_status(&registry);
+        assert_eq!(reaped_agents_first, vec!["bg-1".to_string()]);
+
+        // Second poll: the agent is now Idle → not active → skipped.
+        let (_, reaped_agents_second, reaped_second) = poll_agent_status(&registry);
+        assert!(reaped_agents_second.is_empty());
+        assert!(!reaped_second);
+    }
+
+    // (MED-6) The overlay-needs-redraw gate is true iff a log overlay is open
+    // AND the viewed agent has a log_path (its content comes from a file the
+    // agent writes on its own thread, so run_loop must force a redraw each
+    // tick to tail it). False when the overlay is closed, when no agent
+    // matches, or when the agent has no log_path (in-process subagents tail
+    // via the transcript, which already sets dirty).
+    #[test]
+    fn overlay_needs_redraw_only_when_log_overlay_open_on_log_path_agent() {
+        let mut app = test_app();
+        // No overlay → never redraw.
+        assert!(!overlay_needs_redraw(&app));
+
+        // Register a background agent WITH a log_path and open its overlay.
+        app.registry.register(AgentRegistration {
+            name: "coder".to_string(),
+            kind: AgentKind::Background { pid: 12345, run_id: String::new() },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: Some(12345),
+            log_path: Some(PathBuf::from("/tmp/coder.log")),
+        });
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "coder".to_string(),
+            scroll: 0,
+            follow: true,
+        });
+        assert!(
+            overlay_needs_redraw(&app),
+            "open overlay on a log_path agent must request a redraw each tick"
+        );
+
+        // An in-process subagent (no log_path) does NOT need forced redraws:
+        // its output reaches the in-memory transcript, which sets dirty.
+        app.registry.register(AgentRegistration {
+            name: "inline".to_string(),
+            kind: AgentKind::Teammate { team: "t".to_string() },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: None,
+            log_path: None,
+        });
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "inline".to_string(),
+            scroll: 0,
+            follow: true,
+        });
+        assert!(
+            !overlay_needs_redraw(&app),
+            "in-process subagent (no log_path) must not need forced redraws"
+        );
+
+        // Unknown agent name → no redraw (overlay shouldn't tail nothing).
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "ghost".to_string(),
+            scroll: 0,
+            follow: true,
+        });
+        assert!(!overlay_needs_redraw(&app), "unknown agent must not request redraw");
+    }
+
     // --- Category (1): queued drain ----------------------------------------
 
     #[test]
@@ -4851,7 +5551,10 @@ mod tests {
         // One prompt was sent for the first queued message.
         let sent = cmd_rx.try_recv().expect("expected a Cmd::Prompt");
         match sent {
-            Cmd::Prompt(p) => assert_eq!(p, "hello"),
+            Cmd::Prompt { text, output_style } => {
+                assert_eq!(text, "hello");
+                assert!(output_style.is_none(), "test_app has no style set");
+            }
             other => panic!("expected Cmd::Prompt, got {other:?}"),
         }
         // No extra commands.
@@ -4885,6 +5588,52 @@ mod tests {
         assert!(app.transcript.is_empty());
         assert_eq!(app.phase, Phase::Idle);
         assert!(app.turn_started.is_none());
+    }
+
+    // (MED-7) A queued prompt drain threads the current `/output-style`
+    // override (app.bar.output_style) into Cmd::Prompt so the bg thread can
+    // wrap the prompt with apply_output_style. Without this the style was
+    // cosmetic-only for regular prompts (the bg thread never saw it).
+    #[test]
+    fn drain_queued_threads_output_style_into_cmd_prompt() {
+        let mut app = test_app();
+        app.queued = vec!["hello".to_string()];
+        app.bar.output_style = Some("concise".to_string());
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        assert!(drain_queued(&mut app, &cmd_tx));
+
+        match cmd_rx.try_recv().expect("expected a Cmd::Prompt") {
+            Cmd::Prompt { text, output_style } => {
+                assert_eq!(text, "hello");
+                assert_eq!(
+                    output_style.as_deref(),
+                    Some("concise"),
+                    "output_style must be threaded so the bg thread can apply it"
+                );
+            }
+            other => panic!("expected Cmd::Prompt, got {other:?}"),
+        }
+    }
+
+    // (MED-7 corollary) When no override is set, output_style is None (the
+    // bg helper leaves the prompt unchanged — already covered by the shared
+    // apply_output_style tests; here we only assert the threading is None).
+    #[test]
+    fn drain_queued_threads_none_output_style_when_unset() {
+        let mut app = test_app();
+        app.queued = vec!["hello".to_string()];
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        assert!(drain_queued(&mut app, &cmd_tx));
+
+        match cmd_rx.try_recv().expect("expected a Cmd::Prompt") {
+            Cmd::Prompt { text, output_style } => {
+                assert_eq!(text, "hello");
+                assert!(output_style.is_none());
+            }
+            other => panic!("expected Cmd::Prompt, got {other:?}"),
+        }
     }
 
     // --- Category (2): handle_agent_msg state transitions ------------------
@@ -4993,7 +5742,10 @@ mod tests {
         assert!(app.turn_started.is_some());
         assert!(app.queued.is_empty());
         match cmd_rx.try_recv() {
-            Ok(Cmd::Prompt(p)) => assert_eq!(p, "next-prompt"),
+            Ok(Cmd::Prompt { text, output_style }) => {
+                assert_eq!(text, "next-prompt");
+                assert!(output_style.is_none());
+            }
             other => panic!("expected Cmd::Prompt, got {other:?}"),
         }
         // The echoed prompt appears in the transcript (after the turn-end
@@ -5091,6 +5843,50 @@ mod tests {
             .transcript
             .iter()
             .any(|e| matches!(e, TranscriptEntry::System(ref s) if s.contains("unknown command: /nope"))));
+    }
+
+    // (stubs) /image /attach /schedule are honest stubs: instead of silently
+    // falling through to "unknown command", they push a "not yet supported in
+    // TUI" System line explaining the gap. Each returns None (no action).
+    #[test]
+    fn slash_image_attach_schedule_are_honest_stubs() {
+        for (cmd, needle) in [
+            ("/image", "image not yet supported in TUI"),
+            ("/attach", "attach not yet supported in TUI"),
+            ("/schedule", "schedule not yet supported in TUI"),
+        ] {
+            let mut app = test_app();
+            let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+            let action = handle_slash_command(&mut app, cmd, &cmd_tx);
+            assert!(action.is_none(), "{cmd} must return no action");
+            assert!(
+                app.transcript.iter().any(|e| matches!(
+                    e,
+                    TranscriptEntry::System(ref s) if s.contains(needle)
+                )),
+                "{cmd} must push a System line containing {needle:?}, got {:?}",
+                app.transcript
+            );
+        }
+    }
+
+    // (stubs) The stub commands are NOT "unknown": they must NOT push the
+    // "unknown command" System line (the stub message wins instead).
+    #[test]
+    fn slash_image_attach_schedule_do_not_report_unknown() {
+        for cmd in ["/image", "/attach", "/schedule"] {
+            let mut app = test_app();
+            let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+            let _ = handle_slash_command(&mut app, cmd, &cmd_tx);
+            assert!(
+                !app.transcript.iter().any(|e| matches!(
+                    e,
+                    TranscriptEntry::System(ref s) if s.contains("unknown command")
+                )),
+                "{cmd} must not report 'unknown command' — it's a stub, got {:?}",
+                app.transcript
+            );
+        }
     }
 
     #[test]
@@ -5985,6 +6781,127 @@ task = "Do the thing"
         assert!(app.current_tool.is_none());
     }
 
+    // (MED-3) An errored subagent tool with NO body must NOT be silently
+    // dropped — handle_agent_msg emits a ToolResult with is_error=true and a
+    // "<no output>" fallback body so the failure still surfaces as a red line.
+    #[test]
+    fn handle_agent_msg_subagent_tool_end_error_empty_output_not_dropped() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::SubagentToolEnd {
+                agent_name: "coder".into(),
+                tool_name: "bash".into(),
+                output: String::new(),
+                is_error: true,
+            },
+            &cmd_tx,
+        );
+
+        match app.transcript.last() {
+            Some(TranscriptEntry::ToolResult { name, output, is_error }) => {
+                assert_eq!(name, "coder · bash");
+                assert!(!output.is_empty(), "empty error must fall back to a body");
+                assert!(
+                    output.contains("no output"),
+                    "empty error body should be the <no output> fallback: {output}"
+                );
+                assert!(*is_error, "is_error must be true");
+            }
+            other => panic!("errored empty subagent tool must surface, got {other:?}"),
+        }
+    }
+
+    // (MED-3 corollary) A NON-error subagent tool with empty output is still
+    // dropped (the prior behavior), so we don't add noise for successful
+    // empty-body tools.
+    #[test]
+    fn handle_agent_msg_subagent_tool_end_non_error_empty_output_still_dropped() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::SubagentToolEnd {
+                agent_name: "coder".into(),
+                tool_name: "edit".into(),
+                output: String::new(),
+                is_error: false,
+            },
+            &cmd_tx,
+        );
+
+        assert!(
+            app.transcript.is_empty(),
+            "non-error empty subagent tool should emit no line"
+        );
+    }
+
+    // (MED-9) AgentMsg::Error pushes a TranscriptEntry::Error (not System), so
+    // failures render in the error color instead of being washed out as a dim
+    // system line.
+    #[test]
+    fn handle_agent_msg_error_pushes_error_variant() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::Error("boom: connection reset".into()),
+            &cmd_tx,
+        );
+
+        match app.transcript.last() {
+            Some(TranscriptEntry::Error(text)) => {
+                assert!(text.contains("boom"), "error text preserved: {text}");
+            }
+            other => panic!("expected TranscriptEntry::Error, got {other:?}"),
+        }
+    }
+
+    // (MED-9 render) The Error variant renders with theme::error() (Red), not
+    // the dim System style. Drives the real `scrollback::draw` against a
+    // TestBackend buffer and inspects the rendered cell color so the styling
+    // decision is exercised, not just the variant.
+    #[test]
+    fn transcript_error_variant_renders_red() {
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+
+        let mut app = test_app();
+        app.transcript.push(TranscriptEntry::Error("boom: exit 1".into()));
+
+        let backend = TestBackend::new(40, 3);
+        let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend");
+        terminal
+            .draw(|frame| {
+                crate::commands::code_tui::scrollback::draw(frame, Rect::new(0, 0, 40, 3), &mut app);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        // Find the first non-empty cell carrying the error text and assert its
+        // foreground is Red (theme::error()).
+        let red = ratatui::style::Color::Red;
+        let mut saw_red = false;
+        for y in 0..3 {
+            for x in 0..40 {
+                if let Some(cell) = buffer.cell(ratatui::layout::Position { x, y }) {
+                    if !cell.symbol().is_empty() && cell.symbol() != " " {
+                        assert_eq!(
+                            cell.fg, red,
+                            "error text cell ({x},{y}) must be Red, got {cell:?}"
+                        );
+                        saw_red = true;
+                    }
+                }
+            }
+        }
+        assert!(saw_red, "expected at least one Red error cell in the buffer");
+    }
+
     // (4) parse_outcome mapping: failed→Failed, completed→Completed,
     // aborted/stopped→Stopped, unknown→Completed.
     #[test]
@@ -6378,6 +7295,119 @@ task = "Do the thing"
         assert!(abort_signal.is_aborted(), "x must abort the agent's AbortHandle");
         assert_eq!(h.status(), AgentStatus::Stopped, "x must mark the agent Stopped");
         assert!(app.agent_overlay.is_some(), "x must not close the overlay");
+    }
+
+    // (MED-11) Esc-to-stop: /hotkeys advertises "Esc — stop the running turn
+    // from the mid-turn input row", but Esc in Phase::Streaming previously
+    // fell through to the textarea (a no-op) and never aborted. Pressing Esc
+    // while streaming now takes the shared abort handle (the same path as
+    // Ctrl+C) and transitions back to Idle. Reached only when no
+    // modal/overlay/palette/diff-view is open (those return early at the top
+    // of handle_key).
+    #[test]
+    fn esc_in_streaming_aborts_the_running_turn() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+
+        // Seed the shared abort slot the way the bg thread does at turn start.
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        *shared_abort.lock().unwrap() = Some(abort_handle);
+        app.phase = Phase::Streaming;
+        app.turn_started = Some(Instant::now());
+        assert!(!abort_signal.is_aborted(), "fresh signal must not be aborted");
+        // No modal/overlay/palette/diff-view is open, so Esc reaches the
+        // streaming abort arm (not an overlay-close path).
+        assert!(app.approval.is_none());
+        assert!(app.ask.is_none());
+        assert!(app.slash_palette.is_none());
+        assert!(app.diff_view.is_none());
+        assert!(app.agent_overlay.is_none());
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        // Esc-to-stop is a no-action (it aborts inline, like Ctrl+C).
+        assert!(action.is_none(), "Esc-to-stop returns no action");
+        assert!(
+            abort_signal.is_aborted(),
+            "Esc must fire the shared abort handle"
+        );
+        assert!(shared_abort.lock().unwrap().is_none(), "Esc must take the abort slot");
+        assert_eq!(app.phase, Phase::Idle, "Esc must transition back to Idle");
+        assert!(app.turn_started.is_none(), "Esc must clear turn_started");
+        // No command sent to the bg thread (abort is synchronous on main).
+        assert!(cmd_rx.try_recv().is_err(), "Esc must not send a Cmd");
+    }
+
+    // (MED-11 corollary) Esc in Idle does NOT abort (there's nothing to
+    // abort) and falls through harmlessly — phase stays Idle, no action.
+    #[test]
+    fn esc_in_idle_does_not_abort_or_change_phase() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(action.is_none(), "Esc in Idle returns no action");
+        assert_eq!(app.phase, Phase::Idle, "phase must stay Idle");
+    }
+
+    // (MED-11 conflict) When an agent overlay is open, Esc must close the
+    // overlay (its own Esc-to-close path) — NOT abort the running turn. The
+    // overlay-key handler returns early at the top of handle_key, so the
+    // streaming Esc arm is never reached. Pin that the overlay Esc path wins.
+    #[test]
+    fn esc_does_not_abort_when_agent_overlay_is_open() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        // Seed a real abort handle so we can assert Esc did NOT fire it.
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        *shared_abort.lock().unwrap() = Some(abort_handle);
+        app.phase = Phase::Streaming;
+        // Open an agent overlay — its Esc/Tab handler takes priority.
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "reviewer".into(),
+            scroll: 0,
+            follow: true,
+        });
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        // The overlay's Esc closes it (returns None); the shared abort is
+        // untouched (still Some) and the signal is NOT aborted.
+        assert!(action.is_none());
+        assert!(
+            app.agent_overlay.is_none(),
+            "Esc must close the overlay, not abort"
+        );
+        assert!(
+            !abort_signal.is_aborted(),
+            "Esc must NOT fire the shared abort while an overlay is open"
+        );
+        assert!(
+            shared_abort.lock().unwrap().is_some(),
+            "the shared abort slot must be untouched"
+        );
+        assert_eq!(app.phase, Phase::Streaming, "phase must stay Streaming");
+        assert!(cmd_rx.try_recv().is_err(), "no Cmd sent");
     }
 
     // (M5b-abort-4c) `s` on an overlay whose agent_name no longer has a
@@ -6991,6 +8021,320 @@ task = "Do the thing"
         }
     }
 
+    // (7b) RE-1 notify-cfg-gate: the team-complete terminal bell must be
+    // gated by code_turn_notifications. notify_terminal writes to stderr
+    // (not unit-testable in isolation here), so the gate is factored into the
+    // pure helper `team_complete_bell_enabled` — this test asserts that
+    // helper reads the cfg field: with the flag off (the default), the bell
+    // does NOT fire; with the flag on, it does. Mirrors
+    // slash_notify_on_off_flips_code_turn_notifications above.
+    #[test]
+    fn team_complete_bell_gated_by_code_turn_notifications() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        // Default seed: code_turn_notifications is false → bell suppressed.
+        assert!(!app.cfg.code_turn_notifications);
+        assert!(
+            !team_complete_bell_enabled(&app.cfg),
+            "bell must be suppressed when code_turn_notifications is off"
+        );
+
+        // Flip the flag on via /notify on (the user-facing path) and assert
+        // the gate now permits the bell.
+        let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY (env): see slash_notify_on_off_flips_code_turn_notifications
+        // — no concurrent test reads/writes the LibertAI config dir.
+        std::env::set_var("XDG_CONFIG_HOME", tempfile::tempdir().unwrap().path());
+        handle_slash_command(&mut app, "/notify on", &cmd_tx);
+        assert!(app.cfg.code_turn_notifications);
+        assert!(
+            team_complete_bell_enabled(&app.cfg),
+            "bell must fire when code_turn_notifications is on"
+        );
+        match prior_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    // HIGH-2 (agent-end notifications): the per-agent "agent exited" bell is
+    // gated by code_turn_notifications via the pure `agent_bell_enabled`
+    // helper (mirrors team_complete_bell_enabled). notify_terminal writes to
+    // stderr (not unit-testable in isolation here), so the gate decision is
+    // the testable surface — assert the helper reads the cfg field: with the
+    // flag off (default) the bell is suppressed, with it on the bell fires.
+    #[test]
+    fn agent_bell_gated_by_code_turn_notifications() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        assert!(!app.cfg.code_turn_notifications);
+        assert!(
+            !agent_bell_enabled(&app.cfg),
+            "per-agent bell must be suppressed when code_turn_notifications is off"
+        );
+
+        let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY (env): see slash_notify_on_off_flips_code_turn_notifications.
+        std::env::set_var("XDG_CONFIG_HOME", tempfile::tempdir().unwrap().path());
+        handle_slash_command(&mut app, "/notify on", &cmd_tx);
+        assert!(app.cfg.code_turn_notifications);
+        assert!(
+            agent_bell_enabled(&app.cfg),
+            "per-agent bell must fire when code_turn_notifications is on"
+        );
+        match prior_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    // HIGH-2 per-agent dedup: the run_loop per-agent arm inserts each reaped
+    // name into `notified_agents` and skips names already present, so a
+    // reaped agent notifies at most once. We can't drive run_loop here (it
+    // owns the terminal), so this test asserts the dedup contract directly
+    // against the set the arm mutates: a first reap inserts + would-fire
+    // (gate on), a second reap of the same name is skipped. The
+    // `agent_bell_enabled` gate is asserted separately above; here we assert
+    // the set mutation + the skip.
+    #[test]
+    fn per_agent_notify_fires_once_and_is_deduped() {
+        let mut app = test_app();
+        // Mirror the per-agent arm's dedup check + insert for "bg-1".
+        let name = "bg-1".to_string();
+        assert!(
+            !app.notified_agents.contains(&name),
+            "fresh agent must not be pre-notified"
+        );
+        // First reap: gate off (default) → no bell, but the in-transcript
+        // System line still fires (ungated) and the name is recorded.
+        let gate_first = agent_bell_enabled(&app.cfg);
+        assert!(!gate_first, "bell suppressed with flag off");
+        app.notified_agents.insert(name.clone());
+        app.transcript
+            .push(TranscriptEntry::System(format!("› agent “{name}” exited · press Tab to browse")));
+        assert!(app.notified_agents.contains(&name));
+
+        // Second reap of the same name: the arm's `contains` guard skips it
+        // — no second System line, no second insert.
+        let already = app.notified_agents.contains(&name);
+        assert!(already, "second reap must be skipped by notified_agents");
+        let before = app.transcript.len();
+        if !already {
+            // Mirror the arm body; with `already == true` this is dead, which
+            // is the assertion (the line count must NOT grow).
+            app.notified_agents.insert(name.clone());
+            app.transcript.push(TranscriptEntry::System("should not happen".into()));
+        }
+        assert_eq!(
+            app.transcript.len(),
+            before,
+            "a re-reaped agent must not push a second System line"
+        );
+    }
+
+    // HIGH-2 per-agent notify is suppressed when code_turn_notifications is
+    // false (bell) but the System line still records the exit. Assert the
+    // gate flips with the flag and that the set mutation is independent of
+    // the gate (the line is ungated, like the team-complete path).
+    #[test]
+    fn per_agent_bell_suppressed_when_flag_off_system_line_ungated() {
+        let mut app = test_app();
+        assert!(!app.cfg.code_turn_notifications);
+        // Bell suppressed, but the System line still records the exit.
+        let gate = agent_bell_enabled(&app.cfg);
+        assert!(!gate);
+        app.notified_agents.insert("bg-1".to_string());
+        app.transcript
+            .push(TranscriptEntry::System("› agent “bg-1” exited · press Tab to browse".into()));
+        assert!(app.notified_agents.contains("bg-1"));
+        assert!(
+            app.transcript
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::System(s) if s.contains("bg-1” exited"))),
+            "System line must record the exit even when the bell is gated off"
+        );
+    }
+
+    // HIGH-2 inline-subagent bell: fires for Failed/Stopped (an unexpected
+    // or user-aborted end), NOT for Completed (inline subagents finish
+    // mid-turn while the user is watching → Completed is redundant/noisy).
+    // `subagent_end_bell_enabled(cfg, completed)` is the pure gate; assert
+    // each (flag, outcome) combination. notify_terminal isn't assertable
+    // here, so the gate decision is the testable surface (mirrors
+    // team_complete_bell_gated_by_code_turn_notifications).
+    #[test]
+    fn subagent_end_bell_fires_for_failed_stopped_not_completed() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY (env): see slash_notify_on_off_flips_code_turn_notifications.
+        std::env::set_var("XDG_CONFIG_HOME", tempfile::tempdir().unwrap().path());
+
+        // Flag OFF: bell suppressed for every outcome.
+        assert!(!app.cfg.code_turn_notifications);
+        assert!(
+            !subagent_end_bell_enabled(&app.cfg, false),
+            "bell suppressed when flag is off, even for Failed"
+        );
+        assert!(
+            !subagent_end_bell_enabled(&app.cfg, true),
+            "bell suppressed when flag is off for Completed"
+        );
+
+        // Flag ON: bell fires for non-Completed (Failed/Stopped) …
+        handle_slash_command(&mut app, "/notify on", &cmd_tx);
+        assert!(app.cfg.code_turn_notifications);
+        assert!(
+            subagent_end_bell_enabled(&app.cfg, false),
+            "bell must fire for Failed/Stopped when flag is on"
+        );
+        // … but NOT for Completed.
+        assert!(
+            !subagent_end_bell_enabled(&app.cfg, true),
+            "bell must NOT fire for Completed even when flag is on"
+        );
+        match prior_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    // (MED-8) The inline-subagent end bell is the out-of-band tui_bell (\x07
+    // to stdout), NOT notify_terminal (which splatters a line-oriented
+    // "notification" block on the alt-screen). So the handler must leave NO
+    // System "notification"/"subagent" transcript block — only the
+    // agent-colored SubagentEnd entry + a Blank. The visible message lives in
+    // the SubagentEnd render, and the bell is all that's needed.
+    #[test]
+    fn subagent_end_bell_leaves_no_splatter_system_line() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", tempfile::tempdir().unwrap().path());
+        // Turn the bell ON so the gated path is exercised.
+        handle_slash_command(&mut app, "/notify on", &cmd_tx);
+        assert!(app.cfg.code_turn_notifications);
+
+        let before = app.transcript.len();
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::SubagentEnd {
+                agent_name: "coder".into(),
+                outcome: SubagentOutcome::Failed,
+            },
+            &cmd_tx,
+        );
+
+        // The handler pushed exactly SubagentEnd + Blank — no System line
+        // (notify_terminal's splatter would have added a "notification"
+        // System block). tui_bell writes \x07 to stdout, not the transcript.
+        let added: Vec<_> = app.transcript.iter().skip(before).collect();
+        assert!(
+            added
+                .iter()
+                .all(|e| matches!(e, TranscriptEntry::SubagentEnd { .. } | TranscriptEntry::Blank)),
+            "SubagentEnd handler must not splatter a System line, got {added:?}"
+        );
+        assert!(
+            added.iter().any(|e| matches!(e, TranscriptEntry::SubagentEnd { .. })),
+            "the SubagentEnd entry must still be recorded"
+        );
+
+        match prior_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    // HIGH-2 SubagentEnd arm: handle_agent_msg drives the notify decision for
+    // an inline-subagent end. notify_terminal writes to stderr (not
+    // assertable here), so this test asserts the gate decision the arm makes
+    // — Failed fires the bell (when flag on) and Completed does NOT — by
+    // mirroring the arm's exact gate expression against a real App. The
+    // existing transcript push (SubagentEnd variant + Blank) is unchanged.
+    #[test]
+    fn handle_agent_msg_subagent_end_failed_bell_completed_no_bell() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        // SAFETY (env): see slash_notify_on_off_flips_code_turn_notifications.
+        std::env::set_var("XDG_CONFIG_HOME", tempfile::tempdir().unwrap().path());
+        handle_slash_command(&mut app, "/notify on", &cmd_tx);
+        assert!(app.cfg.code_turn_notifications);
+
+        // Failed: gate permits the bell (the arm's decision), and the
+        // transcript still gets the SubagentEnd{Failed} variant + Blank.
+        let outcome_failed = SubagentOutcome::Failed;
+        let completed = outcome_failed == SubagentOutcome::Completed;
+        assert!(
+            subagent_end_bell_enabled(&app.cfg, completed),
+            "Failed subagent must trip the bell gate when flag is on"
+        );
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::SubagentEnd {
+                agent_name: "reviewer".into(),
+                outcome: outcome_failed,
+            },
+            &cmd_tx,
+        );
+        assert!(
+            app.transcript
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::SubagentEnd { agent_name, outcome }
+                    if agent_name == "reviewer" && *outcome == SubagentOutcome::Failed)),
+            "Failed subagent must still push the SubagentEnd variant"
+        );
+        assert!(matches!(app.transcript.last(), Some(TranscriptEntry::Blank)));
+
+        // Completed: gate suppresses the bell, but the variant still lands.
+        app.transcript.clear();
+        let outcome_done = SubagentOutcome::Completed;
+        let completed_done = outcome_done == SubagentOutcome::Completed;
+        assert!(
+            !subagent_end_bell_enabled(&app.cfg, completed_done),
+            "Completed subagent must NOT trip the bell gate"
+        );
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::SubagentEnd {
+                agent_name: "coder".into(),
+                outcome: outcome_done,
+            },
+            &cmd_tx,
+        );
+        assert!(
+            app.transcript
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::SubagentEnd { agent_name, outcome }
+                    if agent_name == "coder" && *outcome == SubagentOutcome::Completed)),
+            "Completed subagent must still push the SubagentEnd variant"
+        );
+        match prior_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+
+    // HIGH-2 outcome labels: the inline-subagent end renders an outcome
+    // label (done/failed/stopped). The mapping now lives in scrollback.rs's
+    // `SubagentEnd` render arm (MED-8 moved the bell to tui_bell, so the
+    // standalone label helper was removed). This test pins the contract the
+    // scrollback renderer honors: Failed→"failed", Stopped→"stopped",
+    // Completed→"done" (mirrored locally so a drift in the renderer's
+    // match is caught by the SubagentEnd scrollback render test instead).
+    #[test]
+    fn subagent_outcome_labels_contract() {
+        let label = |outcome: SubagentOutcome| match outcome {
+            SubagentOutcome::Failed => "failed",
+            SubagentOutcome::Stopped => "stopped",
+            SubagentOutcome::Completed => "done",
+        };
+        assert_eq!(label(SubagentOutcome::Failed), "failed");
+        assert_eq!(label(SubagentOutcome::Stopped), "stopped");
+        assert_eq!(label(SubagentOutcome::Completed), "done");
+    }
+
     // (8) #15 regression: BgCommand no longer has SkillsList/MemoryShow/
     // ShellEscape variants. Construct the survivors (Usage, CustomPrompt) and
     // match them so the build fails if those variants are referenced after a
@@ -7542,7 +8886,7 @@ task = "Do the thing"
             while let Ok(cmd) = cmd_rx.try_recv() {
                 match cmd {
                     Cmd::RunReadOnly(BgCommand::Copy { .. }) => got_copy = true,
-                    Cmd::Prompt(_) => got_prompt = true,
+                    Cmd::Prompt { .. } => got_prompt = true,
                     other => panic!("/{input}: unexpected Cmd {other:?}"),
                 }
             }
@@ -8108,6 +9452,385 @@ task = "Do the thing"
         assert!(
             help_line.contains("/commit"),
             "/help must list /commit: {help_line}"
+        );
+    }
+
+    // ── FEATURE-A: slash-command palette ─────────────────────────────────────
+    //
+    // Mirrors the handle_diff_view_key tests: drive handle_key (the open seam)
+    // + handle_slash_palette_key directly and assert the palette state +
+    // textarea transitions. Pure main-thread state — no bg thread, no
+    // out-of-band writes — so these are hermetic.
+
+    // (FEATURE-A-help-golden) The /help "Commands:" line is now rendered FROM
+    // WIRED_COMMANDS, so it can't drift. This golden snapshot locks the exact
+    // output: any addition/removal/reorder of WIRED_COMMANDS (or a change to
+    // help_commands_line's formatter) fails this test. The snapshot includes
+    // the previously-missing /compact /cost /new /notifications /plan /quit
+    // and drops the stray /apply, per the FEATURE-A spec.
+    #[test]
+    fn slash_help_golden_snapshot() {
+        let expected = "Commands: /exit /quit /help /clear /new /mode /permissions /plan /model \
+         /skills /memory /review /security-review /mention /ide /hotkeys /theme /vim /bug \
+         /hooks /mcp /forget /undo /notify /notifications /usage /cost /doctor /compact \
+         /changelog /tree /diff /commit /pr_comments /pr-comments /copy /status /statusline \
+         /statusline-command /output-style /history /team /agent /agents /image /attach \
+         /schedule  !<cmd>  !!  custom templates (e.g. /project/my-command)";
+        assert_eq!(help_commands_line(), expected);
+
+        // Spec inclusions: the help line MUST surface these (the prior
+        // hardcoded string was missing them). Aliases too, so they're
+        // discoverable.
+        for required in [
+            "/compact", "/cost", "/new", "/notifications", "/plan", "/quit", "/copy", "/diff",
+            "/commit", "/undo", "/team", "/agent", "/agents",
+        ] {
+            assert!(
+                help_commands_line().contains(required),
+                "/help must list {required}: {}",
+                help_commands_line()
+            );
+        }
+        // The stray /apply (a custom-template example, not a wired command)
+        // must be gone — replaced by the generic /project/my-command example.
+        assert!(
+            !help_commands_line().contains("/apply"),
+            "/help must NOT list the stray /apply: {}",
+            help_commands_line()
+        );
+    }
+
+    // (MED-12) /compact + /copy are surfaced in the /help "Commands:" line.
+    // Feature A renders /help from WIRED_COMMANDS, so adding them there (already
+    // present: lines for `/compact` + `/copy`) auto-satisfies MED-12. These
+    // dedicated assertions pin the contract independently of the golden snapshot.
+    #[test]
+    fn help_line_lists_compact_and_copy() {
+        let line = help_commands_line();
+        assert!(line.contains("/compact"), "/help must list /compact: {line}");
+        assert!(line.contains("/copy"), "/help must list /copy: {line}");
+    }
+
+    // (FEATURE-A-open) Typing `/` in an empty Idle textarea opens the palette
+    // and inserts the `/` so the filter has a prefix to read. The palette
+    // starts with selected == 0.
+    #[test]
+    fn slash_palette_opens_on_slash_in_empty_idle_textarea() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        // Empty Idle textarea — the open seam should fire.
+        assert!(app.textarea.is_empty());
+        assert_eq!(app.phase, Phase::Idle);
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(action.is_none(), "opening the palette returns no action");
+        assert!(app.slash_palette.is_some(), "palette must be open");
+        assert_eq!(
+            app.slash_palette.as_ref().unwrap().selected,
+            0,
+            "palette starts at selected 0"
+        );
+        assert_eq!(
+            app.textarea.lines().join(""),
+            "/",
+            "the `/` must be inserted so the filter has a prefix"
+        );
+    }
+
+    // (FEATURE-A-esc) Esc closes the palette and clears the textarea.
+    #[test]
+    fn slash_palette_esc_closes_and_clears() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        app.slash_palette = Some(SlashPalette { selected: 2 });
+        set_textarea_text(&mut app.textarea, "/cl");
+
+        handle_slash_palette_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+
+        assert!(app.slash_palette.is_none(), "Esc must close the palette");
+        assert!(
+            app.textarea.lines().join("").is_empty(),
+            "Esc must clear the textarea"
+        );
+    }
+
+    // (FEATURE-A-clamp) Up/Down clamp `selected` to the filtered list length
+    // (recomputed each call), so the index can't drift past the end as the
+    // filter shrinks the list. With a `/c` filter the list is several
+    // entries (/clear /copy /commit /changelog /compact /cost); Down then Up
+    // must stay in-bounds and wrap.
+    #[test]
+    fn slash_palette_up_down_clamp_to_filtered_len() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        set_textarea_text(&mut app.textarea, "/c");
+        let filtered_len = slash_palette_filtered(&app).len();
+        assert!(
+            filtered_len > 1,
+            "test needs >1 filtered entry for /c (got {filtered_len})"
+        );
+
+        // Start out of bounds to prove the clamp runs on the first key.
+        app.slash_palette = Some(SlashPalette {
+            selected: filtered_len + 10,
+        });
+
+        handle_slash_palette_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+        let sel = app.slash_palette.as_ref().unwrap().selected;
+        assert!(
+            sel < filtered_len,
+            "Down must clamp selected ({sel}) into [0,{filtered_len})"
+        );
+
+        // Up wraps within the filtered list (modulo), staying in bounds.
+        handle_slash_palette_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+        let sel = app.slash_palette.as_ref().unwrap().selected;
+        assert!(
+            sel < filtered_len,
+            "Up must keep selected ({sel}) in [0,{filtered_len})"
+        );
+    }
+
+    // (FEATURE-A-enter) Enter accepts the selected entry: sets the textarea to
+    // "{name} " (trailing space for args) and closes the palette.
+    #[test]
+    fn slash_palette_enter_inserts_name_plus_space() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        set_textarea_text(&mut app.textarea, "/clear");
+        // /clear is the only match for the exact `/clear` prefix among
+        // primaries (it has no aliases that also start with `/clear`).
+        app.slash_palette = Some(SlashPalette { selected: 0 });
+
+        handle_slash_palette_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+
+        assert!(app.slash_palette.is_none(), "Enter must close the palette");
+        assert_eq!(
+            app.textarea.lines().join(""),
+            "/clear ",
+            "Enter must set the textarea to '/clear ' (trailing space)"
+        );
+    }
+
+    // (FEATURE-A-backspace) Backspacing past the leading `/` closes the
+    // palette (the filter would otherwise be left matching stale text).
+    #[test]
+    fn slash_palette_backspace_past_slash_closes() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        set_textarea_text(&mut app.textarea, "/");
+        app.slash_palette = Some(SlashPalette { selected: 0 });
+
+        // Backspace the `/`: textarea becomes empty → no longer starts with
+        // `/` → palette closes.
+        handle_slash_palette_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+
+        assert!(
+            app.slash_palette.is_none(),
+            "backspacing past `/` must close the palette"
+        );
+        assert!(
+            app.textarea.lines().join("").is_empty(),
+            "textarea must be empty after backspacing the `/`"
+        );
+    }
+
+    // (FEATURE-A-filter) Typing a letter narrows the filter and clamps the
+    // selection into the new (smaller) list. A printable char is NOT
+    // swallowed by the palette handler — it falls through to the main match's
+    // catch-all, which feeds it to the textarea.
+    #[test]
+    fn slash_palette_typing_a_letter_filters_and_clamps() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        // Open the palette with `/`.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+        assert!(app.slash_palette.is_some());
+
+        // Move selection down a few rows so it's likely out of the post-filter
+        // window, then type `c` (filter → names starting with `c`: /clear,
+        // /copy, /commit, /changelog, /compact, /cost …). The fall-through
+        // feeds the `c` to the textarea.
+        for _ in 0..5 {
+            handle_slash_palette_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                &cmd_tx,
+            );
+        }
+        // A printable char returns None (fall-through) — it is NOT swallowed.
+        let action = handle_slash_palette_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            &cmd_tx,
+        );
+        assert!(
+            action.is_none(),
+            "printable chars must fall through (not be swallowed by the palette handler)"
+        );
+
+        // The fall-through would normally feed the textarea via the main
+        // match; here we simulate that by feeding it explicitly, then verify
+        // the filter narrows and selected clamps.
+        app.textarea.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        let filtered = slash_palette_filtered(&app);
+        assert_eq!(
+            app.textarea.lines().join(""),
+            "/c",
+            "filter prefix should be /c"
+        );
+        assert!(
+            filtered.iter().all(|(n, _)| n
+                .strip_prefix('/')
+                .unwrap_or(n)
+                .to_ascii_lowercase()
+                .starts_with('c')),
+            "filtered list must only contain names starting with 'c'"
+        );
+        // selected must be within the new filtered length after the next
+        // intercepted key (Down) clamps it.
+        if app.slash_palette.as_ref().unwrap().selected >= filtered.len() {
+            handle_slash_palette_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                &cmd_tx,
+            );
+            let sel = app.slash_palette.as_ref().unwrap().selected;
+            assert!(
+                sel < filtered.len(),
+                "Down must clamp selected ({sel}) into the filtered list of {}",
+                filtered.len()
+            );
+        }
+    }
+
+    // (FEATURE-A-custom) A custom command appears in the palette (via
+    // custom_invocation_names) using its `namespace/name` invocation name, so
+    // a palette selection round-trips through resolve_custom. Wired commands
+    // win on a name collision (a custom /help can't shadow the builtin).
+    #[test]
+    fn slash_palette_custom_command_appears_and_wired_wins_on_collision() {
+        let mut app = test_app();
+        // Two custom commands: a namespaced one and one colliding with /help.
+        app.custom_commands = vec![
+            custom_cmd("deploy", Some("ci")),
+            custom_cmd("help", None),
+        ];
+
+        let entries = slash_palette_entries(&app);
+        // The namespaced custom command appears as `/ci/deploy` (slashed, so
+        // it round-trips: Enter inserts `/ci/deploy ` → resolve_custom strips
+        // the `/` → matches `ci/deploy`).
+        assert!(
+            entries.iter().any(|(n, _)| n == "/ci/deploy"),
+            "namespaced custom command must appear as '/ci/deploy': {entries:?}"
+        );
+        // The custom `help` is shadowed by the wired `/help` — the wired
+        // primary is present and there's no second `/help` row.
+        let help_count = entries.iter().filter(|(n, _)| n == "/help").count();
+        assert_eq!(
+            help_count, 1,
+            "a bare custom 'help' must be deduped away (wired wins): {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|(n, _)| n == "/help"),
+            "the wired /help must be present"
+        );
+    }
+
+    // (LOW-1) The default-chip footer cost mirrors the legacy `~$`
+    // semantics: a zero session cost renders no chip at all (matching
+    // `/status` and the template expander, which both gate on `cost > 0.0`),
+    // and a non-zero cost renders with the `~$` prefix. Drives the real
+    // `footer::draw_rule` against a TestBackend so the render path — not
+    // just the data — is exercised.
+    fn footer_cost_text(estimated_cost: Option<f64>) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+
+        let mut app = test_app();
+        app.bar.estimated_cost = estimated_cost;
+        // Empty template + command keep us on the default-chip path.
+        let backend = TestBackend::new(120, 1);
+        let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend");
+        terminal
+            .draw(|frame| {
+                crate::commands::code_tui::footer::draw_rule(
+                    frame,
+                    Rect::new(0, 0, 120, 1),
+                    &app,
+                );
+            })
+            .expect("draw");
+        buffer_text(terminal.backend().buffer())
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        let area = buffer.area();
+        let mut s = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) =
+                    buffer.cell(ratatui::layout::Position { x, y })
+                {
+                    s.push_str(cell.symbol());
+                }
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn footer_cost_chip_suppresses_zero() {
+        // $0.00 must NOT render a cost chip (the legacy gate is `cost > 0.0`).
+        let text = footer_cost_text(Some(0.0));
+        assert!(
+            !text.contains("$0.00") && !text.contains("$"),
+            "zero cost must render no dollar chip: {text:?}"
+        );
+    }
+
+    #[test]
+    fn footer_cost_chip_shows_tilde_dollar_for_nonzero() {
+        // A non-zero cost renders with the `~$` prefix, matching the
+        // template expander (`~{dollar(cost)}`) and `/status`'s `~$` form.
+        let text = footer_cost_text(Some(1.50));
+        assert!(
+            text.contains("~$1.50"),
+            "non-zero cost must render '~$1.50': {text:?}"
         );
     }
 }

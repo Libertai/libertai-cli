@@ -9,10 +9,13 @@ use std::sync::Arc;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::Line;
+use unicode_width::UnicodeWidthStr;
 
 use crate::commands::code_team::AgentHandle;
 use crate::commands::code_tui::agents_panel;
-use crate::commands::code_tui::app::{App, Phase, Focus, SubagentOutcome, TranscriptEntry};
+use crate::commands::code_tui::app::{
+    slash_palette_filtered, App, Focus, Phase, SubagentOutcome, TranscriptEntry,
+};
 use crate::commands::code_tui::footer;
 use crate::commands::code_tui::input;
 use crate::commands::code_tui::markdown;
@@ -74,6 +77,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.diff_view.is_some() {
         draw_diff_view(frame, area, app);
     }
+
+    // Draw the slash-command palette (FEATURE-A) LAST so it sits above the
+    // footer — matches Claude Code (the input bar stays visible behind the
+    // popup). Bottom-anchored, above the footer with a 2-row gap.
+    if app.slash_palette.is_some() {
+        draw_slash_palette(frame, area, app);
+    }
 }
 
 /// Agent row count for the footer's agents panel, clamped to a third of
@@ -117,7 +127,7 @@ fn draw_footer(
     agents: &[Arc<AgentHandle>],
     agent_rows: u16,
 ) {
-    let agent_header = if agents.is_empty() { 0 } else { 1 };
+    let agent_header = if agent_rows > 0 { 1 } else { 0 };
     let queued_rows = app.queued.len().min(3) as u16;
     let spinner_h = 1u16;
     let rule_h = 1u16;
@@ -342,7 +352,9 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
         let para = Paragraph::new(lines);
         frame.render_widget(para, inner);
         // Set cursor position.
-        let cursor_x = inner.x + 2 + modal.free_text.chars().count() as u16;
+        // Use display width (not char count) so CJK/emoji wide glyphs
+        // don't leave the cursor mid-glyph (MED-2).
+        let cursor_x = inner.x + 2 + (modal.free_text.width() as u16);
         let cursor_y = inner.y + 2;
         frame.set_cursor_position((cursor_x, cursor_y));
     } else {
@@ -438,7 +450,6 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-    use unicode_width::UnicodeWidthStr;
 
     let Some(overlay) = &app.agent_overlay else {
         return;
@@ -497,23 +508,17 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
         )));
     }
 
-    // Scroll calculation (same bottom-anchoring as scrollback). The
-    // markdown-rendered lines are pre-wrapped to usable_width, so most
-    // are exactly one visual row; code-block / blank lines may differ.
-    // Count DISPLAY width (not chars) and ceil-divide by usable_width —
-    // minimum 1 — so wide glyphs and the non-pre-wrapped lines stay
-    // consistent with what Paragraph renders with wrap off.
-    let total_visual: usize = lines
-        .iter()
-        .map(|l| {
-            let w: usize = l.spans.iter().map(|s| s.content.width()).sum();
-            if w == 0 {
-                1
-            } else {
-                ((w + usable_width.saturating_sub(1)) / usable_width.max(1)).max(1)
-            }
-        })
-        .sum();
+    // COUNT MODEL: wrap-off + flat count — matches the scrollback. The
+    // Paragraph below renders with `.wrap()` OFF, so ratatui 0.30
+    // truncates each input `Line` to exactly ONE visual row (never wraps).
+    // The row-count model must agree: every `Line` (empty OR over-wide) is
+    // exactly one row.  The previous ceil(width/usable_width) count
+    // OVER-COUNTED over-wide lines (drifted scroll vs. render, leaving
+    // blank rows above the latest content).  Lines that want to wrap are
+    // pre-wrapped upstream (`render_entry_lines` → `markdown::render` /
+    // `wrap::word_wrap`), so each chunk is its own `Line` and the flat
+    // 1-per-Line count is correct for those too.
+    let total_visual: usize = lines.len();
     let inner_height = overlay_height.saturating_sub(2) as usize; // minus borders
     let max_from_top = total_visual.saturating_sub(inner_height);
     let scroll_from_top =
@@ -538,7 +543,6 @@ fn draw_diff_view(frame: &mut Frame, area: Rect, app: &App) {
     use ratatui::style::{Modifier, Style};
     use ratatui::text::Span;
     use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-    use unicode_width::UnicodeWidthStr;
 
     let Some(view) = &app.diff_view else {
         return;
@@ -569,11 +573,10 @@ fn draw_diff_view(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ));
 
-    // Usable text width inside the bordered overlay (Borders::ALL = 1 col
-    // each side). Diff lines are emitted raw (no markdown wrap), so wide
-    // lines may overflow — consistent with the agent overlay's code-block
-    // behavior.
-    let usable_width = overlay_width.saturating_sub(2) as usize;
+    // Diff lines are emitted raw (one `Line` per parsed diff line, no
+    // markdown wrap), so the flat count below (`lines.len()`) matches the
+    // wrap-off truncating renderer exactly; wide lines truncate rather than
+    // wrap, consistent with the agent overlay's pre-wrap-off model.
 
     let mut lines = crate::commands::code_tui::diff::parse_diff(
         app.pending_diff.as_deref().unwrap_or(""),
@@ -586,18 +589,16 @@ fn draw_diff_view(frame: &mut Frame, area: Rect, app: &App) {
         )));
     }
 
-    // Scroll calculation (same bottom-anchoring as the agent overlay).
-    let total_visual: usize = lines
-        .iter()
-        .map(|l| {
-            let w: usize = l.spans.iter().map(|s| s.content.width()).sum();
-            if w == 0 {
-                1
-            } else {
-                ((w + usable_width.saturating_sub(1)) / usable_width.max(1)).max(1)
-            }
-        })
-        .sum();
+    // COUNT MODEL: wrap-off + flat count — matches the agent overlay +
+    // scrollback. The Paragraph below renders with `.wrap()` OFF, so each
+    // input `Line` truncates to exactly ONE visual row. Diff lines are
+    // emitted raw (one `Line` per parsed diff line, no markdown wrap), so
+    // the flat `lines.len()` count matches the truncating renderer exactly.
+    // (Wide diff lines truncate rather than wrap — consistent with the
+    // agent overlay's code-block behavior.) The previous ceil(width/
+    // usable_width) count OVER-COUNTED wide diff lines and drifted the
+    // scroll against the render.
+    let total_visual: usize = lines.len();
     let inner_height = overlay_height.saturating_sub(2) as usize; // minus borders
     let max_from_top = total_visual.saturating_sub(inner_height);
     let scroll_from_top = max_from_top
@@ -608,6 +609,114 @@ fn draw_diff_view(frame: &mut Frame, area: Rect, app: &App) {
         .block(block)
         .scroll((scroll_from_top as u16, 0));
     frame.render_widget(para, overlay_area);
+}
+
+/// Draw the slash-command palette (FEATURE-A) — a bottom-anchored popup
+/// listing the filtered [`app::slash_palette_entries`] for the current
+/// textarea prefix. Modeled on [`draw_agent_overlay`]'s centered-rect +
+/// `Clear` + rounded `Block` shape, but bottom-anchored (Claude Code style)
+/// with a 2-row gap above the footer and a fixed max height of 10 rows so a
+/// long command list never swamps the screen. The selected row is styled
+/// `theme::ACCENT` + BOLD + REVERSED, matching the agents-panel selection
+/// style. The window scrolls so the selected row stays visible when the
+/// filtered list exceeds the visible height (max 7 content rows).
+fn draw_slash_palette(frame: &mut Frame, area: Rect, app: &App) {
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+    let Some(palette) = &app.slash_palette else {
+        return;
+    };
+
+    let entries = slash_palette_filtered(app);
+
+    // Palette geometry: 80% width, centered; bottom-anchored with a 2-row
+    // gap above the footer. Height is the entry count + 2 border rows, capped
+    // at 7 content rows (10 total with borders) so a long list never fills the
+    // screen. An empty filtered list still renders a bordered "no matches" box.
+    let palette_width = ((area.width as f32) * 0.8) as u16;
+    let visible_rows = entries.len().min(7);
+    let palette_height = visible_rows.saturating_add(2) as u16;
+    let palette_x = area.x + (area.width.saturating_sub(palette_width)) / 2;
+    let palette_y = area
+        .height
+        .saturating_sub(palette_height)
+        .saturating_sub(2);
+    let palette_area = Rect::new(palette_x, palette_y, palette_width, palette_height);
+
+    frame.render_widget(Clear, palette_area);
+
+    let title = " /commands — esc to close ";
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme::MUTED))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let total = entries.len();
+    let selected = palette.selected.min(total.saturating_sub(1));
+
+    // Window the selected row into the `visible_rows` window so a long list
+    // scrolls to keep the selection on-screen. Start = selected - half, then
+    // clamp to [0, total - visible] (the legal range of window starts).
+    let visible = visible_rows;
+    let half = visible / 2;
+    let win_start = if total <= visible {
+        0
+    } else {
+        selected.saturating_sub(half).min(total - visible)
+    };
+
+    // Build content lines, styling the selected row with ACCENT+BOLD+REVERSED
+    // (matching the agents-panel selection). `format!("{:<20}", name)` keeps
+    // the name column left-aligned so descriptions line up.
+    let selected_style = Style::default()
+        .fg(theme::ACCENT)
+        .add_modifier(Modifier::BOLD | Modifier::REVERSED);
+    let name_style = Style::default().fg(theme::PRIMARY);
+    let desc_style = Style::default().fg(theme::MUTED);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(no matching commands)",
+            Style::default().fg(theme::MUTED),
+        )));
+    } else {
+        for (i, (name, desc)) in entries.iter().enumerate() {
+            if i < win_start || i >= win_start + visible {
+                continue;
+            }
+            let style = if i == selected {
+                selected_style
+            } else {
+                name_style
+            };
+            // The selected row highlights the WHOLE row (name + desc) so the
+            // reverse-video bar reads as a single selection, matching Claude
+            // Code. Unselected rows color the name PRIMARY and the desc MUTED.
+            if i == selected {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{:<20}", name), style),
+                    Span::styled(desc.clone(), style),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{:<20}", name), style),
+                    Span::styled(desc.clone(), desc_style),
+                ]));
+            }
+        }
+    }
+
+    let para = Paragraph::new(lines).block(block);
+    frame.render_widget(para, palette_area);
 }
 
 /// Render a single overlay [`TranscriptEntry`] to styled [`Line`]s,
@@ -706,7 +815,7 @@ fn render_entry_lines<'a>(
                 theme::muted()
             };
             let prefix = format!("{RESULT_MARKER}{name}");
-            let prefix_w = prefix.chars().count() + 1; // prefix + ": "
+            let prefix_w = prefix.width() + 2; // prefix + ": " (2 display cols)
             let body = if output.is_empty() {
                 prefix
             } else {

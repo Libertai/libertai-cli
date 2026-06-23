@@ -152,10 +152,12 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    // Estimated cost.
-    if let Some(cost) = app.bar.estimated_cost {
+    // Estimated cost. Mirrors the legacy `~$` semantics (the template
+    // expander and `/status` both prefix `~` and suppress $0.00), so the
+    // default-chip path does too: a zero session cost renders no chip.
+    if let Some(cost) = app.bar.estimated_cost.filter(|c| *c > 0.0) {
         spans.push(Span::raw("  "));
-        spans.push(Span::styled(format!("${cost:.2}"), theme::muted()));
+        spans.push(Span::styled(format!("~${cost:.2}"), theme::muted()));
     }
 
     // Mode.

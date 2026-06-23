@@ -726,10 +726,18 @@ fn render_child(event: AgentEvent, on_update: Option<&(dyn Fn(ToolUpdate) + Send
             // reduce to completed/failed. The one-shot eprint! path
             // keeps its "[subagent done]" content; the TUI reads
             // details.outcome.
-            let outcome = if error.is_some() {
-                "failed"
-            } else {
-                "completed"
+            //
+            // (MED-4) On abort, pi sets the error to "Aborted" (see
+            // `build_abort_message` in agent.rs). Sniff for it and emit
+            // "stopped" instead of "failed" so the TUI renders a single,
+            // accurate "stopped" outcome line — not a misleading "failed"
+            // that would double up with the main-thread "stopped {name}"
+            // line. Chose option (a): sniff in render_child so the bg-side
+            // outcome is authoritative and matches the AbortHandle path.
+            let outcome = match &error {
+                Some(msg) if msg.to_ascii_lowercase().contains("aborted") => "stopped",
+                Some(_) => "failed",
+                None => "completed",
             };
             if let Some(on_update) = on_update {
                 on_update(ToolUpdate {
@@ -943,6 +951,96 @@ mod tests {
         assert_eq!(updates[1].details.as_ref().unwrap()["agent"], "reviewer");
         assert_eq!(updates[1].details.as_ref().unwrap()["isError"], false);
         assert_eq!(updates[1].details.as_ref().unwrap()["details"]["bytes"], 24);
+    }
+
+    // (MED-4) An aborted inline subagent's AgentEnd carries error "Aborted"
+    // (pi's `build_abort_message`). render_child must map that to outcome
+    // "stopped" — not "failed" — so the TUI renders a single accurate line
+    // instead of a misleading "failed" that would double up with the
+    // main-thread "stopped {name}" line.
+    #[test]
+    fn render_child_aborted_agent_end_maps_to_stopped() {
+        let updates = Arc::new(Mutex::new(Vec::<ToolUpdate>::new()));
+        let sink = {
+            let updates = Arc::clone(&updates);
+            move |update: ToolUpdate| updates.lock().unwrap().push(update)
+        };
+
+        render_child(
+            AgentEvent::AgentEnd {
+                session_id: "s1".into(),
+                messages: Vec::new(),
+                error: Some("Aborted".to_string()),
+            },
+            Some(&sink),
+            "coder",
+        );
+
+        let updates = updates.lock().unwrap();
+        assert_eq!(updates.len(), 1, "AgentEnd emits one update");
+        assert_eq!(
+            updates[0].details.as_ref().unwrap()["kind"],
+            "subagent_end"
+        );
+        assert_eq!(
+            updates[0].details.as_ref().unwrap()["outcome"],
+            "stopped",
+            "Aborted error must map to 'stopped', not 'failed'"
+        );
+    }
+
+    // (MED-4 corollary) A non-abort error still maps to "failed".
+    #[test]
+    fn render_child_failed_agent_end_maps_to_failed() {
+        let updates = Arc::new(Mutex::new(Vec::<ToolUpdate>::new()));
+        let sink = {
+            let updates = Arc::clone(&updates);
+            move |update: ToolUpdate| updates.lock().unwrap().push(update)
+        };
+
+        render_child(
+            AgentEvent::AgentEnd {
+                session_id: "s1".into(),
+                messages: Vec::new(),
+                error: Some("network: connection reset".to_string()),
+            },
+            Some(&sink),
+            "coder",
+        );
+
+        let updates = updates.lock().unwrap();
+        assert_eq!(
+            updates[0].details.as_ref().unwrap()["outcome"],
+            "failed",
+            "non-abort error must map to 'failed'"
+        );
+    }
+
+    // (MED-4 corollary) A clean end (no error) maps to "completed".
+    #[test]
+    fn render_child_clean_agent_end_maps_to_completed() {
+        let updates = Arc::new(Mutex::new(Vec::<ToolUpdate>::new()));
+        let sink = {
+            let updates = Arc::clone(&updates);
+            move |update: ToolUpdate| updates.lock().unwrap().push(update)
+        };
+
+        render_child(
+            AgentEvent::AgentEnd {
+                session_id: "s1".into(),
+                messages: Vec::new(),
+                error: None,
+            },
+            Some(&sink),
+            "coder",
+        );
+
+        let updates = updates.lock().unwrap();
+        assert_eq!(
+            updates[0].details.as_ref().unwrap()["outcome"],
+            "completed",
+            "no-error end must map to 'completed'"
+        );
     }
 
     fn tool_update_text(update: &ToolUpdate) -> &str {

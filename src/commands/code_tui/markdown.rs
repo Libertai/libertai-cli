@@ -121,27 +121,27 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
 
         // Heading # .. ######
         if let Some(s) = stripped.strip_prefix("# ") {
-            lines.push(heading(s, 1));
+            lines.extend(heading(s, 1, width));
             continue;
         }
         if let Some(s) = stripped.strip_prefix("## ") {
-            lines.push(heading(s, 2));
+            lines.extend(heading(s, 2, width));
             continue;
         }
         if let Some(s) = stripped.strip_prefix("### ") {
-            lines.push(heading(s, 3));
+            lines.extend(heading(s, 3, width));
             continue;
         }
         if let Some(s) = stripped.strip_prefix("#### ") {
-            lines.push(heading(s, 4));
+            lines.extend(heading(s, 4, width));
             continue;
         }
         if let Some(s) = stripped.strip_prefix("##### ") {
-            lines.push(heading(s, 5));
+            lines.extend(heading(s, 5, width));
             continue;
         }
         if let Some(s) = stripped.strip_prefix("###### ") {
-            lines.push(heading(s, 6));
+            lines.extend(heading(s, 6, width));
             continue;
         }
 
@@ -826,9 +826,22 @@ fn parse_inline_depth(text: &str, depth: usize) -> Vec<Span<'static>> {
     spans
 }
 
-/// Render a heading line, styled by level via [`theme::heading`].
-fn heading(text: &str, level: usize) -> Line<'static> {
-    Line::from(Span::styled(text.to_string(), theme::heading(level)))
+/// Render a heading, styled by level via [`theme::heading`], pre-wrapped to
+/// `width`. A heading wider than `width` (e.g. a 61-col `#` heading at width
+/// 20) is word-wrapped to `width` and emitted as one `Line` per visual row,
+/// each carrying the heading style — so it is NOT truncated by the wrap-off
+/// Paragraph renderer and the flat 1-row-per-`Line` count stays correct.
+/// `text` is the heading text with the `#`/`##`/… prefix already stripped.
+fn heading(text: &str, level: usize, width: usize) -> Vec<Line<'static>> {
+    let style = theme::heading(level);
+    let width = width.max(1);
+    // word_wrap to `width` (no first-line indent — the `#` prefix was
+    // already removed, so the whole budget is available on every line).
+    let wrapped = wrap::word_wrap(text, width, 0);
+    wrapped
+        .into_iter()
+        .map(|chunk| Line::from(Span::styled(chunk, style)))
+        .collect()
 }
 
 /// Render a list item with the given bullet and indent, pre-wrapped
@@ -845,8 +858,12 @@ fn list_item(bullet: &str, text: &str, indent: usize, width: usize) -> Vec<Line<
 
 /// Render a code block with dim border lines and a dim header naming
 /// the language. Borders are `width`-aware (was hardcoded 40). Code
-/// lines are emitted hard — one `Line` each — and are NOT soft-wrapped;
-/// a line wider than `width` overflows or hard-breaks at `width`.
+/// lines are pre-wrapped to `width` (with the 2-space indent budget) and
+/// emitted as one `Line` per visual row, each carrying the `theme::accent`
+/// style. Pre-wrapping (rather than emitting hard unwrapped lines) keeps the
+/// wrap-off Paragraph renderer from truncating a wide code line and keeps the
+/// flat 1-row-per-`Line` count correct: `word_wrap` emits one chunk per visual
+/// row, and each chunk becomes its own `Line`.
 fn render_code_block(code: &[&str], lang: &str, width: usize) -> Vec<Line<'static>> {
     let border = "─".repeat(width.saturating_sub(2));
     let mut lines = Vec::new();
@@ -855,11 +872,16 @@ fn render_code_block(code: &[&str], lang: &str, width: usize) -> Vec<Line<'stati
     let label = if lang.is_empty() { "(code)" } else { lang };
     lines.push(Line::from(Span::styled(label.to_string(), theme::muted())));
     lines.push(Line::from(Span::styled(border.clone(), theme::muted())));
+    // Each code line is prefixed with a 2-space indent, so the first
+    // wrapped chunk's budget is width-2 and continuation chunks get the
+    // full width. word_wrap handles the per-line budget; the indent is
+    // prepended to every chunk so wrapped continuation lines align.
+    let style = theme::accent();
     for code_line in code {
-        lines.push(Line::from(Span::styled(
-            format!("  {code_line}"),
-            theme::accent(),
-        )));
+        let wrapped = wrap::word_wrap(code_line, width, 2);
+        for chunk in wrapped {
+            lines.push(Line::from(Span::styled(format!("  {chunk}"), style)));
+        }
     }
     lines.push(Line::from(Span::styled(border, theme::muted())));
     lines
@@ -1072,18 +1094,25 @@ mod tests {
     }
 
     #[test]
-    fn code_block_does_not_soft_wrap() {
-        // A fenced code block whose code line is wider than `width`
-        // must NOT soft-wrap: one Line per code line (it may hard-break
-        // or overflow, but never becomes 2 soft-wrapped lines).
+    fn code_block_soft_wraps_to_width() {
+        // A fenced code block whose code line is wider than `width` is
+        // PRE-WRAPPED to `width` (with the 2-space indent budget) so the
+        // wrap-off Paragraph renderer does not truncate it and the flat
+        // 1-row-per-`Line` count stays correct. word_wrap emits one chunk
+        // per visual row, each becoming its own `Line` (a single long
+        // no-space word is hard-broken once at the budget — see
+        // `wrap::word_wrap` — so the remainder may overflow, but it is no
+        // longer a single over-wide line that the truncator would cut).
         let long_code = "x".repeat(50);
         let src = format!("```rust\n{long_code}\n```");
         let lines = render(&src, 20);
-        // header + top border + 1 code line + bottom border == 4 lines.
+        // first-line budget = 20 - 2 (indent) = 18; the 50-char word is
+        // hard-broken once -> 18 + 32 -> 2 code Lines.
+        // header + top border + 2 code lines + bottom border == 5 lines.
         assert_eq!(
             lines.len(),
-            4,
-            "code block should be header + border + 1 code + border, got {}",
+            5,
+            "code block should be header + border + 2 wrapped code + border, got {}",
             lines.len()
         );
         // The header line names the language and is dim (muted).
@@ -1095,14 +1124,16 @@ mod tests {
             "header should name the lang 'rust', got {:?}",
             header.spans[0].content
         );
-        // The single code line (index 2) is wider than `width` 20 —
-        // i.e. it was NOT broken to fit (no soft-wrap).
-        let code_line = &lines[2];
-        let code_w: usize = code_line.spans.iter().map(|s| s.content.width()).sum();
-        assert!(
-            code_w > 20,
-            "code line should overflow width 20 (no soft-wrap), got {code_w}"
-        );
+        // The first wrapped code line carries the indent + first 18 x's
+        // (fits width 20, so the truncator does not cut it).
+        let first: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(first, format!("  {}", "x".repeat(18)));
+        assert_eq!(first.width(), 20);
+        // The second code line is the remainder (32 x's + indent); it may
+        // overflow width 20, but it is its own Line (counted as 1 row),
+        // not merged with the first — so the row count matches the render.
+        let second: String = lines[3].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(second, format!("  {}", "x".repeat(32)));
     }
 
     #[test]
