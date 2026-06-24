@@ -24,7 +24,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Enable Git long paths
         if: runner.os == 'Windows'
@@ -59,7 +59,7 @@ jobs:
       version: ${{ steps.get-version.outputs.version }}
       is-prerelease: ${{ steps.get-version.outputs.is-prerelease }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - id: get-version
         env:
@@ -141,7 +141,7 @@ jobs:
             artifact: libertai
             asset: libertai-macos-aarch64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Enable Git long paths
         if: runner.os == 'Windows'
@@ -220,7 +220,7 @@ jobs:
     env:
       HAVE_APT_REPO_SECRETS: ${{ secrets.APT_GPG_PRIVATE_KEY != '' && secrets.APT_REPO_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -265,7 +265,7 @@ jobs:
 
       - name: Checkout APT repository
         if: env.HAVE_APT_REPO_SECRETS == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: Libertai/apt
           token: ${{ secrets.APT_REPO_TOKEN }}
@@ -336,7 +336,7 @@ jobs:
         if: env.HAVE_BREW_REPO_TOKEN != 'true'
         run: echo "BREW_REPO_TOKEN is not configured; skipping Homebrew tap update."
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         if: env.HAVE_BREW_REPO_TOKEN == 'true'
 
       - name: Download macOS release assets
@@ -380,7 +380,7 @@ jobs:
 
       - name: Checkout Homebrew tap
         if: env.HAVE_BREW_REPO_TOKEN == 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: Libertai/homebrew-tap
           token: ${{ secrets.BREW_REPO_TOKEN }}
@@ -427,7 +427,7 @@ jobs:
     env:
       HAVE_CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
