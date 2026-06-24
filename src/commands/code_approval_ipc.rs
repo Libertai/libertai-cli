@@ -32,16 +32,26 @@
 //! clean exit → listener dropped → unaccepted/ refused → `Deny`. No orphaned
 //! approval ever hangs the child; no orphaned modal ever lingers in the parent.
 
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::sync::{mpsc, Arc, Mutex};
 
-use anyhow::{Context, Result};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::Result;
+#[cfg(unix)]
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::commands::code_approvals::{ApprovalUi, NotifyOutcome, PromptChoice};
+#[cfg(unix)]
+use crate::commands::code_approvals::ApprovalUi;
+#[cfg(unix)]
+use crate::commands::code_approvals::NotifyOutcome;
+use crate::commands::code_approvals::PromptChoice;
 
 /// Env var carrying the parent TUI's approval-socket path to a child.
 pub const APPROVAL_SOCKET_ENV: &str = "LIBERTAI_APPROVAL_SOCKET";
@@ -76,6 +86,7 @@ impl IpcApprovalResponse {
 }
 
 /// Write a length-prefixed JSON frame.
+#[cfg(unix)]
 fn write_frame<W: Write>(w: &mut W, value: &impl Serialize) -> Result<()> {
     let json = serde_json::to_string(value)?;
     let bytes = json.as_bytes();
@@ -88,6 +99,7 @@ fn write_frame<W: Write>(w: &mut W, value: &impl Serialize) -> Result<()> {
 
 /// Read a length-prefixed JSON frame. Returns `Ok(None)` on clean EOF
 /// (peer closed) — the caller treats that as parent-gone → Deny.
+#[cfg(unix)]
 fn read_frame<R: Read, T: for<'de> Deserialize<'de>>(r: &mut R) -> Result<Option<T>> {
     let mut len_buf = [0u8; 4];
     match r.read_exact(&mut len_buf) {
@@ -116,11 +128,13 @@ fn read_frame<R: Read, T: for<'de> Deserialize<'de>>(r: &mut R) -> Result<Option
 pub struct ApprovalResponder {
     /// The connection to write the response to. Wrapped so the modal can
     /// hold it across the await on the user's keypress without borrowing.
+    #[cfg(unix)]
     conn: Arc<Mutex<Option<UnixStream>>>,
     pub id: String,
 }
 
 impl ApprovalResponder {
+    #[cfg(unix)]
     fn new(conn: UnixStream, id: String) -> Self {
         Self {
             conn: Arc::new(Mutex::new(Some(conn))),
@@ -133,7 +147,7 @@ impl ApprovalResponder {
     /// `handle_approval_key`'s Remote (teammate) arm + assert the pre-modal
     /// phase is restored. `respond` is best-effort, so a test stream that is
     /// never read (or already closed) is harmless.
-    #[cfg(test)]
+    #[cfg(all(unix, test))]
     pub(crate) fn for_test(conn: UnixStream, id: String) -> Self {
         Self::new(conn, id)
     }
@@ -141,6 +155,7 @@ impl ApprovalResponder {
     /// Send the user's choice to the teammate. Best-effort: a write failure
     /// (the teammate already exited) is silently ignored — the teammate's
     /// blocking read already returned EOF→Deny in that case.
+    #[cfg(unix)]
     pub fn respond(&self, choice: PromptChoice) {
         let choice_str = match choice {
             PromptChoice::Allow => "allow",
@@ -160,26 +175,58 @@ impl ApprovalResponder {
     }
 }
 
+// ---------- Non-Unix (Windows) stubs ----------
+//
+// The approval IPC rides a Unix domain socket, which doesn't exist on
+// Windows. Rather than gate the whole module off (the `Remote` responder
+// variant is woven through `app.rs`'s modal handling), we keep the public
+// types present on all platforms and make the socket I/O a no-op on
+// non-Unix. Effect: on Windows the parent TUI never binds a socket
+// (`bind` → `Err`, so `app.rs`'s `.ok()` gives `None` → the documented
+// "fall back to auto-deny" pre-IPC path), and children's `from_env` returns
+// `None`. No teammate approval is ever routed on Windows; behavior is the
+// safe headless auto-deny. This mirrors how bind failure is already handled
+// on Unix.
+#[cfg(not(unix))]
+impl ApprovalResponder {
+    /// No-op on non-Unix: there's no socket to write to.
+    pub fn respond(&self, _choice: PromptChoice) {}
+}
+
 /// Parent-side approval socket. Bound once at TUI startup; polled non-blocking
 /// each `run_loop` tick. Drop closes the listener + removes the socket file.
 pub struct ApprovalServer {
+    #[cfg(unix)]
     listener: UnixListener,
+    #[cfg(unix)]
     path: PathBuf,
 }
 
+#[cfg(unix)]
 impl ApprovalServer {
-    /// Bind a fresh Unix socket at a unique path under the config dir. The
-    /// path is returned so it can be passed to children via
+    /// Bind a fresh Unix socket at a unique per-process path under the system
+    /// temp dir. The path is returned so it can be passed to children via
     /// `APPROVAL_SOCKET_ENV`. A stale socket from a prior crashed TUI is
-    /// unlinked before bind (EADDRINUSE otherwise). Best-effort: if the
-    /// config dir isn't usable the TUI still runs — teammates just fall back
-    /// to auto-deny (the pre-IPC behavior).
+    /// unlinked before bind (EADDRINUSE otherwise). The temp dir (not the
+    /// config dir) is used so the path stays under the 104-byte `sun_path`
+    /// limit on macOS, where `~/Library/Application Support/libertai/...` can
+    /// overflow it. Best-effort: if bind isn't usable the TUI still runs —
+    /// teammates just fall back to auto-deny (the pre-IPC behavior).
     pub fn bind() -> Result<Self> {
-        let dir = crate::config::libertai_config_dir()?;
+        // Bind under the system temp dir, NOT the config dir. macOS' config
+        // dir (`~/Library/Application Support/libertai`) is long enough that a
+        // real $HOME (or a redirected one under `/var/folders/.../T/.tmpXXXX`)
+        // pushes the socket path past the 104-byte `sun_path` limit, and
+        // `UnixListener::bind` fails with "path must be shorter than SUN_LEN".
+        // `env::temp_dir()` resolves to a short `/tmp`-rooted path on every
+        // platform, so the unique per-process name stays well under the limit.
+        // Mirrors code_image_tool's `libertai-image-tool-<pid>` temp-path
+        // precedent.
+        let dir = std::env::temp_dir();
         let _ = std::fs::create_dir_all(&dir);
         // Unique per-process path so two concurrent TUIs don't collide on a
         // shared socket (mirrors the round-7 cross-restart-collision lesson).
-        let path = dir.join(format!("code-approval-{}.sock", std::process::id()));
+        let path = dir.join(format!("libertai-approval-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path); // stale socket from a prior run
         let listener = UnixListener::bind(&path)
             .with_context(|| format!("binding approval socket at {}", path.display()))?;
@@ -226,8 +273,34 @@ impl ApprovalServer {
 impl Drop for ApprovalServer {
     fn drop(&mut self) {
         // Closing the listener lets in-flight child connects refuse → Deny
-        // (safe). Remove the socket file so it doesn't litter the config dir.
+        // (safe). Remove the socket file so it doesn't litter the temp dir.
+        #[cfg(unix)]
         let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+// ---------- Non-Unix (Windows) `ApprovalServer` stub ----------
+#[cfg(not(unix))]
+impl ApprovalServer {
+    /// Unix domain sockets don't exist on Windows, so bind always fails. The
+    /// caller (`app.rs`) does `bind().ok()` and treats `None` as "fall back
+    /// to auto-deny" — the safe pre-IPC headless behavior.
+    pub fn bind() -> Result<Self> {
+        anyhow::bail!("approval IPC is unavailable on non-Unix platforms");
+    }
+
+    /// Never reached on non-Unix (bind fails), but must compile.
+    pub fn path(&self) -> &PathBuf {
+        use std::sync::OnceLock;
+        // Unreachable in practice (path() is only called after a successful
+        // bind), but we need a valid `&PathBuf` to satisfy the signature.
+        static EMPTY: OnceLock<PathBuf> = OnceLock::new();
+        EMPTY.get_or_init(|| PathBuf::new())
+    }
+
+    /// No socket to poll; never yields a request.
+    pub fn poll_accept(&self) -> Result<Option<(IpcApprovalRequest, ApprovalResponder)>> {
+        Ok(None)
     }
 }
 
@@ -239,12 +312,14 @@ impl Drop for ApprovalServer {
 /// `RatatuiApprovalUi` `unwrap_or(Deny)` discipline). Smart approvals are off
 /// (the parent TUI decides, not a headless LLM).
 pub struct IpcApprovalUi {
+    #[cfg(unix)]
     socket_path: PathBuf,
 }
 
 impl IpcApprovalUi {
     /// Construct from the env var. `Ok(None)` if the var is unset (the caller
     /// falls back to `PrintModeApprovalUi`).
+    #[cfg(unix)]
     pub fn from_env() -> Option<Self> {
         let path = std::env::var(APPROVAL_SOCKET_ENV).ok()?;
         let path = path.trim();
@@ -256,7 +331,21 @@ impl IpcApprovalUi {
         })
     }
 
-    fn decide_over_socket(&self, tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
+    /// Non-Unix: the parent TUI never binds a socket (see `ApprovalServer::bind`),
+    /// so there is no IPC to route to. Always returns `None` so the caller
+    /// falls back to the safe headless `PrintModeApprovalUi` (auto-deny).
+    #[cfg(not(unix))]
+    pub fn from_env() -> Option<Self> {
+        None
+    }
+
+    #[cfg(unix)]
+    fn decide_over_socket(
+        &self,
+        tool_name: &str,
+        preview: &str,
+        always_rule: &str,
+    ) -> PromptChoice {
         let req = IpcApprovalRequest {
             // Unique id per request so a future multiplexed protocol can
             // correlate. Today one request per connection, so a fixed-ish id
@@ -289,18 +378,14 @@ impl IpcApprovalUi {
     }
 }
 
+#[cfg(unix)]
 #[async_trait]
 impl ApprovalUi for IpcApprovalUi {
     fn allows_smart_approval(&self) -> bool {
         false
     }
 
-    async fn decide(
-        &self,
-        tool_name: &str,
-        preview: &str,
-        always_rule: &str,
-    ) -> PromptChoice {
+    async fn decide(&self, tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
         // The socket I/O is blocking; run it on a spawnable thread + await
         // the oneshot so this fits the async trait without blocking the
         // child's single-threaded runtime (mirrors LlmSmartApproval's shape
@@ -326,13 +411,17 @@ impl ApprovalUi for IpcApprovalUi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream;
+    #[cfg(unix)]
     use std::sync::mpsc;
+    #[cfg(unix)]
     use std::time::Duration;
 
     /// Spin up an `ApprovalServer`, connect a raw client, send a request
     /// frame, drive `poll_accept` to read it, respond, and confirm the client
     /// reads the choice. Pins the full round-trip + the wire protocol.
+    #[cfg(unix)]
     #[test]
     fn roundtrip_request_response_over_socket() {
         let server = ApprovalServer::bind().expect("bind");
@@ -376,6 +465,7 @@ mod tests {
     }
 
     /// A child whose parent never accepts returns `Deny` (safe fallback).
+    #[cfg(unix)]
     #[test]
     fn child_denies_when_parent_socket_absent() {
         let ui = IpcApprovalUi {

@@ -304,7 +304,10 @@ fn render_task_list(tasks: &[TeamTask]) -> String {
     let header = if segments.is_empty() {
         format!("Team task list ({total} {task_word}):")
     } else {
-        format!("Team task list ({total} {task_word}: {}):", segments.join(", "))
+        format!(
+            "Team task list ({total} {task_word}: {}):",
+            segments.join(", ")
+        )
     };
 
     let mut out = header;
@@ -325,10 +328,7 @@ fn render_task_line(task: &TeamTask) -> String {
         Some(name) => format!("assigned to {name}"),
         None => "unassigned".to_string(),
     };
-    format!(
-        "  {:<11} {}: {} — {}",
-        label, task.id, task.title, assignee
-    )
+    format!("  {:<11} {}: {} — {}", label, task.id, task.title, assignee)
 }
 
 /// Render a single task with its accumulated notes, for the
@@ -440,9 +440,27 @@ mod tests {
     #[test]
     fn render_mixed_statuses_and_assignees_matches_spec_shape() {
         let tasks = [
-            task("t1", "Refactor parser", Some("alice"), TeamTaskStatus::Completed, vec![]),
-            task("t2", "Wire new event", Some("bob"), TeamTaskStatus::Active, vec![]),
-            task("t3", "Bench the fallback", None, TeamTaskStatus::Pending, vec![]),
+            task(
+                "t1",
+                "Refactor parser",
+                Some("alice"),
+                TeamTaskStatus::Completed,
+                vec![],
+            ),
+            task(
+                "t2",
+                "Wire new event",
+                Some("bob"),
+                TeamTaskStatus::Active,
+                vec![],
+            ),
+            task(
+                "t3",
+                "Bench the fallback",
+                None,
+                TeamTaskStatus::Pending,
+                vec![],
+            ),
             task("t4", "Write docs", None, TeamTaskStatus::Pending, vec![]),
         ];
         let out = render_task_list(&tasks);
@@ -482,12 +500,21 @@ mod tests {
             out.contains("Team task list (3 tasks: 1 active, 2 blocked):"),
             "blocked count header wrong: {out}"
         );
-        assert!(out.contains("  [blocked]   t2: B — unassigned"), "blocked line: {out}");
+        assert!(
+            out.contains("  [blocked]   t2: B — unassigned"),
+            "blocked line: {out}"
+        );
     }
 
     #[test]
     fn render_single_task_uses_singular_word() {
-        let tasks = [task("t1", "Solo", Some("alice"), TeamTaskStatus::Active, vec![])];
+        let tasks = [task(
+            "t1",
+            "Solo",
+            Some("alice"),
+            TeamTaskStatus::Active,
+            vec![],
+        )];
         let out = render_task_list(&tasks);
         assert!(out.contains("(1 task:"), "singular header wrong: {out}");
     }
@@ -532,7 +559,11 @@ mod tests {
     #[test]
     fn update_task_changes_status_and_appends_note() {
         let mut t = task("t1", "X", None, TeamTaskStatus::Pending, vec![]);
-        update_task(&mut t, Some(TeamTaskStatus::Blocked), Some("waiting on API"));
+        update_task(
+            &mut t,
+            Some(TeamTaskStatus::Blocked),
+            Some("waiting on API"),
+        );
         assert_eq!(t.status, TeamTaskStatus::Blocked);
         assert_eq!(t.notes, vec!["waiting on API".to_string()]);
     }
@@ -566,9 +597,18 @@ mod tests {
 
     #[test]
     fn render_task_includes_notes_section() {
-        let t = task("t1", "X", Some("alice"), TeamTaskStatus::Active, vec!["one", "two"]);
+        let t = task(
+            "t1",
+            "X",
+            Some("alice"),
+            TeamTaskStatus::Active,
+            vec!["one", "two"],
+        );
         let out = render_task(&t);
-        assert!(out.contains("  [active]    t1: X — assigned to alice"), "line: {out}");
+        assert!(
+            out.contains("  [active]    t1: X — assigned to alice"),
+            "line: {out}"
+        );
         assert!(out.contains("  Notes:"), "notes header missing: {out}");
         assert!(out.contains("    - one"), "note one missing: {out}");
         assert!(out.contains("    - two"), "note two missing: {out}");

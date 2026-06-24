@@ -281,12 +281,18 @@ pub fn approval_subject_with_base(
             // rule narrows to the sentinel. (Pre-existing latent: the empty-
             // pattern = match-all `matches()` semantics is intentional via
             // `AllowRule::tool_all`, but this fallback arm must not reach it.)
-            let no_real_binary = cmd.trim().is_empty()
-                || first_token.is_empty()
-                || first_token == "<missing";
+            let no_real_binary =
+                cmd.trim().is_empty() || first_token.is_empty() || first_token == "<missing";
             let (rule, label) = if no_real_binary {
-                let rule_pattern = if s.is_empty() { "<no command>".to_string() } else { s.clone() };
-                (AllowRule::exact(tool, rule_pattern.clone()), format!("bash({rule_pattern})"))
+                let rule_pattern = if s.is_empty() {
+                    "<no command>".to_string()
+                } else {
+                    s.clone()
+                };
+                (
+                    AllowRule::exact(tool, rule_pattern.clone()),
+                    format!("bash({rule_pattern})"),
+                )
             } else if cmd_trimmed_has_args(cmd) {
                 (
                     AllowRule::wildcard(tool, format!("{first_token} *")),
@@ -1739,10 +1745,7 @@ mod tests {
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("out.txt");
-            let content = input
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
             std::fs::write(path, content).ok();
             Ok(ToolOutput {
                 content: vec![ContentBlock::Text(TextContent::new("wrote"))],
@@ -2737,5 +2740,3 @@ scope = "session"
         assert!(!state.is_pre_allowed("bash", "echo bye"));
     }
 }
-
-

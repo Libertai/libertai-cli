@@ -91,7 +91,17 @@ pub fn run(
     // prompt (the trailing args); conflicts with --print (enforced by
     // clap) and the interactive REPL.
     if bg {
-        return run_background(&cfg, &model, &provider, mode, name, agent, team, teammate, oneshot_prompt);
+        return run_background(
+            &cfg,
+            &model,
+            &provider,
+            mode,
+            name,
+            agent,
+            team,
+            teammate,
+            oneshot_prompt,
+        );
     }
 
     // Resolve --resume / --continue into an explicit session path, if any.
@@ -164,9 +174,7 @@ pub fn run(
             // pre-IPC headless behavior: teammates auto-allow
             // team_task/mailbox and auto-deny the rest; non-team children just
             // auto-deny.
-            if let Some(ipc) =
-                crate::commands::code_approval_ipc::IpcApprovalUi::from_env()
-            {
+            if let Some(ipc) = crate::commands::code_approval_ipc::IpcApprovalUi::from_env() {
                 Arc::new(ipc)
             } else if has_team && has_teammate {
                 Arc::new(
@@ -263,19 +271,25 @@ fn run_background(
     teammate: Option<String>,
     prompt: Option<String>,
 ) -> Result<()> {
-    use crate::commands::code_ui::{background_agent_run_id, start_background_agent, BackgroundAgentLaunch};
-    let prompt = prompt.ok_or_else(|| anyhow::anyhow!("--bg requires a prompt (pass it as trailing args)"))?;
+    use crate::commands::code_ui::{
+        background_agent_run_id, start_background_agent, BackgroundAgentLaunch,
+    };
+    let prompt = prompt
+        .ok_or_else(|| anyhow::anyhow!("--bg requires a prompt (pass it as trailing args)"))?;
 
     // --agent <name>: load the agent definition, build a task-tool
     // dispatch prompt, and apply the agent's model override if any.
     let (model, prompt) = if let Some(agent_name) = agent.as_ref() {
-        let cwd = std::env::current_dir()
-            .map_err(|e| anyhow::anyhow!("cwd lookup failed: {e}"))?;
+        let cwd = std::env::current_dir().map_err(|e| anyhow::anyhow!("cwd lookup failed: {e}"))?;
         let agents = crate::commands::code_agents::discover_agents(&cwd)?;
         let agent_def = agents
             .iter()
             .find(|a| a.name == agent_name.as_str())
-            .or_else(|| agents.iter().find(|a| a.name.starts_with(agent_name.as_str())))
+            .or_else(|| {
+                agents
+                    .iter()
+                    .find(|a| a.name.starts_with(agent_name.as_str()))
+            })
             .ok_or_else(|| {
                 let suffix = if agents.is_empty() {
                     "no named sub-agents are configured".to_string()
@@ -689,7 +703,11 @@ fn pick_session_path(headless: bool) -> Result<Option<PathBuf>> {
         .map(|m| {
             let when = format_relative_age(now_ms - m.last_modified_ms);
             let short_id: String = m.id.chars().take(8).collect();
-            let name = m.name.as_deref().filter(|n| !n.is_empty()).unwrap_or(&short_id);
+            let name = m
+                .name
+                .as_deref()
+                .filter(|n| !n.is_empty())
+                .unwrap_or(&short_id);
             format!("{when}  {} msgs  {name}  {}", m.message_count, m.path)
         })
         .collect();

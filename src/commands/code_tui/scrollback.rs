@@ -1,10 +1,10 @@
 //! Scrollback transcript — renders the conversation history with
 //! markdown formatting and a scrollbar.
 
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::commands::code_tui::app::{App, SubagentOutcome, TranscriptEntry};
@@ -141,7 +141,12 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
                 for (i, md_line) in md_lines.into_iter().enumerate() {
                     if i == 0 {
                         let mut v = vec![
-                            Span::styled(agent_name.clone(), ratatui::style::Style::default().fg(color).add_modifier(ratatui::style::Modifier::BOLD)),
+                            Span::styled(
+                                agent_name.clone(),
+                                ratatui::style::Style::default()
+                                    .fg(color)
+                                    .add_modifier(ratatui::style::Modifier::BOLD),
+                            ),
                             Span::raw(" "),
                         ];
                         v.extend(md_line.spans);
@@ -166,8 +171,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
                 // `tool_preview` already prefixes the tool name; split off
                 // the detail so we can color the tool name like the main
                 // `Tool` arm (bold) and the detail muted.
-                let preview =
-                    crate::commands::code_tool_preview::tool_preview(tool_name, args);
+                let preview = crate::commands::code_tool_preview::tool_preview(tool_name, args);
                 let detail = preview
                     .strip_prefix(tool_name)
                     .map(str::trim_start)
@@ -302,8 +306,9 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     //   scroll_from_top = max(0, total_visual_lines − viewport − scroll_from_bottom)
     let viewport = area.height as usize;
     let max_from_top = total_visual_lines.saturating_sub(viewport);
-    let scroll_from_top =
-        max_from_top.saturating_sub(app.scroll as usize).min(max_from_top);
+    let scroll_from_top = max_from_top
+        .saturating_sub(app.scroll as usize)
+        .min(max_from_top);
 
     // Render with scroll.  No `.wrap()`: content is already pre-wrapped to
     // usable_width, and leaving wrap off stops ratatui from double-counting
@@ -313,8 +318,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     // and render the wrong slice. `app.scroll` is itself `u16`, so clamping
     // to `u16::MAX` loses nothing the renderer could express.
     let scroll_from_top_u16 = scroll_from_top.min(u16::MAX as usize) as u16;
-    let paragraph = Paragraph::new(lines)
-        .scroll((scroll_from_top_u16, 0));
+    let paragraph = Paragraph::new(lines).scroll((scroll_from_top_u16, 0));
     frame.render_widget(paragraph, para_area);
 
     // Draw scrollbar in the freed rightmost column.
@@ -377,7 +381,10 @@ mod tests {
             Span::styled(theme::glyph::TOOL_MARKER, theme::accent()),
             Span::raw(" "),
             Span::styled("bash", theme::bold()),
-            Span::styled("(cargo test --lib --features very-long-flag-name)", theme::muted()),
+            Span::styled(
+                "(cargo test --lib --features very-long-flag-name)",
+                theme::muted(),
+            ),
         ]);
         let tool_w: usize = tool_line.spans.iter().map(|s| s.content.width()).sum();
         assert!(
@@ -407,7 +414,8 @@ mod tests {
             "sanity: old model over-counts the tool line to {old_tool_rows} rows"
         );
         assert_eq!(
-            total - heading_rows, 1,
+            total - heading_rows,
+            1,
             "the over-wide tool line contributes exactly 1 row under the flat model, \
              not {old_tool_rows}"
         );
@@ -418,9 +426,15 @@ mod tests {
         // rows above it (the bug the old over-count produced).
         let viewport = total; // viewport exactly fits all rows
         let max_from_top = total.saturating_sub(viewport);
-        assert_eq!(max_from_top, 0, "max_from_top is 0 when viewport fits all rows");
+        assert_eq!(
+            max_from_top, 0,
+            "max_from_top is 0 when viewport fits all rows"
+        );
         let scroll_from_top = max_from_top.saturating_sub(0).min(max_from_top);
-        assert_eq!(scroll_from_top, 0, "scroll_from_top clamps to 0 at the bottom");
+        assert_eq!(
+            scroll_from_top, 0,
+            "scroll_from_top clamps to 0 at the bottom"
+        );
     }
 
     /// A blank/empty `Line` is still one visual row (the renderer reserves

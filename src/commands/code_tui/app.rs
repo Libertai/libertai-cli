@@ -21,24 +21,21 @@ use anyhow::Context;
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
 use crate::commands::code_diff::EditJournal;
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
-use crate::commands::code_slash_registry;
-use crate::commands::code_slash_router::{self, BgCommand, CustomResolveResult};
-use crate::commands::code_ui::{
-    self, apply_pending_shell_context, context_percent, context_tokens, context_window_for,
-    read_log_tail, shell_escape_command, stage_pr_comment_draft, start_background_agent,
-    stop_line_text, truncate_chars, usage_summary, BackgroundAgentLaunch, PrCommentDraft,
-    ShellEscapeAction, UsageRecord,
+use crate::commands::code_hooks::{
+    run_post_tool_hooks, run_stop_hooks, run_user_prompt_submit_hooks, tool_policy_from_config,
+    SessionHookGuard,
 };
-use crate::commands::code_hooks::{tool_policy_from_config, run_post_tool_hooks, run_stop_hooks, run_user_prompt_submit_hooks, SessionHookGuard};
 use crate::commands::code_identity_prompt;
 use crate::commands::code_mode_prompt;
 use crate::commands::code_pr_comments;
 use crate::commands::code_session::{
-    build_session_options, CodeSessionConfig, DEFAULT_MAX_TOKENS, SessionPersistence,
+    build_session_options, CodeSessionConfig, SessionPersistence, DEFAULT_MAX_TOKENS,
 };
 use crate::commands::code_skills::{prompt_for_pillar, SkillPillar};
+use crate::commands::code_slash_registry;
+use crate::commands::code_slash_router::{self, BgCommand, CustomResolveResult};
 use crate::commands::code_team::{
-    AgentCapability, AgentId, AgentRegistry, AgentColor, AgentKind, AgentRegistration, AgentStatus,
+    AgentCapability, AgentColor, AgentId, AgentKind, AgentRegistration, AgentRegistry, AgentStatus,
 };
 use crate::commands::code_team_spawn::{self, TeamManifest};
 use crate::commands::code_tui::approvals::RatatuiApprovalUi;
@@ -46,6 +43,12 @@ use crate::commands::code_tui::markdown;
 use crate::commands::code_tui::terminal::TerminalGuard;
 use crate::commands::code_tui::theme;
 use crate::commands::code_tui::view;
+use crate::commands::code_ui::{
+    self, apply_pending_shell_context, context_percent, context_tokens, context_window_for,
+    read_log_tail, shell_escape_command, stage_pr_comment_draft, start_background_agent,
+    stop_line_text, truncate_chars, usage_summary, BackgroundAgentLaunch, PrCommentDraft,
+    ShellEscapeAction, UsageRecord,
+};
 use crate::config::{allow_rules_path, Config as LibertaiConfig};
 
 /// Maximum entries in the input history. Matches the legacy REPL.
@@ -131,9 +134,7 @@ pub enum AgentMsg {
         output: serde_json::Value,
     },
     /// The turn ended.
-    TurnEnd {
-        elapsed_secs: u64,
-    },
+    TurnEnd { elapsed_secs: u64 },
     /// An approval is needed. The main thread shows a modal and
     /// sends the choice back via the oneshot channel.
     ApprovalRequest {
@@ -202,10 +203,7 @@ pub enum AgentMsg {
         diff: String,
     },
     /// Streaming text delta from a subagent (task tool child session).
-    SubagentText {
-        agent_name: String,
-        text: String,
-    },
+    SubagentText { agent_name: String, text: String },
     /// A subagent tool started executing. `args` is the tool's argument
     /// JSON (from `details.args`), kept so the scrollback renderer can
     /// reuse `tool_preview` instead of the TUI re-parsing it.
@@ -582,10 +580,7 @@ pub enum TranscriptEntry {
     /// Assistant text (bold `●` prefix, markdown).
     Assistant(String),
     /// Tool marker (cyan `●` prefix).
-    Tool {
-        name: String,
-        detail: String,
-    },
+    Tool { name: String, detail: String },
     /// Tool result (the output a finished tool produced). Rendered as a
     /// dim line below the tool marker. `is_error` controls coloring.
     ToolResult {
@@ -594,10 +589,7 @@ pub enum TranscriptEntry {
         is_error: bool,
     },
     /// Subagent text (colored agent name prefix).
-    SubagentText {
-        agent_name: String,
-        text: String,
-    },
+    SubagentText { agent_name: String, text: String },
     /// Subagent tool marker. `args` is retained so the scrollback
     /// renderer can call `tool_preview` rather than re-parsing here.
     SubagentTool {
@@ -943,9 +935,7 @@ fn translate_event(event: &AgentEvent) -> Option<AgentMsg> {
             }
         }
         AgentEvent::ExtensionError { error, .. } => Some(AgentMsg::Error(error.clone())),
-        AgentEvent::ToolExecutionUpdate {
-            partial_result, ..
-        } => {
+        AgentEvent::ToolExecutionUpdate { partial_result, .. } => {
             // Subagent events arrive as ToolExecutionUpdate with a
             // `kind` field in the details JSON.
             let details = match &partial_result.details {
@@ -1033,7 +1023,10 @@ fn translate_event(event: &AgentEvent) -> Option<AgentMsg> {
                         .and_then(|v| v.as_str())
                         .map(parse_outcome)
                         .unwrap_or(SubagentOutcome::Completed);
-                    Some(AgentMsg::SubagentEnd { agent_name, outcome })
+                    Some(AgentMsg::SubagentEnd {
+                        agent_name,
+                        outcome,
+                    })
                 }
                 _ => None,
             }
@@ -1713,7 +1706,11 @@ pub fn run(
     guard.raw_mode = true;
 
     let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
+    crossterm::execute!(
+        stdout,
+        EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
     guard.alt_screen = true;
 
     // Enable bracketed paste (`ESC[?2004h`) last so it is the first thing
@@ -1812,16 +1809,16 @@ pub fn run(
         history: VecDeque::new(),
         history_idx: None,
         stashed_live: None,
-            approval: None,
-            pre_approval_phase: None,
-            approval_socket_path: None,
-            ask: None,
-            focus: Focus::default(),
-            agent_selection: 0,
-            agent_overlay: None,
-            diff_view: None,
-            slash_palette: None,
-            pending_diff: None,
+        approval: None,
+        pre_approval_phase: None,
+        approval_socket_path: None,
+        ask: None,
+        focus: Focus::default(),
+        agent_selection: 0,
+        agent_overlay: None,
+        diff_view: None,
+        slash_palette: None,
+        pending_diff: None,
         registry,
         notified_teams: std::collections::HashSet::new(),
         notified_agents: std::collections::HashSet::new(),
@@ -1874,8 +1871,7 @@ pub fn run(
     // exit (after run_loop) + unlinks the socket file; declared here so it
     // outlives run_loop. The socket path is stashed on `app` so the
     // `start_background_agent` spawn path can pass it to children via env.
-    let approval_server = crate::commands::code_approval_ipc::ApprovalServer::bind()
-        .ok();
+    let approval_server = crate::commands::code_approval_ipc::ApprovalServer::bind().ok();
     if let Some(ref srv) = approval_server {
         app.approval_socket_path = Some(srv.path().clone());
     }
@@ -1952,8 +1948,14 @@ fn poll_agent_status(registry: &AgentRegistry) -> (Vec<String>, Vec<String>, boo
             continue;
         }
         // kill(pid, 0) returns Err(ESRCH) if the process no longer
-        // exists. On Unix this is a cheap syscall.
+        // exists. On Unix this is a cheap syscall. On non-Unix there is no
+        // portable equivalent, so assume the agent is still alive (skip
+        // reaping) — the safe default, since a false "alive" just delays a
+        // status update rather than prematurely reaping a live agent.
+        #[cfg(unix)]
         let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+        #[cfg(not(unix))]
+        let alive = true;
         if !alive {
             // (MED-5) An exited background teammate/agent is NOT a known
             // success — `kill(pid, 0)` only reports the pid is gone (no
@@ -2037,7 +2039,6 @@ fn subagent_end_bell_enabled(cfg: &LibertaiConfig, completed: bool) -> bool {
     cfg.code_turn_notifications && !completed
 }
 
-
 /// Apply a bracketed-paste payload to the input textarea.
 ///
 /// Extracted from the `Event::Paste` arm of [`run_loop`] so the paste path
@@ -2120,7 +2121,11 @@ fn run_loop(
             // per-frame `markdown::render` work is O(MAX) regardless of
             // session length. O(1) when already within the cap.
             app.trim_transcript();
-            guard.terminal.as_mut().unwrap().draw(|frame| view::draw(frame, app))?;
+            guard
+                .terminal
+                .as_mut()
+                .unwrap()
+                .draw(|frame| view::draw(frame, app))?;
             app.dirty = false;
         }
 
@@ -2216,11 +2221,14 @@ fn run_loop(
                         app.phase = Phase::Idle;
                         app.turn_started = None;
                     }
-                    app.transcript
-                        .push(TranscriptEntry::System(
-                            "session ended — background thread exited.".to_string(),
-                        ));
-                    guard.terminal.as_mut().unwrap().draw(|frame| view::draw(frame, app))?;
+                    app.transcript.push(TranscriptEntry::System(
+                        "session ended — background thread exited.".to_string(),
+                    ));
+                    guard
+                        .terminal
+                        .as_mut()
+                        .unwrap()
+                        .draw(|frame| view::draw(frame, app))?;
                     return Ok(());
                 }
             }
@@ -2311,8 +2319,9 @@ fn run_loop(
                 // writes only \x07 out-of-band.
                 crate::commands::code_term::tui_bell();
             }
-            app.transcript
-                .push(TranscriptEntry::System(format!("› {body} · press Tab to browse")));
+            app.transcript.push(TranscriptEntry::System(format!(
+                "› {body} · press Tab to browse"
+            )));
             app.transcript.push(TranscriptEntry::Blank);
             app.set_dirty();
         }
@@ -2504,9 +2513,8 @@ fn handle_key(
             Mode::AcceptEdits => "accept-edits mode",
             Mode::Plan => "plan mode",
         };
-        app.transcript.push(TranscriptEntry::System(
-            format!("→ {label}"),
-        ));
+        app.transcript
+            .push(TranscriptEntry::System(format!("→ {label}")));
         return None;
     }
 
@@ -2543,8 +2551,7 @@ fn handle_key(
         match key.code {
             KeyCode::Up => {
                 if !agents.is_empty() {
-                    app.agent_selection =
-                        (app.agent_selection + agents.len() - 1) % agents.len();
+                    app.agent_selection = (app.agent_selection + agents.len() - 1) % agents.len();
                 }
                 return None;
             }
@@ -2728,8 +2735,7 @@ fn handle_key(
                     // Apply pending shell-escape output contexts (`!cmd`)
                     // as a prefix to the next real prompt, mirroring the
                     // legacy REPL, then drain them.
-                    let prompt =
-                        apply_pending_shell_context(&app.pending_shell_contexts, &prompt);
+                    let prompt = apply_pending_shell_context(&app.pending_shell_contexts, &prompt);
                     app.pending_shell_contexts.clear();
                     Some(Action::Submit(prompt))
                 }
@@ -2854,15 +2860,14 @@ fn handle_shell_escape(app: &mut App, prompt: &str) {
     let action = shell_escape_command(&prompt[1..], app.last_shell_command.as_deref());
     match action {
         ShellEscapeAction::Usage(msg) => {
-            app.transcript.push(TranscriptEntry::System(msg.to_string()));
+            app.transcript
+                .push(TranscriptEntry::System(msg.to_string()));
             app.transcript.push(TranscriptEntry::Blank);
             app.scroll = 0;
         }
         ShellEscapeAction::Run(cmd) => {
-            let res = code_slash_router::run_shell_escape_tui(
-                &cmd,
-                app.bash_command_wrapper.as_deref(),
-            );
+            let res =
+                code_slash_router::run_shell_escape_tui(&cmd, app.bash_command_wrapper.as_deref());
             // Record the last shell command so `!!` can repeat it.
             app.last_shell_command = Some(cmd.clone());
             // Render the result as transcript: a `$ cmd` header, then one
@@ -2874,12 +2879,15 @@ fn handle_shell_escape(app: &mut App, prompt: &str) {
             // flat visual-row count models it as one row, so there are no
             // extra rows to scroll into to recover them). One entry per line
             // makes each output line its own scrollable row.
-            app.transcript.push(TranscriptEntry::System(format!("$ {cmd}")));
+            app.transcript
+                .push(TranscriptEntry::System(format!("$ {cmd}")));
             for line in res.stdout.trim_end().lines() {
-                app.transcript.push(TranscriptEntry::System(line.to_string()));
+                app.transcript
+                    .push(TranscriptEntry::System(line.to_string()));
             }
             for line in res.stderr.trim_end().lines() {
-                app.transcript.push(TranscriptEntry::System(line.to_string()));
+                app.transcript
+                    .push(TranscriptEntry::System(line.to_string()));
             }
             if let Some(code) = res.exit_code {
                 if code != 0 {
@@ -2920,7 +2928,10 @@ fn usage_text(records: &[UsageRecord]) -> String {
         Some(summary) => {
             let mut out = String::new();
             out.push_str("usage\n");
-            out.push_str(&format!("  provider/model: {}/{}\n", summary.provider, summary.model));
+            out.push_str(&format!(
+                "  provider/model: {}/{}\n",
+                summary.provider, summary.model
+            ));
             out.push_str(&format!("  turns: {}\n", summary.turns));
             out.push_str(&format!(
                 "  last turn: {} in · {} out\n",
@@ -2932,8 +2943,7 @@ fn usage_text(records: &[UsageRecord]) -> String {
                 human_tokens(summary.output_total)
             ));
             if summary.context_window > 0 {
-                let pct = ((summary.context_high_water as f64
-                    / f64::from(summary.context_window))
+                let pct = ((summary.context_high_water as f64 / f64::from(summary.context_window))
                     * 100.0)
                     .round()
                     .min(100.0) as u32;
@@ -2979,9 +2989,16 @@ async fn doctor_text(
             ));
             out.push_str(&format!(
                 "  session persistence: {}\n",
-                if state.save_enabled { "enabled" } else { "disabled" }
+                if state.save_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
             ));
-            out.push_str(&format!("  transcript: {} message(s)\n", state.message_count));
+            out.push_str(&format!(
+                "  transcript: {} message(s)\n",
+                state.message_count
+            ));
             if let Some(level) = state.thinking_level {
                 out.push_str(&format!("  thinking: {level}\n"));
             }
@@ -3073,7 +3090,9 @@ fn build_team_invocation(
     let _ = (provider, model, mode); // defaults threaded by the arm; unused here.
     let rest = rest.trim();
     if rest.is_empty() {
-        anyhow::bail!("usage: /team <name>  |  /team <name> <manifest-path>  |  /team <name> <agent> <task>");
+        anyhow::bail!(
+            "usage: /team <name>  |  /team <name> <manifest-path>  |  /team <name> <agent> <task>"
+        );
     }
     // Tokenize on whitespace runs so `"a  b"` doesn't yield an empty middle
     // token. We count tokens to pick the form, then recover the raw remainder
@@ -3113,7 +3132,10 @@ fn build_team_invocation(
                 model: None,
             }],
         };
-        return Ok(TeamInvocation { team_name, manifest });
+        return Ok(TeamInvocation {
+            team_name,
+            manifest,
+        });
     }
 
     // Two-token form: `<name> <manifest-path>` — load from an explicit file.
@@ -3130,12 +3152,18 @@ fn build_team_invocation(
         let raw = std::fs::read_to_string(&manifest_path)
             .with_context(|| format!("reading manifest {}", manifest_path.display()))?;
         let manifest = code_team_spawn::parse_manifest(&raw)?;
-        return Ok(TeamInvocation { team_name, manifest });
+        return Ok(TeamInvocation {
+            team_name,
+            manifest,
+        });
     }
 
     // Bare `<name>` — resolve against `.libertai/teams/<name>.toml`.
     let manifest = code_team_spawn::resolve_team(cwd, &team_name)?;
-    Ok(TeamInvocation { team_name, manifest })
+    Ok(TeamInvocation {
+        team_name,
+        manifest,
+    })
 }
 
 /// Parse `/agent` args (`"<agent> [task...]"`) into a [`BackgroundAgentLaunch`]
@@ -3203,10 +3231,7 @@ fn handle_agent_overlay_key(
         KeyCode::Up | KeyCode::PageUp => {
             if let Some(overlay) = &mut app.agent_overlay {
                 overlay.follow = false;
-                overlay.scroll = overlay
-                    .scroll
-                    .saturating_add(3)
-                    .min(overlay.max_scroll);
+                overlay.scroll = overlay.scroll.saturating_add(3).min(overlay.max_scroll);
             }
         }
         // Scrolling down decrements the offset; reaching the bottom
@@ -3238,9 +3263,8 @@ fn handle_agent_overlay_key(
                     if let Some(abort) = handle.take_abort() {
                         abort.abort();
                         handle.set_status(AgentStatus::Stopped);
-                        app.transcript.push(TranscriptEntry::System(format!(
-                            "stopped {name}"
-                        )));
+                        app.transcript
+                            .push(TranscriptEntry::System(format!("stopped {name}")));
                     } else {
                         app.transcript.push(TranscriptEntry::System(format!(
                             "{name} already finished — nothing to stop"
@@ -3327,10 +3351,7 @@ fn handle_diff_view_key(
 /// the renderer, so the two never disagree on the row set.
 pub(crate) fn slash_palette_filtered(app: &App) -> Vec<(String, String)> {
     let text = app.textarea.lines().join("");
-    let prefix = text
-        .strip_prefix('/')
-        .unwrap_or(&text)
-        .to_ascii_lowercase();
+    let prefix = text.strip_prefix('/').unwrap_or(&text).to_ascii_lowercase();
     slash_palette_entries(app)
         .into_iter()
         .filter(|(name, _)| {
@@ -3388,8 +3409,7 @@ fn handle_slash_palette_key(
             if let Some(palette) = &mut app.slash_palette {
                 if filtered_len > 0 {
                     palette.selected = palette.selected.min(filtered_len - 1);
-                    palette.selected =
-                        (palette.selected + filtered_len - 1) % filtered_len;
+                    palette.selected = (palette.selected + filtered_len - 1) % filtered_len;
                 } else {
                     palette.selected = 0;
                 }
@@ -3563,7 +3583,6 @@ fn clamp_palette_selected(app: &mut App) {
     }
 }
 
-
 /// Collect output for a specific agent (by name). For background
 /// agents with a `log_path`, reads the log file (each raw line wrapped
 /// as a [`TranscriptEntry::System`] so the overlay can render it
@@ -3607,7 +3626,11 @@ pub fn agent_transcript(app: &App, agent_name: &str) -> Vec<TranscriptEntry> {
 /// COMPLETED subagent whose registry entry was removed on the success path
 /// (R4HUNT-3) so `find_by_name` returns None but the overlay's captured
 /// `log_path` still points into the subagents dir.
-fn subagent_log_kind(registry: &AgentRegistry, agent_name: &str, log_path: &std::path::Path) -> bool {
+fn subagent_log_kind(
+    registry: &AgentRegistry,
+    agent_name: &str,
+    log_path: &std::path::Path,
+) -> bool {
     if let Some(handle) = registry.find_by_name(agent_name) {
         if matches!(handle.kind, AgentKind::Subagent { .. }) {
             return true;
@@ -3688,7 +3711,10 @@ pub fn agent_transcript_for_overlay(
 /// `SubagentText` / `SubagentTool` / `SubagentEnd` entries plus the per-tool
 /// result lines (stored as `ToolResult` with the name prefixed
 /// `"{agent} · {tool}"` — see the `SubagentToolEnd` arm of [`handle_agent_msg`]).
-fn agent_transcript_from_memory(transcript: &[TranscriptEntry], agent_name: &str) -> Vec<TranscriptEntry> {
+fn agent_transcript_from_memory(
+    transcript: &[TranscriptEntry],
+    agent_name: &str,
+) -> Vec<TranscriptEntry> {
     // The leading "{agent} · " prefix on `ToolResult` (see
     // `SubagentToolEnd` storage) is what binds a per-tool result to this
     // agent.
@@ -3863,13 +3889,25 @@ enum SubagentLogRecord {
     Text { agent: String, text: String },
     /// Tool-start marker. `args` is the tool's argument JSON (kept so the
     /// overlay renderer can reuse `tool_preview` instead of re-parsing).
-    Tool { agent: String, tool: String, args: serde_json::Value },
+    Tool {
+        agent: String,
+        tool: String,
+        args: serde_json::Value,
+    },
     /// Per-tool result line. `output` is the rendered output body; `tool`
     /// is the bare tool name (the `{agent} · ` prefix is reconstructed by
     /// the overlay renderer, mirroring `agent_transcript_from_memory`).
-    ToolResult { agent: String, tool: String, output: String, is_error: bool },
+    ToolResult {
+        agent: String,
+        tool: String,
+        output: String,
+        is_error: bool,
+    },
     /// Terminal state. `outcome` is the typed [`SubagentOutcome`].
-    End { agent: String, outcome: SubagentOutcome },
+    End {
+        agent: String,
+        outcome: SubagentOutcome,
+    },
 }
 
 /// (R4HUNT-2) Marker kind tag written into the log line. Kept short +
@@ -3899,7 +3937,12 @@ impl SubagentLogRecord {
             Self::Tool { agent, tool, args } => {
                 serde_json::json!({ "agent": agent, "tool": tool, "args": args })
             }
-            Self::ToolResult { agent, tool, output, is_error } => serde_json::json!({
+            Self::ToolResult {
+                agent,
+                tool,
+                output,
+                is_error,
+            } => serde_json::json!({
                 "agent": agent,
                 "tool": tool,
                 "output": output,
@@ -4060,7 +4103,10 @@ fn read_agent_log_typed(log_path: &std::path::Path) -> Vec<TranscriptEntry> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                entries.push(TranscriptEntry::SubagentText { agent_name: agent, text });
+                entries.push(TranscriptEntry::SubagentText {
+                    agent_name: agent,
+                    text,
+                });
             }
             "tool" => {
                 let tool = payload
@@ -4068,7 +4114,10 @@ fn read_agent_log_typed(log_path: &std::path::Path) -> Vec<TranscriptEntry> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let args = payload.get("args").cloned().unwrap_or(serde_json::Value::Null);
+                let args = payload
+                    .get("args")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 entries.push(TranscriptEntry::SubagentTool {
                     agent_name: agent,
                     tool_name: tool,
@@ -4098,9 +4147,15 @@ fn read_agent_log_typed(log_path: &std::path::Path) -> Vec<TranscriptEntry> {
             }
             "end" => {
                 let outcome = parse_outcome(
-                    payload.get("outcome").and_then(|v| v.as_str()).unwrap_or(""),
+                    payload
+                        .get("outcome")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
                 );
-                entries.push(TranscriptEntry::SubagentEnd { agent_name: agent, outcome });
+                entries.push(TranscriptEntry::SubagentEnd {
+                    agent_name: agent,
+                    outcome,
+                });
             }
             // Unknown kind: back-compat — render as a dim System line so a
             // future-added kind degrades gracefully instead of dropping data.
@@ -4195,7 +4250,11 @@ const WIRED_COMMANDS: &[(&str, &[&str], &str)] = &[
     ("/model", &[], "Show or set the model"),
     ("/skills", &[], "List active skills"),
     ("/memory", &[], "Show project memory"),
-    ("/review", &["/security-review"], "Review the diff as a turn"),
+    (
+        "/review",
+        &["/security-review"],
+        "Review the diff as a turn",
+    ),
     ("/mention", &[], "Attach a file as context"),
     ("/ide", &[], "Show IDE integration status"),
     ("/hotkeys", &[], "Show hotkey bindings"),
@@ -4206,7 +4265,11 @@ const WIRED_COMMANDS: &[(&str, &[&str], &str)] = &[
     ("/mcp", &[], "Show MCP server status"),
     ("/forget", &[], "Clear saved allow rules"),
     ("/undo", &[], "Revert the most recent edit"),
-    ("/notify", &["/notifications"], "Show or toggle turn notifications"),
+    (
+        "/notify",
+        &["/notifications"],
+        "Show or toggle turn notifications",
+    ),
     ("/usage", &["/cost"], "Show session usage/cost"),
     ("/doctor", &[], "Run a health check"),
     ("/compact", &[], "Compact the conversation"),
@@ -4214,11 +4277,19 @@ const WIRED_COMMANDS: &[(&str, &[&str], &str)] = &[
     ("/tree", &[], "Render the project file tree"),
     ("/diff", &[], "Show the uncommitted diff"),
     ("/commit", &[], "Commit the working tree"),
-    ("/pr_comments", &["/pr-comments"], "Inspect or draft PR review comments"),
+    (
+        "/pr_comments",
+        &["/pr-comments"],
+        "Inspect or draft PR review comments",
+    ),
     ("/copy", &[], "Copy the last response to the clipboard"),
     ("/status", &[], "Show session status"),
     ("/statusline", &[], "Show or set the statusline template"),
-    ("/statusline-command", &[], "Show or set the statusline command"),
+    (
+        "/statusline-command",
+        &[],
+        "Show or set the statusline command",
+    ),
     ("/output-style", &[], "Show or set the output style"),
     ("/history", &[], "Show recent prompt history"),
     ("/team", &[], "Spawn a team of teammate agents"),
@@ -4227,9 +4298,21 @@ const WIRED_COMMANDS: &[(&str, &[&str], &str)] = &[
     // Honest stubs (so these stop silently falling through to "unknown
     // command"): advertised in /help + the palette, with stub arms in
     // handle_slash_command pushing a "not yet supported in TUI" System line.
-    ("/image", &[], "Attach an image (TUI stub — not yet supported)"),
-    ("/attach", &[], "Attach a file/image (TUI stub — not yet supported)"),
-    ("/schedule", &[], "Schedule a prompt (TUI stub — not yet supported)"),
+    (
+        "/image",
+        &[],
+        "Attach an image (TUI stub — not yet supported)",
+    ),
+    (
+        "/attach",
+        &[],
+        "Attach a file/image (TUI stub — not yet supported)",
+    ),
+    (
+        "/schedule",
+        &[],
+        "Schedule a prompt (TUI stub — not yet supported)",
+    ),
 ];
 
 /// The slash-palette rows `(name, description)` for the current app state:
@@ -4298,11 +4381,13 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
 
     match cmd {
         "/exit" | "/quit" => {
-            app.transcript.push(TranscriptEntry::System("goodbye.".to_string()));
+            app.transcript
+                .push(TranscriptEntry::System("goodbye.".to_string()));
             Some(Action::Quit)
         }
         "/help" => {
-            app.transcript.push(TranscriptEntry::System(help_commands_line()));
+            app.transcript
+                .push(TranscriptEntry::System(help_commands_line()));
             app.transcript.push(TranscriptEntry::Blank);
             None
         }
@@ -4329,9 +4414,8 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     Mode::AcceptEdits => "accept-edits",
                     Mode::Plan => "plan",
                 };
-                app.transcript.push(TranscriptEntry::System(
-                    format!("mode: {label}"),
-                ));
+                app.transcript
+                    .push(TranscriptEntry::System(format!("mode: {label}")));
             } else {
                 let new_mode = match rest {
                     "normal" | "default" => Some(Mode::Normal),
@@ -4346,13 +4430,11 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                         Mode::AcceptEdits => "accept-edits",
                         Mode::Plan => "plan",
                     };
-                    app.transcript.push(TranscriptEntry::System(
-                        format!("→ {label} mode"),
-                    ));
+                    app.transcript
+                        .push(TranscriptEntry::System(format!("→ {label} mode")));
                 } else {
-                    app.transcript.push(TranscriptEntry::System(
-                        format!("unknown mode: {rest}"),
-                    ));
+                    app.transcript
+                        .push(TranscriptEntry::System(format!("unknown mode: {rest}")));
                 }
             }
             None
@@ -4368,9 +4450,8 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                 Mode::AcceptEdits => "accept-edits",
                 Mode::Plan => "plan",
             };
-            app.transcript.push(TranscriptEntry::System(
-                format!("→ {label} mode"),
-            ));
+            app.transcript
+                .push(TranscriptEntry::System(format!("→ {label} mode")));
             None
         }
         "/model" => {
@@ -4383,28 +4464,22 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     .strip_prefix("list")
                     .map(|s| s.split_whitespace().map(String::from).collect())
                     .unwrap_or_default();
-                let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::ModelList {
-                    scoped_patterns,
-                }));
-                app.transcript.push(TranscriptEntry::System(
-                    "listing models…".to_string(),
-                ));
+                let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::ModelList { scoped_patterns }));
+                app.transcript
+                    .push(TranscriptEntry::System("listing models…".to_string()));
                 return None;
             }
             if rest.is_empty() || rest == "show" || rest == "status" {
-                app.transcript.push(TranscriptEntry::System(
-                    format!("model: {}", app.bar.model_label),
-                ));
+                app.transcript.push(TranscriptEntry::System(format!(
+                    "model: {}",
+                    app.bar.model_label
+                )));
             } else {
                 // Parse "provider/model" or just "model".
                 if let Some((provider, model_id)) = rest.split_once('/') {
-                    let _ = cmd_tx.send(Cmd::SetModel(
-                        provider.to_string(),
-                        model_id.to_string(),
-                    ));
-                    app.transcript.push(TranscriptEntry::System(
-                        format!("setting model to {rest}…"),
-                    ));
+                    let _ = cmd_tx.send(Cmd::SetModel(provider.to_string(), model_id.to_string()));
+                    app.transcript
+                        .push(TranscriptEntry::System(format!("setting model to {rest}…")));
                 } else {
                     // Just model — keep current provider.
                     let provider = app
@@ -4415,9 +4490,8 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                         .unwrap_or("openai")
                         .to_string();
                     let _ = cmd_tx.send(Cmd::SetModel(provider, rest.to_string()));
-                    app.transcript.push(TranscriptEntry::System(
-                        format!("setting model to {rest}…"),
-                    ));
+                    app.transcript
+                        .push(TranscriptEntry::System(format!("setting model to {rest}…")));
                 }
             }
             None
@@ -4502,8 +4576,9 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     }
                 }
                 None => {
-                    app.transcript
-                        .push(TranscriptEntry::System("usage: /mention <path> [prompt]".to_string()));
+                    app.transcript.push(TranscriptEntry::System(
+                        "usage: /mention <path> [prompt]".to_string(),
+                    ));
                     app.transcript.push(TranscriptEntry::Blank);
                     None
                 }
@@ -4547,8 +4622,9 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     ));
                 }
                 code_ui::HotkeysCommand::Usage => {
-                    app.transcript
-                        .push(TranscriptEntry::System(code_slash_router::hotkeys_usage_text()));
+                    app.transcript.push(TranscriptEntry::System(
+                        code_slash_router::hotkeys_usage_text(),
+                    ));
                 }
             }
             app.transcript.push(TranscriptEntry::Blank);
@@ -4557,8 +4633,9 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
         "/theme" => {
             match code_ui::parse_theme_command(rest) {
                 code_ui::ThemeCommand::Status => {
-                    app.transcript
-                        .push(TranscriptEntry::System(code_slash_router::theme_status_text()));
+                    app.transcript.push(TranscriptEntry::System(
+                        code_slash_router::theme_status_text(),
+                    ));
                 }
                 code_ui::ThemeCommand::Json => {
                     let payload = code_ui::theme_json_payload(rest);
@@ -4697,8 +4774,9 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                 }
                 // Unknown sub-command — show usage.
                 code_ui::HooksCommand::Usage => {
-                    app.transcript
-                        .push(TranscriptEntry::System(code_slash_router::hooks_usage_text()));
+                    app.transcript.push(TranscriptEntry::System(
+                        code_slash_router::hooks_usage_text(),
+                    ));
                 }
             }
             app.transcript.push(TranscriptEntry::Blank);
@@ -4709,9 +4787,8 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             // `reset`/`probe --save` mutate MCP state — deferred.
             match code_ui::parse_mcp_command(rest) {
                 code_ui::McpCommand::Status => {
-                    app.transcript.push(TranscriptEntry::System(
-                        code_slash_router::mcp_status_text(),
-                    ));
+                    app.transcript
+                        .push(TranscriptEntry::System(code_slash_router::mcp_status_text()));
                 }
                 code_ui::McpCommand::Json => {
                     let cfg = crate::config::load().unwrap_or_else(|_| app.cfg.as_ref().clone());
@@ -4722,7 +4799,9 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                 }
                 code_ui::McpCommand::Show(name) => {
                     app.transcript
-                        .push(TranscriptEntry::System(code_slash_router::mcp_show_text(&name)));
+                        .push(TranscriptEntry::System(code_slash_router::mcp_show_text(
+                            &name,
+                        )));
                 }
                 code_ui::McpCommand::Open => {
                     app.transcript
@@ -4773,8 +4852,9 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                         ));
                     }
                     code_ui::ForgetCommand::Usage => {
-                        app.transcript
-                            .push(TranscriptEntry::System(code_slash_router::forget_usage_text()));
+                        app.transcript.push(TranscriptEntry::System(
+                            code_slash_router::forget_usage_text(),
+                        ));
                     }
                 }
             }
@@ -4801,16 +4881,15 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                             }
                         }
                     }
-                    app.transcript.push(TranscriptEntry::System(format!(
-                        "reverted {}",
-                        e.path
-                    )));
+                    app.transcript
+                        .push(TranscriptEntry::System(format!("reverted {}", e.path)));
                     app.transcript.push(TranscriptEntry::Blank);
                     app.set_dirty();
                 }
                 None => {
-                    app.transcript
-                        .push(TranscriptEntry::System("/undo: nothing to undo.".to_string()));
+                    app.transcript.push(TranscriptEntry::System(
+                        "/undo: nothing to undo.".to_string(),
+                    ));
                     app.transcript.push(TranscriptEntry::Blank);
                 }
             }
@@ -4836,9 +4915,9 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                         Ok(()) => app.transcript.push(TranscriptEntry::System(
                             "turn notifications enabled".to_string(),
                         )),
-                        Err(e) => app.transcript.push(TranscriptEntry::System(format!(
-                            "/notify: {e:#}"
-                        ))),
+                        Err(e) => app
+                            .transcript
+                            .push(TranscriptEntry::System(format!("/notify: {e:#}"))),
                     }
                 }
                 code_ui::NotifyCommand::Off => {
@@ -4846,20 +4925,24 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                         Ok(()) => app.transcript.push(TranscriptEntry::System(
                             "turn notifications disabled".to_string(),
                         )),
-                        Err(e) => app.transcript.push(TranscriptEntry::System(format!(
-                            "/notify: {e:#}"
-                        ))),
+                        Err(e) => app
+                            .transcript
+                            .push(TranscriptEntry::System(format!("/notify: {e:#}"))),
                     }
                 }
                 code_ui::NotifyCommand::Test => {
-                    crate::commands::code_term::notify_terminal("LibertAI Code", "Notification test");
+                    crate::commands::code_term::notify_terminal(
+                        "LibertAI Code",
+                        "Notification test",
+                    );
                     app.transcript.push(TranscriptEntry::System(
                         "notification test sent".to_string(),
                     ));
                 }
                 code_ui::NotifyCommand::Usage => {
-                    app.transcript
-                        .push(TranscriptEntry::System(code_slash_router::notify_usage_text()));
+                    app.transcript.push(TranscriptEntry::System(
+                        code_slash_router::notify_usage_text(),
+                    ));
                 }
             }
             app.transcript.push(TranscriptEntry::Blank);
@@ -4941,10 +5024,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                 // back to the default limit on a bare `json`.
                 let limit = code_ui::parse_changelog_limit(&query)
                     .unwrap_or(code_ui::CHANGELOG_DEFAULT_LIMIT);
-                let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Changelog {
-                    limit,
-                    json: true,
-                }));
+                let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Changelog { limit, json: true }));
             } else {
                 let limit = match code_ui::parse_changelog_limit(rest) {
                     Ok(limit) => limit,
@@ -5121,10 +5201,8 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             match first.as_str() {
                 "drafts" => {
                     // `/pr_comments drafts [list|clear|state|status|submit|…]`
-                    let rest_after_drafts = rest
-                        .strip_prefix("drafts")
-                        .map(str::trim)
-                        .unwrap_or("");
+                    let rest_after_drafts =
+                        rest.strip_prefix("drafts").map(str::trim).unwrap_or("");
                     let action = rest_after_drafts
                         .split_whitespace()
                         .next()
@@ -5176,10 +5254,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     // pushes into `app.pr_comment_drafts`, and returns the
                     // draft so we can format the staged confirmation as a
                     // System entry (the legacy fn printed it).
-                    let rest_after_draft = rest
-                        .strip_prefix("draft")
-                        .map(str::trim)
-                        .unwrap_or("");
+                    let rest_after_draft = rest.strip_prefix("draft").map(str::trim).unwrap_or("");
                     match stage_pr_comment_draft(rest_after_draft, &mut app.pr_comment_drafts) {
                         Ok(draft) => {
                             app.transcript.push(TranscriptEntry::System(format!(
@@ -5275,7 +5350,11 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             if let Some(branch) = &app.bar.git_branch {
                 parts.push(format!("branch: {branch}"));
             }
-            let style = app.bar.output_style.clone().unwrap_or_else(|| "default".to_string());
+            let style = app
+                .bar
+                .output_style
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
             parts.push(format!("style: {style}"));
             app.transcript
                 .push(TranscriptEntry::System(parts.join("  ·  ")));
@@ -5310,8 +5389,9 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                 } else {
                     app.bar.status_line_command.clone()
                 };
-                app.transcript
-                    .push(TranscriptEntry::System(format!("statusline-command: {shown}")));
+                app.transcript.push(TranscriptEntry::System(format!(
+                    "statusline-command: {shown}"
+                )));
             } else {
                 app.bar.status_line_command = rest.to_string();
                 app.transcript.push(TranscriptEntry::System(
@@ -5345,7 +5425,10 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                         }
                         app.transcript.push(TranscriptEntry::System(format!(
                             "→ output style: {}",
-                            app.bar.output_style.clone().unwrap_or_else(|| "default".to_string())
+                            app.bar
+                                .output_style
+                                .clone()
+                                .unwrap_or_else(|| "default".to_string())
                         )));
                     }
                     None => {
@@ -5359,16 +5442,14 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
         }
         "/history" => {
             if app.history.is_empty() {
-                app.transcript.push(TranscriptEntry::System(
-                    "no history yet.".to_string(),
-                ));
+                app.transcript
+                    .push(TranscriptEntry::System("no history yet.".to_string()));
             } else {
-                app.transcript.push(TranscriptEntry::System("history:".to_string()));
+                app.transcript
+                    .push(TranscriptEntry::System("history:".to_string()));
                 for (i, item) in app.history.iter().rev().take(20).enumerate() {
-                    app.transcript.push(TranscriptEntry::System(format!(
-                        "  {}. {item}",
-                        i + 1,
-                    )));
+                    app.transcript
+                        .push(TranscriptEntry::System(format!("  {}. {item}", i + 1,)));
                 }
             }
             None
@@ -5383,9 +5464,9 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             let cwd = match std::env::current_dir() {
                 Ok(c) => c,
                 Err(e) => {
-                    app.transcript.push(TranscriptEntry::System(
-                        format!("team: could not resolve cwd: {e}"),
-                    ));
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "team: could not resolve cwd: {e}"
+                    )));
                     app.transcript.push(TranscriptEntry::Blank);
                     return None;
                 }
@@ -5455,9 +5536,8 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     }
                 }
                 Err(e) => {
-                    app.transcript.push(TranscriptEntry::System(format!(
-                        "team: {e:#}"
-                    )));
+                    app.transcript
+                        .push(TranscriptEntry::System(format!("team: {e:#}")));
                     app.transcript.push(TranscriptEntry::Blank);
                 }
             }
@@ -5471,9 +5551,9 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             let cwd = match std::env::current_dir() {
                 Ok(c) => c,
                 Err(e) => {
-                    app.transcript.push(TranscriptEntry::System(
-                        format!("agent: could not resolve cwd: {e}"),
-                    ));
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "agent: could not resolve cwd: {e}"
+                    )));
                     app.transcript.push(TranscriptEntry::Blank);
                     return None;
                 }
@@ -5490,8 +5570,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             ) {
                 Ok(launch) => {
                     let name = launch.name.clone();
-                    let prompt_preview: String =
-                        launch.prompt.chars().take(80).collect();
+                    let prompt_preview: String = launch.prompt.chars().take(80).collect();
                     match start_background_agent(&launch) {
                         Ok(started) => {
                             let reg = AgentRegistration {
@@ -5534,9 +5613,8 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     }
                 }
                 Err(e) => {
-                    app.transcript.push(TranscriptEntry::System(format!(
-                        "agent: {e:#}"
-                    )));
+                    app.transcript
+                        .push(TranscriptEntry::System(format!("agent: {e:#}")));
                     app.transcript.push(TranscriptEntry::Blank);
                 }
             }
@@ -5548,7 +5626,8 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             // agent: name · status · pid (if any) · team (if any).
             let snapshot = app.registry.snapshot();
             if snapshot.is_empty() {
-                app.transcript.push(TranscriptEntry::System("no agents.".to_string()));
+                app.transcript
+                    .push(TranscriptEntry::System("no agents.".to_string()));
             } else {
                 app.transcript.push(TranscriptEntry::System(format!(
                     "agents ({}):",
@@ -5658,11 +5737,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
 }
 
 /// Handle a key when the approval modal is active.
-fn handle_approval_key(
-    app: &mut App,
-    key: KeyEvent,
-    shared_abort: &SharedAbort,
-) -> Option<Action> {
+fn handle_approval_key(app: &mut App, key: KeyEvent, shared_abort: &SharedAbort) -> Option<Action> {
     use crate::commands::code_approvals::PromptChoice;
     // Whether this modal is a teammate (Remote) approval — its resolution
     // shouldn't touch the parent turn's abort/phase (the teammate is a
@@ -5879,11 +5954,11 @@ fn advance_question(app: &mut App) {
         // All questions answered — send result.
         let modal = app.ask.take().unwrap();
         let answers = modal.answers;
-        let _ = modal.responder.send(
-            crate::commands::code_approvals::AskOutcome::Answer(
+        let _ = modal
+            .responder
+            .send(crate::commands::code_approvals::AskOutcome::Answer(
                 serde_json::json!({ "answers": answers }),
-            ),
-        );
+            ));
         app.phase = Phase::Streaming;
     } else {
         // Reset state for the next question.
@@ -6043,9 +6118,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.scroll = 0; // auto-scroll to bottom
         }
         AgentMsg::ToolStart {
-            tool_name,
-            args,
-            ..
+            tool_name, args, ..
         } => {
             let detail = crate::commands::code_tool_preview::tool_preview(&tool_name, &args);
             let detail = detail
@@ -6063,9 +6136,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.scroll = 0; // auto-scroll to bottom
         }
         AgentMsg::ToolEnd {
-            tool_name,
-            output,
-            ..
+            tool_name, output, ..
         } => {
             // Stop dropping tool output: render a dim ToolResult line below
             // the tool marker. `render_tool_output` extracts a readable
@@ -6200,10 +6271,9 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             // for the user to decide. The clone shares the channel, so the
             // send reaches the bg thread's `resp_rx.recv()`.
             if app.approval.is_some() {
-                let _ = resp_clone
-                    .send(crate::commands::code_approvals::AskOutcome::Answer(
-                        serde_json::json!({ "cancelled": true, "reason": "USER_DECLINED" }),
-                    ));
+                let _ = resp_clone.send(crate::commands::code_approvals::AskOutcome::Answer(
+                    serde_json::json!({ "cancelled": true, "reason": "USER_DECLINED" }),
+                ));
             } else if let Some(modal) = AskModal::from_payload(&payload, responder) {
                 app.ask = Some(modal);
                 app.phase = Phase::Ask;
@@ -6289,20 +6359,20 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.current_tool_detail = String::new();
             app.spinner_label = "thinking…";
             app.scroll = 0; // auto-scroll to bottom
-            // (Round-11) Symmetric with the TurnEnd stash refresh: PromptReady
-            // unconditionally starts a real parent turn (phase=Streaming) but
-            // previously did NOT touch `pre_approval_phase`. The async slash-
-            // expansion window (build_custom_slash_prompt on the separately-
-            // suspended bg thread) is large enough that a previously-spawned
-            // teammate subprocess can connect + be accepted by the IPC poll
-            // (guard approval.is_none() is true while the parent was Idle)
-            // BEFORE the expansion completes — so the stash is Some(Idle) when
-            // PromptReady fires. Without this refresh, resolving the teammate
-            // modal would hit the Remote arm `pre_approval_phase.take()
-            // .unwrap_or(Idle)` -> Idle, clobbering the now-live streaming
-            // parent turn to a phantom Idle (frozen spinner + Ctrl+C quits the
-            // app instead of aborting). Track the new Streaming phase so the
-            // restore lands on Streaming (correct — the parent IS streaming).
+                            // (Round-11) Symmetric with the TurnEnd stash refresh: PromptReady
+                            // unconditionally starts a real parent turn (phase=Streaming) but
+                            // previously did NOT touch `pre_approval_phase`. The async slash-
+                            // expansion window (build_custom_slash_prompt on the separately-
+                            // suspended bg thread) is large enough that a previously-spawned
+                            // teammate subprocess can connect + be accepted by the IPC poll
+                            // (guard approval.is_none() is true while the parent was Idle)
+                            // BEFORE the expansion completes — so the stash is Some(Idle) when
+                            // PromptReady fires. Without this refresh, resolving the teammate
+                            // modal would hit the Remote arm `pre_approval_phase.take()
+                            // .unwrap_or(Idle)` -> Idle, clobbering the now-live streaming
+                            // parent turn to a phantom Idle (frozen spinner + Ctrl+C quits the
+                            // app instead of aborting). Track the new Streaming phase so the
+                            // restore lands on Streaming (correct — the parent IS streaming).
             if app.approval.is_some() {
                 app.pre_approval_phase = Some(app.phase);
             }
@@ -6431,7 +6501,10 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.scroll = 0; // auto-scroll to bottom
             overlay_auto_tail(app, &agent_name);
         }
-        AgentMsg::SubagentEnd { agent_name, outcome } => {
+        AgentMsg::SubagentEnd {
+            agent_name,
+            outcome,
+        } => {
             // HIGH-2: surface an unexpected/user-aborted inline-subagent end
             // out-of-band. Inline subagents finish mid-turn while the user is
             // watching, so a Completed end is redundant/noisy — the bell fires
@@ -6471,7 +6544,8 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
         AgentMsg::Error(e) => {
             // (MED-9) Errors render with the error color, not the dim System
             // style, so failures are visible.
-            app.transcript.push(TranscriptEntry::Error(format!("error: {e}")));
+            app.transcript
+                .push(TranscriptEntry::Error(format!("error: {e}")));
             app.scroll = 0; // auto-scroll to bottom
         }
     }
@@ -6487,7 +6561,9 @@ mod tests {
     fn reg_teammate(team: &str) -> AgentRegistration {
         AgentRegistration {
             name: format!("{team}-agent"),
-            kind: AgentKind::Teammate { team: team.to_string() },
+            kind: AgentKind::Teammate {
+                team: team.to_string(),
+            },
             color: AgentColor::Dim,
             capability: AgentCapability::ReadOnly,
             cwd: PathBuf::from("."),
@@ -6527,7 +6603,9 @@ mod tests {
         // free and `kill(pid, 0)` returns ESRCH. The pid is reused only after
         // the kernel wraps pid_max (~4M), so for a single short-lived test
         // the probe is deterministic.
-        let mut child = std::process::Command::new("true").spawn().expect("spawn `true`");
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn `true`");
         let pid = child.id();
         drop(child.wait());
         let reg = AgentRegistration {
@@ -6620,8 +6698,11 @@ mod tests {
         let prev = active_team_set(&registry.snapshot());
         a.set_status(AgentStatus::Completed);
         let after = active_team_set(&registry.snapshot());
-        let completed: Vec<String> =
-            prev.keys().filter(|t| !after.contains_key(*t)).cloned().collect();
+        let completed: Vec<String> = prev
+            .keys()
+            .filter(|t| !after.contains_key(*t))
+            .cloned()
+            .collect();
         assert_eq!(completed, vec!["alpha".to_string()]);
     }
 
@@ -6634,8 +6715,11 @@ mod tests {
         // Only one of two finishes — team still active.
         a.set_status(AgentStatus::Completed);
         let after = active_team_set(&registry.snapshot());
-        let completed: Vec<String> =
-            prev.keys().filter(|t| !after.contains_key(*t)).cloned().collect();
+        let completed: Vec<String> = prev
+            .keys()
+            .filter(|t| !after.contains_key(*t))
+            .cloned()
+            .collect();
         assert!(completed.is_empty());
     }
 
@@ -6720,7 +6804,10 @@ mod tests {
         // Register a background agent WITH a log_path and open its overlay.
         app.registry.register(AgentRegistration {
             name: "coder".to_string(),
-            kind: AgentKind::Background { pid: 12345, run_id: String::new() },
+            kind: AgentKind::Background {
+                pid: 12345,
+                run_id: String::new(),
+            },
             color: AgentColor::Dim,
             capability: AgentCapability::ReadOnly,
             cwd: PathBuf::from("."),
@@ -6745,7 +6832,9 @@ mod tests {
         // its output reaches the in-memory transcript, which sets dirty.
         app.registry.register(AgentRegistration {
             name: "inline".to_string(),
-            kind: AgentKind::Teammate { team: "t".to_string() },
+            kind: AgentKind::Teammate {
+                team: "t".to_string(),
+            },
             color: AgentColor::Dim,
             capability: AgentCapability::ReadOnly,
             cwd: PathBuf::from("."),
@@ -6773,7 +6862,10 @@ mod tests {
             follow: true,
             ..Default::default()
         });
-        assert!(!overlay_needs_redraw(&app), "unknown agent must not request redraw");
+        assert!(
+            !overlay_needs_redraw(&app),
+            "unknown agent must not request redraw"
+        );
     }
 
     // R3-SHELL-MULTILINE: `!`/`!!` shell escape must push ONE System entry per
@@ -6997,7 +7089,8 @@ mod tests {
         // the tail read kept the very end of the file.
         let expected_last = format!("line-{:05}-{pad}", total - 1);
         assert_eq!(
-            lines[lines.len() - 2], expected_last,
+            lines[lines.len() - 2],
+            expected_last,
             "last kept line before the notice must be the final written line"
         );
     }
@@ -7058,7 +7151,10 @@ mod tests {
         // First read: cache miss → reads disk, populates the cache.
         let first = read_agent_log_cached(&mut overlay, &log);
         assert_eq!(first, vec!["first", "second"]);
-        assert!(overlay.cached_log_meta.is_some(), "cache must be populated on first read");
+        assert!(
+            overlay.cached_log_meta.is_some(),
+            "cache must be populated on first read"
+        );
         assert_eq!(
             overlay.cached_log_lines, first,
             "cached lines must match the returned lines"
@@ -7074,8 +7170,15 @@ mod tests {
         // Writing changes the size, so the mtime+size gate trips.
         std::fs::write(&log, "first\nsecond\nthird\n").unwrap();
         let third = read_agent_log_cached(&mut overlay, &log);
-        assert_eq!(third, vec!["first", "second", "third"], "cache miss after growth must re-read");
-        assert_eq!(overlay.cached_log_lines, third, "cache refreshed after growth");
+        assert_eq!(
+            third,
+            vec!["first", "second", "third"],
+            "cache miss after growth must re-read"
+        );
+        assert_eq!(
+            overlay.cached_log_lines, third,
+            "cache refreshed after growth"
+        );
     }
 
     // (R4HUNT-2 perf) The typed-marker cache mirrors the flat cache: a first
@@ -7109,7 +7212,10 @@ mod tests {
         let first = read_agent_log_typed_cached(&mut overlay, &log);
         assert_eq!(first.len(), 1);
         assert!(overlay.cached_log_meta.is_some(), "cache meta populated");
-        assert!(overlay.cached_typed_entries.is_some(), "typed cache populated");
+        assert!(
+            overlay.cached_typed_entries.is_some(),
+            "typed cache populated"
+        );
         assert!(
             overlay.cached_log_lines.is_empty(),
             "flat cache invalidated by the typed path (cross-kind)"
@@ -7140,7 +7246,11 @@ mod tests {
             write!(f, "{}", rec2.marker_line()).unwrap();
         }
         let third = read_agent_log_typed_cached(&mut overlay, &log);
-        assert_eq!(third.len(), 2, "cache miss after growth re-parses both markers");
+        assert_eq!(
+            third.len(),
+            2,
+            "cache miss after growth re-parses both markers"
+        );
         assert!(matches!(third[1], TranscriptEntry::SubagentEnd { .. }));
         assert_eq!(
             overlay.cached_typed_entries.as_ref().unwrap().len(),
@@ -7158,7 +7268,8 @@ mod tests {
         let mut app = test_app();
         // Push MAX + 250 System entries so the cap trips.
         for i in 0..(MAX_TRANSCRIPT_ENTRIES + 250) {
-            app.transcript.push(TranscriptEntry::System(format!("entry-{i}")));
+            app.transcript
+                .push(TranscriptEntry::System(format!("entry-{i}")));
         }
         assert_eq!(
             app.transcript.len(),
@@ -7199,11 +7310,16 @@ mod tests {
     fn trim_transcript_noop_when_within_cap() {
         let mut app = test_app();
         for i in 0..(MAX_TRANSCRIPT_ENTRIES - 1) {
-            app.transcript.push(TranscriptEntry::System(format!("entry-{i}")));
+            app.transcript
+                .push(TranscriptEntry::System(format!("entry-{i}")));
         }
         let before = app.transcript.len();
         app.trim_transcript();
-        assert_eq!(app.transcript.len(), before, "within-cap trim must not drop anything");
+        assert_eq!(
+            app.transcript.len(),
+            before,
+            "within-cap trim must not drop anything"
+        );
         assert!(
             matches!(
                 app.transcript.first(),
@@ -7224,7 +7340,8 @@ mod tests {
     fn trim_transcript_preserves_scroll_clamp_no_panic() {
         let mut app = test_app();
         for i in 0..(MAX_TRANSCRIPT_ENTRIES + 500) {
-            app.transcript.push(TranscriptEntry::System(format!("entry-{i}")));
+            app.transcript
+                .push(TranscriptEntry::System(format!("entry-{i}")));
         }
         // Simulate a user scrolled up (large offset from bottom). Use a value
         // larger than what the trimmed transcript can satisfy — the clamp must
@@ -7235,14 +7352,14 @@ mod tests {
 
         // Reproduce the scrollback::draw clamp math against the trimmed
         // transcript (flat visual-row count: one row per System entry).
-        let total_visual_lines: usize =
-            app.transcript.iter().map(|_| 1usize).sum();
+        let total_visual_lines: usize = app.transcript.iter().map(|_| 1usize).sum();
         // A small viewport so max_from_top is nonzero and the clamp exercises
         // the saturating_sub path.
         let viewport = 40usize;
         let max_from_top = total_visual_lines.saturating_sub(viewport);
-        let scroll_from_top =
-            max_from_top.saturating_sub(app.scroll as usize).min(max_from_top);
+        let scroll_from_top = max_from_top
+            .saturating_sub(app.scroll as usize)
+            .min(max_from_top);
         // The invariant: scroll_from_top never exceeds max_from_top and never
         // underflows (saturating_sub clamps to 0).
         assert!(
@@ -7444,7 +7561,10 @@ mod tests {
         assert!(app.current_tool.is_none());
         assert!(cmd_rx.try_recv().is_err(), "no queued prompt to send");
         // A trailing Blank separator is pushed on turn end.
-        assert!(matches!(app.transcript.last(), Some(TranscriptEntry::Blank)));
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptEntry::Blank)
+        ));
     }
 
     #[test]
@@ -7558,10 +7678,9 @@ mod tests {
         let action = handle_slash_command(&mut app, "/nope", &cmd_tx);
 
         assert!(action.is_none());
-        assert!(app
-            .transcript
-            .iter()
-            .any(|e| matches!(e, TranscriptEntry::System(ref s) if s.contains("unknown command: /nope"))));
+        assert!(app.transcript.iter().any(
+            |e| matches!(e, TranscriptEntry::System(ref s) if s.contains("unknown command: /nope"))
+        ));
     }
 
     // (stubs) /image /attach /schedule are honest stubs: instead of silently
@@ -7708,7 +7827,10 @@ mod tests {
         );
         // The stashed context carries the captured stdout.
         let stashed = app.pending_shell_contexts.join("\n");
-        assert!(stashed.contains("hi"), "stashed context missing stdout: {stashed}");
+        assert!(
+            stashed.contains("hi"),
+            "stashed context missing stdout: {stashed}"
+        );
 
         // The next real prompt is prefixed with the stashed context.
         let prefixed = apply_pending_shell_context(&app.pending_shell_contexts, "summarize this");
@@ -7725,7 +7847,10 @@ mod tests {
         // noop once empty (the next prompt passes through unmodified).
         app.pending_shell_contexts.clear();
         let passthrough = apply_pending_shell_context(&app.pending_shell_contexts, "next prompt");
-        assert_eq!(passthrough, "next prompt", "empty contexts should pass the prompt through");
+        assert_eq!(
+            passthrough, "next prompt",
+            "empty contexts should pass the prompt through"
+        );
     }
 
     // `!!` repeats the last shell command: after `!echo hi`, a bare `!!` (rest
@@ -7841,8 +7966,8 @@ mod tests {
     // is pub(crate) in code_ui and not re-exported by app.rs.
     #[test]
     fn expand_status_line_template_substitutes_tokens() {
-        use crate::commands::code_ui::BarStatus as LegacyBarStatus;
         use crate::commands::code_ui::expand_status_line_template;
+        use crate::commands::code_ui::BarStatus as LegacyBarStatus;
 
         let legacy = LegacyBarStatus {
             model_label: "openai/gpt-4o".to_string(),
@@ -7854,9 +7979,8 @@ mod tests {
             estimated_cost: Some(1.50),
         };
 
-        let rendered =
-            expand_status_line_template("{model} {ctx} {cost}", &legacy, Mode::Normal)
-                .expect("non-empty template renders");
+        let rendered = expand_status_line_template("{model} {ctx} {cost}", &legacy, Mode::Normal)
+            .expect("non-empty template renders");
         // {model} → part after the slash.
         assert!(rendered.contains("gpt-4o"), "model token: {rendered:?}");
         // {ctx} → "50%".
@@ -7868,8 +7992,8 @@ mod tests {
     // An empty template yields None (the footer falls back to default chips).
     #[test]
     fn expand_status_line_template_empty_returns_none() {
-        use crate::commands::code_ui::BarStatus as LegacyBarStatus;
         use crate::commands::code_ui::expand_status_line_template;
+        use crate::commands::code_ui::BarStatus as LegacyBarStatus;
 
         let legacy = LegacyBarStatus {
             model_label: "openai/gpt-4o".to_string(),
@@ -7985,7 +8109,10 @@ mod tests {
         let action = handle_slash_command(&mut app, "/output-style default", &cmd_tx);
 
         assert!(action.is_none());
-        assert!(app.bar.output_style.is_none(), "default clears the override");
+        assert!(
+            app.bar.output_style.is_none(),
+            "default clears the override"
+        );
     }
 
     #[test]
@@ -8045,7 +8172,10 @@ mod tests {
                 _ => None,
             })
             .expect("a /status System entry was pushed");
-        assert!(status_line.contains("branch: main"), "branch: {status_line:?}");
+        assert!(
+            status_line.contains("branch: main"),
+            "branch: {status_line:?}"
+        );
         assert!(status_line.contains("cost: $0.42"), "cost: {status_line:?}");
         // ctx % derived from the (known) hermetic window.
         assert!(status_line.contains("ctx: 3%"), "ctx: {status_line:?}");
@@ -8094,8 +8224,14 @@ mod tests {
     #[test]
     fn build_team_invocation_quick_form_builds_single_teammate_manifest() {
         let cwd = PathBuf::from(".");
-        let inv = build_team_invocation("refactor coder refactor the parser", &cwd, "openai", "gpt-4o", Mode::Normal)
-            .expect("quick form parses");
+        let inv = build_team_invocation(
+            "refactor coder refactor the parser",
+            &cwd,
+            "openai",
+            "gpt-4o",
+            Mode::Normal,
+        )
+        .expect("quick form parses");
         assert_eq!(inv.team_name, "refactor");
         assert_eq!(inv.manifest.teammates.len(), 1);
         let t = &inv.manifest.teammates[0];
@@ -8112,17 +8248,17 @@ mod tests {
         // quick form. A nonexistent path → read error (not a usage error).
         let err = build_team_invocation("refactor coder", &cwd, "openai", "gpt-4o", Mode::Normal)
             .expect_err("two-token form with a missing path errors");
-        assert!(format!("{err:#}").contains("reading manifest"), "err: {err:#}");
+        assert!(
+            format!("{err:#}").contains("reading manifest"),
+            "err: {err:#}"
+        );
     }
 
     #[test]
     fn build_team_invocation_manifest_path_form_loads_file() {
         // Write a minimal manifest to a temp file and load it by explicit path.
         let dir = std::env::temp_dir();
-        let manifest_path = dir.join(format!(
-            "libertai-m3b-team-{}.toml",
-            std::process::id()
-        ));
+        let manifest_path = dir.join(format!("libertai-m3b-team-{}.toml", std::process::id()));
         std::fs::write(
             &manifest_path,
             r#"
@@ -8148,8 +8284,15 @@ task = "Do the thing"
     #[test]
     fn build_agent_invocation_parses_name_and_task() {
         let cwd = PathBuf::from(".");
-        let launch = build_agent_invocation("coder fix the parser", &cwd, "openai", "gpt-4o", Mode::AcceptEdits, None)
-            .expect("agent parses");
+        let launch = build_agent_invocation(
+            "coder fix the parser",
+            &cwd,
+            "openai",
+            "gpt-4o",
+            Mode::AcceptEdits,
+            None,
+        )
+        .expect("agent parses");
         assert_eq!(launch.name, "coder");
         assert_eq!(launch.prompt, "fix the parser");
         assert_eq!(launch.provider, "openai");
@@ -8181,10 +8324,7 @@ task = "Do the thing"
             Some(sock.as_path()),
         )
         .expect("agent parses");
-        assert_eq!(
-            launch.approval_socket_path.as_deref(),
-            Some(sock.as_path()),
-        );
+        assert_eq!(launch.approval_socket_path.as_deref(), Some(sock.as_path()),);
     }
 
     // (Round-9) A teammate (Remote) approval modal that appears DURING a
@@ -8197,6 +8337,7 @@ task = "Do the thing"
     // modal, resolve it, assert phase returns to Streaming (not Idle) + the
     // stash is cleared. Tests all three resolution keys (allow / deny / Esc)
     // + Ctrl+C.
+    #[cfg(unix)]
     fn remote_approval_modal() -> ApprovalModal {
         // A dummy connected socket pair — respond() is best-effort, so a
         // stream nobody reads (or that's closed) is harmless. We only need a
@@ -8214,6 +8355,7 @@ task = "Do the thing"
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn remote_approval_resolving_restores_streaming_phase() {
         let mut app = test_app();
@@ -8232,11 +8374,19 @@ task = "Do the thing"
             &shared_abort,
         );
         assert!(action.is_none());
-        assert_eq!(app.phase, Phase::Streaming, "resolve must RESTORE Streaming, not Idle");
+        assert_eq!(
+            app.phase,
+            Phase::Streaming,
+            "resolve must RESTORE Streaming, not Idle"
+        );
         assert!(app.approval.is_none(), "modal consumed");
-        assert!(app.pre_approval_phase.is_none(), "stash cleared after restore");
+        assert!(
+            app.pre_approval_phase.is_none(),
+            "stash cleared after restore"
+        );
     }
 
+    #[cfg(unix)]
     #[test]
     fn remote_approval_deny_restores_streaming_phase() {
         let mut app = test_app();
@@ -8257,6 +8407,7 @@ task = "Do the thing"
         assert!(app.pre_approval_phase.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn remote_approval_ctrlc_restores_streaming_phase_and_does_not_abort_parent() {
         let mut app = test_app();
@@ -8277,13 +8428,20 @@ task = "Do the thing"
             &shared_abort,
         );
         assert!(action.is_none());
-        assert!(!abort_signal.is_aborted(), "Ctrl+C on a teammate approval must NOT abort the parent turn");
-        assert!(shared_abort.lock().unwrap().is_some(), "parent abort slot preserved");
+        assert!(
+            !abort_signal.is_aborted(),
+            "Ctrl+C on a teammate approval must NOT abort the parent turn"
+        );
+        assert!(
+            shared_abort.lock().unwrap().is_some(),
+            "parent abort slot preserved"
+        );
         assert_eq!(app.phase, Phase::Streaming, "Ctrl+C must RESTORE Streaming");
         assert!(app.approval.is_none());
         assert!(app.pre_approval_phase.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn remote_approval_from_idle_restores_idle_phase() {
         // The teammate approval arrived while the parent was Idle (no turn).
@@ -8304,6 +8462,7 @@ task = "Do the thing"
         assert!(app.pre_approval_phase.is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn remote_approval_without_stash_falls_back_to_idle() {
         // Defensive: if pre_approval_phase was never saved (shouldn't happen
@@ -8350,9 +8509,17 @@ task = "Do the thing"
             KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
             &shared_abort,
         );
-        assert_eq!(app.phase, Phase::Streaming, "Local approval resumes Streaming");
+        assert_eq!(
+            app.phase,
+            Phase::Streaming,
+            "Local approval resumes Streaming"
+        );
         // The Local arm leaves the stash untouched (it doesn't take() it).
-        assert_eq!(app.pre_approval_phase, Some(Phase::Idle), "Local arm ignores the stash");
+        assert_eq!(
+            app.pre_approval_phase,
+            Some(Phase::Idle),
+            "Local arm ignores the stash"
+        );
     }
 
     // (Round-10 repro) Reproduce the stale-stash scenario: a teammate (Remote)
@@ -8363,6 +8530,7 @@ task = "Do the thing"
     // Expected: phase == Idle (the parent already ended). Actual (buggy):
     // phase == Streaming restored from the stale stash → phantom spinner +
     // disabled slash palette.
+    #[cfg(unix)]
     #[test]
     fn remote_approval_stale_stash_after_parent_turnend_restores_idle() {
         let mut app = test_app();
@@ -8407,6 +8575,7 @@ task = "Do the thing"
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn round11_remote_modal_across_queued_drain_then_resolve_keeps_streaming() {
         let mut app = test_app();
@@ -8421,7 +8590,11 @@ task = "Do the thing"
         app.phase = Phase::Approval;
 
         handle_agent_msg(&mut app, AgentMsg::TurnEnd { elapsed_secs: 5 }, &cmd_tx);
-        assert_eq!(app.phase, Phase::Streaming, "queued prompt drained into a new streaming turn");
+        assert_eq!(
+            app.phase,
+            Phase::Streaming,
+            "queued prompt drained into a new streaming turn"
+        );
         assert!(app.approval.is_some(), "teammate modal still up");
         let stash_after_drain = app.pre_approval_phase;
 
@@ -8443,6 +8616,7 @@ task = "Do the thing"
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_approval_request_does_not_clobber_in_flight_remote_modal() {
         // (Round-10) Symmetry with the IPC poll's `if app.approval.is_none()`
@@ -8491,7 +8665,11 @@ task = "Do the thing"
             ),
             "the surviving modal is still the Remote (teammate) one"
         );
-        assert_eq!(app.phase, Phase::Approval, "phase stays Approval for the surviving modal");
+        assert_eq!(
+            app.phase,
+            Phase::Approval,
+            "phase stays Approval for the surviving modal"
+        );
         // The Local request is immediately denied (the bg thread unblocks).
         // recv_timeout (not recv) so a future regression fails fast with a
         // clear message instead of an obscure deadlock/timeout.
@@ -8504,6 +8682,7 @@ task = "Do the thing"
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn promptready_while_remote_modal_up_tracks_streaming_in_stash() {
         // (Round-11 HIGH-2) PromptReady unconditionally sets phase=Streaming +
@@ -8529,8 +8708,16 @@ task = "Do the thing"
         app.approval = Some(remote_approval_modal());
 
         // The slash expansion completes -> PromptReady starts a real turn.
-        handle_agent_msg(&mut app, AgentMsg::PromptReady("do the thing".to_string()), &cmd_tx);
-        assert_eq!(app.phase, Phase::Streaming, "PromptReady starts a streaming turn");
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::PromptReady("do the thing".to_string()),
+            &cmd_tx,
+        );
+        assert_eq!(
+            app.phase,
+            Phase::Streaming,
+            "PromptReady starts a streaming turn"
+        );
         assert!(app.approval.is_some(), "teammate modal still up");
         // (Round-11 fix) The stash MUST now reflect the live Streaming phase,
         // not the stale Idle — so the Remote-arm restore lands on Streaming.
@@ -8554,6 +8741,7 @@ task = "Do the thing"
         assert!(app.approval.is_none(), "modal resolved");
     }
 
+    #[cfg(unix)]
     #[test]
     fn askrequest_while_remote_modal_up_is_cancelled_not_clobbering() {
         // (Round-11 MEDIUM-3) AskRequest had no `app.approval` guard. A parent
@@ -8577,8 +8765,7 @@ task = "Do the thing"
         // AskModal::from_payload returns Some -> app.ask is set + phase=Ask
         // (the clobber). WITH the guard the Ask is cancelled before
         // from_payload runs.
-        let (ask_tx, ask_rx) =
-            mpsc::channel::<crate::commands::code_approvals::AskOutcome>();
+        let (ask_tx, ask_rx) = mpsc::channel::<crate::commands::code_approvals::AskOutcome>();
         let ask_req = AgentMsg::AskRequest {
             payload: serde_json::json!({
                 "questions": [{
@@ -8657,7 +8844,9 @@ task = "Do the thing"
         // Register one teammate + one background agent directly in the registry.
         let _ = app.registry.register(AgentRegistration {
             name: "alice".to_string(),
-            kind: AgentKind::Teammate { team: "refactor".to_string() },
+            kind: AgentKind::Teammate {
+                team: "refactor".to_string(),
+            },
             color: AgentColor::Dim,
             capability: AgentCapability::ReadOnly,
             cwd: PathBuf::from("."),
@@ -8669,7 +8858,10 @@ task = "Do the thing"
         });
         let bg = app.registry.register(AgentRegistration {
             name: "coder".to_string(),
-            kind: AgentKind::Background { pid: 99, run_id: String::new() },
+            kind: AgentKind::Background {
+                pid: 99,
+                run_id: String::new(),
+            },
             color: AgentColor::Dim,
             capability: AgentCapability::ReadOnly,
             cwd: PathBuf::from("."),
@@ -8792,7 +8984,10 @@ task = "Do the thing"
             TranscriptEntry::System(ref s) if s.starts_with("team:") && s.contains("reading manifest")
         )));
         // No spawn: the registry is still empty and no Cmd was sent.
-        assert!(app.registry.snapshot().is_empty(), "registry must stay empty on a failed /team");
+        assert!(
+            app.registry.snapshot().is_empty(),
+            "registry must stay empty on a failed /team"
+        );
         assert!(cmd_rx.try_recv().is_err(), "malformed /team sends no Cmd");
     }
 
@@ -8813,7 +9008,10 @@ task = "Do the thing"
             TranscriptEntry::System(ref s) if s.starts_with("agent:") && s.contains("usage:")
         )));
         // No spawn: the registry is still empty and no Cmd was sent.
-        assert!(app.registry.snapshot().is_empty(), "registry must stay empty on a failed /agent");
+        assert!(
+            app.registry.snapshot().is_empty(),
+            "registry must stay empty on a failed /agent"
+        );
         assert!(cmd_rx.try_recv().is_err(), "malformed /agent sends no Cmd");
     }
 
@@ -8876,7 +9074,9 @@ task = "Do the thing"
     #[test]
     fn translate_event_subagent_tool_end_error_carries_output() {
         let event = child_update(
-            vec![ContentBlock::Text(TextContent::new("command failed: exit 1"))],
+            vec![ContentBlock::Text(TextContent::new(
+                "command failed: exit 1",
+            ))],
             serde_json::json!({
                 "kind": "subagent_tool_end",
                 "agent": "coder",
@@ -8913,7 +9113,10 @@ task = "Do the thing"
             }),
         );
         match translate_event(&event).expect("subagent_end translates") {
-            AgentMsg::SubagentEnd { agent_name, outcome } => {
+            AgentMsg::SubagentEnd {
+                agent_name,
+                outcome,
+            } => {
                 assert_eq!(agent_name, "reviewer");
                 assert_eq!(outcome, SubagentOutcome::Failed);
             }
@@ -8946,7 +9149,11 @@ task = "Do the thing"
 
         // The tool output was NOT dropped — a ToolResult entry landed.
         match app.transcript.last() {
-            Some(TranscriptEntry::ToolResult { name, output, is_error }) => {
+            Some(TranscriptEntry::ToolResult {
+                name,
+                output,
+                is_error,
+            }) => {
                 assert_eq!(name, "bash");
                 assert_eq!(output, "boom: exit 1", "rendered text preserved");
                 assert!(*is_error, "is_error should mirror the result");
@@ -8977,7 +9184,11 @@ task = "Do the thing"
         );
 
         match app.transcript.last() {
-            Some(TranscriptEntry::ToolResult { name, output, is_error }) => {
+            Some(TranscriptEntry::ToolResult {
+                name,
+                output,
+                is_error,
+            }) => {
                 assert_eq!(name, "coder · bash");
                 assert!(!output.is_empty(), "empty error must fall back to a body");
                 assert!(
@@ -9047,13 +9258,18 @@ task = "Do the thing"
         use ratatui::layout::Rect;
 
         let mut app = test_app();
-        app.transcript.push(TranscriptEntry::Error("boom: exit 1".into()));
+        app.transcript
+            .push(TranscriptEntry::Error("boom: exit 1".into()));
 
         let backend = TestBackend::new(40, 3);
         let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend");
         terminal
             .draw(|frame| {
-                crate::commands::code_tui::scrollback::draw(frame, Rect::new(0, 0, 40, 3), &mut app);
+                crate::commands::code_tui::scrollback::draw(
+                    frame,
+                    Rect::new(0, 0, 40, 3),
+                    &mut app,
+                );
             })
             .expect("draw");
 
@@ -9075,7 +9291,10 @@ task = "Do the thing"
                 }
             }
         }
-        assert!(saw_red, "expected at least one Red error cell in the buffer");
+        assert!(
+            saw_red,
+            "expected at least one Red error cell in the buffer"
+        );
     }
 
     // (4) parse_outcome mapping: failed→Failed, completed→Completed,
@@ -9111,14 +9330,23 @@ task = "Do the thing"
         );
 
         // The SubagentEnd variant lands; the trailing Blank separator follows it.
-        let has_end = app.transcript.iter().any(|e| matches!(
-            e,
-            TranscriptEntry::SubagentEnd { agent_name, outcome }
-                if agent_name == "reviewer" && *outcome == SubagentOutcome::Failed
-        ));
-        assert!(has_end, "expected a SubagentEnd{{Failed}} entry, got {:?}", app.transcript);
+        let has_end = app.transcript.iter().any(|e| {
+            matches!(
+                e,
+                TranscriptEntry::SubagentEnd { agent_name, outcome }
+                    if agent_name == "reviewer" && *outcome == SubagentOutcome::Failed
+            )
+        });
+        assert!(
+            has_end,
+            "expected a SubagentEnd{{Failed}} entry, got {:?}",
+            app.transcript
+        );
         // A trailing Blank separator is pushed after the end marker.
-        assert!(matches!(app.transcript.last(), Some(TranscriptEntry::Blank)));
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptEntry::Blank)
+        ));
     }
 
     // (6) SubagentToolStart pushes a SubagentTool with the args echoed (the
@@ -9140,7 +9368,11 @@ task = "Do the thing"
         );
 
         match app.transcript.last() {
-            Some(TranscriptEntry::SubagentTool { agent_name, tool_name, args: got }) => {
+            Some(TranscriptEntry::SubagentTool {
+                agent_name,
+                tool_name,
+                args: got,
+            }) => {
                 assert_eq!(agent_name, "coder");
                 assert_eq!(tool_name, "bash");
                 assert_eq!(got.clone(), args, "args stored verbatim for the renderer");
@@ -9192,13 +9424,14 @@ task = "Do the thing"
         );
         // The ToolResult line appears with the "{agent} · " prefix stripped.
         let result = lines.iter().find_map(|e| match e {
-            TranscriptEntry::ToolResult { name, output, is_error } => {
-                Some((name.clone(), output.clone(), *is_error))
-            }
+            TranscriptEntry::ToolResult {
+                name,
+                output,
+                is_error,
+            } => Some((name.clone(), output.clone(), *is_error)),
             _ => None,
         });
-        let (name, output, is_error) =
-            result.expect("expected a ToolResult line for reviewer");
+        let (name, output, is_error) = result.expect("expected a ToolResult line for reviewer");
         assert_eq!(name, "bash", "prefix should be stripped");
         assert_eq!(output, "ok");
         assert!(!is_error);
@@ -9294,9 +9527,8 @@ task = "Do the thing"
         // unrelated noise so trim_transcript evicts the subagent's earliest
         // entries from app.transcript.
         for i in 0..(MAX_TRANSCRIPT_ENTRIES + 50) {
-            app.transcript.push(TranscriptEntry::System(format!(
-                "noise line {i}"
-            )));
+            app.transcript
+                .push(TranscriptEntry::System(format!("noise line {i}")));
         }
         assert!(app.transcript.len() > MAX_TRANSCRIPT_ENTRIES);
         app.trim_transcript();
@@ -9355,7 +9587,11 @@ task = "Do the thing"
             } if agent_name == "reviewer" => Some(tool_name.clone()),
             _ => None,
         });
-        assert_eq!(tool.as_deref(), Some("grep"), "tool start should re-parse, got {lines:?}");
+        assert_eq!(
+            tool.as_deref(),
+            Some("grep"),
+            "tool start should re-parse, got {lines:?}"
+        );
         let result = lines.iter().find_map(|e| match e {
             TranscriptEntry::ToolResult { name, output, .. } if name == "grep" => {
                 Some(output.clone())
@@ -9499,7 +9735,11 @@ task = "Do the thing"
             ..Default::default()
         });
 
-        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &cmd_tx);
+        handle_agent_overlay_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &cmd_tx,
+        );
 
         let overlay = app.agent_overlay.as_ref().expect("overlay still open");
         assert!(
@@ -9522,7 +9762,11 @@ task = "Do the thing"
             ..Default::default()
         });
 
-        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &cmd_tx);
+        handle_agent_overlay_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &cmd_tx,
+        );
 
         let overlay = app.agent_overlay.as_ref().expect("overlay still open");
         assert_eq!(overlay.scroll, 0, "Down saturating-sub keeps scroll at 0");
@@ -9545,14 +9789,18 @@ task = "Do the thing"
             ..Default::default()
         });
 
-        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &cmd_tx);
+        handle_agent_overlay_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &cmd_tx,
+        );
 
         let overlay = app.agent_overlay.as_ref().expect("overlay still open");
-        assert_eq!(overlay.scroll, 1, "Down decrements scroll by 3 (saturating)");
-        assert!(
-            !overlay.follow,
-            "still off-bottom must keep follow=false"
+        assert_eq!(
+            overlay.scroll, 1,
+            "Down decrements scroll by 3 (saturating)"
         );
+        assert!(!overlay.follow, "still off-bottom must keep follow=false");
     }
 
     // (M5b-3d) Esc closes the overlay (Tab too) — the overlay is dropped.
@@ -9567,7 +9815,11 @@ task = "Do the thing"
             ..Default::default()
         });
 
-        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &cmd_tx);
+        handle_agent_overlay_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &cmd_tx,
+        );
 
         assert!(app.agent_overlay.is_none(), "Esc should close the overlay");
     }
@@ -9586,7 +9838,10 @@ task = "Do the thing"
         let mut app = test_app();
         let h = app.registry.register(AgentRegistration {
             name: "reviewer".to_string(),
-            kind: AgentKind::Subagent { depth: 0, parent: None },
+            kind: AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
             color: AgentColor::Dim,
             capability: AgentCapability::ReadOnly,
             cwd: PathBuf::from("."),
@@ -9608,19 +9863,45 @@ task = "Do the thing"
             ..Default::default()
         });
 
-        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &cmd_tx);
+        handle_agent_overlay_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            &cmd_tx,
+        );
 
         // No command is sent to the bg thread (the abort is synchronous on
         // the main thread).
-        assert!(cmd_rx.try_recv().is_err(), "s must not send a Cmd — it aborts inline");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "s must not send a Cmd — it aborts inline"
+        );
         // The abort slot was taken and the signal fired cross-thread.
-        assert!(abort_signal.is_aborted(), "s must abort the agent's AbortHandle");
-        assert!(h.take_abort().is_none(), "s must clear the abort slot (taken)");
+        assert!(
+            abort_signal.is_aborted(),
+            "s must abort the agent's AbortHandle"
+        );
+        assert!(
+            h.take_abort().is_none(),
+            "s must clear the abort slot (taken)"
+        );
         // The agent is marked Stopped and a System notice was pushed.
-        assert_eq!(h.status(), AgentStatus::Stopped, "s must mark the agent Stopped");
-        let last = app.transcript.last().expect("a transcript entry was pushed");
-        let notice = match last { TranscriptEntry::System(s) => s.clone(), _ => String::new() };
-        assert_eq!(notice, "stopped reviewer", "s pushes a 'stopped {{name}}' System line");
+        assert_eq!(
+            h.status(),
+            AgentStatus::Stopped,
+            "s must mark the agent Stopped"
+        );
+        let last = app
+            .transcript
+            .last()
+            .expect("a transcript entry was pushed");
+        let notice = match last {
+            TranscriptEntry::System(s) => s.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(
+            notice, "stopped reviewer",
+            "s pushes a 'stopped {{name}}' System line"
+        );
         // The overlay stays open.
         assert!(app.agent_overlay.is_some(), "s must not close the overlay");
     }
@@ -9632,7 +9913,10 @@ task = "Do the thing"
         let mut app = test_app();
         let h = app.registry.register(AgentRegistration {
             name: "reviewer".to_string(),
-            kind: AgentKind::Subagent { depth: 0, parent: None },
+            kind: AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
             color: AgentColor::Dim,
             capability: AgentCapability::ReadOnly,
             cwd: PathBuf::from("."),
@@ -9653,10 +9937,21 @@ task = "Do the thing"
             ..Default::default()
         });
 
-        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE), &cmd_tx);
+        handle_agent_overlay_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &cmd_tx,
+        );
 
-        assert!(abort_signal.is_aborted(), "x must abort the agent's AbortHandle");
-        assert_eq!(h.status(), AgentStatus::Stopped, "x must mark the agent Stopped");
+        assert!(
+            abort_signal.is_aborted(),
+            "x must abort the agent's AbortHandle"
+        );
+        assert_eq!(
+            h.status(),
+            AgentStatus::Stopped,
+            "x must mark the agent Stopped"
+        );
         assert!(app.agent_overlay.is_some(), "x must not close the overlay");
     }
 
@@ -9678,7 +9973,10 @@ task = "Do the thing"
         *shared_abort.lock().unwrap() = Some(abort_handle);
         app.phase = Phase::Streaming;
         app.turn_started = Some(Instant::now());
-        assert!(!abort_signal.is_aborted(), "fresh signal must not be aborted");
+        assert!(
+            !abort_signal.is_aborted(),
+            "fresh signal must not be aborted"
+        );
         // No modal/overlay/palette/diff-view is open, so Esc reaches the
         // streaming abort arm (not an overlay-close path).
         assert!(app.approval.is_none());
@@ -9700,7 +9998,10 @@ task = "Do the thing"
             abort_signal.is_aborted(),
             "Esc must fire the shared abort handle"
         );
-        assert!(shared_abort.lock().unwrap().is_none(), "Esc must take the abort slot");
+        assert!(
+            shared_abort.lock().unwrap().is_none(),
+            "Esc must take the abort slot"
+        );
         assert_eq!(app.phase, Phase::Idle, "Esc must transition back to Idle");
         assert!(app.turn_started.is_none(), "Esc must clear turn_started");
         // No command sent to the bg thread (abort is synchronous on main).
@@ -9790,12 +10091,28 @@ task = "Do the thing"
             ..Default::default()
         });
 
-        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &cmd_tx);
+        handle_agent_overlay_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            &cmd_tx,
+        );
 
-        assert!(cmd_rx.try_recv().is_err(), "no Cmd is sent for an unregistered agent");
-        let last = app.transcript.last().expect("a not-found notice was pushed");
-        let notice = match last { TranscriptEntry::System(s) => s.clone(), _ => String::new() };
-        assert_eq!(notice, "agent not found — nothing to stop", "s reports a not-found System line");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no Cmd is sent for an unregistered agent"
+        );
+        let last = app
+            .transcript
+            .last()
+            .expect("a not-found notice was pushed");
+        let notice = match last {
+            TranscriptEntry::System(s) => s.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(
+            notice, "agent not found — nothing to stop",
+            "s reports a not-found System line"
+        );
         assert!(app.agent_overlay.is_some(), "overlay must remain open");
     }
 
@@ -9807,7 +10124,10 @@ task = "Do the thing"
         let mut app = test_app();
         let h = app.registry.register(AgentRegistration {
             name: "done".to_string(),
-            kind: AgentKind::Subagent { depth: 0, parent: None },
+            kind: AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
             color: AgentColor::Dim,
             capability: AgentCapability::ReadOnly,
             cwd: PathBuf::from("."),
@@ -9827,11 +10147,24 @@ task = "Do the thing"
             ..Default::default()
         });
 
-        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &cmd_tx);
+        handle_agent_overlay_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            &cmd_tx,
+        );
 
-        assert!(cmd_rx.try_recv().is_err(), "no Cmd is sent for a finished agent");
-        let last = app.transcript.last().expect("an already-finished notice was pushed");
-        let notice = match last { TranscriptEntry::System(s) => s.clone(), _ => String::new() };
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no Cmd is sent for a finished agent"
+        );
+        let last = app
+            .transcript
+            .last()
+            .expect("an already-finished notice was pushed");
+        let notice = match last {
+            TranscriptEntry::System(s) => s.clone(),
+            _ => String::new(),
+        };
         assert_eq!(notice, "done already finished — nothing to stop");
         // Status is NOT changed to Stopped for an already-finished agent.
         assert_ne!(h.status(), AgentStatus::Stopped);
@@ -9847,7 +10180,10 @@ task = "Do the thing"
         let mut app = test_app();
         let h = app.registry.register(AgentRegistration {
             name: "reviewer".to_string(),
-            kind: AgentKind::Subagent { depth: 0, parent: None },
+            kind: AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
             color: AgentColor::Dim,
             capability: AgentCapability::ReadOnly,
             cwd: PathBuf::from("."),
@@ -9868,12 +10204,19 @@ task = "Do the thing"
             ..Default::default()
         });
 
-        handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE), &cmd_tx);
+        handle_agent_overlay_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            &cmd_tx,
+        );
 
         match cmd_rx.try_recv() {
             Ok(Cmd::SendToAgent(id, text)) => {
                 assert_eq!(id, h.id, "SendToAgent must target the viewed agent");
-                assert_eq!(text, "please re-run grep", "SendToAgent carries the textarea body");
+                assert_eq!(
+                    text, "please re-run grep",
+                    "SendToAgent carries the textarea body"
+                );
             }
             other => panic!("expected Cmd::SendToAgent, got {other:?}"),
         }
@@ -9903,7 +10246,10 @@ task = "Do the thing"
         let registry = AgentRegistry::new();
         let h = registry.register(AgentRegistration {
             name: "reviewer".to_string(),
-            kind: AgentKind::Subagent { depth: 0, parent: None },
+            kind: AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
             color: AgentColor::Dim,
             capability: AgentCapability::ReadOnly,
             cwd: PathBuf::from("."),
@@ -9929,9 +10275,19 @@ task = "Do the thing"
             false
         };
         assert!(aborted, "the Some-branch abort path must run");
-        assert!(signal.is_aborted(), "the abort must propagate to the signal");
-        assert!(h.abort.lock().unwrap().is_none(), "the slot must be cleared after take");
-        assert_eq!(h.status(), AgentStatus::Stopped, "the agent must be marked Stopped");
+        assert!(
+            signal.is_aborted(),
+            "the abort must propagate to the signal"
+        );
+        assert!(
+            h.abort.lock().unwrap().is_none(),
+            "the slot must be cleared after take"
+        );
+        assert_eq!(
+            h.status(),
+            AgentStatus::Stopped,
+            "the agent must be marked Stopped"
+        );
     }
 
     // ── M6a: slash-command wiring + dead-code regression tests ──────────────
@@ -10022,7 +10378,9 @@ task = "Do the thing"
         let review_prompt = match handle_slash_command(&mut app, "/review", &cmd_tx) {
             Some(Action::Submit(p)) => p,
             Some(Action::Quit) => panic!("/review: expected Submit, got Quit"),
-            Some(Action::ClearTranscript) => panic!("/review: expected Submit, got ClearTranscript"),
+            Some(Action::ClearTranscript) => {
+                panic!("/review: expected Submit, got ClearTranscript")
+            }
             Some(Action::OpenEditor) => panic!("/review: expected Submit, got OpenEditor"),
             None => panic!("/review: expected Submit, got None"),
         };
@@ -10081,8 +10439,14 @@ task = "Do the thing"
             }
             None => panic!("expected Submit for valid /mention, got None"),
         };
-        assert!(prompt.contains("summarize this"), "mention prompt missing user text: {prompt}");
-        assert!(prompt.contains("Mentioned file:"), "mention prompt missing file header: {prompt}");
+        assert!(
+            prompt.contains("summarize this"),
+            "mention prompt missing user text: {prompt}"
+        );
+        assert!(
+            prompt.contains("Mentioned file:"),
+            "mention prompt missing file header: {prompt}"
+        );
 
         // Missing path: build_mention_prompt fails to read → System error,
         // NOT a Submit. No Cmd is sent.
@@ -10094,7 +10458,10 @@ task = "Do the thing"
             lines.iter().any(|s| s.starts_with("/mention:")),
             "missing-path /mention should push a '/mention: <error>' System line, got: {lines:?}"
         );
-        assert!(cmd_rx.try_recv().is_err(), "missing-path /mention sends no Cmd");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "missing-path /mention sends no Cmd"
+        );
 
         // Bare /mention (no path) → usage System line, no Submit.
         app.transcript.clear();
@@ -10102,7 +10469,9 @@ task = "Do the thing"
         assert!(action.is_none(), "bare /mention must not Submit");
         let lines = system_lines(&app);
         assert!(
-            lines.iter().any(|s| s.contains("usage:") && s.contains("/mention")),
+            lines
+                .iter()
+                .any(|s| s.contains("usage:") && s.contains("/mention")),
             "bare /mention should push the usage System line, got: {lines:?}"
         );
     }
@@ -10199,7 +10568,9 @@ task = "Do the thing"
         app.transcript.clear();
         handle_slash_command(&mut app, "/vim", &cmd_tx);
         assert!(
-            system_lines(&app).iter().any(|s| s.starts_with("vim") && s.contains("status")),
+            system_lines(&app)
+                .iter()
+                .any(|s| s.starts_with("vim") && s.contains("status")),
             "/vim status should render a 'vim' block with a status line"
         );
 
@@ -10235,7 +10606,9 @@ task = "Do the thing"
             "/vim on must set VIM_INPUT_ENABLED"
         );
         assert!(
-            system_lines(&app).iter().any(|s| s.contains("vim input enabled")),
+            system_lines(&app)
+                .iter()
+                .any(|s| s.contains("vim input enabled")),
             "/vim on should confirm enabling"
         );
 
@@ -10247,7 +10620,9 @@ task = "Do the thing"
             "/vim off must clear VIM_INPUT_ENABLED"
         );
         assert!(
-            system_lines(&app).iter().any(|s| s.contains("vim input disabled")),
+            system_lines(&app)
+                .iter()
+                .any(|s| s.contains("vim input disabled")),
             "/vim off should confirm disabling"
         );
 
@@ -10266,9 +10641,14 @@ task = "Do the thing"
 
         // Register two saved-allow rules on the shared ApprovalState.
         app.approvals
-            .record_always(crate::commands::code_approvals::AllowRule::exact("bash", "npm test"));
+            .record_always(crate::commands::code_approvals::AllowRule::exact(
+                "bash", "npm test",
+            ));
         app.approvals
-            .record_always(crate::commands::code_approvals::AllowRule::exact("edit", "README.md"));
+            .record_always(crate::commands::code_approvals::AllowRule::exact(
+                "edit",
+                "README.md",
+            ));
         assert_eq!(app.approvals.always_rules().len(), 2);
 
         // Bare /forget clears them and reports the count.
@@ -10311,12 +10691,13 @@ task = "Do the thing"
         // The edit had changed "before\n" -> "after\n"; the journal entry
         // captured both.
         std::fs::write(&target, "after\n").unwrap();
-        app.edit_journal.push(crate::commands::code_diff::JournalEntry {
-            path: "notes.txt".to_string(),
-            resolved: target.clone(),
-            before: Some("before\n".to_string()),
-            after: Some("after\n".to_string()),
-        });
+        app.edit_journal
+            .push(crate::commands::code_diff::JournalEntry {
+                path: "notes.txt".to_string(),
+                resolved: target.clone(),
+                before: Some("before\n".to_string()),
+                after: Some("after\n".to_string()),
+            });
 
         handle_slash_command(&mut app, "/undo", &cmd_tx);
 
@@ -10341,12 +10722,13 @@ task = "Do the thing"
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("brand_new.txt");
         std::fs::write(&target, "created\n").unwrap();
-        app.edit_journal.push(crate::commands::code_diff::JournalEntry {
-            path: "brand_new.txt".to_string(),
-            resolved: target.clone(),
-            before: None,
-            after: Some("created\n".to_string()),
-        });
+        app.edit_journal
+            .push(crate::commands::code_diff::JournalEntry {
+                path: "brand_new.txt".to_string(),
+                resolved: target.clone(),
+                before: None,
+                after: Some("created\n".to_string()),
+            });
 
         handle_slash_command(&mut app, "/undo", &cmd_tx);
 
@@ -10534,8 +10916,9 @@ task = "Do the thing"
         let gate_first = agent_bell_enabled(&app.cfg);
         assert!(!gate_first, "bell suppressed with flag off");
         app.notified_agents.insert(name.clone());
-        app.transcript
-            .push(TranscriptEntry::System(format!("› agent “{name}” exited · press Tab to browse")));
+        app.transcript.push(TranscriptEntry::System(format!(
+            "› agent “{name}” exited · press Tab to browse"
+        )));
         assert!(app.notified_agents.contains(&name));
 
         // Second reap of the same name: the arm's `contains` guard skips it
@@ -10547,7 +10930,8 @@ task = "Do the thing"
             // Mirror the arm body; with `already == true` this is dead, which
             // is the assertion (the line count must NOT grow).
             app.notified_agents.insert(name.clone());
-            app.transcript.push(TranscriptEntry::System("should not happen".into()));
+            app.transcript
+                .push(TranscriptEntry::System("should not happen".into()));
         }
         assert_eq!(
             app.transcript.len(),
@@ -10568,8 +10952,9 @@ task = "Do the thing"
         let gate = agent_bell_enabled(&app.cfg);
         assert!(!gate);
         app.notified_agents.insert("bg-1".to_string());
-        app.transcript
-            .push(TranscriptEntry::System("› agent “bg-1” exited · press Tab to browse".into()));
+        app.transcript.push(TranscriptEntry::System(
+            "› agent “bg-1” exited · press Tab to browse".into(),
+        ));
         assert!(app.notified_agents.contains("bg-1"));
         assert!(
             app.transcript
@@ -10654,13 +11039,16 @@ task = "Do the thing"
         // System block). tui_bell writes \x07 to stdout, not the transcript.
         let added: Vec<_> = app.transcript.iter().skip(before).collect();
         assert!(
-            added
-                .iter()
-                .all(|e| matches!(e, TranscriptEntry::SubagentEnd { .. } | TranscriptEntry::Blank)),
+            added.iter().all(|e| matches!(
+                e,
+                TranscriptEntry::SubagentEnd { .. } | TranscriptEntry::Blank
+            )),
             "SubagentEnd handler must not splatter a System line, got {added:?}"
         );
         assert!(
-            added.iter().any(|e| matches!(e, TranscriptEntry::SubagentEnd { .. })),
+            added
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::SubagentEnd { .. })),
             "the SubagentEnd entry must still be recorded"
         );
 
@@ -10703,13 +11091,16 @@ task = "Do the thing"
             &cmd_tx,
         );
         assert!(
-            app.transcript
-                .iter()
-                .any(|e| matches!(e, TranscriptEntry::SubagentEnd { agent_name, outcome }
-                    if agent_name == "reviewer" && *outcome == SubagentOutcome::Failed)),
+            app.transcript.iter().any(
+                |e| matches!(e, TranscriptEntry::SubagentEnd { agent_name, outcome }
+                    if agent_name == "reviewer" && *outcome == SubagentOutcome::Failed)
+            ),
             "Failed subagent must still push the SubagentEnd variant"
         );
-        assert!(matches!(app.transcript.last(), Some(TranscriptEntry::Blank)));
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptEntry::Blank)
+        ));
 
         // Completed: gate suppresses the bell, but the variant still lands.
         app.transcript.clear();
@@ -10728,10 +11119,10 @@ task = "Do the thing"
             &cmd_tx,
         );
         assert!(
-            app.transcript
-                .iter()
-                .any(|e| matches!(e, TranscriptEntry::SubagentEnd { agent_name, outcome }
-                    if agent_name == "coder" && *outcome == SubagentOutcome::Completed)),
+            app.transcript.iter().any(
+                |e| matches!(e, TranscriptEntry::SubagentEnd { agent_name, outcome }
+                    if agent_name == "coder" && *outcome == SubagentOutcome::Completed)
+            ),
             "Completed subagent must still push the SubagentEnd variant"
         );
         match prior_xdg {
@@ -10859,19 +11250,28 @@ task = "Do the thing"
         // + raw args (NOT a Cmd::Prompt).
         match cmd_rx.try_recv() {
             Ok(Cmd::RunReadOnly(BgCommand::CustomPrompt { name, args })) => {
-                assert_eq!(name, "apply", "CustomPrompt name should be the resolved command");
-                assert_eq!(args, "fix the bug", "CustomPrompt args should be the raw arg string");
+                assert_eq!(
+                    name, "apply",
+                    "CustomPrompt name should be the resolved command"
+                );
+                assert_eq!(
+                    args, "fix the bug",
+                    "CustomPrompt args should be the raw arg string"
+                );
             }
-            other => panic!(
-                "expected Cmd::RunReadOnly(BgCommand::CustomPrompt), got {other:?}"
-            ),
+            other => panic!("expected Cmd::RunReadOnly(BgCommand::CustomPrompt), got {other:?}"),
         }
         // No further command (no Cmd::Prompt).
-        assert!(cmd_rx.try_recv().is_err(), "no Cmd::Prompt expected for a custom hit");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no Cmd::Prompt expected for a custom hit"
+        );
         // The raw invocation was recorded in history (up-arrow recalls
         // `/apply …`, not the expansion).
         assert!(
-            app.history.back().is_some_and(|last| last.starts_with("/apply")),
+            app.history
+                .back()
+                .is_some_and(|last| last.starts_with("/apply")),
             "custom hit should record the raw `/apply …` in history"
         );
     }
@@ -10942,7 +11342,10 @@ task = "Do the thing"
         handle_slash_command(&mut app, "/pr_comments", &cmd_tx);
         match cmd_rx.try_recv() {
             Ok(Cmd::RunReadOnly(BgCommand::PrCommentsInspect { scope })) => {
-                assert!(scope.is_empty(), "bare /pr_comments scope is empty (infer current PR)");
+                assert!(
+                    scope.is_empty(),
+                    "bare /pr_comments scope is empty (infer current PR)"
+                );
             }
             other => panic!("expected RunReadOnly(PrCommentsInspect), got {other:?}"),
         }
@@ -10950,9 +11353,16 @@ task = "Do the thing"
         // /pr_comments draft <path>:<line> <body> stages a draft into
         // app.pr_comment_drafts (no network, no Cmd).
         app.transcript.clear();
-        let action = handle_slash_command(&mut app, "/pr_comments draft src/foo.rs:12 looks off", &cmd_tx);
+        let action = handle_slash_command(
+            &mut app,
+            "/pr_comments draft src/foo.rs:12 looks off",
+            &cmd_tx,
+        );
         assert!(action.is_none(), "/pr_comments draft returns no action");
-        assert!(cmd_rx.try_recv().is_err(), "/pr_comments draft sends no Cmd");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "/pr_comments draft sends no Cmd"
+        );
         assert_eq!(app.pr_comment_drafts.len(), 1, "a draft should be staged");
         let draft = &app.pr_comment_drafts[0];
         assert_eq!(draft.path, "src/foo.rs");
@@ -11201,12 +11611,18 @@ task = "Do the thing"
         // The read-only Copy command was routed with an empty query (bare copy).
         match cmd_rx.try_recv() {
             Ok(Cmd::RunReadOnly(BgCommand::Copy { query })) => {
-                assert!(query.is_empty(), "bare /copy query must be empty, got {query:?}");
+                assert!(
+                    query.is_empty(),
+                    "bare /copy query must be empty, got {query:?}"
+                );
             }
             other => panic!("expected Cmd::RunReadOnly(Copy{{\"\"}}), got {other:?}"),
         }
         // No further command — and explicitly NOT a prompt submission.
-        assert!(cmd_rx.try_recv().is_err(), "/copy sends no further Cmd (no Prompt)");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "/copy sends no further Cmd (no Prompt)"
+        );
     }
 
     // (M7a-2) `/copy status` (and the info/json aliases) carry the raw
@@ -11227,7 +11643,10 @@ task = "Do the thing"
 
         match cmd_rx.try_recv() {
             Ok(Cmd::RunReadOnly(BgCommand::Copy { query })) => {
-                assert_eq!(query, "status", "status subcommand must round-trip verbatim");
+                assert_eq!(
+                    query, "status",
+                    "status subcommand must round-trip verbatim"
+                );
             }
             other => panic!("expected Cmd::RunReadOnly(Copy{{\"status\"}}), got {other:?}"),
         }
@@ -11276,7 +11695,11 @@ task = "Do the thing"
         let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
         let before = app.transcript.len();
 
-        handle_agent_msg(&mut app, AgentMsg::Osc52("\x1b]52;c;aGk=\x07".into()), &cmd_tx);
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::Osc52("\x1b]52;c;aGk=\x07".into()),
+            &cmd_tx,
+        );
 
         assert_eq!(
             app.transcript.len(),
@@ -11301,7 +11724,13 @@ task = "Do the thing"
         let mut app = test_app();
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
 
-        for input in ["/copy", "/copy status", "/copy info", "/copy json", "/copy last"] {
+        for input in [
+            "/copy",
+            "/copy status",
+            "/copy info",
+            "/copy json",
+            "/copy last",
+        ] {
             app.transcript.clear();
             let _ = handle_slash_command(&mut app, input, &cmd_tx);
             // Each routes exactly one RunReadOnly(Copy) and nothing else.
@@ -11327,7 +11756,10 @@ task = "Do the thing"
     fn apply_paste_inserts_text_and_sets_dirty() {
         let mut app = test_app();
         app.dirty = false;
-        assert!(app.textarea.lines().join("\n").is_empty(), "precondition: empty textarea");
+        assert!(
+            app.textarea.lines().join("\n").is_empty(),
+            "precondition: empty textarea"
+        );
 
         apply_paste(&mut app, "pasted text");
 
@@ -11350,9 +11782,16 @@ task = "Do the thing"
         apply_paste(&mut app, "line one\nline two\nline three");
 
         let joined = app.textarea.lines().join("\n");
-        assert_eq!(joined, "line one\nline two\nline three", "newlines preserved verbatim");
+        assert_eq!(
+            joined, "line one\nline two\nline three",
+            "newlines preserved verbatim"
+        );
         // The textarea actually split into three lines.
-        assert_eq!(app.textarea.lines().len(), 3, "multi-line paste yields 3 textarea lines");
+        assert_eq!(
+            app.textarea.lines().len(),
+            3,
+            "multi-line paste yields 3 textarea lines"
+        );
         assert!(app.dirty, "multi-line paste sets dirty");
     }
 
@@ -11406,7 +11845,9 @@ task = "Do the thing"
             Action::OpenEditor => {} // the run_loop arm
             Action::Quit => panic!("OpenEditor must match its own arm, got Quit"),
             Action::Submit(_) => panic!("OpenEditor must match its own arm, got Submit"),
-            Action::ClearTranscript => panic!("OpenEditor must match its own arm, got ClearTranscript"),
+            Action::ClearTranscript => {
+                panic!("OpenEditor must match its own arm, got ClearTranscript")
+            }
         }
         // It is distinct from the other actions (not Quit / Submit / Clear).
         assert!(matches!(Action::OpenEditor, Action::OpenEditor));
@@ -11493,7 +11934,10 @@ task = "Do the thing"
                 _ => None,
             })
             .expect("a Commands: line was pushed");
-        assert!(help_line.contains("/copy"), "/help must list /copy: {help_line}");
+        assert!(
+            help_line.contains("/copy"),
+            "/help must list /copy: {help_line}"
+        );
     }
 
     // ── M7b: /diff + /commit routing + DiffView overlay ─────────────────────
@@ -11722,10 +12166,7 @@ task = "Do the thing"
 
         let view = app.diff_view.as_ref().expect("overlay still open");
         assert_eq!(view.scroll, 1, "Down decrements scroll by 3 (saturating)");
-        assert!(
-            !view.follow,
-            "still off-bottom must keep follow=false"
-        );
+        assert!(!view.follow, "still off-bottom must keep follow=false");
     }
 
     // (M7b-commit-1) `/commit <message>` routes
@@ -11759,9 +12200,7 @@ task = "Do the thing"
         }
         assert!(cmd_rx.try_recv().is_err(), "no further command expected");
         assert!(
-            system_lines(&app)
-                .iter()
-                .any(|s| s.contains("committing")),
+            system_lines(&app).iter().any(|s| s.contains("committing")),
             "/commit <message> should push a 'committing…' placeholder, got: {:?}",
             system_lines(&app)
         );
@@ -11861,7 +12300,10 @@ task = "Do the thing"
                 _ => None,
             })
             .expect("a Commands: line was pushed");
-        assert!(help_line.contains("/diff"), "/help must list /diff: {help_line}");
+        assert!(
+            help_line.contains("/diff"),
+            "/help must list /diff: {help_line}"
+        );
     }
 
     // (M7b-help-2) `/help` lists `/commit` so users discover the command.
@@ -11911,8 +12353,19 @@ task = "Do the thing"
         // hardcoded string was missing them). Aliases too, so they're
         // discoverable.
         for required in [
-            "/compact", "/cost", "/new", "/notifications", "/plan", "/quit", "/copy", "/diff",
-            "/commit", "/undo", "/team", "/agent", "/agents",
+            "/compact",
+            "/cost",
+            "/new",
+            "/notifications",
+            "/plan",
+            "/quit",
+            "/copy",
+            "/diff",
+            "/commit",
+            "/undo",
+            "/team",
+            "/agent",
+            "/agents",
         ] {
             assert!(
                 help_commands_line().contains(required),
@@ -11936,7 +12389,10 @@ task = "Do the thing"
     #[test]
     fn help_line_lists_compact_and_copy() {
         let line = help_commands_line();
-        assert!(line.contains("/compact"), "/help must list /compact: {line}");
+        assert!(
+            line.contains("/compact"),
+            "/help must list /compact: {line}"
+        );
         assert!(line.contains("/copy"), "/help must list /copy: {line}");
     }
 
@@ -12121,7 +12577,10 @@ task = "Do the thing"
             action.is_none(),
             "printable chars must be fed (return None), not produce an action"
         );
-        assert!(app.slash_palette.is_some(), "palette must stay open for `/c`");
+        assert!(
+            app.slash_palette.is_some(),
+            "palette must stay open for `/c`"
+        );
 
         // The real handler fed the `c` — the textarea must now be `/c`.
         assert_eq!(
@@ -12139,10 +12598,7 @@ task = "Do the thing"
                 .starts_with('c')),
             "filtered list must only contain names starting with 'c'"
         );
-        assert!(
-            !filtered.is_empty(),
-            "test needs >=1 filtered entry for /c"
-        );
+        assert!(!filtered.is_empty(), "test needs >=1 filtered entry for /c");
 
         // selected must stay in bounds; clamp on the next intercepted key
         // (Down) if the (now smaller) filtered list pushed it out of range.
@@ -12218,7 +12674,10 @@ task = "Do the thing"
         *shared_abort.lock().unwrap() = Some(abort_handle);
         app.phase = Phase::Streaming;
         app.turn_started = Some(Instant::now());
-        assert!(!abort_signal.is_aborted(), "fresh signal must not be aborted");
+        assert!(
+            !abort_signal.is_aborted(),
+            "fresh signal must not be aborted"
+        );
         // Open palette (the guard that previously blocked the abort).
         set_textarea_text(&mut app.textarea, "/");
         app.slash_palette = Some(SlashPalette { selected: 0 });
@@ -12239,7 +12698,11 @@ task = "Do the thing"
             shared_abort.lock().unwrap().is_none(),
             "Ctrl+C must take the abort slot"
         );
-        assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
+        assert_eq!(
+            app.phase,
+            Phase::Idle,
+            "Ctrl+C must transition back to Idle"
+        );
         // (R5-CTRLC-ORPHANS-SUBAGENT-LOG) The slash palette is a TRANSIENT
         // filter UI (not a persistent view the user opened deliberately), so
         // Ctrl+C clears it — the one foreground surface the interrupt dismisses.
@@ -12276,13 +12739,15 @@ task = "Do the thing"
 
         match action {
             Some(Action::OpenEditor) => {}
-            Some(Action::Quit) => panic!("Ctrl+O with palette open must return OpenEditor, got Quit"),
+            Some(Action::Quit) => {
+                panic!("Ctrl+O with palette open must return OpenEditor, got Quit")
+            }
             Some(Action::Submit(_)) => {
                 panic!("Ctrl+O with palette open must return OpenEditor, got Submit")
             }
-            Some(Action::ClearTranscript) => panic!(
-                "Ctrl+O with palette open must return OpenEditor, got ClearTranscript"
-            ),
+            Some(Action::ClearTranscript) => {
+                panic!("Ctrl+O with palette open must return OpenEditor, got ClearTranscript")
+            }
             None => panic!("Ctrl+O with palette open must return OpenEditor, got None"),
         }
         assert!(
@@ -12341,7 +12806,10 @@ task = "Do the thing"
             &cmd_tx,
             &shared_abort,
         );
-        assert!(action.is_none(), "Home must return None (caret move, no action)");
+        assert!(
+            action.is_none(),
+            "Home must return None (caret move, no action)"
+        );
         assert_eq!(
             app.textarea.lines().join(""),
             "/cl",
@@ -12370,7 +12838,10 @@ task = "Do the thing"
             &cmd_tx,
             &shared_abort,
         );
-        assert!(action.is_none(), "End must return None (caret move, no action)");
+        assert!(
+            action.is_none(),
+            "End must return None (caret move, no action)"
+        );
         assert_eq!(
             app.textarea.lines().join(""),
             "/cl",
@@ -12407,7 +12878,10 @@ task = "Do the thing"
             &cmd_tx,
             &shared_abort,
         );
-        assert!(action.is_none(), "Delete-forward must return None (no action)");
+        assert!(
+            action.is_none(),
+            "Delete-forward must return None (no action)"
+        );
         assert_eq!(
             app.textarea.lines().join(""),
             "/c",
@@ -12465,7 +12939,10 @@ task = "Do the thing"
         *shared_abort.lock().unwrap() = Some(abort_handle);
         app.phase = Phase::Streaming;
         app.turn_started = Some(Instant::now());
-        assert!(!abort_signal.is_aborted(), "fresh signal must not be aborted");
+        assert!(
+            !abort_signal.is_aborted(),
+            "fresh signal must not be aborted"
+        );
         // Open the diff-view overlay (the guard that previously swallowed Ctrl+C).
         app.diff_view = Some(DiffView {
             path: None,
@@ -12490,7 +12967,11 @@ task = "Do the thing"
             shared_abort.lock().unwrap().is_none(),
             "Ctrl+C must take the abort slot"
         );
-        assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
+        assert_eq!(
+            app.phase,
+            Phase::Idle,
+            "Ctrl+C must transition back to Idle"
+        );
         // (R5-CTRLC-ORPHANS-SUBAGENT-LOG) Ctrl+C stops the turn + clears the
         // transient palette, but does NOT close a diff the user opened
         // deliberately — it survives for the user to Esc (reverts the overlay-
@@ -12518,7 +12999,10 @@ task = "Do the thing"
         *shared_abort.lock().unwrap() = Some(abort_handle);
         app.phase = Phase::Streaming;
         app.turn_started = Some(Instant::now());
-        assert!(!abort_signal.is_aborted(), "fresh signal must not be aborted");
+        assert!(
+            !abort_signal.is_aborted(),
+            "fresh signal must not be aborted"
+        );
         // Open an agent overlay (the guard that previously swallowed Ctrl+C).
         app.agent_overlay = Some(AgentOverlay {
             agent_name: "reviewer".into(),
@@ -12543,7 +13027,11 @@ task = "Do the thing"
             shared_abort.lock().unwrap().is_none(),
             "Ctrl+C must take the abort slot"
         );
-        assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
+        assert_eq!(
+            app.phase,
+            Phase::Idle,
+            "Ctrl+C must transition back to Idle"
+        );
         // (R5-CTRLC-ORPHANS-SUBAGENT-LOG) Ctrl+C stops the turn + clears the
         // transient palette, but does NOT close an agent overlay the user
         // opened deliberately — it survives for the user to Esc (reverts the
@@ -12575,8 +13063,14 @@ task = "Do the thing"
         *shared_abort.lock().unwrap() = Some(abort_handle);
         app.phase = Phase::Streaming;
         app.turn_started = Some(Instant::now());
-        assert!(!abort_signal.is_aborted(), "fresh signal must not be aborted");
-        assert!(app.agent_overlay.is_none(), "precondition: overlay starts closed");
+        assert!(
+            !abort_signal.is_aborted(),
+            "fresh signal must not be aborted"
+        );
+        assert!(
+            app.agent_overlay.is_none(),
+            "precondition: overlay starts closed"
+        );
         // Open an agent overlay — the persistent view Ctrl+C must NOT close.
         app.agent_overlay = Some(AgentOverlay {
             agent_name: "reviewer".into(),
@@ -12604,7 +13098,11 @@ task = "Do the thing"
             "Ctrl+C must take the abort slot"
         );
         // The phase transitions back to Idle.
-        assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
+        assert_eq!(
+            app.phase,
+            Phase::Idle,
+            "Ctrl+C must transition back to Idle"
+        );
         // (R5-CTRLC-ORPHANS-SUBAGENT-LOG) The overlay SURVIVES the Ctrl+C —
         // the user opened it deliberately, so it stays for an explicit Esc.
         // Closing it on an unrelated turn's interrupt would orphan a
@@ -12642,7 +13140,10 @@ task = "Do the thing"
         // log_path from the handle AT open time (R4HUNT-3).
         let handle = app.registry.register(AgentRegistration {
             name: "reviewer".to_string(),
-            kind: AgentKind::Subagent { depth: 0, parent: None },
+            kind: AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
             color: AgentColor::Dim,
             capability: AgentCapability::ReadOnly,
             cwd: PathBuf::from("."),
@@ -12677,7 +13178,10 @@ task = "Do the thing"
         *shared_abort.lock().unwrap() = Some(abort_handle);
         app.phase = Phase::Streaming;
         app.turn_started = Some(Instant::now());
-        assert!(!abort_signal.is_aborted(), "fresh signal must not be aborted");
+        assert!(
+            !abort_signal.is_aborted(),
+            "fresh signal must not be aborted"
+        );
 
         let action = handle_key(
             &mut app,
@@ -12697,7 +13201,11 @@ task = "Do the thing"
             shared_abort.lock().unwrap().is_none(),
             "Ctrl+C must take the abort slot"
         );
-        assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
+        assert_eq!(
+            app.phase,
+            Phase::Idle,
+            "Ctrl+C must transition back to Idle"
+        );
         // The completed-subagent overlay SURVIVES the interrupt — not orphaned.
         // The user can Esc it deliberately; its captured log_path is intact so
         // the overlay can still tail the persisted log.
@@ -12721,10 +13229,7 @@ task = "Do the thing"
     fn slash_palette_custom_command_appears_and_wired_wins_on_collision() {
         let mut app = test_app();
         // Two custom commands: a namespaced one and one colliding with /help.
-        app.custom_commands = vec![
-            custom_cmd("deploy", Some("ci")),
-            custom_cmd("help", None),
-        ];
+        app.custom_commands = vec![custom_cmd("deploy", Some("ci")), custom_cmd("help", None)];
 
         let entries = slash_palette_entries(&app);
         // The namespaced custom command appears as `/ci/deploy` (slashed, so
@@ -12764,11 +13269,7 @@ task = "Do the thing"
         let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend");
         terminal
             .draw(|frame| {
-                crate::commands::code_tui::footer::draw_rule(
-                    frame,
-                    Rect::new(0, 0, 120, 1),
-                    &app,
-                );
+                crate::commands::code_tui::footer::draw_rule(frame, Rect::new(0, 0, 120, 1), &app);
             })
             .expect("draw");
         buffer_text(terminal.backend().buffer())
@@ -12779,9 +13280,7 @@ task = "Do the thing"
         let mut s = String::new();
         for y in 0..area.height {
             for x in 0..area.width {
-                if let Some(cell) =
-                    buffer.cell(ratatui::layout::Position { x, y })
-                {
+                if let Some(cell) = buffer.cell(ratatui::layout::Position { x, y }) {
                     s.push_str(cell.symbol());
                 }
             }
@@ -12910,9 +13409,16 @@ task = "Do the thing"
             other => panic!("entry[2] should be ToolResult, got {other:?}"),
         }
         match &entries[3] {
-            TranscriptEntry::SubagentEnd { agent_name, outcome } => {
+            TranscriptEntry::SubagentEnd {
+                agent_name,
+                outcome,
+            } => {
                 assert_eq!(agent_name, "reviewer");
-                assert_eq!(*outcome, SubagentOutcome::Completed, "outcome payload preserved");
+                assert_eq!(
+                    *outcome,
+                    SubagentOutcome::Completed,
+                    "outcome payload preserved"
+                );
             }
             other => panic!("entry[3] should be SubagentEnd, got {other:?}"),
         }
@@ -13005,7 +13511,11 @@ task = "Do the thing"
         // registry is empty (handle removed) — find_by_name returns None, so
         // the path-based classifier is the only signal.
         let entries = agent_transcript_for_overlay(&app.registry, &[], &mut overlay);
-        assert_eq!(entries.len(), 1, "overlay must read the captured-path log, got {entries:?}");
+        assert_eq!(
+            entries.len(),
+            1,
+            "overlay must read the captured-path log, got {entries:?}"
+        );
         match &entries[0] {
             TranscriptEntry::SubagentText { agent_name, text } => {
                 assert_eq!(agent_name, "coder");
@@ -13013,10 +13523,12 @@ task = "Do the thing"
             }
             other => panic!("should re-parse as SubagentText, got {other:?}"),
         }
-        assert!(overlay.log_path.is_some(), "captured path retained for next read");
+        assert!(
+            overlay.log_path.is_some(),
+            "captured path retained for next read"
+        );
 
         // Clean up the test log (don't leak into the user's config dir).
         let _ = std::fs::remove_file(&log_path);
     }
 }
-

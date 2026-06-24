@@ -337,13 +337,14 @@ impl Tool for TaskTool {
         // definition didn't set `worktree: true`, so its mutations land
         // in an isolated checkout rather than the live working copy.
         let capability = crate::commands::code_team::AgentCapability::from_tools(&filtered);
-        let is_write_capable = !matches!(capability, crate::commands::code_team::AgentCapability::ReadOnly);
+        let is_write_capable = !matches!(
+            capability,
+            crate::commands::code_team::AgentCapability::ReadOnly
+        );
         let wants_worktree = if requested_same_cwd {
             false
         } else {
-            requested_worktree
-                || agent.as_ref().is_some_and(|a| a.worktree)
-                || is_write_capable
+            requested_worktree || agent.as_ref().is_some_and(|a| a.worktree) || is_write_capable
         };
         let max_tokens = Some(crate::commands::code_session::DEFAULT_MAX_TOKENS);
         let worktree = if wants_worktree {
@@ -375,7 +376,8 @@ impl Tool for TaskTool {
         } else {
             Some(append_parts.join("\n\n"))
         };
-        let append_system_prompt = crate::commands::code_identity_prompt::apply(append_system_prompt);
+        let append_system_prompt =
+            crate::commands::code_identity_prompt::apply(append_system_prompt);
         // Git context is injected once by pi (build_git_context); do not duplicate it here.
         let model = agent
             .as_ref()
@@ -440,17 +442,17 @@ impl Tool for TaskTool {
         // A creation failure is non-fatal: we fall back to `log_path:
         // None` (the prior in-memory-only path) so the turn still runs.
         let subagent_log_path = create_subagent_log_file(&display_name).ok();
-        let handle_arc = self.registry.register(
-            crate::commands::code_team::AgentRegistration {
+        let handle_arc = self
+            .registry
+            .register(crate::commands::code_team::AgentRegistration {
                 name: display_name.clone(),
                 kind: AgentKind::Subagent {
                     depth: self.parent_depth,
                     parent: None,
                 },
-                color: agent
-                    .as_ref()
-                    .and_then(|a| a.color)
-                    .unwrap_or_else(|| crate::commands::code_team::AgentColor::color_for_name(&display_name)),
+                color: agent.as_ref().and_then(|a| a.color).unwrap_or_else(|| {
+                    crate::commands::code_team::AgentColor::color_for_name(&display_name)
+                }),
                 capability,
                 cwd: child_cwd.clone(),
                 model: model_for_handle,
@@ -458,8 +460,7 @@ impl Tool for TaskTool {
                 parent: None,
                 pid: None,
                 log_path: subagent_log_path.clone(),
-            },
-        );
+            });
 
         let mut handle = match create_agent_session(options).await {
             Ok(h) => {
@@ -511,10 +512,7 @@ impl Tool for TaskTool {
         // The guard no longer owns the log path — log deletion is deferred
         // to session teardown on ALL paths (SUCCESS/FAILURE/ABORT) so an
         // overlay open on the subagent keeps its output.
-        let mut guard = SubagentGuard::new(
-            Arc::clone(&handle_arc),
-            Arc::clone(&self.registry),
-        );
+        let mut guard = SubagentGuard::new(Arc::clone(&handle_arc), Arc::clone(&self.registry));
 
         let assistant = match handle.prompt_with_abort(prompt, abort_signal, render).await {
             Ok(msg) => {
@@ -803,7 +801,11 @@ fn update_handle_from_event(handle: &Arc<AgentHandle>, event: &AgentEvent) {
 /// to the TUI transcript with agent attribution. The raw `eprint!`
 /// output is kept for the one-shot path (non-TUI) where stderr dim
 /// text is the only rendering channel.
-fn render_child(event: AgentEvent, on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>, agent_name: &str) {
+fn render_child(
+    event: AgentEvent,
+    on_update: Option<&(dyn Fn(ToolUpdate) + Send + Sync)>,
+    agent_name: &str,
+) {
     match event {
         AgentEvent::MessageUpdate {
             assistant_message_event: pi::model::AssistantMessageEvent::TextDelta { delta, .. },
@@ -814,7 +816,9 @@ fn render_child(event: AgentEvent, on_update: Option<&(dyn Fn(ToolUpdate) + Send
             let _ = std::io::stderr().flush();
             send_child_update(on_update, "subagent_text_delta", &delta, agent_name);
         }
-        AgentEvent::ToolExecutionStart { tool_name, args, .. } => {
+        AgentEvent::ToolExecutionStart {
+            tool_name, args, ..
+        } => {
             eprintln!("\n  \x1b[2m[subagent tool] {tool_name}\x1b[0m");
             // Pack the tool args into the details JSON so the TUI can
             // show what the subagent invoked (the one-shot eprint! path
@@ -947,8 +951,8 @@ fn err_output(text: &str) -> ToolExecution {
 /// same-name-same-millis pair got the SAME path and two writers corrupted
 /// both logs.
 pub(crate) fn subagent_log_dir() -> std::io::Result<PathBuf> {
-    let root = crate::config::libertai_config_dir()
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let root =
+        crate::config::libertai_config_dir().map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(root.join("code-subagents"))
 }
 
@@ -990,7 +994,11 @@ fn create_subagent_log_file(name: &str) -> std::io::Result<PathBuf> {
         })
         .collect();
     let safe_name = safe_name.trim_matches('-');
-    let safe_name = if safe_name.is_empty() { "agent" } else { safe_name };
+    let safe_name = if safe_name.is_empty() {
+        "agent"
+    } else {
+        safe_name
+    };
     let started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -1062,13 +1070,10 @@ fn sweep_subagent_logs_in(dir: &Path) {
         // `create_subagent_log_file` produces (`subagent-...-<name>.log`),
         // so a user/tool-dropped non-log file (NOTES, README, .tmp) in the
         // dir survives the teardown sweep.
-        let is_subagent_log = path
-            .file_name()
-            .is_some_and(|n| {
-                n.to_str().is_some_and(|s| {
-                    s.starts_with("subagent-") && s.ends_with(".log")
-                })
-            });
+        let is_subagent_log = path.file_name().is_some_and(|n| {
+            n.to_str()
+                .is_some_and(|s| s.starts_with("subagent-") && s.ends_with(".log"))
+        });
         if is_subagent_log {
             let _ = std::fs::remove_file(&path);
         }
@@ -1130,13 +1135,11 @@ impl Drop for SubagentLogSweeper {
 mod tests {
     use super::{
         cleanup_subagent_logs, create_subagent_log_file, named_subagent_prompt, render_child,
-        should_skip_snapshot_entry, subagent_log_dir, sweep_subagent_logs_in,
-        task_wants_same_cwd, task_wants_worktree, SubagentGuard, SubagentLogSweeper, TaskWorktree,
+        should_skip_snapshot_entry, subagent_log_dir, sweep_subagent_logs_in, task_wants_same_cwd,
+        task_wants_worktree, SubagentGuard, SubagentLogSweeper, TaskWorktree,
     };
     use crate::commands::code_agents::{AgentDefinition, AgentSource};
-    use crate::commands::code_team::{
-        AgentKind, AgentRegistration, AgentStatus, AgentRegistry,
-    };
+    use crate::commands::code_team::{AgentKind, AgentRegistration, AgentRegistry, AgentStatus};
     use pi::model::{ContentBlock, TextContent};
     use pi::sdk::{AbortHandle, AgentEvent, ToolOutput, ToolUpdate};
     use serde_json::json;
@@ -1329,10 +1332,7 @@ mod tests {
 
         let updates = updates.lock().unwrap();
         assert_eq!(updates.len(), 1, "AgentEnd emits one update");
-        assert_eq!(
-            updates[0].details.as_ref().unwrap()["kind"],
-            "subagent_end"
-        );
+        assert_eq!(updates[0].details.as_ref().unwrap()["kind"], "subagent_end");
         assert_eq!(
             updates[0].details.as_ref().unwrap()["outcome"],
             "stopped",
@@ -1463,18 +1463,22 @@ mod tests {
         // drop it WITHOUT marking `cleaned = true` — simulating the abort/
         // panic drop path where the explicit arms never ran.
         {
-            let _guard = SubagentGuard::new(
-                Arc::clone(&handle),
-                Arc::clone(&registry),
-            );
+            let _guard = SubagentGuard::new(Arc::clone(&handle), Arc::clone(&registry));
             // Guard is dropped here, before any explicit-arm cleanup.
         }
 
         // The guard's Drop fired the reaping sequence (registry/abort/status),
         // but (R5-HUNT-B) the log SURVIVES — deferred to teardown so an overlay
         // already open on the aborted subagent keeps its partial output.
-        assert!(log_path.exists(), "Drop KEPT the log file (R5-HUNT-B deferral)");
-        assert_eq!(registry.snapshot().len(), 0, "Drop removed the registry entry");
+        assert!(
+            log_path.exists(),
+            "Drop KEPT the log file (R5-HUNT-B deferral)"
+        );
+        assert_eq!(
+            registry.snapshot().len(),
+            0,
+            "Drop removed the registry entry"
+        );
         assert!(
             handle.abort.lock().unwrap().is_none(),
             "Drop drained the abort slot (take_abort ran)"
@@ -1518,18 +1522,22 @@ mod tests {
         registry.remove(handle.id);
 
         {
-            let mut guard = SubagentGuard::new(
-                Arc::clone(&handle),
-                Arc::clone(&registry),
-            );
+            let mut guard = SubagentGuard::new(Arc::clone(&handle), Arc::clone(&registry));
             guard.cleaned = true; // explicit arm already cleaned up
-            // Guard drops here as a no-op.
+                                  // Guard drops here as a no-op.
         }
         // No-op Drop: the log file is NOT removed (R4HUNT-3 defers it), the
         // status stays Completed (not overwritten to Failed), and the registry
         // stays empty (no double-remove, though remove is idempotent anyway).
-        assert!(log_path.exists(), "no-op Drop left the success-path log intact (R4HUNT-3)");
-        assert_eq!(handle.status(), AgentStatus::Completed, "no-op Drop kept Completed");
+        assert!(
+            log_path.exists(),
+            "no-op Drop left the success-path log intact (R4HUNT-3)"
+        );
+        assert_eq!(
+            handle.status(),
+            AgentStatus::Completed,
+            "no-op Drop kept Completed"
+        );
         assert_eq!(registry.snapshot().len(), 0, "registry stays empty");
     }
 
@@ -1580,10 +1588,7 @@ mod tests {
         // does take_abort + set_status(Failed) + registry.remove + marks the
         // guard cleaned — and NO longer calls remove_subagent_log_file.
         {
-            let mut guard = SubagentGuard::new(
-                Arc::clone(&handle),
-                Arc::clone(&registry),
-            );
+            let mut guard = SubagentGuard::new(Arc::clone(&handle), Arc::clone(&registry));
             // --- Err-arm body (mirrors code_task.rs `Err(e) => { ... }`) ---
             let _ = handle.take_abort();
             handle.set_status(AgentStatus::Failed);
@@ -1595,7 +1600,10 @@ mod tests {
 
         // The log SURVIVES the Err arm — an overlay open on this subagent keeps
         // the final output + the failure reason instead of going blank.
-        assert!(log_path.exists(), "Err arm KEPT the log (R5-HUNT-B deferral)");
+        assert!(
+            log_path.exists(),
+            "Err arm KEPT the log (R5-HUNT-B deferral)"
+        );
         let on_disk = std::fs::read_to_string(&log_path).expect("log readable");
         assert!(
             on_disk.contains("ERROR: tool rejected"),
@@ -1605,7 +1613,11 @@ mod tests {
         // registry entry is gone (overlay can't be RE-opened, but the one
         // already open keeps reading via its captured path).
         assert_eq!(handle.status(), AgentStatus::Failed, "Err arm set Failed");
-        assert_eq!(registry.snapshot().len(), 0, "Err arm removed the registry entry");
+        assert_eq!(
+            registry.snapshot().len(),
+            0,
+            "Err arm removed the registry entry"
+        );
     }
 
     // --- R4HUNT-4: distinct subagent log path -----------------------------------
@@ -1680,9 +1692,7 @@ mod tests {
         let seq_of = |p: &std::path::Path| -> u64 {
             let name = p.file_name().and_then(|n| n.to_str()).expect("file name");
             // Strip the `subagent-` prefix + the `-coder.log` tail.
-            let inner = name
-                .strip_prefix("subagent-")
-                .expect("subagent- prefix");
+            let inner = name.strip_prefix("subagent-").expect("subagent- prefix");
             let core = inner.strip_suffix("-coder.log").expect("-coder.log suffix");
             // core == `<millis>-<seq>`; the seq is the last `-`-delimited run.
             core.rsplit_once('-')
@@ -1715,7 +1725,10 @@ mod tests {
             .collect();
         let mut seen = std::collections::HashSet::new();
         for p in &paths {
-            assert!(seen.insert(p.clone()), "duplicate path in burst — monotonic counter regressed");
+            assert!(
+                seen.insert(p.clone()),
+                "duplicate path in burst — monotonic counter regressed"
+            );
         }
         for p in &paths {
             let _ = std::fs::remove_file(p);
@@ -1758,7 +1771,10 @@ mod tests {
         assert!(notes.exists(), "NOTES.md survives (R5HUNT-2 name guard)");
         assert!(readme.exists(), "README survives (R5HUNT-2 name guard)");
         assert!(tmp.exists(), "scratch.tmp survives (R5HUNT-2 name guard)");
-        assert!(stray_log.exists(), "agent.log (no subagent- prefix) survives");
+        assert!(
+            stray_log.exists(),
+            "agent.log (no subagent- prefix) survives"
+        );
         assert!(
             stray_prefix.exists(),
             "subagent-notes.txt (no .log suffix) survives"
@@ -1823,10 +1839,19 @@ mod tests {
 
         // Both stale subagent logs are reaped — the cross-restart collision
         // window is closed before create_subagent_log_file can append to them.
-        assert!(!stale.exists(), "R6HUNT-1: stale cross-restart log reaped at startup");
-        assert!(!stale2.exists(), "R6HUNT-1: second stale log reaped at startup");
+        assert!(
+            !stale.exists(),
+            "R6HUNT-1: stale cross-restart log reaped at startup"
+        );
+        assert!(
+            !stale2.exists(),
+            "R6HUNT-1: second stale log reaped at startup"
+        );
         // Non-conforming files SURVIVE (R5HUNT-2 name guard honored at startup).
-        assert!(notes.exists(), "R6HUNT-1: NOTES.md survives the startup sweep");
+        assert!(
+            notes.exists(),
+            "R6HUNT-1: NOTES.md survives the startup sweep"
+        );
         assert!(
             stray_prefix.exists(),
             "R6HUNT-1: subagent-notes.txt survives the startup sweep"

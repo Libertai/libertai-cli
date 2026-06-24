@@ -10,9 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::commands::code_approvals::{
-    AskOutcome, ApprovalUi, NotifyOutcome, PromptChoice,
-};
+use crate::commands::code_approvals::{ApprovalUi, AskOutcome, NotifyOutcome, PromptChoice};
 
 /// Ratatui-based approval UI. Shared between the background thread
 /// (which calls `decide`/`ask`) and the main thread (which renders
@@ -30,12 +28,7 @@ impl RatatuiApprovalUi {
 
 #[async_trait]
 impl ApprovalUi for RatatuiApprovalUi {
-    async fn decide(
-        &self,
-        tool_name: &str,
-        preview: &str,
-        always_rule: &str,
-    ) -> PromptChoice {
+    async fn decide(&self, tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
         let (resp_tx, resp_rx) = std::sync::mpsc::channel();
 
         let msg = crate::commands::code_tui::app::AgentMsg::ApprovalRequest {
@@ -67,10 +60,12 @@ impl ApprovalUi for RatatuiApprovalUi {
             }));
         }
 
-        resp_rx.recv().unwrap_or(AskOutcome::Answer(serde_json::json!({
-            "cancelled": true,
-            "reason": "UI_NO_RESPONSE",
-        })))
+        resp_rx
+            .recv()
+            .unwrap_or(AskOutcome::Answer(serde_json::json!({
+                "cancelled": true,
+                "reason": "UI_NO_RESPONSE",
+            })))
     }
 
     async fn notify(&self, _title: &str, _body: &str) -> NotifyOutcome {

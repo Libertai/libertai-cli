@@ -171,7 +171,10 @@ fn print_plain(cwd_filter: Option<&Path>) -> Result<()> {
             let entry = &entries[idx];
             let icon = status_icon(entry.status);
             let time = relative_time(entry.record.started_at_ms, now_epoch_ms());
-            println!("  {icon} {}  {}  {time}", entry.record.name, entry.record.prompt_preview);
+            println!(
+                "  {icon} {}  {}  {time}",
+                entry.record.name, entry.record.prompt_preview
+            );
         }
     }
     Ok(())
@@ -248,9 +251,9 @@ fn draw(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),           // header
-            Constraint::Min(1),             // list
-            Constraint::Length(peek_height), // peek (0 when hidden)
+            Constraint::Length(1),             // header
+            Constraint::Min(1),                // list
+            Constraint::Length(peek_height),   // peek (0 when hidden)
             Constraint::Length(footer_height), // footer
         ])
         .split(area);
@@ -263,17 +266,16 @@ fn draw(
     draw_footer(frame, chunks[3], state, &message);
 }
 
-fn draw_header(
-    frame: &mut ratatui::Frame,
-    area: Rect,
-    state: &ViewState,
-    config: &ViewConfig,
-) {
+fn draw_header(frame: &mut ratatui::Frame, area: Rect, state: &ViewState, config: &ViewConfig) {
     let (working, completed, _) = group_entries(&state.entries);
     let total = state.entries.len();
     let header = format!(
         "LibertAI agents · {} · {} · {} total ({} working, {} exited)",
-        config.model, config.cwd_label, total, working.len(), completed.len()
+        config.model,
+        config.cwd_label,
+        total,
+        working.len(),
+        completed.len()
     );
     let line = Line::from(vec![Span::styled(
         header,
@@ -434,7 +436,10 @@ fn handle_key(state: &mut ViewState, config: &ViewConfig, key: KeyEvent) -> Resu
             if state.peek.is_some() {
                 state.peek = None;
             } else if let Some(&idx) = order.get(state.selected) {
-                match read_log_tail(Path::new(&state.entries[idx].record.log_path), PEEK_TAIL_BYTES) {
+                match read_log_tail(
+                    Path::new(&state.entries[idx].record.log_path),
+                    PEEK_TAIL_BYTES,
+                ) {
                     Ok(tail) => state.peek = Some(tail),
                     Err(e) => state.peek = Some(format!("could not read log: {e:#}")),
                 }
@@ -445,7 +450,8 @@ fn handle_key(state: &mut ViewState, config: &ViewConfig, key: KeyEvent) -> Resu
                 let pid = state.entries[idx].record.pid;
                 let _ = send_background_agent_kill(pid);
                 let records = load_background_agent_records()?;
-                let running = retain_running_background_agent_records(records, background_agent_status);
+                let running =
+                    retain_running_background_agent_records(records, background_agent_status);
                 rewrite_background_agent_records(&running)?;
                 state.message = Some(format!("stopped pid {pid}"));
                 refresh(state, config)?;
@@ -461,11 +467,7 @@ fn handle_key(state: &mut ViewState, config: &ViewConfig, key: KeyEvent) -> Resu
     Ok(false)
 }
 
-fn handle_dispatch_key(
-    state: &mut ViewState,
-    config: &ViewConfig,
-    key: KeyEvent,
-) -> Result<bool> {
+fn handle_dispatch_key(state: &mut ViewState, config: &ViewConfig, key: KeyEvent) -> Result<bool> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(true),
         (KeyCode::Esc, _) => {
@@ -562,10 +564,17 @@ fn sort_newest_first(bucket: &mut [usize], entries: &[AgentViewEntry]) {
 
 fn display_order(entries: &[AgentViewEntry]) -> Vec<usize> {
     let (working, completed, unknown) = group_entries(entries);
-    working.into_iter().chain(completed).chain(unknown).collect()
+    working
+        .into_iter()
+        .chain(completed)
+        .chain(unknown)
+        .collect()
 }
 
-fn filter_by_cwd(records: Vec<BackgroundAgentRecord>, cwd: Option<&Path>) -> Vec<BackgroundAgentRecord> {
+fn filter_by_cwd(
+    records: Vec<BackgroundAgentRecord>,
+    cwd: Option<&Path>,
+) -> Vec<BackgroundAgentRecord> {
     match cwd {
         Some(cwd) => records
             .into_iter()
@@ -588,7 +597,11 @@ fn slug_from_prompt(prompt: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-");
-    if slug.is_empty() { "agent".to_string() } else { slug }
+    if slug.is_empty() {
+        "agent".to_string()
+    } else {
+        slug
+    }
 }
 
 fn relative_time(started_at_ms: u64, now_ms: u64) -> String {
@@ -635,7 +648,10 @@ fn status_icon(status: BackgroundAgentStatus) -> &'static str {
     }
 }
 
-fn dispatch(config: &ViewConfig, prompt: &str) -> Result<crate::commands::code_ui::StartedBackgroundAgent> {
+fn dispatch(
+    config: &ViewConfig,
+    prompt: &str,
+) -> Result<crate::commands::code_ui::StartedBackgroundAgent> {
     let slug = slug_from_prompt(prompt);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let launch = BackgroundAgentLaunch {
@@ -694,8 +710,14 @@ mod tests {
     #[test]
     fn parse_permission_mode_maps_known_aliases() {
         assert_eq!(parse_permission_mode(Some("normal")), Mode::Normal);
-        assert_eq!(parse_permission_mode(Some("accept-edits")), Mode::AcceptEdits);
-        assert_eq!(parse_permission_mode(Some("accept_edits")), Mode::AcceptEdits);
+        assert_eq!(
+            parse_permission_mode(Some("accept-edits")),
+            Mode::AcceptEdits
+        );
+        assert_eq!(
+            parse_permission_mode(Some("accept_edits")),
+            Mode::AcceptEdits
+        );
         assert_eq!(parse_permission_mode(Some("accept")), Mode::AcceptEdits);
         assert_eq!(parse_permission_mode(Some("plan")), Mode::Plan);
         assert_eq!(parse_permission_mode(Some("readonly")), Mode::Plan);
@@ -704,7 +726,10 @@ mod tests {
 
     #[test]
     fn parse_permission_mode_is_case_insensitive() {
-        assert_eq!(parse_permission_mode(Some("Accept-Edits")), Mode::AcceptEdits);
+        assert_eq!(
+            parse_permission_mode(Some("Accept-Edits")),
+            Mode::AcceptEdits
+        );
         assert_eq!(parse_permission_mode(Some("PLAN")), Mode::Plan);
     }
 
@@ -742,7 +767,10 @@ mod tests {
 
     #[test]
     fn slug_from_prompt_joins_first_four_words() {
-        assert_eq!(slug_from_prompt("fix the build now please"), "fix-the-build-now");
+        assert_eq!(
+            slug_from_prompt("fix the build now please"),
+            "fix-the-build-now"
+        );
     }
 
     #[test]
@@ -764,10 +792,10 @@ mod tests {
     #[test]
     fn relative_time_formats_age_buckets() {
         let now = 100_000_000; // 100s in ms
-        assert_eq!(relative_time(99_950_000, now), "just now");     // 50s ago
-        assert_eq!(relative_time(99_880_000, now), "2m ago");       // 120s = 2m ago
-        assert_eq!(relative_time(92_800_000, now), "2h ago");      // 7200s = 2h ago
-        assert_eq!(relative_time(13_600_000, now), "1d ago");      // 86400s = 1d ago
+        assert_eq!(relative_time(99_950_000, now), "just now"); // 50s ago
+        assert_eq!(relative_time(99_880_000, now), "2m ago"); // 120s = 2m ago
+        assert_eq!(relative_time(92_800_000, now), "2h ago"); // 7200s = 2h ago
+        assert_eq!(relative_time(13_600_000, now), "1d ago"); // 86400s = 1d ago
     }
 
     #[test]
@@ -818,7 +846,11 @@ mod tests {
     #[test]
     fn status_icon_exited_is_neutral_not_success() {
         let icon = status_icon(BackgroundAgentStatus::Exited);
-        assert_eq!(icon, theme::glyph::IDLE, "exited should use the neutral idle glyph");
+        assert_eq!(
+            icon,
+            theme::glyph::IDLE,
+            "exited should use the neutral idle glyph"
+        );
         assert_ne!(icon, "✓", "exited must NOT claim success with a checkmark");
         // Distinct from the Working spinner so the two states are visually
         // separable in the list.

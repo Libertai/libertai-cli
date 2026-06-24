@@ -8,17 +8,19 @@
 //! ─ model ─ tokens ─ mode ─ cost ─
 //! ```
 
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use ratatui::Frame;
 
 use crate::commands::code_factory::Mode;
 use crate::commands::code_tui::app::App;
 use crate::commands::code_tui::theme;
-use crate::commands::code_ui::{context_percent, expand_status_line_template, status_line_command_text};
 use crate::commands::code_ui::BarStatus as LegacyBarStatus;
+use crate::commands::code_ui::{
+    context_percent, expand_status_line_template, status_line_command_text,
+};
 
 /// Draw the spinner line: `⠋ label…  ●tool(detail)`.
 /// Only shown during Streaming phase; blank otherwise.
@@ -198,7 +200,11 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::raw("  "));
         let hint = match app.focus {
             crate::commands::code_tui::app::Focus::Input => {
-                format!("[tab] {} agent{}", agent_count, if agent_count > 1 { "s" } else { "" })
+                format!(
+                    "[tab] {} agent{}",
+                    agent_count,
+                    if agent_count > 1 { "s" } else { "" }
+                )
             }
             crate::commands::code_tui::app::Focus::Agents => "[esc] back to input".to_string(),
         };

@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::Line;
+use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::commands::code_team::AgentHandle;
@@ -45,7 +45,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),                // scrollback — takes remaining space
-            Constraint::Length(footer_height),  // footer — pinned to bottom
+            Constraint::Length(footer_height), // footer — pinned to bottom
         ])
         .split(area);
 
@@ -160,14 +160,29 @@ fn draw_footer(
 
     // Agent header + agent rows.
     if agent_header > 0 {
-        agents_panel::draw_header(frame, chunks[chunk_idx], agents.len(), app.focus == Focus::Agents);
+        agents_panel::draw_header(
+            frame,
+            chunks[chunk_idx],
+            agents.len(),
+            app.focus == Focus::Agents,
+        );
         chunk_idx += 1;
     }
     if agent_rows > 0 {
         let max_rows = agent_rows as usize;
         // Scroll offset so the selected agent is always visible.
-        let scroll_offset = app.agent_selection.saturating_sub(max_rows.saturating_sub(1));
-        agents_panel::draw(frame, chunks[chunk_idx], agents, max_rows, scroll_offset, app.agent_selection, app.focus == Focus::Agents);
+        let scroll_offset = app
+            .agent_selection
+            .saturating_sub(max_rows.saturating_sub(1));
+        agents_panel::draw(
+            frame,
+            chunks[chunk_idx],
+            agents,
+            max_rows,
+            scroll_offset,
+            app.agent_selection,
+            app.focus == Focus::Agents,
+        );
         chunk_idx += 1;
     }
 
@@ -228,8 +243,7 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
     let display_lines: Vec<String> = if wrapped_preview.len() <= max_preview_lines {
         wrapped_preview
     } else {
-        let mut out: Vec<String> = wrapped_preview[..max_preview_lines.saturating_sub(1)]
-            .to_vec();
+        let mut out: Vec<String> = wrapped_preview[..max_preview_lines.saturating_sub(1)].to_vec();
         let mut last = wrapped_preview
             .get(max_preview_lines.saturating_sub(1))
             .cloned()
@@ -256,7 +270,9 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
         .border_style(Style::default().fg(theme::ACCENT))
         .title(Span::styled(
             " Approval ",
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
         ));
 
     // Build the content lines. The "Preview: " prefix goes on the
@@ -264,7 +280,10 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = Vec::with_capacity(2 + fixed_inner + display_lines.len());
     lines.push(Line::from(vec![
         Span::styled("Tool: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(&approval.tool_name, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            &approval.tool_name,
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
     ]));
     for (i, pl) in display_lines.iter().enumerate() {
         if i == 0 {
@@ -332,7 +351,9 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
         .border_style(Style::default().fg(theme::ACCENT))
         .title(Span::styled(
             title,
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(modal_area);
@@ -366,12 +387,10 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.set_cursor_position((cursor_x, cursor_y));
     } else {
         // Options list mode.
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("Q: ", Style::default().fg(theme::MUTED)),
-                Span::styled(&q.question, Style::default().add_modifier(Modifier::BOLD)),
-            ]),
-        ];
+        let mut lines = vec![Line::from(vec![
+            Span::styled("Q: ", Style::default().fg(theme::MUTED)),
+            Span::styled(&q.question, Style::default().add_modifier(Modifier::BOLD)),
+        ])];
         if !q.header.is_empty() {
             lines.push(Line::from(Span::styled(
                 &q.header,
@@ -384,7 +403,10 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
         } else {
             "↑↓ move · 1-9 pick · enter confirm · esc cancel"
         };
-        lines.push(Line::from(Span::styled(hint, Style::default().fg(theme::MUTED))));
+        lines.push(Line::from(Span::styled(
+            hint,
+            Style::default().fg(theme::MUTED),
+        )));
 
         // Build option items.
         let items: Vec<ListItem> = q
@@ -416,8 +438,7 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
         // (R5) Clamp before the `u16` cast so a >65535-line header doesn't
         // wrap and corrupt the list area below. The +1 blank separator uses
         // saturating_add to avoid overflow.
-        let header_height =
-            (lines.len().min(u16::MAX as usize - 1) as u16).saturating_add(1);
+        let header_height = (lines.len().min(u16::MAX as usize - 1) as u16).saturating_add(1);
         let header_area = Rect {
             height: header_height,
             ..inner
@@ -482,11 +503,8 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &mut App) {
     // Collect this agent's transcript as typed entries. Goes through the
     // overlay's mtime/size cache so an unchanged log file is NOT re-read on
     // every redraw tick.
-    let entries = crate::commands::code_tui::app::agent_transcript_for_overlay(
-        registry,
-        transcript,
-        overlay,
-    );
+    let entries =
+        crate::commands::code_tui::app::agent_transcript_for_overlay(registry, transcript, overlay);
 
     // Overlay: 80% width, 80% height, centered.
     let overlay_width = (area.width as f32 * 0.8) as u16;
@@ -527,7 +545,12 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &mut App) {
     // entries preserves the prior visual grouping.
     let mut lines: Vec<Line> = Vec::new();
     for entry in &entries {
-        lines.extend(render_entry_lines(entry, &overlay.agent_name, color, usable_width));
+        lines.extend(render_entry_lines(
+            entry,
+            &overlay.agent_name,
+            color,
+            usable_width,
+        ));
         lines.push(Line::from(""));
     }
 
@@ -551,8 +574,9 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &mut App) {
     let total_visual: usize = lines.len();
     let inner_height = overlay_height.saturating_sub(2) as usize; // minus borders
     let max_from_top = total_visual.saturating_sub(inner_height);
-    let scroll_from_top =
-        max_from_top.saturating_sub(overlay.scroll as usize).min(max_from_top);
+    let scroll_from_top = max_from_top
+        .saturating_sub(overlay.scroll as usize)
+        .min(max_from_top);
 
     // No `.wrap()`: content is already pre-wrapped to usable_width, and
     // leaving wrap off stops ratatui from double-counting (and drifting
@@ -621,9 +645,8 @@ fn draw_diff_view(frame: &mut Frame, area: Rect, app: &mut App) {
     // wrap-off truncating renderer exactly; wide lines truncate rather than
     // wrap, consistent with the agent overlay's pre-wrap-off model.
 
-    let mut lines = crate::commands::code_tui::diff::parse_diff(
-        app.pending_diff.as_deref().unwrap_or(""),
-    );
+    let mut lines =
+        crate::commands::code_tui::diff::parse_diff(app.pending_diff.as_deref().unwrap_or(""));
 
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -693,10 +716,7 @@ fn draw_slash_palette(frame: &mut Frame, area: Rect, app: &App) {
     let visible_rows = entries.len().min(7);
     let palette_height = visible_rows.saturating_add(2) as u16;
     let palette_x = area.x + (area.width.saturating_sub(palette_width)) / 2;
-    let palette_y = area
-        .height
-        .saturating_sub(palette_height)
-        .saturating_sub(2);
+    let palette_y = area.height.saturating_sub(palette_height).saturating_sub(2);
     let palette_area = Rect::new(palette_x, palette_y, palette_width, palette_height);
 
     frame.render_widget(Clear, palette_area);
@@ -825,8 +845,7 @@ fn render_entry_lines<'a>(
             // the per-tool detail string, then split off the detail so we
             // can color the tool name bold and the detail muted — mirroring
             // the scrollback `SubagentTool` arm exactly.
-            let preview =
-                crate::commands::code_tool_preview::tool_preview(tool_name, args);
+            let preview = crate::commands::code_tool_preview::tool_preview(tool_name, args);
             let detail = preview
                 .strip_prefix(tool_name)
                 .map(str::trim_start)
@@ -915,6 +934,9 @@ fn render_entry_lines<'a>(
         // Other variants aren't produced by agent_transcript; render any
         // stray one as dim text so the match stays exhaustive and never
         // silently drops content.
-        _ => vec![Line::from(Span::styled(format!("{entry:?}"), theme::muted()))],
+        _ => vec![Line::from(Span::styled(
+            format!("{entry:?}"),
+            theme::muted(),
+        ))],
     }
 }

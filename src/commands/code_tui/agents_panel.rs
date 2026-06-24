@@ -7,11 +7,11 @@
 
 use std::sync::Arc;
 
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use ratatui::Frame;
 
 use crate::commands::code_team::{AgentCapability, AgentHandle, AgentStatus};
 use crate::commands::code_tui::theme;
@@ -24,9 +24,7 @@ pub fn draw_header(frame: &mut Frame, area: Rect, count: usize, focused: bool) {
     } else {
         format!(" agents ({count}) ")
     };
-    let dash_count = area
-        .width
-        .saturating_sub(label.len() as u16) as usize;
+    let dash_count = area.width.saturating_sub(label.len() as u16) as usize;
     let style = if focused {
         theme::bold_accent()
     } else {
@@ -35,7 +33,11 @@ pub fn draw_header(frame: &mut Frame, area: Rect, count: usize, focused: bool) {
     let line = Line::from(vec![
         Span::styled(
             glyph::DIVIDER.to_string().repeat(dash_count),
-            if focused { theme::accent() } else { theme::muted() },
+            if focused {
+                theme::accent()
+            } else {
+                theme::muted()
+            },
         ),
         Span::styled(label, style),
     ]);
@@ -99,7 +101,9 @@ pub fn draw(
 
             // Agent name — colored by agent color.
             let name_style = if focused && actual_index == selected {
-                Style::default().fg(color).add_modifier(ratatui::style::Modifier::BOLD | ratatui::style::Modifier::REVERSED)
+                Style::default().fg(color).add_modifier(
+                    ratatui::style::Modifier::BOLD | ratatui::style::Modifier::REVERSED,
+                )
             } else {
                 Style::default().fg(color)
             };

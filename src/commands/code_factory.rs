@@ -28,12 +28,12 @@ use crate::commands::code_ask_user::AskUserTool;
 use crate::commands::code_aux::{smart_approval_from_config, SmartApproval};
 use crate::commands::code_diff::EditJournal;
 use crate::commands::code_guardrail::{GuardrailTool, ToolGuardrailState};
+use crate::commands::code_mailbox::MailboxTool;
 use crate::commands::code_mcp_tool::{cached_mcp_context_tools, named_mcp_tools, McpCallTool};
 use crate::commands::code_notification::PushNotificationTool;
 use crate::commands::code_path_safety::{
     is_path_mutation_tool, safe_root_from_env, PathSafetyTool,
 };
-use crate::commands::code_mailbox::MailboxTool;
 use crate::commands::code_task::TaskTool;
 use crate::commands::code_team::AgentRegistry;
 use crate::commands::code_team_task::TeamTaskTool;

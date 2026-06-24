@@ -35,10 +35,7 @@ pub const MAX_DIFF_LINES: usize = 2000;
 pub fn parse_diff(diff: &str) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     if diff.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "(no changes)",
-            theme::muted(),
-        )));
+        lines.push(Line::from(Span::styled("(no changes)", theme::muted())));
         return lines;
     }
 
@@ -58,23 +55,21 @@ pub fn parse_diff(diff: &str) -> Vec<Line<'static>> {
         // Stage the line + a chosen style, then own the content into a
         // `Span::styled` so the returned `Line<'static>` borrows nothing
         // from the input `&str`.
-        let (content, style): (String, Style) = if raw.starts_with("diff --git ")
-            || raw.starts_with("+++")
-            || raw.starts_with("---")
-        {
-            // file headers — bold.
-            (raw.to_string(), bold)
-        } else if raw.starts_with("@@ ") {
-            // hunk header — muted.
-            (raw.to_string(), muted)
-        } else if raw.starts_with('+') {
-            (raw.to_string(), added)
-        } else if raw.starts_with('-') {
-            (raw.to_string(), removed)
-        } else {
-            // context (` ` prefix) and anything else — muted.
-            (raw.to_string(), muted)
-        };
+        let (content, style): (String, Style) =
+            if raw.starts_with("diff --git ") || raw.starts_with("+++") || raw.starts_with("---") {
+                // file headers — bold.
+                (raw.to_string(), bold)
+            } else if raw.starts_with("@@ ") {
+                // hunk header — muted.
+                (raw.to_string(), muted)
+            } else if raw.starts_with('+') {
+                (raw.to_string(), added)
+            } else if raw.starts_with('-') {
+                (raw.to_string(), removed)
+            } else {
+                // context (` ` prefix) and anything else — muted.
+                (raw.to_string(), muted)
+            };
         lines.push(Line::from(Span::styled(content, style)));
     }
 

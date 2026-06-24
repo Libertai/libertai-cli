@@ -9,5 +9,5 @@ pub mod markdown;
 pub mod scrollback;
 pub mod terminal;
 pub mod theme;
-pub mod wrap;
 pub mod view;
+pub mod wrap;

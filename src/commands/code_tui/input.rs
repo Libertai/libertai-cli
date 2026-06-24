@@ -4,10 +4,10 @@
 //! the `❯` prompt glyph to its left. In Approval/Ask phases the
 //! textarea is dimmed and a hint is shown instead.
 
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use ratatui::Frame;
 
 use crate::commands::code_tui::app::{App, Phase};
 use crate::commands::code_tui::theme;
@@ -43,10 +43,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
         let line = Line::from(vec![
             Span::styled(theme::glyph::USER_PROMPT, theme::bold_accent()),
             Span::raw(" "),
-            Span::styled(
-                "(browsing agents — tab/esc to return)",
-                theme::muted(),
-            ),
+            Span::styled("(browsing agents — tab/esc to return)", theme::muted()),
         ]);
         frame.render_widget(Paragraph::new(line), area);
     } else {

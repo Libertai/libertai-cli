@@ -57,11 +57,7 @@ pub struct SpawnTeamTool {
 }
 
 impl SpawnTeamTool {
-    pub fn new(
-        cwd: PathBuf,
-        mode: ModeFlag,
-        registry: Arc<AgentRegistry>,
-    ) -> Self {
+    pub fn new(cwd: PathBuf, mode: ModeFlag, registry: Arc<AgentRegistry>) -> Self {
         Self {
             cwd,
             mode,
@@ -136,10 +132,16 @@ impl Tool for SpawnTeamTool {
                 return Ok(err_output("each teammate needs a non-empty `name`"));
             }
             if t.agent.trim().is_empty() {
-                return Ok(err_output(&format!("teammate `{}` needs a non-empty `agent`", t.name)));
+                return Ok(err_output(&format!(
+                    "teammate `{}` needs a non-empty `agent`",
+                    t.name
+                )));
             }
             if t.task.trim().is_empty() {
-                return Ok(err_output(&format!("teammate `{}` needs a non-empty `task`", t.name)));
+                return Ok(err_output(&format!(
+                    "teammate `{}` needs a non-empty `task`",
+                    t.name
+                )));
             }
         }
 
@@ -191,13 +193,12 @@ impl Tool for SpawnTeamTool {
         // modal. The socket path is inherited from the env var the parent set
         // on us; if we're not running under a TUI (`LIBERTAI_APPROVAL_SOCKET`
         // unset) this is `None` and the sub-teammates auto-deny (safe).
-        let approval_socket_path: Option<std::path::PathBuf> = std::env::var(
-            crate::commands::code_approval_ipc::APPROVAL_SOCKET_ENV,
-        )
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(std::path::PathBuf::from);
+        let approval_socket_path: Option<std::path::PathBuf> =
+            std::env::var(crate::commands::code_approval_ipc::APPROVAL_SOCKET_ENV)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from);
         let spawned = match crate::commands::code_team_spawn::spawn_team(
             &parsed.team_name,
             &manifest,

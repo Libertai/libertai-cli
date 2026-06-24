@@ -205,8 +205,14 @@ mod tests {
     /// The mouse-disable decision is purely a function of `restore_mouse`.
     #[test]
     fn should_disable_mouse_tracks_flag() {
-        assert!(!should_disable_mouse(false), "no mouse capture -> no disable");
-        assert!(should_disable_mouse(true), "mouse capture -> disable on drop");
+        assert!(
+            !should_disable_mouse(false),
+            "no mouse capture -> no disable"
+        );
+        assert!(
+            should_disable_mouse(true),
+            "mouse capture -> disable on drop"
+        );
     }
 
     /// A guard with `restore_mouse=false` drops cleanly and never asks for a
@@ -273,7 +279,9 @@ mod tests {
         guard.alt_screen = true;
         guard.terminal = None;
 
-        guard.suspend().expect("suspend must Ok on captured stdout (no backend)");
+        guard
+            .suspend()
+            .expect("suspend must Ok on captured stdout (no backend)");
         // Suspend must not fire Drop (the guard still owns teardown).
         assert!(
             !drop_probe_take(),
@@ -284,7 +292,9 @@ mod tests {
         assert!(guard.alt_screen, "suspend must not clear alt_screen");
         assert!(guard.terminal.is_none());
 
-        guard.resume().expect("resume must Ok on captured stdout (no backend)");
+        guard
+            .resume()
+            .expect("resume must Ok on captured stdout (no backend)");
         assert!(
             !drop_probe_take(),
             "resume must NOT run Drop (the guard is not dropped)"
@@ -318,8 +328,12 @@ mod tests {
             "restore_mouse=true must select DisableMouseCapture on suspend / EnableMouseCapture on resume"
         );
 
-        guard.suspend().expect("suspend with mouse flag Ok on captured stdout");
-        guard.resume().expect("resume with mouse flag Ok on captured stdout");
+        guard
+            .suspend()
+            .expect("suspend with mouse flag Ok on captured stdout");
+        guard
+            .resume()
+            .expect("resume with mouse flag Ok on captured stdout");
         // Guard still alive (not dropped by suspend/resume).
         assert!(guard.terminal.is_none());
         drop(guard);
@@ -355,7 +369,10 @@ mod tests {
             .expect("suspend with raw_mode must Ok when raw was never enabled (no tty needed)");
         // The field is NOT cleared by suspend (resume would read it to re-arm).
         assert!(guard.raw_mode, "suspend must not clear the raw_mode flag");
-        assert!(guard.terminal.is_none(), "suspend must not drop the (absent) terminal");
+        assert!(
+            guard.terminal.is_none(),
+            "suspend must not drop the (absent) terminal"
+        );
         // Suspend must not fire Drop.
         assert!(!drop_probe_take(), "suspend must NOT run Drop");
 

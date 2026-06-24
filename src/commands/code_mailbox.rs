@@ -227,10 +227,7 @@ impl MailboxTool {
 /// Count unread messages in a teammate's mailbox directory.
 /// Returns 0 if the directory doesn't exist.
 pub fn count_unread(mailbox_dir: &Path) -> usize {
-    read_mailbox(mailbox_dir)
-        .iter()
-        .filter(|m| !m.read)
-        .count()
+    read_mailbox(mailbox_dir).iter().filter(|m| !m.read).count()
 }
 
 /// List all messages in a teammate's mailbox, newest-first.
@@ -314,8 +311,8 @@ fn read_mailbox(dir: &Path) -> Vec<MailMessage> {
 /// [`message_file_name`]. Overwrites an existing file with the same
 /// name (used by [`mark_read`] to flip `read` in place).
 fn write_message(dir: &Path, msg: &MailMessage) -> Result<()> {
-    let json = serde_json::to_string(msg)
-        .with_context(|| format!("serialize message {}", msg.id))?;
+    let json =
+        serde_json::to_string(msg).with_context(|| format!("serialize message {}", msg.id))?;
     let path = dir.join(message_file_name(msg));
     std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
     Ok(())
@@ -380,7 +377,13 @@ mod tests {
 
     fn msg(from: &str, subject: &str, body: &str, read: bool) -> MailMessage {
         MailMessage {
-            id: format!("msg-{}{}{}{}", from.len(), subject.len(), body.len(), u8::from(read)),
+            id: format!(
+                "msg-{}{}{}{}",
+                from.len(),
+                subject.len(),
+                body.len(),
+                u8::from(read)
+            ),
             from: from.to_string(),
             to: "me".to_string(),
             subject: subject.to_string(),
@@ -468,7 +471,12 @@ mod tests {
                 false,
             ),
             msg("bob", "Already read", "stale", true),
-            msg("carol", "Task claimed", "I've claimed the benchmarking task.", false),
+            msg(
+                "carol",
+                "Task claimed",
+                "I've claimed the benchmarking task.",
+                false,
+            ),
         ];
         let out = format_inbox(&messages);
         assert!(
@@ -479,7 +487,9 @@ mod tests {
         assert!(out.contains("From: alice\n"));
         assert!(out.contains("Subject: Parser refactored\n"));
         assert!(
-            out.contains("Body: The parser is now using the new AST. Ready for you to wire the events.\n"),
+            out.contains(
+                "Body: The parser is now using the new AST. Ready for you to wire the events.\n"
+            ),
             "alice body missing: {out:?}"
         );
         // Second unread block (carol).
@@ -499,7 +509,10 @@ mod tests {
             msg("carol", "three", "body-three", false),
         ];
         let out = format_inbox(&messages);
-        assert!(out.starts_with("Inbox (3 unread):\n"), "count wrong: {out:?}");
+        assert!(
+            out.starts_with("Inbox (3 unread):\n"),
+            "count wrong: {out:?}"
+        );
         // All three blocks present, in slice order.
         assert!(out.contains("From: alice\n"));
         assert!(out.contains("From: bob\n"));

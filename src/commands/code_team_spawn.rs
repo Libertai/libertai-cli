@@ -75,8 +75,8 @@ pub struct QuickTeammate {
 /// Validates that the manifest defines at least one teammate and that
 /// every teammate has a non-empty `name`, `agent`, and `task`.
 pub fn parse_manifest(content: &str) -> Result<TeamManifest> {
-    let manifest: TeamManifest = toml::from_str(content)
-        .map_err(|e| anyhow::anyhow!("team manifest parse error: {e}"))?;
+    let manifest: TeamManifest =
+        toml::from_str(content).map_err(|e| anyhow::anyhow!("team manifest parse error: {e}"))?;
     if manifest.teammates.is_empty() {
         anyhow::bail!("team manifest has no teammates");
     }
@@ -183,7 +183,7 @@ pub fn spawn_team(
     registry: Option<&crate::commands::code_team::AgentRegistry>,
     approval_socket_path: Option<&std::path::Path>,
 ) -> Result<Vec<SpawnedTeammate>> {
-    use crate::commands::code_team::{AgentKind, AgentRegistration, AgentCapability, AgentColor};
+    use crate::commands::code_team::{AgentCapability, AgentColor, AgentKind, AgentRegistration};
     let mut spawned = Vec::with_capacity(manifest.teammates.len());
     for teammate in &manifest.teammates {
         // Teammate model overrides team-level, which overrides the caller default.
@@ -201,11 +201,7 @@ pub fn spawn_team(
             provider: resolved_provider.to_string(),
             model: resolved_model.to_string(),
             mode: resolved_mode,
-            prompt: format_teammate_prompt(
-                &teammate.task,
-                team_name,
-                &teammate.name,
-            ),
+            prompt: format_teammate_prompt(&teammate.task, team_name, &teammate.name),
             cwd: cwd.to_path_buf(),
             agent: Some(teammate.agent.clone()),
             team: Some(team_name.to_string()),
@@ -226,7 +222,9 @@ pub fn spawn_team(
         if let Some(reg) = registry {
             let reg_entry = AgentRegistration {
                 name: teammate.name.clone(),
-                kind: AgentKind::Teammate { team: team_name.to_string() },
+                kind: AgentKind::Teammate {
+                    team: team_name.to_string(),
+                },
                 color: AgentColor::color_for_name(&teammate.name),
                 capability: AgentCapability::ReadOnly,
                 cwd: cwd.to_path_buf(),
@@ -264,11 +262,7 @@ pub fn spawn_team(
     // task-completion detection would require monitoring the
     // background processes; that's deferred to a future milestone.)
     if let Ok(cfg) = crate::config::load() {
-        crate::commands::code_hooks::run_team_complete_hooks(
-            &cfg,
-            team_name,
-            spawned.len(),
-        );
+        crate::commands::code_hooks::run_team_complete_hooks(&cfg, team_name, spawned.len());
     }
 
     Ok(spawned)
@@ -300,10 +294,7 @@ pub fn quick_team_spec(spec: &str) -> Vec<QuickTeammate> {
 /// just renders the manifest's teammates and points at `libertai agents`.
 pub fn print_team_status(team_name: &str, cwd: &Path) -> Result<()> {
     let manifest = resolve_team(cwd, team_name)?;
-    println!(
-        "Team {team_name} ({} teammates):",
-        manifest.teammates.len()
-    );
+    println!("Team {team_name} ({} teammates):", manifest.teammates.len());
     for t in &manifest.teammates {
         let task = clip(&t.task, 60);
         println!("  {}  \x1b[2m{}\x1b[0m", t.name, task);
@@ -318,15 +309,8 @@ pub fn print_team_status(team_name: &str, cwd: &Path) -> Result<()> {
 /// `assignee` = teammate name, `title` = teammate task).
 ///
 /// Returns the team directory path.
-pub fn init_team_tasks(
-    team_name: &str,
-    manifest: &TeamManifest,
-    cwd: &Path,
-) -> Result<PathBuf> {
-    let dir = cwd
-        .join(".libertai")
-        .join("teams")
-        .join(team_name);
+pub fn init_team_tasks(team_name: &str, manifest: &TeamManifest, cwd: &Path) -> Result<PathBuf> {
+    let dir = cwd.join(".libertai").join("teams").join(team_name);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let tasks_path = dir.join("tasks.jsonl");
     let mut content = String::new();
@@ -343,8 +327,7 @@ pub fn init_team_tasks(
         content.push_str(&line);
         content.push('\n');
     }
-    fs::write(&tasks_path, content)
-        .with_context(|| format!("writing {}", tasks_path.display()))?;
+    fs::write(&tasks_path, content).with_context(|| format!("writing {}", tasks_path.display()))?;
     Ok(dir)
 }
 
@@ -369,11 +352,7 @@ fn clip(s: &str, max: usize) -> String {
     if count <= max {
         return s.to_string();
     }
-    let end = s
-        .char_indices()
-        .nth(max)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len());
+    let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
     format!("{}…", &s[..end])
 }
 

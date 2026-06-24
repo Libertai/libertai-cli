@@ -43,8 +43,8 @@ use std::path::Path;
 
 use crate::commands::code_factory::Mode;
 use crate::commands::code_skills::SkillPillar;
-use crate::commands::code_ui;
 use crate::commands::code_slash_registry::CustomCommand;
+use crate::commands::code_ui;
 use crate::config::Config as LibertaiConfig;
 
 /// The typed outcome of a slash-command dispatch.
@@ -386,7 +386,9 @@ pub fn theme_status_text() -> String {
     out.push_str("theme\n");
     out.push_str("  desktop: /theme system|dark|light|high-contrast updates the app appearance.\n");
     out.push_str("  terminal: colors are controlled by your terminal emulator; libertai code uses ANSI styling only.\n");
-    out.push_str("  status aliases: /theme status, /theme show, /theme current, /theme info, /theme json\n");
+    out.push_str(
+        "  status aliases: /theme status, /theme show, /theme current, /theme info, /theme json\n",
+    );
     out
 }
 
@@ -404,7 +406,11 @@ pub fn vim_status_text() -> String {
     out.push_str("vim\n");
     out.push_str(&format!(
         "  status: {}\n",
-        if code_ui::vim_input_enabled() { "on" } else { "off" }
+        if code_ui::vim_input_enabled() {
+            "on"
+        } else {
+            "off"
+        }
     ));
     out.push_str(
         "  terminal: Vim input supports insert/normal mode: Esc, i/a/I/A, h/l/0/$, x, and Enter.\n",
@@ -419,7 +425,12 @@ pub fn vim_usage_text() -> String {
 
 /// `/bug` template text (mirrors `print_bug_template`), threading the live
 /// provider/model/mode/output-style from the App's status bar.
-pub fn bug_template_text(provider: &str, model: &str, mode: Mode, output_style: Option<&str>) -> String {
+pub fn bug_template_text(
+    provider: &str,
+    model: &str,
+    mode: Mode,
+    output_style: Option<&str>,
+) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|e| format!("unavailable: {e}"));
@@ -432,7 +443,10 @@ pub fn bug_template_text(provider: &str, model: &str, mode: Mode, output_style: 
     out.push_str(&format!("- provider: {provider}\n"));
     out.push_str(&format!("- model: {model}\n"));
     out.push_str(&format!("- mode: {}\n", code_ui::mode_label(mode)));
-    out.push_str(&format!("- output-style: {}\n", output_style.unwrap_or("default")));
+    out.push_str(&format!(
+        "- output-style: {}\n",
+        output_style.unwrap_or("default")
+    ));
     out.push_str(&format!("- cwd: {cwd}\n"));
     out.push('\n');
     out.push_str("Describe:\n");
@@ -461,13 +475,17 @@ pub fn hooks_status_text(cfg: &LibertaiConfig) -> String {
     for (event, hooks) in code_ui::hook_event_rows(cfg) {
         out.push_str(&code_ui::hook_section_text(event, hooks));
     }
-    out.push_str("  UserPromptSubmit hooks run before the prompt reaches the agent and may block it.\n");
+    out.push_str(
+        "  UserPromptSubmit hooks run before the prompt reaches the agent and may block it.\n",
+    );
     out.push_str("  PreToolUse hooks may return permissionDecision allow|ask|defer|deny.\n");
     out.push_str("  PostToolUse hooks run after tool execution and cannot alter the result.\n");
     out.push_str("  SubagentStop hooks run after task-tool subagents finish.\n");
     out.push_str("  Notification hooks run after agent-requested push notifications.\n");
     out.push_str("  lifecycle hooks warn on nonzero exit and do not block the session.\n");
-    out.push_str("  command, HTTP, MCP-tool, prompt, and agent hook handlers are executed natively.\n");
+    out.push_str(
+        "  command, HTTP, MCP-tool, prompt, and agent hook handlers are executed natively.\n",
+    );
     out.push_str(&format!("  usage: {}\n", code_ui::HOOKS_USAGE));
     out.push('\n');
     out
@@ -505,7 +523,10 @@ pub fn mcp_status_text() -> String {
         }
         Ok(cfg) => {
             let exposure = code_ui::mcp_exposure_summary(&cfg);
-            out.push_str(&format!("  configured servers: {}\n", cfg.mcp_servers.len()));
+            out.push_str(&format!(
+                "  configured servers: {}\n",
+                cfg.mcp_servers.len()
+            ));
             out.push_str(&format!(
                 "  native exposure: mcp_call {}, {} named MCP tool(s), mcp_read_resource {}, mcp_get_prompt {}, {} resource subscription candidate(s)\n",
                 if exposure.mcp_call { "on" } else { "off" },
@@ -516,7 +537,9 @@ pub fn mcp_status_text() -> String {
             ));
         }
         Err(e) => {
-            out.push_str(&format!("  configured servers: config load failed: {e:#}\n"));
+            out.push_str(&format!(
+                "  configured servers: config load failed: {e:#}\n"
+            ));
         }
     }
     out.push_str("  desktop: Settings > MCP owns stdio/HTTP/SSE server discovery, probing, and richer cache management\n");
@@ -576,7 +599,11 @@ pub fn notify_status_text(cfg: &LibertaiConfig) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "  turn notifications: {}\n",
-        if cfg.code_turn_notifications { "on" } else { "off" }
+        if cfg.code_turn_notifications {
+            "on"
+        } else {
+            "off"
+        }
     ));
     out.push_str("  agent push notifications: terminal bell + visible notification block\n");
     out.push_str(&format!("  usage: {}\n", code_ui::notify_usage_text()));
@@ -601,9 +628,7 @@ pub fn notify_usage_text() -> String {
 /// prefixed like the legacy `eprintln`.
 pub fn changelog_text(cwd: &Path, limit: usize) -> String {
     match code_ui::recent_git_commits_in(cwd, limit) {
-        Ok(lines) if lines.is_empty() => {
-            "  /changelog: no commits found.\n".to_string()
-        }
+        Ok(lines) if lines.is_empty() => "  /changelog: no commits found.\n".to_string(),
         Ok(lines) => {
             let mut out = String::new();
             out.push_str("changelog\n");
@@ -623,8 +648,9 @@ pub fn changelog_text(cwd: &Path, limit: usize) -> String {
 pub fn changelog_json_text(cwd: &Path, limit: usize, query: &str) -> String {
     match code_ui::recent_git_commits_in(cwd, limit) {
         Ok(lines) => {
-            match serde_json::to_string_pretty(&code_ui::changelog_json_payload(limit, query, lines))
-            {
+            match serde_json::to_string_pretty(&code_ui::changelog_json_payload(
+                limit, query, lines,
+            )) {
                 Ok(raw) => raw,
                 Err(e) => format!("  /changelog json: {e:#}\n"),
             }
@@ -651,14 +677,15 @@ pub fn tree_text(path: Option<&str>) -> String {
 /// request arg (often empty).
 pub fn tree_json_text(path: Option<&str>, query: &str) -> String {
     match code_ui::tree_root(path) {
-        Ok(root) => match code_ui::project_tree_json_payload(&root, code_ui::TREE_MAX_ENTRIES, query)
-        {
-            Ok(payload) => match serde_json::to_string_pretty(&payload) {
-                Ok(raw) => raw,
+        Ok(root) => {
+            match code_ui::project_tree_json_payload(&root, code_ui::TREE_MAX_ENTRIES, query) {
+                Ok(payload) => match serde_json::to_string_pretty(&payload) {
+                    Ok(raw) => raw,
+                    Err(e) => format!("  /tree json: {e:#}\n"),
+                },
                 Err(e) => format!("  /tree json: {e:#}\n"),
-            },
-            Err(e) => format!("  /tree json: {e:#}\n"),
-        },
+            }
+        }
         Err(e) => format!("  /tree json: {e:#}\n"),
     }
 }
@@ -673,10 +700,7 @@ pub fn tree_json_text(path: Option<&str>, query: &str) -> String {
 /// on a [`CustomResolveResult::Hit`] it sends a [`BgCommand::CustomPrompt`] so
 /// the background thread expands the template with the async
 /// `code_ui::build_custom_slash_prompt`.
-pub fn resolve_custom<'a>(
-    commands: &'a [CustomCommand],
-    name: &str,
-) -> CustomResolveResult<'a> {
+pub fn resolve_custom<'a>(commands: &'a [CustomCommand], name: &str) -> CustomResolveResult<'a> {
     let needle = name.trim().trim_start_matches('/').to_ascii_lowercase();
     if needle.is_empty() {
         return CustomResolveResult::NotFound;
@@ -692,7 +716,8 @@ pub fn resolve_custom<'a>(
     }
 
     // Exact bare-name match.
-    let exact_name: Vec<&CustomCommand> = commands.iter().filter(|cmd| cmd.name == needle).collect();
+    let exact_name: Vec<&CustomCommand> =
+        commands.iter().filter(|cmd| cmd.name == needle).collect();
     if let Some(hit) = unique_match(exact_name) {
         return hit;
     }
@@ -700,7 +725,12 @@ pub fn resolve_custom<'a>(
     // Prefix match (on either bare name or `namespace/name`).
     let prefix: Vec<&CustomCommand> = commands
         .iter()
-        .filter(|cmd| cmd.name.starts_with(&needle) || invocation_name(cmd).to_ascii_lowercase().starts_with(&needle))
+        .filter(|cmd| {
+            cmd.name.starts_with(&needle)
+                || invocation_name(cmd)
+                    .to_ascii_lowercase()
+                    .starts_with(&needle)
+        })
         .collect();
     unique_match(prefix).unwrap_or(CustomResolveResult::NotFound)
 }
@@ -768,9 +798,7 @@ pub(crate) fn invocation_name(cmd: &CustomCommand) -> String {
 /// `namespace/name` (or bare `name`) that [`resolve_custom`] matches against,
 /// so a palette selection round-trips cleanly through the resolver. A missing
 /// description falls back to a placeholder so the palette row is never blank.
-pub(crate) fn custom_invocation_names(
-    commands: &[CustomCommand],
-) -> Vec<(String, String)> {
+pub(crate) fn custom_invocation_names(commands: &[CustomCommand]) -> Vec<(String, String)> {
     commands
         .iter()
         .map(|cmd| {
@@ -866,14 +894,17 @@ fn glob_match(pattern: &[char], value: &[char]) -> bool {
 /// First up to `max` non-empty lines of a trimmed memory body, for the
 /// `/memory show` preview.
 fn preview_lines(body: &str, max: usize) -> Vec<&str> {
-    body.lines().filter(|line| !line.trim().is_empty()).take(max).collect()
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(max)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::code_ui::ShellEscapeAction;
     use crate::commands::code_slash_registry;
+    use crate::commands::code_ui::ShellEscapeAction;
     use std::path::PathBuf;
 
     fn cmd(name: &str, namespace: Option<&str>) -> CustomCommand {
@@ -917,7 +948,10 @@ mod tests {
         let commands = vec![cmd("audit", Some("ops")), cmd("audit", Some("team"))];
         match resolve_custom(&commands, "audit") {
             CustomResolveResult::Ambiguous(names) => {
-                assert_eq!(names, vec!["ops/audit".to_string(), "team/audit".to_string()]);
+                assert_eq!(
+                    names,
+                    vec!["ops/audit".to_string(), "team/audit".to_string()]
+                );
             }
             other => panic!("expected ambiguous, got {other:?}"),
         }
@@ -926,7 +960,10 @@ mod tests {
     #[test]
     fn resolve_custom_not_found() {
         let commands = vec![cmd("apply", None)];
-        assert_eq!(resolve_custom(&commands, "nope"), CustomResolveResult::NotFound);
+        assert_eq!(
+            resolve_custom(&commands, "nope"),
+            CustomResolveResult::NotFound
+        );
     }
 
     #[test]
@@ -1003,8 +1040,16 @@ mod tests {
         // `true` is guaranteed present on every POSIX shell, exits 0, no output.
         let res = run_shell_escape_tui("true", None);
         assert_eq!(res.exit_code, Some(0), "exit_code: {:?}", res.exit_code);
-        assert!(res.stdout.is_empty(), "stdout should be empty: {:?}", res.stdout);
-        assert!(res.stderr.is_empty(), "stderr should be empty: {:?}", res.stderr);
+        assert!(
+            res.stdout.is_empty(),
+            "stdout should be empty: {:?}",
+            res.stdout
+        );
+        assert!(
+            res.stderr.is_empty(),
+            "stderr should be empty: {:?}",
+            res.stderr
+        );
         // The prompt-context block still records the run for the next prompt.
         assert!(res.prompt_context.contains("$ true"));
     }
@@ -1043,7 +1088,10 @@ mod tests {
     #[test]
     fn resolve_custom_empty_vec_misses_for_any_name() {
         // MISS path: no discovered commands → every name is NotFound.
-        assert_eq!(resolve_custom(&[], "anything"), CustomResolveResult::NotFound);
+        assert_eq!(
+            resolve_custom(&[], "anything"),
+            CustomResolveResult::NotFound
+        );
         assert_eq!(resolve_custom(&[], "/apply"), CustomResolveResult::NotFound);
     }
 
@@ -1071,6 +1119,9 @@ mod tests {
             "unexpected expansion: {expanded}"
         );
         // The {{args}} token is fully consumed.
-        assert!(!expanded.contains("{{args}}"), "expansion left a token: {expanded}");
+        assert!(
+            !expanded.contains("{{args}}"),
+            "expansion left a token: {expanded}"
+        );
     }
 }

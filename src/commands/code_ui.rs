@@ -890,7 +890,11 @@ pub(crate) fn recent_git_commits_in(cwd: &Path, limit: usize) -> Result<Vec<Stri
 /// `recent_git_commits_in` (same `git -C` + error-surfacing shape).
 pub(crate) fn git_diff_in(cwd: &Path, path: Option<&str>) -> Result<String> {
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(cwd).arg("diff").arg("--no-color").arg("HEAD");
+    cmd.arg("-C")
+        .arg(cwd)
+        .arg("diff")
+        .arg("--no-color")
+        .arg("HEAD");
     if let Some(p) = path {
         cmd.arg("--").arg(p);
     }
@@ -1534,7 +1538,10 @@ fn parse_pr_comment_draft(input: &str) -> Result<PrCommentDraft> {
     })
 }
 
-pub(crate) fn stage_pr_comment_draft(input: &str, drafts: &mut Vec<PrCommentDraft>) -> Result<PrCommentDraft> {
+pub(crate) fn stage_pr_comment_draft(
+    input: &str,
+    drafts: &mut Vec<PrCommentDraft>,
+) -> Result<PrCommentDraft> {
     let draft = parse_pr_comment_draft(input)?;
     drafts.push(draft.clone());
     Ok(draft)
@@ -1712,7 +1719,9 @@ pub(crate) enum BackgroundAgentStatus {
     Unknown,
 }
 
-pub(crate) fn start_background_agent(launch: &BackgroundAgentLaunch) -> Result<StartedBackgroundAgent> {
+pub(crate) fn start_background_agent(
+    launch: &BackgroundAgentLaunch,
+) -> Result<StartedBackgroundAgent> {
     let exe = std::env::current_exe().context("resolving current executable")?;
     let log_path = background_agent_log_path(&launch.name)?;
     if let Some(parent) = log_path.parent() {
@@ -2755,7 +2764,14 @@ pub(crate) fn hook_section_text(event: &str, hooks: &[crate::config::HookCommand
         // formats it in one shot with `{DIM}`/`{RESET}` ANSI wrappers; here we
         // emit plain text, so assemble the same fields in order without ANSI).
         let mut line = String::new();
-        line.push_str(&format!("  {}. {} [{}] type={} matcher={}", idx + 1, event, marker, hook_type, matcher));
+        line.push_str(&format!(
+            "  {}. {} [{}] type={} matcher={}",
+            idx + 1,
+            event,
+            marker,
+            hook_type,
+            matcher
+        ));
         line.push_str(&timeout);
         line.push_str(&shell);
         line.push_str(async_flag);
@@ -3150,7 +3166,11 @@ impl SpinnerCore {
 
         if agent_count > 0 {
             let header = if agents.len() > agent_count {
-                format!("── agents ({}) +{} more ", agent_count, agents.len() - agent_count)
+                format!(
+                    "── agents ({}) +{} more ",
+                    agent_count,
+                    agents.len() - agent_count
+                )
             } else {
                 format!("── agents ({}) ", agent_count)
             };
@@ -4217,7 +4237,10 @@ mod tests {
         let path = temp.path().join("small.log");
         std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
         let tail = read_log_tail(&path, 64_000).unwrap();
-        assert_eq!(tail, "alpha\nbeta\ngamma\n", "under-budget file must pass through whole, no marker");
+        assert_eq!(
+            tail, "alpha\nbeta\ngamma\n",
+            "under-budget file must pass through whole, no marker"
+        );
     }
 
     #[test]
@@ -4249,7 +4272,8 @@ mod tests {
             .strip_prefix(&format!("[truncated to last {budget} bytes]\n"))
             .unwrap();
         assert_eq!(
-            after_marker, &format!("{line3}\n"),
+            after_marker,
+            &format!("{line3}\n"),
             "partial first line must be dropped; tail must start at line3, got: {after_marker:?}"
         );
     }
@@ -4258,7 +4282,10 @@ mod tests {
     fn read_log_tail_missing_file_errors() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("nope.log");
-        assert!(read_log_tail(&path, 1000).is_err(), "missing file must error, not panic");
+        assert!(
+            read_log_tail(&path, 1000).is_err(),
+            "missing file must error, not panic"
+        );
     }
 
     #[test]
@@ -4590,13 +4617,14 @@ mod tests {
 
     #[test]
     fn agent_footer_line_renders_name_elapsed_and_tool() {
-        use crate::commands::code_team::{
-            AgentColor, AgentKind, AgentRegistration, AgentRegistry,
-        };
+        use crate::commands::code_team::{AgentColor, AgentKind, AgentRegistration, AgentRegistry};
         let registry = AgentRegistry::new();
         let h = registry.register(AgentRegistration {
             name: "reviewer".to_string(),
-            kind: AgentKind::Subagent { depth: 0, parent: None },
+            kind: AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
             color: AgentColor::Green,
             capability: crate::commands::code_team::AgentCapability::ReadOnly,
             cwd: PathBuf::from("/tmp"),
@@ -4619,13 +4647,14 @@ mod tests {
 
     #[test]
     fn agent_footer_line_markes_write_capable_with_pencil() {
-        use crate::commands::code_team::{
-            AgentColor, AgentKind, AgentRegistration, AgentRegistry,
-        };
+        use crate::commands::code_team::{AgentColor, AgentKind, AgentRegistration, AgentRegistry};
         let registry = AgentRegistry::new();
         let h = registry.register(AgentRegistration {
             name: "builder".to_string(),
-            kind: AgentKind::Subagent { depth: 0, parent: None },
+            kind: AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
             color: AgentColor::Blue,
             capability: crate::commands::code_team::AgentCapability::ReadWrite,
             cwd: PathBuf::from("/tmp"),
@@ -5727,7 +5756,10 @@ mod tests {
             seq.starts_with("\x1b]52;c;"),
             "OSC52 must start with ESC]52;c; — the 'c' clipboard selection, got {seq:?}"
         );
-        assert!(seq.ends_with('\x07'), "OSC52 must end with BEL (\\x07), got {seq:?}");
+        assert!(
+            seq.ends_with('\x07'),
+            "OSC52 must end with BEL (\\x07), got {seq:?}"
+        );
         // The middle is the base64 of the payload bytes.
         let middle = &seq["\x1b]52;c;".len()..seq.len() - 1];
         assert_eq!(
@@ -5743,7 +5775,10 @@ mod tests {
     #[test]
     fn osc52_sequence_empty_payload_is_well_formed() {
         let seq = osc52_sequence("");
-        assert_eq!(seq, "\x1b]52;c;\x07", "empty payload → empty base64 + framing");
+        assert_eq!(
+            seq, "\x1b]52;c;\x07",
+            "empty payload → empty base64 + framing"
+        );
     }
 
     // (M7a-u3) `OSC52_MAX_TEXT_BYTES` is the cap the bg `/copy` arm uses to
@@ -5767,7 +5802,10 @@ mod tests {
         std::env::set_var("EDITOR", "fallback-editor");
         let resolved = resolve_editor();
         restore_editor_env(snap);
-        assert_eq!(resolved, "visual-editor", "VISUAL must take precedence over EDITOR");
+        assert_eq!(
+            resolved, "visual-editor",
+            "VISUAL must take precedence over EDITOR"
+        );
     }
 
     // (M7a-u6) `resolve_editor` falls back to `vi` when neither `$VISUAL` nor
@@ -5779,7 +5817,10 @@ mod tests {
         clear_editor_env();
         let resolved = resolve_editor();
         restore_editor_env(snap);
-        assert_eq!(resolved, "vi", "vi is the final fallback when VISUAL and EDITOR are unset");
+        assert_eq!(
+            resolved, "vi",
+            "vi is the final fallback when VISUAL and EDITOR are unset"
+        );
     }
 
     // (M7a-u7) `quote_for_sh` single-quotes a path so a space-containing temp
@@ -5796,8 +5837,14 @@ mod tests {
         // The inner content is the raw path (no spaces escaped — they're safe
         // inside single quotes).
         let inner = &quoted[1..quoted.len() - 1];
-        assert!(inner.contains("some dir"), "spaces preserved inside quotes: {quoted:?}");
-        assert!(inner.contains("editor draft.txt"), "inner path verbatim: {quoted:?}");
+        assert!(
+            inner.contains("some dir"),
+            "spaces preserved inside quotes: {quoted:?}"
+        );
+        assert!(
+            inner.contains("editor draft.txt"),
+            "inner path verbatim: {quoted:?}"
+        );
     }
 
     // (M7a-u8) `quote_sh_string` escapes embedded single quotes via the
@@ -5832,10 +5879,17 @@ mod tests {
     #[test]
     fn quote_sh_string_wraps_plain_string_in_single_quotes() {
         assert_eq!(quote_sh_string("plain"), "'plain'");
-        assert_eq!(quote_sh_string(""), "''", "empty string → empty single-quotes");
+        assert_eq!(
+            quote_sh_string(""),
+            "''",
+            "empty string → empty single-quotes"
+        );
         // A path with a `$` (shell-significant) is neutralized by the quotes.
         let quoted = quote_sh_string("/tmp/$HOME/x");
-        assert_eq!(quoted, "'/tmp/$HOME/x'", "dollar is literal inside single quotes");
+        assert_eq!(
+            quoted, "'/tmp/$HOME/x'",
+            "dollar is literal inside single quotes"
+        );
     }
 
     // ── R2-COV-1: restored behavioral tests for the round-2-purged helpers ─
@@ -5888,12 +5942,30 @@ mod tests {
     #[test]
     fn parse_changelog_limit_defaults_and_clamps() {
         assert_eq!(parse_changelog_limit("").unwrap(), CHANGELOG_DEFAULT_LIMIT);
-        assert_eq!(parse_changelog_limit("list").unwrap(), CHANGELOG_DEFAULT_LIMIT);
-        assert_eq!(parse_changelog_limit("recent").unwrap(), CHANGELOG_DEFAULT_LIMIT);
-        assert_eq!(parse_changelog_limit("latest").unwrap(), CHANGELOG_DEFAULT_LIMIT);
-        assert_eq!(parse_changelog_limit("status").unwrap(), CHANGELOG_DEFAULT_LIMIT);
-        assert_eq!(parse_changelog_limit("state").unwrap(), CHANGELOG_DEFAULT_LIMIT);
-        assert_eq!(parse_changelog_limit("show").unwrap(), CHANGELOG_DEFAULT_LIMIT);
+        assert_eq!(
+            parse_changelog_limit("list").unwrap(),
+            CHANGELOG_DEFAULT_LIMIT
+        );
+        assert_eq!(
+            parse_changelog_limit("recent").unwrap(),
+            CHANGELOG_DEFAULT_LIMIT
+        );
+        assert_eq!(
+            parse_changelog_limit("latest").unwrap(),
+            CHANGELOG_DEFAULT_LIMIT
+        );
+        assert_eq!(
+            parse_changelog_limit("status").unwrap(),
+            CHANGELOG_DEFAULT_LIMIT
+        );
+        assert_eq!(
+            parse_changelog_limit("state").unwrap(),
+            CHANGELOG_DEFAULT_LIMIT
+        );
+        assert_eq!(
+            parse_changelog_limit("show").unwrap(),
+            CHANGELOG_DEFAULT_LIMIT
+        );
         assert_eq!(parse_changelog_limit("3").unwrap(), 3);
         assert_eq!(parse_changelog_limit("0").unwrap(), 1);
         assert_eq!(parse_changelog_limit("999").unwrap(), CHANGELOG_MAX_LIMIT);
@@ -5915,9 +5987,18 @@ mod tests {
         assert!(changelog_usage_text().contains("list --json|recent --json|latest --json"));
         assert_eq!(changelog_json_request_arg("json"), Some(String::new()));
         assert_eq!(changelog_json_request_arg("--json"), Some(String::new()));
-        assert_eq!(changelog_json_request_arg("state --json"), Some(String::new()));
-        assert_eq!(changelog_json_request_arg("show --json"), Some(String::new()));
-        assert_eq!(changelog_json_request_arg("list --json"), Some(String::new()));
+        assert_eq!(
+            changelog_json_request_arg("state --json"),
+            Some(String::new())
+        );
+        assert_eq!(
+            changelog_json_request_arg("show --json"),
+            Some(String::new())
+        );
+        assert_eq!(
+            changelog_json_request_arg("list --json"),
+            Some(String::new())
+        );
         assert_eq!(changelog_json_request_arg("json 3"), Some("3".to_string()));
         assert_eq!(changelog_json_request_arg("status"), None);
         let payload = changelog_json_payload(
@@ -6041,7 +6122,10 @@ mod tests {
         assert_eq!(parse_hooks_command("status --json"), HooksCommand::Json);
         assert_eq!(parse_hooks_command("list --json"), HooksCommand::Json);
         assert_eq!(parse_hooks_command("state --json"), HooksCommand::Json);
-        assert_eq!(parse_hooks_command("diagnostics --json"), HooksCommand::Json);
+        assert_eq!(
+            parse_hooks_command("diagnostics --json"),
+            HooksCommand::Json
+        );
         assert_eq!(parse_hooks_command("show --json"), HooksCommand::Json);
         assert_eq!(parse_hooks_command("open"), HooksCommand::Open);
         assert_eq!(parse_hooks_command("settings"), HooksCommand::Open);
@@ -6377,7 +6461,10 @@ mod tests {
             api_base: "https://example.com/api/".to_string(),
             ..LibertaiConfig::default()
         };
-        assert_eq!(model_list_source(&cfg_slash), "https://example.com/api/v1/models");
+        assert_eq!(
+            model_list_source(&cfg_slash),
+            "https://example.com/api/v1/models"
+        );
     }
 
     // (R2-COV-1) `render_project_tree` + `tree_json_request_arg` +

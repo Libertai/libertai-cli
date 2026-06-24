@@ -167,9 +167,7 @@ pub mod glyph {
 // ---------------------------------------------------------------------------
 
 /// Braille spinner frames, 80ms tick — smoother than the old 120ms.
-pub const SPINNER_FRAMES: [&str; 10] = [
-    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-];
+pub const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Tick rate for the event loop (and spinner animation).
 pub const TICK_RATE_MS: u64 = 80;
@@ -185,7 +183,10 @@ mod tests {
         assert_eq!(agent_color_for(AgentColor::Green), Color::Green);
         assert_eq!(agent_color_for(AgentColor::Purple), Color::Magenta);
         assert_eq!(agent_color_for(AgentColor::Dim), Color::DarkGray);
-        assert_eq!(agent_color_for(AgentColor::Orange), Color::Rgb(216, 144, 60));
+        assert_eq!(
+            agent_color_for(AgentColor::Orange),
+            Color::Rgb(216, 144, 60)
+        );
     }
 
     #[test]

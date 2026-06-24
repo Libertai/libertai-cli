@@ -49,21 +49,13 @@ pub enum AgentKind {
     /// the nesting level (0 = top-level child of the REPL, 1 = grand-
     /// child, …). `parent` is the parent agent's id (the REPL itself
     /// has no id, so a top-level subagent's parent is `None`).
-    Subagent {
-        depth: u8,
-        parent: Option<AgentId>,
-    },
+    Subagent { depth: u8, parent: Option<AgentId> },
     /// A detached OS process running `libertai code`, launched from
     /// the REPL or the agent view. Identified by pid + our run id.
-    Background {
-        pid: u32,
-        run_id: String,
-    },
+    Background { pid: u32, run_id: String },
     /// A team teammate (M3). Stubbed now so the registry can hold the
     /// slot before the team system is wired up.
-    Teammate {
-        team: String,
-    },
+    Teammate { team: String },
 }
 
 /// Lifecycle state for one agent. Mirrors Claude Code's agent-view
@@ -92,7 +84,10 @@ impl AgentStatus {
     /// True for states that count as "active" in the live panel and
     /// the agent-view Working group.
     pub fn is_active(self) -> bool {
-        matches!(self, AgentStatus::Spawning | AgentStatus::Working | AgentStatus::NeedsInput)
+        matches!(
+            self,
+            AgentStatus::Spawning | AgentStatus::Working | AgentStatus::NeedsInput
+        )
     }
 }
 
@@ -187,7 +182,14 @@ impl AgentCapability {
     /// tool name (matching the existing `is_path_edit_tool` set plus
     /// `bash` and `hashline_edit`) makes the agent read-write.
     pub fn from_tools(tools: &[String]) -> Self {
-        const MUTATORS: &[&str] = &["write", "edit", "hashline_edit", "bash", "notebook_edit", "notebook_execute"];
+        const MUTATORS: &[&str] = &[
+            "write",
+            "edit",
+            "hashline_edit",
+            "bash",
+            "notebook_edit",
+            "notebook_execute",
+        ];
         if tools.iter().any(|t| MUTATORS.contains(&t.as_str())) {
             Self::ReadWrite
         } else {
@@ -281,10 +283,7 @@ impl AgentHandle {
     /// request a stop without the spawner having to coordinate.
     pub fn abort_handle(&self) -> Option<AbortHandle> {
         // Poison-recovery (#21): see `status()`.
-        self.abort
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.abort.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Store the abort handle for a run the spawner just kicked off.
@@ -404,7 +403,10 @@ impl AgentRegistry {
     pub fn remove(&self, id: AgentId) {
         // Poison-recovery (#21): see `snapshot()`. Remove from the
         // recovered inner map instead of panicking.
-        self.handles.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        self.handles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
     }
 
     /// Update an agent's status by id. No-op if it was already removed.
@@ -412,7 +414,12 @@ impl AgentRegistry {
         // Poison-recovery (#21): see `snapshot()`. Read off the recovered
         // inner map instead of panicking; the handle's own `set_status`
         // recovers its status lock too.
-        if let Some(h) = self.handles.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
+        if let Some(h) = self
+            .handles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+        {
             h.set_status(status);
         }
     }
@@ -497,7 +504,13 @@ mod tests {
     #[test]
     fn register_and_snapshot() {
         let registry = AgentRegistry::new();
-        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        let h = registry.register(reg(
+            "reviewer",
+            AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
+        ));
         assert_eq!(registry.active_count(), 1);
         assert_eq!(registry.snapshot().len(), 1);
         assert_eq!(h.name, "reviewer");
@@ -507,7 +520,13 @@ mod tests {
     #[test]
     fn active_filters_finished() {
         let registry = AgentRegistry::new();
-        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        let h = registry.register(reg(
+            "reviewer",
+            AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
+        ));
         assert_eq!(registry.active_count(), 1);
         h.set_status(AgentStatus::Completed);
         assert_eq!(registry.active_count(), 0);
@@ -517,7 +536,13 @@ mod tests {
     #[test]
     fn remove_drops_handle() {
         let registry = AgentRegistry::new();
-        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        let h = registry.register(reg(
+            "reviewer",
+            AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
+        ));
         registry.remove(h.id);
         assert_eq!(registry.snapshot().len(), 0);
         assert_eq!(registry.active_count(), 0);
@@ -525,8 +550,14 @@ mod tests {
 
     #[test]
     fn color_for_name_is_stable() {
-        assert_eq!(AgentColor::color_for_name("reviewer"), AgentColor::color_for_name("reviewer"));
-        assert_ne!(AgentColor::color_for_name("reviewer"), AgentColor::color_for_name("researcher"));
+        assert_eq!(
+            AgentColor::color_for_name("reviewer"),
+            AgentColor::color_for_name("reviewer")
+        );
+        assert_ne!(
+            AgentColor::color_for_name("reviewer"),
+            AgentColor::color_for_name("researcher")
+        );
     }
 
     #[test]
@@ -557,7 +588,13 @@ mod tests {
     #[test]
     fn current_tool_updates() {
         let registry = AgentRegistry::new();
-        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        let h = registry.register(reg(
+            "reviewer",
+            AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
+        ));
         assert_eq!(h.current_tool(), None);
         h.set_current_tool(Some("read".to_string()));
         assert_eq!(h.current_tool(), Some("read".to_string()));
@@ -574,7 +611,13 @@ mod tests {
     #[test]
     fn abort_slot_defaults_to_none_after_register() {
         let registry = AgentRegistry::new();
-        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        let h = registry.register(reg(
+            "reviewer",
+            AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
+        ));
         assert!(
             h.abort.lock().unwrap().is_none(),
             "a freshly-registered agent must have no abort handle"
@@ -591,12 +634,24 @@ mod tests {
     #[test]
     fn abort_slot_set_take_clears() {
         let registry = AgentRegistry::new();
-        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        let h = registry.register(reg(
+            "reviewer",
+            AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
+        ));
 
         let (handle, _signal) = AbortHandle::new();
         h.set_abort(handle);
-        assert!(h.abort.lock().unwrap().is_some(), "set_abort must store the handle");
-        assert!(h.abort_handle().is_some(), "abort_handle must reflect the stored handle");
+        assert!(
+            h.abort.lock().unwrap().is_some(),
+            "set_abort must store the handle"
+        );
+        assert!(
+            h.abort_handle().is_some(),
+            "abort_handle must reflect the stored handle"
+        );
 
         let taken = h.take_abort();
         assert!(taken.is_some(), "take_abort must return the stored handle");
@@ -617,7 +672,13 @@ mod tests {
     #[test]
     fn abort_handle_abort_is_observable_via_signal() {
         let registry = AgentRegistry::new();
-        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        let h = registry.register(reg(
+            "reviewer",
+            AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
+        ));
 
         let (handle, signal) = AbortHandle::new();
         h.set_abort(handle);
@@ -655,7 +716,10 @@ mod tests {
             panic!("poison the mutex");
         }));
         assert!(result.is_err(), "the inner closure must panic");
-        assert!(m.is_poisoned(), "the mutex must be poisoned after a panic-in-lock");
+        assert!(
+            m.is_poisoned(),
+            "the mutex must be poisoned after a panic-in-lock"
+        );
         // The poison-recovery accessor pattern: `.into_inner()` extracts the
         // inner value out of the `PoisonError` instead of propagating the
         // panic. This is exactly what `AgentHandle::status()` does.
@@ -671,7 +735,13 @@ mod tests {
     #[test]
     fn agent_status_recovers_from_poisoned_lock() {
         let registry = AgentRegistry::new();
-        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        let h = registry.register(reg(
+            "reviewer",
+            AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
+        ));
         // Establish a known status before poisoning.
         h.set_status(AgentStatus::Working);
         assert_eq!(h.status(), AgentStatus::Working);
@@ -688,7 +758,8 @@ mod tests {
         // (A stale status beats a dead TUI.)
         let recovered = h.status();
         assert_eq!(
-            recovered, AgentStatus::Working,
+            recovered,
+            AgentStatus::Working,
             "status() recovers the stale value from a poisoned lock: {recovered:?}"
         );
     }
@@ -699,7 +770,13 @@ mod tests {
     #[test]
     fn agent_current_tool_recovers_from_poisoned_lock() {
         let registry = AgentRegistry::new();
-        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        let h = registry.register(reg(
+            "reviewer",
+            AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
+        ));
         h.set_current_tool(Some("bash".to_string()));
         assert_eq!(h.current_tool(), Some("bash".to_string()));
 
@@ -709,7 +786,10 @@ mod tests {
             panic!("poison the current_tool lock");
         }));
         assert!(result.is_err(), "inner closure must panic");
-        assert!(h.current_tool.is_poisoned(), "current_tool lock is poisoned");
+        assert!(
+            h.current_tool.is_poisoned(),
+            "current_tool lock is poisoned"
+        );
 
         // Accessor recovers the stale value, no panic.
         assert_eq!(
@@ -727,7 +807,13 @@ mod tests {
     #[test]
     fn registry_snapshot_recovers_from_poisoned_lock() {
         let registry = AgentRegistry::new();
-        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        let h = registry.register(reg(
+            "reviewer",
+            AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
+        ));
         assert_eq!(registry.snapshot().len(), 1);
 
         // Poison the registry's handles lock. Reach the private field via
@@ -737,7 +823,10 @@ mod tests {
             panic!("poison the registry handles lock");
         }));
         assert!(result.is_err(), "inner closure must panic");
-        assert!(registry.handles.is_poisoned(), "registry handles lock is poisoned");
+        assert!(
+            registry.handles.is_poisoned(),
+            "registry handles lock is poisoned"
+        );
 
         // snapshot() must recover and return the stale handle, not panic.
         let snap = registry.snapshot();
@@ -750,8 +839,16 @@ mod tests {
         assert_eq!(snap[0].name, "reviewer");
         // The other registry accessors use the same recovery; spot-check
         // active_count / total_count don't panic on a poisoned lock either.
-        assert_eq!(registry.total_count(), 1, "total_count recovers from poison");
-        assert_eq!(registry.active_count(), 1, "active_count recovers from poison");
+        assert_eq!(
+            registry.total_count(),
+            1,
+            "total_count recovers from poison"
+        );
+        assert_eq!(
+            registry.active_count(),
+            1,
+            "active_count recovers from poison"
+        );
         // The handle is still usable (its own locks are unpoisoned).
         assert_eq!(h.status(), AgentStatus::Spawning);
     }
@@ -762,7 +859,13 @@ mod tests {
     #[test]
     fn agent_abort_handle_recovers_from_poisoned_lock() {
         let registry = AgentRegistry::new();
-        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        let h = registry.register(reg(
+            "reviewer",
+            AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
+        ));
         let (handle, _signal) = AbortHandle::new();
         h.set_abort(handle);
         assert!(h.abort_handle().is_some(), "abort handle is set");
@@ -796,7 +899,13 @@ mod tests {
     #[test]
     fn agent_set_status_recovers_from_poisoned_lock() {
         let registry = AgentRegistry::new();
-        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        let h = registry.register(reg(
+            "reviewer",
+            AgentKind::Subagent {
+                depth: 0,
+                parent: None,
+            },
+        ));
         // Establish a known status before poisoning.
         h.set_status(AgentStatus::Working);
         assert_eq!(h.status(), AgentStatus::Working);

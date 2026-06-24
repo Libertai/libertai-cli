@@ -46,9 +46,7 @@ fn dumped_prompt_leads_with_libertai_identity() {
     let id = stderr
         .find(IDENTITY_LEAD)
         .expect("identity lead present (checked above)");
-    let harness = stderr
-        .find(HARNESS_MARKER)
-        .unwrap_or(usize::MAX);
+    let harness = stderr.find(HARNESS_MARKER).unwrap_or(usize::MAX);
     assert!(
         id < harness,
         "identity block should precede the harness skill marker"
