@@ -408,6 +408,33 @@ impl ApprovalUi for IpcApprovalUi {
     }
 }
 
+/// Non-Unix `ApprovalUi` for `IpcApprovalUi`. `from_env()` returns `None` on
+/// non-Unix (see above), so this impl is never reached at runtime — it exists
+/// only so `code.rs`'s `Arc::new(ipc)` used as `Arc<dyn ApprovalUi>` typechecks
+/// on Windows. If it were ever called it would auto-deny (the safe headless
+/// behavior), mirroring the Unix failure-path.
+#[cfg(not(unix))]
+#[async_trait::async_trait]
+impl crate::commands::code_approvals::ApprovalUi for IpcApprovalUi {
+    fn allows_smart_approval(&self) -> bool {
+        false
+    }
+
+    async fn decide(&self, _tool_name: &str, _preview: &str, _always_rule: &str) -> PromptChoice {
+        PromptChoice::Deny
+    }
+
+    async fn notify(
+        &self,
+        _title: &str,
+        _body: &str,
+    ) -> crate::commands::code_approvals::NotifyOutcome {
+        crate::commands::code_approvals::NotifyOutcome::Skipped(
+            "IPC_NOTIFY_NOT_SUPPORTED".to_string(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

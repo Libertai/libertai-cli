@@ -30,6 +30,7 @@
 //! detection-row UI works on every OS.
 
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::Command;
 use std::sync::OnceLock;
 
