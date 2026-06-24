@@ -247,11 +247,46 @@ pub fn approval_subject_with_base(
                 .and_then(|v| v.as_str())
                 .unwrap_or("<missing command>");
             let s = cmd.to_string();
-            (
-                s.clone(),
-                AllowRule::exact(tool, s.clone()),
-                format!("bash({s})"),
-            )
+            // (Issue-2: bash allow-rule granularity) The "always allow"
+            // rule for bash is keyed on the command's FIRST TOKEN (the
+            // binary), NOT the full command string. bash commands almost
+            // never repeat byte-identically (git status vs git status
+            // --short, cd prefixes, env prefixes, varying flags), so a
+            // whole-command exact rule never re-matched and the user was
+            // re-prompted every call ("the allow rules don't work"). Keying
+            // on the binary lets one "always allow npm" cover `npm run
+            // build`, `npm run test`, `npm run build --watch`, etc. The
+            // `value` matched at prompt time is still the FULL command
+            // (so a too-broad rule can't widen what the user already
+            // approved mid-prompt); only the recorded rule narrows to the
+            // binary. When the command has args we record a wildcard
+            // `"<bin> *"` (matches the binary followed by any args, but
+            // NOT a bare invocation of a differently-named binary); when
+            // it's a single token we record the exact binary name. The
+            // label shows the scope so the user knows they're trusting
+            // the binary, not the exact command.
+            let first_token = first_bash_token(cmd);
+            // The missing-command placeholder + an all-whitespace command have
+            // no real binary to key on — fall back to an exact rule on the
+            // full string (which never matches a real command, so it won't
+            // auto-allow anything; the label stays readable).
+            let no_real_binary = cmd.trim().is_empty()
+                || first_token.is_empty()
+                || first_token == "<missing";
+            let (rule, label) = if no_real_binary {
+                (AllowRule::exact(tool, s.clone()), format!("bash({s})"))
+            } else if cmd_trimmed_has_args(cmd) {
+                (
+                    AllowRule::wildcard(tool, format!("{first_token} *")),
+                    format!("bash({first_token} *)"),
+                )
+            } else {
+                (
+                    AllowRule::exact(tool, first_token.clone()),
+                    format!("bash({first_token})"),
+                )
+            };
+            (s, rule, label)
         }
         "bash_output" => {
             let path = field(input, "logPath")
@@ -368,6 +403,35 @@ fn absolutize_for_match(path: &str, base: Option<&Path>) -> String {
         }
     }
     format!("/{}", parts.join("/"))
+}
+
+/// (Issue-2: bash allow-rule granularity) Extract the first token of a bash
+/// command string — the binary name — so a bash "always allow" rule can key on
+/// the binary rather than the whole command. Leading whitespace is trimmed; the
+/// token is the run of non-whitespace chars before the first whitespace. Shell
+/// metacharacters are NOT parsed (a `cd foo && npm run build` command's first
+/// token is `cd`, not `npm` — a deliberately conservative first cut; a shell
+/// parser can refine this later). Returns the empty string for an all-whitespace
+/// command (the caller's `unwrap_or("<missing command>")` already guards the
+/// missing-command case, and an empty pattern means "match all bash", which is
+/// safer to avoid — but `cmd_trimmed_has_args` returns false for all-whitespace
+/// so we record `exact("bash", "")`, which never matches a real command).
+fn first_bash_token(cmd: &str) -> String {
+    cmd.trim_start()
+        .split(char::is_whitespace)
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// (Issue-2) True when the trimmed command has at least one whitespace-separated
+/// argument after the first token — i.e. it's `<bin> <args...>` rather than a
+/// bare `<bin>`. Decides whether the recorded rule is a `"<bin> *"` wildcard
+/// (has args) or an exact `"<bin>"` (no args).
+fn cmd_trimmed_has_args(cmd: &str) -> bool {
+    // Split on any whitespace run; >1 non-empty token means args follow the
+    // binary. (A trailing-space-only command like "npm " yields one token.)
+    cmd.split_whitespace().count() > 1
 }
 
 /// Match `text` against a `*`-wildcard pattern.
@@ -2203,10 +2267,71 @@ mod tests {
     fn subject_bash_extracts_command() {
         let input = serde_json::json!({"command": "npm run build"});
         let subj = approval_subject("bash", &input);
+        // (Issue-2) The matched value is the FULL command, but the suggested
+        // "always allow" rule keys on the binary (first token) as a wildcard,
+        // so one rule covers `npm run build`, `npm run test`, etc.
         assert_eq!(subj.value, "npm run build");
-        assert_eq!(subj.suggested_rule.pattern, "npm run build");
         assert_eq!(subj.suggested_rule.tool, "bash");
-        assert_eq!(subj.suggested_label, "bash(npm run build)");
+        assert!(subj.suggested_rule.wildcard, "bash rule is a wildcard");
+        assert_eq!(subj.suggested_rule.pattern, "npm *");
+        assert_eq!(subj.suggested_label, "bash(npm *)");
+    }
+
+    #[test]
+    fn subject_bash_single_token_is_exact() {
+        // A bare binary with no args records an exact rule (no wildcard).
+        let input = serde_json::json!({"command": "git"});
+        let subj = approval_subject("bash", &input);
+        assert_eq!(subj.value, "git");
+        assert_eq!(subj.suggested_rule.tool, "bash");
+        assert!(
+            !subj.suggested_rule.wildcard,
+            "single-token bash rule is exact"
+        );
+        assert_eq!(subj.suggested_rule.pattern, "git");
+        assert_eq!(subj.suggested_label, "bash(git)");
+    }
+
+    #[test]
+    fn subject_bash_leading_whitespace_is_trimmed() {
+        let input = serde_json::json!({"command": "   npm   run build  "});
+        let subj = approval_subject("bash", &input);
+        assert_eq!(subj.value, "   npm   run build  ");
+        assert_eq!(subj.suggested_rule.pattern, "npm *");
+        assert_eq!(subj.suggested_label, "bash(npm *)");
+    }
+
+    #[test]
+    fn bash_always_allow_on_binary_covers_varied_subcommands() {
+        // (Issue-2) The user-reported bug: "always allow" on `npm run build`
+        // never re-matched `npm run test`, so the user was re-prompted every
+        // call. With the binary-keyed wildcard rule, one allow covers all npm
+        // subcommands.
+        let state = ApprovalState::new();
+        let input = serde_json::json!({"command": "npm run build"});
+        let subj = approval_subject("bash", &input);
+        state.record_always(subj.suggested_rule);
+        // The same binary with different args is pre-allowed.
+        assert!(
+            state.is_pre_allowed("bash", "npm run test"),
+            "npm run test covered by the npm * rule"
+        );
+        assert!(
+            state.is_pre_allowed("bash", "npm run build --watch"),
+            "npm run build --watch covered by the npm * rule"
+        );
+        // A different binary is NOT pre-allowed (the rule doesn't over-match
+        // to other tools).
+        assert!(
+            !state.is_pre_allowed("bash", "cargo test"),
+            "cargo test NOT covered by the npm * rule"
+        );
+        // A bare `npm` (no args) is NOT matched by `npm *` (the wildcard
+        // requires a trailing arg) — a deliberate precision choice.
+        assert!(
+            !state.is_pre_allowed("bash", "npm"),
+            "bare npm not covered by 'npm *' (requires an arg)"
+        );
     }
 
     #[test]
