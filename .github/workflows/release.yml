@@ -122,7 +122,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          # Oldest supported runner (glibc 2.35) so the binary runs on
+          # Ubuntu 22.04+ instead of requiring 24.04's glibc 2.39.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact: libertai
             asset: libertai-linux-x86_64
@@ -209,7 +211,9 @@ jobs:
     name: Publish to APT Repository
     needs: [check-version, build-binaries]
     if: needs.check-version.outputs.is-prerelease != 'true'
-    runs-on: ubuntu-latest
+    # Build the .deb on glibc 2.35 so it installs on Ubuntu 22.04+, not
+    # only on 24.04 (cargo-deb derives the libc6 dep from the binary).
+    runs-on: ubuntu-22.04
     environment: apt
     permissions:
       contents: write

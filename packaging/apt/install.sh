@@ -48,6 +48,9 @@ deb_url="$(
 printf 'Downloading %s...\n' "$deb_url"
 curl -fL --progress-bar -o "$tmp_deb" "$deb_url"
 
+# Make the temp file readable so apt skips its "unsandboxed" notice.
+chmod 0644 "$tmp_deb"
+
 printf 'Installing LibertAI CLI...\n'
 apt-get update
 apt-get install -y "$tmp_deb"
