@@ -1797,7 +1797,7 @@ fn is_lcode_executable(exe: &Path) -> bool {
         .is_some_and(|stem| stem == "lcode")
 }
 
-fn background_agent_log_path(name: &str) -> Result<PathBuf> {
+pub(crate) fn background_agent_log_path(name: &str) -> Result<PathBuf> {
     let safe_name: String = name
         .chars()
         .map(|ch| {
@@ -1956,10 +1956,55 @@ pub(crate) fn retain_running_background_agent_records(
 }
 
 pub(crate) fn read_log_tail(path: &Path, max_bytes: usize) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let start = bytes.len().saturating_sub(max_bytes);
-    let mut text = String::from_utf8_lossy(&bytes[start..]).to_string();
+    use std::io::{Read, Seek, SeekFrom};
+
+    // (R4-LOG-2) Seek-based tail read: open the file, stat its length, seek to
+    // (len - max_bytes).max(0), and read ONLY the remainder into a bounded
+    // buffer. This avoids reading the whole (potentially multi-MB) file on
+    // every call — the prior `fs::read(path)` read the entire file into a
+    // `Vec<u8>` then sliced the tail, which re-allocated the whole file on
+    // every 80ms redraw tick while an agent streamed. The seek read is O(tail)
+    // in both bytes read and allocation.
+    let mut file = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let len = file
+        .metadata()
+        .with_context(|| format!("stat {}", path.display()))?
+        .len() as usize;
+    let start = len.saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(start as u64))
+        .with_context(|| format!("seeking {}", path.display()))?;
+    let want = len - start;
+    let mut bytes = Vec::with_capacity(want.min(1 << 16));
+    let mut buf = [0u8; 8192];
+    let mut read = 0usize;
+    while read < want {
+        let n = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        let take = n.min(want - read);
+        bytes.extend_from_slice(&buf[..take]);
+        read += take;
+        if take < n {
+            break;
+        }
+    }
+
+    let mut text = String::from_utf8_lossy(&bytes).to_string();
+    // When we started mid-file (file larger than max_bytes), the first line of
+    // the tail is a partial line (we landed mid-line). Drop it so the tail
+    // begins at a line boundary — cleaner for line-based consumers and matches
+    // the task's spec. The "[truncated ...]" prefix below marks the drop.
     if start > 0 {
+        if let Some(idx) = text.find('\n') {
+            text.drain(..=idx);
+        } else {
+            // The whole tail is one partial line (tiny max_bytes). Clear it so
+            // we don't surface a fragment.
+            text.clear();
+        }
         text.insert_str(0, &format!("[truncated to last {max_bytes} bytes]\n"));
     }
     Ok(text)
@@ -4146,6 +4191,61 @@ mod tests {
     // than at module scope so `cargo build` (non-test) stays 0-warning.
     use pi::model::TextContent;
     use pi::model::UserContent;
+
+    // (R4-LOG-2) `read_log_tail` must read ONLY the tail via seek (not the whole
+    // file) and, when the file is larger than `max_bytes`, prepend its
+    // `[truncated to last N bytes]` marker + drop the partial first line it
+    // landed on. A file SMALLER than the budget must pass through whole with no
+    // marker.
+    #[test]
+    fn read_log_tail_under_budget_returns_whole_file_no_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("small.log");
+        std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+        let tail = read_log_tail(&path, 64_000).unwrap();
+        assert_eq!(tail, "alpha\nbeta\ngamma\n", "under-budget file must pass through whole, no marker");
+    }
+
+    #[test]
+    fn read_log_tail_over_budget_prepends_marker_and_drops_partial_first_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("big.log");
+        // Three distinct lines (160B each) so the budget can land mid-line and
+        // leave at least one complete line after the partial first line is
+        // dropped. body = line1\n line2\n line3\n = 483 bytes.
+        let line1 = "aaaa".repeat(40); // 160 bytes
+        let line2 = "bbbb".repeat(40); // 160 bytes
+        let line3 = "cccc".repeat(40); // 160 bytes
+        let body = format!("{line1}\n{line2}\n{line3}\n");
+        std::fs::write(&path, &body).unwrap();
+
+        // Budget = 200 → start = 483 - 200 = 283, which lands mid-line2 (line2
+        // spans bytes 161..321). The tail therefore begins with a FRAGMENT of
+        // line2 (a partial first line), which must be dropped so the tail
+        // starts at a line boundary (line3). The marker is prepended.
+        let budget = 200usize;
+        let tail = read_log_tail(&path, budget).unwrap();
+        assert!(
+            tail.starts_with(&format!("[truncated to last {budget} bytes]\n")),
+            "over-budget tail must start with the truncation marker, got: {tail:?}"
+        );
+        // After the marker, the first content line must be `line3` (the partial
+        // line2 fragment was dropped).
+        let after_marker = tail
+            .strip_prefix(&format!("[truncated to last {budget} bytes]\n"))
+            .unwrap();
+        assert_eq!(
+            after_marker, &format!("{line3}\n"),
+            "partial first line must be dropped; tail must start at line3, got: {after_marker:?}"
+        );
+    }
+
+    #[test]
+    fn read_log_tail_missing_file_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nope.log");
+        assert!(read_log_tail(&path, 1000).is_err(), "missing file must error, not panic");
+    }
 
     #[test]
     fn output_style_lookup_is_case_insensitive() {

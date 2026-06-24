@@ -934,7 +934,15 @@ fn wrap_spans(
     // the >200-char-url fallback in the link parser): strip the OSC-8
     // wrapper and wrap just the visible label, so the escape is never split.
     let content_for_wrap = if content.contains("\u{1b}]8;;") {
-        strip_osc8(&content)
+        // (R4-OSC8-OVERFLOW-STRIP) Use the multi-link-aware stripper so that
+        // text PRECEDING a link (e.g. 'see [hi](url)') and MULTIPLE links in
+        // one line are both reduced to their visible labels. The singular
+        // `strip_osc8` only handled a LEADING link; with preceding text its
+        // `strip_prefix(open)` failed and fell to the control-strip fallback,
+        // which removes only ESC bytes and leaks the raw OSC-8 framing
+        // (']8;;', '\') + URL into the wrapped output. `strip_all_osc8_labels`
+        // scans for the opener anywhere in the string and walks every link.
+        strip_all_osc8_labels(&content)
     } else {
         content.clone()
     };
@@ -989,11 +997,20 @@ fn strip_all_osc8_labels(s: &str) -> String {
         // Skip the URL up to the first ST, then take the label up to the close.
         match after_open.split_once(st) {
             Some((_, label_and_close)) => {
-                if let Some(before_close) = label_and_close.strip_suffix(close) {
+                // (R4-OSC8-MULTILINK) Find the FIRST closer after THIS link's
+                // label, not the last one in the whole string. A paragraph with
+                // 2+ links is shaped `...<link1>\x1b]8;;\x1b\\...<link2>\x1b]8;;\x1b\\`;
+                // `strip_suffix(close)` matches the LAST closer and swallows
+                // link2's URL + framing as link1's "label" (visible_width then
+                // returned 53 for a true width of 11). `find(close)` gives the
+                // first occurrence, which is this link's own closer.
+                if let Some(idx) = label_and_close.find(close) {
+                    let before_close = &label_and_close[..idx];
                     out.push_str(before_close);
-                    rest = &label_and_close[before_close.len() + close.len()..];
+                    rest = &label_and_close[idx + close.len()..];
                 } else {
-                    // Malformed — take up to the next ESC as label, drop the rest.
+                    // Malformed (no close) — take up to the next ESC as label,
+                    // drop the rest.
                     let (label, _) = label_and_close
                         .split_once('\u{1b}')
                         .unwrap_or((label_and_close, ""));
@@ -1009,40 +1026,6 @@ fn strip_all_osc8_labels(s: &str) -> String {
     }
     out.push_str(rest);
     out
-}
-
-/// (R3-OSC8-WIDTH) Strip an OSC-8 hyperlink wrapper, returning just the
-/// visible label. An OSC-8 span looks like
-/// `\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\`; the label is the text between
-/// the first `\x1b\\` (ST) and the final `\x1b]8;;\x1b\\`. If the shape
-/// doesn't match, returns the input with control chars stripped (safe
-/// fallback — never emits a half-escape).
-fn strip_osc8(s: &str) -> String {
-    // OSC-8: ESC ] 8 ; ; <url> ESC \ <label> ESC ] 8 ; ; ESC \
-    // The label sits between the first `ST` (`\x1b\\`) and the closing
-    // `\x1b]8;;\x1b\\`.
-    let open = "\u{1b}]8;;";
-    let st = "\u{1b}\\";
-    if let Some(rest) = s.strip_prefix(open) {
-        // Skip the URL up to the first ST.
-        if let Some(after_url) = rest.split_once(st) {
-            let label_and_close = after_url.1;
-            // The label runs until the closing OSC-8 (`\x1b]8;;\x1b\\`).
-            let close = "\u{1b}]8;;\u{1b}\\";
-            let label = if let Some(before_close) = label_and_close.strip_suffix(close) {
-                before_close
-            } else {
-                // Malformed tail — take everything up to the next ESC as label.
-                label_and_close
-                    .split_once('\u{1b}')
-                    .map(|(l, _)| l)
-                    .unwrap_or(label_and_close)
-            };
-            return label.to_string();
-        }
-    }
-    // Fallback: strip all control chars so we never return a half-escape.
-    s.chars().filter(|c| !c.is_control()).collect()
 }
 
 #[cfg(test)]
@@ -1537,6 +1520,80 @@ mod tests {
             .map(|s| s.content.as_ref())
             .collect::<String>();
         assert_eq!(joined.chars().filter(|c| *c == 'a').count(), 30, "all 30 label cols preserved");
+    }
+
+    #[test]
+    fn osc8_multi_link_strip_all_does_not_swallow_second_link() {
+        // (R4-OSC8-MULTILINK) A paragraph with TWO OSC-8 links must have
+        // `strip_all_osc8_labels` return BOTH labels joined by the visible
+        // text, NOT swallow link2's URL+framing as link1's "label". The
+        // regression used `strip_suffix(close)` which matched the LAST closer
+        // in the whole string; for 'see [a](u1) and [b](u2)' it returned a
+        // 53-wide blob (URL + framing + label2) instead of the 11-wide
+        // 'see a and b'. `find(close)` matches the FIRST closer (this link's
+        // own), leaving link2 to be handled on the next loop iteration.
+        // Build the escaped string by hand (the renderer emits this shape):
+        //   \x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\   per link.
+        let open = "\u{1b}]8;;";
+        let st = "\u{1b}\\";
+        let close = "\u{1b}]8;;\u{1b}\\";
+        let link1 = format!("{open}u1{st}a{close}");
+        let link2 = format!("{open}u2{st}b{close}");
+        let escaped = format!("see {link1} and {link2}");
+        let stripped = strip_all_osc8_labels(&escaped);
+        assert_eq!(
+            stripped, "see a and b",
+            "two links strip to their labels + visible text, link2 not swallowed: {stripped:?}"
+        );
+        // visible_width keys off the TRUE visible width (control-stripped),
+        // so it must be 11 ('see a and b'), NOT the 53 from the regression.
+        assert_eq!(
+            visible_width(&escaped), 11,
+            "visible_width is the true visible width (11), not 53: got {}",
+            visible_width(&escaped)
+        );
+    }
+
+    #[test]
+    fn osc8_overflow_with_preceding_text_does_not_leak_framing() {
+        // (R4-OSC8-OVERFLOW-STRIP) When text PRECEDES the link
+        // ('see [hi](url)') and the visible content overflows a narrow width,
+        // the wrap branch must reduce to the visible label only — NO raw
+        // OSC-8 framing (']8;;', bare '\') and NO raw URL may leak into the
+        // wrapped output. The regression called the singular `strip_osc8`
+        // which only handled a LEADING link; its `strip_prefix(open)` failed
+        // on 'see ...' and the control-strip fallback leaked ']8;;h' etc.
+        // The fix routes the overflow branch through `strip_all_osc8_labels`,
+        // which scans for the opener anywhere and strips every link.
+        let _guard = OSC8_TEST_GUARD.lock().unwrap();
+        let lines = render("see [hi](https://example.com/aaaa)", 5);
+        // No line carries raw OSC-8 framing or a raw URL.
+        for (i, line) in lines.iter().enumerate() {
+            let t: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                !t.contains("]8;;"),
+                "line {i} leaked OSC-8 framing ']8;;': {t:?}"
+            );
+            // A bare '\' from the ST terminator (`\x1b\\`) is framing, not
+            // visible text — it must not survive the strip. (The label 'hi'
+            // contains no backslash.)
+            assert!(
+                !t.contains('\\'),
+                "line {i} leaked a bare '\\' (ST terminator): {t:?}"
+            );
+            assert!(
+                !t.contains("https://example.com/aaaa"),
+                "line {i} leaked the raw URL: {t:?}"
+            );
+        }
+        // The link label 'hi' still renders (visible text is preserved).
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert!(joined.contains("hi"), "the link label 'hi' renders: {joined:?}");
+        assert!(joined.contains("see"), "the preceding text 'see' renders: {joined:?}");
     }
 
     #[test]

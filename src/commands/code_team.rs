@@ -245,7 +245,11 @@ impl AgentHandle {
     }
 
     pub fn set_status(&self, status: AgentStatus) {
-        *self.status.lock().unwrap() = status;
+        // Poison-recovery (#21): see `status()`. A poisoned lock yields the
+        // (possibly stale) guard via `into_inner()`, so the write proceeds on
+        // the recovered inner value rather than panicking the TUI — same
+        // semantics as the reader. A stale status beats a dead UI.
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
     }
 
     pub fn current_tool(&self) -> Option<String> {
@@ -257,7 +261,9 @@ impl AgentHandle {
     }
 
     pub fn set_current_tool(&self, tool: Option<String>) {
-        *self.current_tool.lock().unwrap() = tool;
+        // Poison-recovery (#21): see `current_tool()`. Mirror the reader —
+        // write into the recovered inner value instead of panicking.
+        *self.current_tool.lock().unwrap_or_else(|e| e.into_inner()) = tool;
     }
 
     /// Take ownership of the stored abort handle, if any. Returns the
@@ -265,7 +271,9 @@ impl AgentHandle {
     /// empty. Used by the spawn path after a run finishes so a finished
     /// agent can't be aborted.
     pub fn take_abort(&self) -> Option<AbortHandle> {
-        self.abort.lock().unwrap().take()
+        // Poison-recovery (#21): see `abort_handle()`. Take off the
+        // recovered inner value instead of panicking.
+        self.abort.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     /// Clone of the stored abort handle, if any (cheap — the inner is
@@ -283,7 +291,9 @@ impl AgentHandle {
     /// Called once the child session exists (so a handle to stop it
     /// exists too).
     pub fn set_abort(&self, h: AbortHandle) {
-        *self.abort.lock().unwrap() = Some(h);
+        // Poison-recovery (#21): see `abort_handle()`. Write into the
+        // recovered inner value instead of panicking.
+        *self.abort.lock().unwrap_or_else(|e| e.into_inner()) = Some(h);
     }
 
     /// Elapsed since spawn, for the panel's per-row timer.
@@ -380,7 +390,10 @@ impl AgentRegistry {
             log_path: reg.log_path,
             abort: Arc::new(Mutex::new(None)),
         });
-        self.handles.lock().unwrap().insert(id, Arc::clone(&handle));
+        self.handles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, Arc::clone(&handle));
         handle
     }
 
@@ -389,12 +402,17 @@ impl AgentRegistry {
     /// view can show their final state; the view prunes old records
     /// from `runs.jsonl` separately.
     pub fn remove(&self, id: AgentId) {
-        self.handles.lock().unwrap().remove(&id);
+        // Poison-recovery (#21): see `snapshot()`. Remove from the
+        // recovered inner map instead of panicking.
+        self.handles.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     }
 
     /// Update an agent's status by id. No-op if it was already removed.
     pub fn set_status(&self, id: AgentId, status: AgentStatus) {
-        if let Some(h) = self.handles.lock().unwrap().get(&id) {
+        // Poison-recovery (#21): see `snapshot()`. Read off the recovered
+        // inner map instead of panicking; the handle's own `set_status`
+        // recovers its status lock too.
+        if let Some(h) = self.handles.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
             h.set_status(status);
         }
     }
@@ -761,6 +779,54 @@ mod tests {
         assert!(
             h.abort_handle().is_some(),
             "abort_handle() recovers the stale handle from a poisoned lock"
+        );
+    }
+
+    /// `AgentHandle::set_status` recovers from a poisoned status lock — the
+    /// writer-side counterpart to `agent_status_recovers_from_poisoned_lock`.
+    /// The reader-side test pins that `status()` does not panic; this pins that
+    /// the *writer* `set_status` does not panic either. This is the regression
+    /// guard for the poison-writes fix: a panic-while-holding-the-lock poisons
+    /// the mutex, and `poll_agent_status` calls `handle.set_status(Idle)` on
+    /// every reaped agent every 80ms tick — so a poisoned status mutex that
+    /// crashed the write would crash the TUI on the next tick. The recovered
+    /// guard is mut, so the write proceeds on the poisoned-but-recovered inner
+    /// value (same semantics as the readers). After the write, `status()`
+    /// reads back the value we just set — confirming the write landed.
+    #[test]
+    fn agent_set_status_recovers_from_poisoned_lock() {
+        let registry = AgentRegistry::new();
+        let h = registry.register(reg("reviewer", AgentKind::Subagent { depth: 0, parent: None }));
+        // Establish a known status before poisoning.
+        h.set_status(AgentStatus::Working);
+        assert_eq!(h.status(), AgentStatus::Working);
+
+        // Poison the status lock by panicking while holding it.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = h.status.lock().unwrap();
+            panic!("poison the status lock");
+        }));
+        assert!(result.is_err(), "inner closure must panic");
+        assert!(h.status.is_poisoned(), "status lock is poisoned");
+
+        // The writer must NOT panic — it recovers the (poisoned-but-recovered)
+        // guard and writes into the inner value. Wrap in catch_unwind so a
+        // regression (a panic) is surfaced as a test failure rather than
+        // aborting the test binary.
+        let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            h.set_status(AgentStatus::Idle);
+        }));
+        assert!(
+            write_result.is_ok(),
+            "set_status must not panic on a poisoned lock (regression: poison-writes fix)"
+        );
+
+        // The write landed: status() reads back the value we just set. Both
+        // sides recover the same poisoned-but-recovered inner value.
+        assert_eq!(
+            h.status(),
+            AgentStatus::Idle,
+            "set_status wrote through the recovered (poisoned) guard: status reflects the new value"
         );
     }
 }

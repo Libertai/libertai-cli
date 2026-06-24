@@ -340,6 +340,20 @@ impl Tool for TaskTool {
             .map(|a| a.name.clone())
             .unwrap_or_else(|| "subagent".to_string());
         let prompt_preview: String = prompt.chars().take(80).collect();
+        // (R4-1) Tee the subagent's streamed text to a per-subagent log
+        // file (mirroring background agents / teammates) so the overlay
+        // reads via `read_agent_log_cached` and survives the 5000-entry
+        // transcript ring evicting the subagent's earliest entries on a
+        // long session. Without this, an in-process subagent registered
+        // with `log_path: None` falls through to `agent_transcript_from_
+        // memory` which scans the CAPPED ring — once trimmed, a STILL-
+        // running subagent's overlay shows truncated/empty history. The
+        // file is created here (secure, 0600) and appended to in the
+        // `Subagent*` arms of `handle_agent_msg` on the main thread
+        // (between draws — satisfies the out-of-band-write constraint).
+        // A creation failure is non-fatal: we fall back to `log_path:
+        // None` (the prior in-memory-only path) so the turn still runs.
+        let subagent_log_path = create_subagent_log_file(&display_name).ok();
         let handle_arc = self.registry.register(
             crate::commands::code_team::AgentRegistration {
                 name: display_name.clone(),
@@ -357,7 +371,7 @@ impl Tool for TaskTool {
                 prompt_preview,
                 parent: None,
                 pid: None,
-                log_path: None,
+                log_path: subagent_log_path.clone(),
             },
         );
 
@@ -368,6 +382,9 @@ impl Tool for TaskTool {
             }
             Err(e) => {
                 handle_arc.set_status(AgentStatus::Failed);
+                if let Some(p) = &subagent_log_path {
+                    remove_subagent_log_file(p);
+                }
                 self.registry.remove(handle_arc.id);
                 return Ok(err_output(&format!("task: session init failed: {e}")));
             }
@@ -401,11 +418,17 @@ impl Tool for TaskTool {
             Err(e) => {
                 let _ = handle_arc.take_abort();
                 handle_arc.set_status(AgentStatus::Failed);
+                if let Some(p) = &subagent_log_path {
+                    remove_subagent_log_file(p);
+                }
                 self.registry.remove(handle_arc.id);
                 return Ok(err_output(&format!("task: run failed: {e}")));
             }
         };
         let _ = handle_arc.take_abort();
+        if let Some(p) = &subagent_log_path {
+            remove_subagent_log_file(p);
+        }
         self.registry.remove(handle_arc.id);
 
         // Collapse the child assistant's text blocks into a single
@@ -778,6 +801,45 @@ fn err_output(text: &str) -> ToolExecution {
         is_error: true,
     }
     .into()
+}
+
+/// (R4-1) Create a per-subagent log file (mirroring background agents /
+/// teammates via [`crate::commands::code_ui::background_agent_log_path`])
+/// so the TUI overlay reads the subagent's streamed text via
+/// `read_agent_log_cached` instead of the capped 5000-entry transcript
+/// ring. Without this, a still-running in-process subagent's earliest
+/// entries get evicted once the ring trims, leaving its overlay
+/// truncated/empty.
+///
+/// Reuses the background-agent log path helper (same `code-background-
+/// agents/` dir + 0600 perms via [`config::open_append_secure`]). The
+/// file is appended to in the `Subagent*` arms of `handle_agent_msg` on
+/// the main thread (between draws), and deleted on subagent return
+/// (in-process subagents are ephemeral — see the `registry.remove` calls
+/// in `run`). Returns the path on success; a creation failure is non-
+/// fatal (the caller falls back to `log_path: None`, the prior in-
+/// memory-only path).
+fn create_subagent_log_file(name: &str) -> std::io::Result<PathBuf> {
+    let log_path = crate::commands::code_ui::background_agent_log_path(name)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    if let Some(parent) = log_path.parent() {
+        config::create_dir_secure(parent)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let _ = config::tighten_dir_mode_700(parent);
+    }
+    // Create + open (append) so the file exists immediately (the overlay
+    // may read it before the first SubagentText lands) and is 0600.
+    let _ = config::open_append_secure(&log_path);
+    Ok(log_path)
+}
+
+/// (R4-1) Best-effort delete of a subagent's log file on return. In-
+/// process subagents are removed from the registry on completion, so the
+/// log file (the overlay's source while running) is no longer reachable —
+/// remove it to avoid accumulating temp files. Mirrors the ephemeral
+/// lifetime of the handle. A missing/unreadable file is silently ignored.
+fn remove_subagent_log_file(log_path: &Path) {
+    let _ = std::fs::remove_file(log_path);
 }
 
 #[cfg(test)]

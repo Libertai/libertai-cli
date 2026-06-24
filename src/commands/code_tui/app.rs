@@ -25,9 +25,9 @@ use crate::commands::code_slash_registry;
 use crate::commands::code_slash_router::{self, BgCommand, CustomResolveResult};
 use crate::commands::code_ui::{
     self, apply_pending_shell_context, context_percent, context_tokens, context_window_for,
-    shell_escape_command, stage_pr_comment_draft, start_background_agent, stop_line_text,
-    truncate_chars, usage_summary, BackgroundAgentLaunch, PrCommentDraft, ShellEscapeAction,
-    UsageRecord,
+    read_log_tail, shell_escape_command, stage_pr_comment_draft, start_background_agent,
+    stop_line_text, truncate_chars, usage_summary, BackgroundAgentLaunch, PrCommentDraft,
+    ShellEscapeAction, UsageRecord,
 };
 use crate::commands::code_hooks::{tool_policy_from_config, run_post_tool_hooks, run_stop_hooks, run_user_prompt_submit_hooks, SessionHookGuard};
 use crate::commands::code_identity_prompt;
@@ -75,6 +75,17 @@ const MAX_TRANSCRIPT_ENTRIES: usize = 5000;
 /// primary tail surface.
 const MAX_AGENT_LOG_LINES: usize = 4000;
 
+/// Estimated average bytes per log line, used to size the tail byte-budget
+/// [`read_agent_log`] asks [`code_ui::read_log_tail`] for. Agent log lines are
+/// the `libertai code --print` combined stdout+stderr: mostly short tool /
+/// status lines with occasional longer markdown paragraphs. 200 bytes is a
+/// generous average that, multiplied by [`MAX_AGENT_LOG_LINES`] (4000), yields
+/// an ~800KB tail budget — enough to capture the last MAX lines (so the line
+/// cap, not the byte cap, is the binding constraint in the common case), while
+/// still bounding the per-miss read + allocation to O(tail) instead of O(file)
+/// (the R4-LOG-2 fix: the prior full `fs::read_to_string` re-allocated the
+/// whole multi-MB file on every 80ms tick).
+const EST_LINE_WIDTH: usize = 200;
 /// Shared abort handle — the main thread calls `.abort()` on Ctrl+C
 /// to interrupt the background thread's current turn.
 type SharedAbort = Arc<Mutex<Option<AbortHandle>>>;
@@ -2188,6 +2199,57 @@ fn handle_key(
         return handle_ask_key(app, key);
     }
 
+    // (PALETTE-CTRL-BLOCK + CTRLC-SWALLOWED-OVERLAYS) Top-of-handle_key Ctrl+C
+    // intercept. This runs AFTER the approval/ask modal guards (those modals
+    // already handle Ctrl+C with their own modal-specific teardown — the
+    // approval modal MUST send `PromptChoice::Deny` and the ask modal MUST
+    // send an `AskOutcome` to unblock the bg thread's `recv()`, which a bare
+    // abort would hang), but BEFORE the slash-palette / diff-view /
+    // agent-overlay / agents-panel-browse guards. Those overlays route their
+    // keys to dedicated handlers whose `_ =>` arms swallow Ctrl+C (the diff
+    // viewer + agent overlay `_ => {}` return `None` without aborting; the
+    // palette's `_ =>` previously FED Ctrl+C to the textarea, corrupting the
+    // filter — see PALETTE-CTRL-CORRUPT). Because `handle_key` returns early
+    // into those handlers while an overlay is open, the main-match Ctrl+C arm
+    // (below) is unreachable with an overlay open. This intercept guarantees
+    // a Ctrl+C ALWAYS reaches the interrupt path regardless of which
+    // overlay/palette is open.
+    //
+    // Behavior mirrors the main-match Ctrl+C arm: in Phase::Streaming we take
+    // the shared abort handle + transition to Idle (the turn is interrupted);
+    // in Phase::Idle we do NOTHING here and let the key fall through — with a
+    // palette/overlay open the dedicated handler's now-printable-gated `_ =>`
+    // arm ignores Ctrl+C (no corruption, no close; the user can Esc to close
+    // the overlay), and with NO overlay open the fall-through reaches the
+    // main-match arm which quits. Crucially the intercept does NOT close the
+    // open palette/overlay after aborting — same as the main-match Ctrl+C arm
+    // (it touches neither `slash_palette` nor `diff_view` nor `agent_overlay`),
+    // so the user can Esc to dismiss it. Ctrl+C is purely an interrupt here.
+    // Only the Streaming case returns early (abort + Idle). The Idle case is
+    // intentionally NOT an early return: it falls through so the key reaches the
+    // palette/overlay guard (ignored, no corruption) or, with no overlay open,
+    // the main-match Ctrl+C arm (quit). Combining the two conditions into one
+    // `if` (rather than nesting) keeps clippy's `collapsible_if` happy and makes
+    // the early-return intent explicit.
+    if key.code == KeyCode::Char('c')
+        && key.modifiers == KeyModifiers::CONTROL
+        && app.phase == Phase::Streaming
+    {
+        // Poison-recovery (#21): on Ctrl+C we read+take the shared abort
+        // handle. A poisoned lock yielding a stale handle (or None) is
+        // strictly better than panicking the TUI on the interrupt path.
+        if let Some(abort) = shared_abort
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            abort.abort();
+        }
+        app.phase = Phase::Idle;
+        return None;
+    }
+    // (Ctrl+C in Idle falls through here — see the comment above the guard.)
+
     // Slash-command palette (FEATURE-A) takes priority over scrollback
     // navigation + the diff viewer: while the palette is open it owns
     // Up/Down/Enter/Tab/Esc/Backspace. Printable chars for filter-typing are
@@ -3162,25 +3224,56 @@ fn handle_slash_palette_key(
             app.set_dirty();
             None
         }
-        // Printable chars (filter-typing) are fed to the textarea HERE —
-        // NOT via fall-through to the main match's catch-all. handle_key
-        // returns early via `return handle_slash_palette_key(...)` while the
-        // palette is open, so the main-match catch-all is NEVER reached for
-        // palette-open keys; feeding here is the ONLY feed. After feeding, re-
-        // check the leading-`/` invariant (same as Backspace): if the user
-        // backspaced/deleted past the leading '/', close the palette so the
-        // filter doesn't match against stale text. Otherwise (PALETTE-2) clamp
-        // `selected` to the new filtered length so an unclamped index can't
-        // drift past the (now-shrunk) filtered list for a render.
-        _ => {
-            app.textarea.input(key);
-            let text = app.textarea.lines().join("");
-            if !text.starts_with('/') {
-                app.slash_palette = None;
-            } else {
-                clamp_palette_selected(app);
-            }
+        // Ctrl+O: open the input-bar contents in the external editor while
+        // the palette is open in Idle (mirrors the main-match Ctrl+O arm).
+        // The main-match arm is unreachable while the palette is open
+        // (`handle_key` returns early into this handler), so without this arm
+        // Ctrl+O would be swallowed by the gated `_ =>` below. Close the
+        // palette first (the editor takes over the screen); only fires in Idle
+        // — suspending the TUI mid-stream would freeze the in-flight turn.
+        KeyCode::Char('o')
+            if key.modifiers == KeyModifiers::CONTROL && app.phase == Phase::Idle =>
+        {
+            app.slash_palette = None;
             app.set_dirty();
+            Some(Action::OpenEditor)
+        }
+        // (PALETTE-CTRL-CORRUPT) Printable chars (filter-typing) are fed to the
+        // textarea HERE — NOT via fall-through to the main match's catch-all.
+        // `handle_key` returns early via `return handle_slash_palette_key(...)`
+        // while the palette is open, so the main-match catch-all is NEVER
+        // reached for palette-open keys; feeding here is the ONLY feed. After
+        // feeding, re-check the leading-`/` invariant (same as Backspace): if
+        // the user backspaced/deleted past the leading '/', close the palette
+        // so the filter doesn't match against stale text. Otherwise (PALETTE-2)
+        // clamp `selected` to the new filtered length so an unclamped index
+        // can't drift past the (now-shrunk) filtered list for a render.
+        //
+        // CRITICAL: feed ONLY a Char with NO modifier. tui-textarea-2's
+        // `input()` ACTIVELY INTERPRETS Ctrl-combos — Ctrl+M inserts a newline
+        // into the filter, Ctrl+H/D/W delete filter chars, etc. — silently
+        // corrupting the filter (PALETTE-CTRL-CORRUPT). So a Ctrl-combo must
+        // NOT be fed. Ctrl+C is handled by the top-of-handle_key intercept
+        // (PART A) BEFORE this handler is even called, and Ctrl+O is handled by
+        // the explicit arm above; other non-printable/Ctrl keys (arrows,
+        // PageUp/Down, F-keys, …) are already matched by earlier arms or are
+        // ignored here. `key.modifiers == KeyModifiers::NONE` also rejects
+        // Shift+chars / Alt+chars so only a plain typed letter feeds the
+        // filter (matches the round-3 typing test, which uses a bare 'c').
+        _ => {
+            if key.modifiers == KeyModifiers::NONE && matches!(key.code, KeyCode::Char(_)) {
+                app.textarea.input(key);
+                let text = app.textarea.lines().join("");
+                if !text.starts_with('/') {
+                    app.slash_palette = None;
+                } else {
+                    clamp_palette_selected(app);
+                }
+                app.set_dirty();
+            }
+            // Non-printable / Ctrl-combo: do NOT feed the textarea. Ctrl+C is
+            // handled by the top-of-handle_key intercept (PART A); Ctrl+O by
+            // the explicit arm above. Other keys are ignored.
             None
         }
     }
@@ -3342,23 +3435,48 @@ fn agent_transcript_from_memory(transcript: &[TranscriptEntry], agent_name: &str
 /// `… (log truncated at N lines)` notice is appended. This bounds the per-
 /// redraw work while the overlay is open: without the cap, a multi-thousand-
 /// line log is re-read and re-allocated on every 80ms tick.
+///
+/// (R4-LOG-2) The MISS path reads only the TAIL of the file via
+/// [`code_ui::read_log_tail`] (a seek-based read: stat the file, seek to
+/// `(len - max_bytes).max(0)`, read the remainder, drop the partial first
+/// line). The prior `std::fs::read_to_string` read the WHOLE file then sliced
+/// the last [`MAX_AGENT_LOG_LINES`] lines — the cap bounded the returned `Vec`,
+/// not the read, so on a cache miss (every 80ms tick while the agent streams)
+/// it re-read + re-allocated the whole multi-MB file. The tail read is O(tail)
+/// in both bytes read and allocation, and is SAFER than an append-merge (which
+/// reintroduces the R4-LOG-1 rotation hazard). The byte budget is
+/// `MAX_AGENT_LOG_LINES * EST_LINE_WIDTH` — sized so the line cap (not the
+/// byte cap) is the binding constraint in the common case. The cache-hit path
+/// ([`read_agent_log_cached`]'s mtime/size gate) is unchanged.
 fn read_agent_log(log_path: &std::path::Path) -> Vec<String> {
-    match std::fs::read_to_string(log_path) {
-        Ok(content) => {
-            let lines: Vec<String> = content.lines().map(String::from).collect();
-            if lines.len() > MAX_AGENT_LOG_LINES {
-                let start = lines.len() - MAX_AGENT_LOG_LINES;
-                let mut tail: Vec<String> = lines[start..].to_vec();
-                tail.push(format!(
-                    "… (log truncated at {MAX_AGENT_LOG_LINES} lines)"
-                ));
-                tail
-            } else {
-                lines
-            }
-        }
-        Err(_) => Vec::new(),
+    // Tail byte-budget: enough for ~MAX_AGENT_LOG_LINES lines so the line cap
+    // (not the byte cap) is the binding constraint in the common case, while
+    // still bounding the per-miss read + allocation to O(tail).
+    let max_bytes = MAX_AGENT_LOG_LINES.saturating_mul(EST_LINE_WIDTH);
+    let content = match read_log_tail(log_path, max_bytes) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    // `read_log_tail` prepends a `"[truncated to last {max_bytes} bytes]\n"`
+    // marker iff the file was larger than `max_bytes` (the byte cap truncated).
+    // Strip that marker (it's for the peek view, not the overlay) and use its
+    // presence as the truncation signal for our own `… (log truncated …)` notice.
+    let prefix = format!("[truncated to last {max_bytes} bytes]\n");
+    let (tail, byte_truncated) = if let Some(rest) = content.strip_prefix(&prefix) {
+        (rest.to_string(), true)
+    } else {
+        (content, false)
+    };
+    let mut lines: Vec<String> = tail.lines().map(String::from).collect();
+    if byte_truncated || lines.len() > MAX_AGENT_LOG_LINES {
+        let start = lines.len().saturating_sub(MAX_AGENT_LOG_LINES);
+        // Drop the lines we're not keeping so the moved tail is the cap-sized
+        // window (avoids holding the full line vec + the tail simultaneously).
+        let kept: Vec<String> = lines.split_off(start);
+        lines = kept;
+        lines.push(format!("… (log truncated at {MAX_AGENT_LOG_LINES} lines)"));
     }
+    lines
 }
 
 /// (MED-6 + R2 perf) Read an agent's log file through an [`AgentOverlay`]'s
@@ -3401,6 +3519,46 @@ fn read_agent_log_cached(overlay: &mut AgentOverlay, log_path: &std::path::Path)
         overlay.cached_log_lines = Vec::new();
         Vec::new()
     }
+}
+
+/// (R4-1) Append a line to the in-process subagent's per-agent log file
+/// (created at registration in `code_task::create_subagent_log_file`).
+/// The overlay reads this file via [`read_agent_log_cached`] so a still-
+/// running subagent's history survives the 5000-entry transcript ring
+/// evicting its earliest entries on a long session.
+///
+/// Called from the `Subagent*` arms of [`handle_agent_msg`] on the main
+/// thread (between draws), so the write satisfies the out-of-band stdout
+/// constraint. The `log_path` is per-handle (no shared mutation); a failed
+/// append is best-effort and MUST NOT crash the turn — mirroring
+/// [`read_agent_log`]'s error handling (returns empty on read failure).
+/// Only appends when the handle has a `log_path` (in-process subagents
+/// after the R4-1 fix); background agents / teammates write their log
+/// via the child process's stdout redirect, so this is a no-op for them.
+fn append_subagent_log(registry: &AgentRegistry, agent_name: &str, line: &str) {
+    use std::io::Write;
+    let Some(handle) = registry.find_by_name(agent_name) else {
+        return;
+    };
+    let Some(log_path) = handle.log_path.as_ref() else {
+        return;
+    };
+    // `OpenOptions::append(true).create(true).open()` re-opens per call.
+    // In-process subagent events are not high-frequency enough for this to
+    // matter (text deltas are coalesced in the transcript; the log append is
+    // one open+write per delta). Single writer (only the main thread appends
+    // to a given subagent's log), so no concurrency concern.
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    else {
+        return;
+    };
+    // Best-effort: a failed write is ignored (the overlay will show whatever
+    // was last successfully flushed). Never propagate `io::Error` to the caller
+    // — a logging failure must not crash the turn.
+    let _ = file.write_all(line.as_bytes());
 }
 
 /// Best-effort current git branch, read directly from `.git/HEAD` (no
@@ -5448,6 +5606,13 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.set_dirty();
         }
         AgentMsg::SubagentText { agent_name, text } => {
+            // (R4-1) Tee the streamed text to the per-agent log file so the
+            // overlay (read via `read_agent_log_cached`) survives the
+            // transcript ring evicting this subagent's entries on a long
+            // session. The raw delta is appended verbatim — consecutive
+            // deltas concatenate naturally in the file, mirroring the
+            // in-memory coalesce below. Best-effort (see `append_subagent_log`).
+            append_subagent_log(&app.registry, &agent_name, &text);
             // Append to last subagent text from same agent, or create new entry.
             if let Some(TranscriptEntry::SubagentText {
                 agent_name: name,
@@ -5473,6 +5638,20 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             tool_name,
             args,
         } => {
+            // (R4-1) Tee a tool-start marker line to the per-agent log. Format
+            // mirrors the scrollback marker (tool name + detail) so the
+            // overlay's dim System line is informative. Best-effort.
+            let detail = crate::commands::code_tool_preview::tool_preview(&tool_name, &args)
+                .strip_prefix(&tool_name)
+                .map(str::trim_start)
+                .unwrap_or("")
+                .to_string();
+            let marker = if detail.is_empty() {
+                format!("→ {tool_name}\n")
+            } else {
+                format!("→ {tool_name} ({detail})\n")
+            };
+            append_subagent_log(&app.registry, &agent_name, &marker);
             // Store args on the entry; the scrollback renderer calls
             // `tool_preview` (reused, not duplicated) to format the marker.
             app.transcript.push(TranscriptEntry::SubagentTool {
@@ -5510,6 +5689,16 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                 output
             };
             let rendered = render_tool_output(&serde_json::Value::String(body));
+            // (R4-1) Tee the per-tool result line to the per-agent log. Mirrors
+            // the early-return guard above (no line for a non-error empty
+            // result) so the log and the in-memory entry stay consistent.
+            // Prefix with the tool name so the dim System line reads
+            // "{tool}: {result}". Best-effort.
+            append_subagent_log(
+                &app.registry,
+                &agent_name,
+                &format!("{tool_name}: {rendered}\n"),
+            );
             app.transcript.push(TranscriptEntry::ToolResult {
                 name,
                 output: rendered,
@@ -5537,6 +5726,18 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             if subagent_end_bell_enabled(&app.cfg, completed) {
                 crate::commands::code_term::tui_bell();
             }
+            // (R4-1) Tee the outcome line to the per-agent log so the overlay
+            // shows the terminal state after the subagent finishes. Best-effort.
+            let outcome_label = match outcome {
+                SubagentOutcome::Completed => "done",
+                SubagentOutcome::Failed => "failed",
+                SubagentOutcome::Stopped => "stopped",
+            };
+            append_subagent_log(
+                &app.registry,
+                &agent_name,
+                &format!("{outcome_label}\n"),
+            );
             app.transcript.push(TranscriptEntry::SubagentEnd {
                 agent_name: agent_name.clone(),
                 outcome,
@@ -5969,6 +6170,151 @@ mod tests {
         let log = temp.path().join("does-not-exist.log");
         let lines = read_agent_log(&log);
         assert!(lines.is_empty());
+    }
+
+    // (R4-LOG-2) A log with FAR more than MAX lines (10000 >> 4000) must still
+    // return exactly the LAST MAX lines + the truncation notice — the line cap
+    // (not the byte cap) is the binding constraint here because 10000 short
+    // lines (~10 bytes each ≈ 100KB) fit well under the
+    // `MAX_AGENT_LOG_LINES * EST_LINE_WIDTH` byte budget (800KB). This guards
+    // against a regression where the tail read would drop the line cap.
+    #[test]
+    fn read_agent_log_far_over_cap_returns_last_max_plus_notice() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("agent.log");
+        let total = 10_000;
+        let body: String = (0..total).map(|i| format!("line-{i}\n")).collect();
+        std::fs::write(&log, body).unwrap();
+
+        let lines = read_agent_log(&log);
+        // Exactly MAX + 1 (the notice) — the line cap binds, not the byte cap.
+        assert_eq!(
+            lines.len(),
+            MAX_AGENT_LOG_LINES + 1,
+            "expected MAX + 1 (notice), got {}",
+            lines.len()
+        );
+        // The kept tail starts at (total - MAX) = 6000.
+        assert_eq!(
+            lines.first(),
+            Some(&"line-6000".to_string()),
+            "first kept line must be the tail window start (line-6000), got: {:?}",
+            lines.first()
+        );
+        // The last kept line (before the notice) is the final written line.
+        assert_eq!(
+            lines[lines.len() - 2],
+            format!("line-{}", total - 1),
+            "last kept line before the notice must be the final written line"
+        );
+        assert_eq!(
+            lines.last(),
+            Some(&format!("… (log truncated at {MAX_AGENT_LOG_LINES} lines)")),
+            "expected trailing truncation notice, got: {:?}",
+            lines.last()
+        );
+    }
+
+    // (R4-LOG-2) A log LARGER than the tail byte budget
+    // (`MAX_AGENT_LOG_LINES * EST_LINE_WIDTH`) forces the byte cap to truncate
+    // — `read_log_tail` reads only the tail (seek) and emits its
+    // `[truncated to last N bytes]` marker, which `read_agent_log` strips and
+    // converts into its own `… (log truncated …)` notice. The returned vec
+    // must be bounded (<= MAX + 1) and contain the notice — even though, when
+    // the lines are WIDE, the byte-cap tail holds FEWER than MAX lines (so the
+    // line cap doesn't bind; only the byte-cap truncation emits the notice).
+    // This is the core R4-LOG-2 guard: the byte-cap path yields a bounded
+    // result with a notice and (implicitly) did NOT read the whole multi-MB
+    // file — the seek read is O(tail).
+    #[test]
+    fn read_agent_log_over_byte_cap_returns_bounded_tail_with_notice() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("agent.log");
+        // Each line is ~232 bytes (well over EST_LINE_WIDTH=200) and there are
+        // many more than MAX lines, so total bytes >> the 800KB byte budget:
+        // the byte cap truncates. The byte-cap tail (~800KB / 232B ≈ 3448
+        // lines) holds FEWER than MAX (4000) lines, so the LINE cap does NOT
+        // bind here — only the byte-cap truncation emits the notice. This is
+        // the case where the byte cap (not the line cap) is the binding
+        // constraint.
+        let pad = "x".repeat(220);
+        let total = 10_000;
+        let body: String = (0..total).map(|i| format!("line-{i:05}-{pad}\n")).collect();
+        let file_bytes = body.len();
+        let max_bytes = MAX_AGENT_LOG_LINES.saturating_mul(EST_LINE_WIDTH);
+        assert!(
+            file_bytes > max_bytes,
+            "test setup: file ({file_bytes}B) must exceed the byte budget ({max_bytes}B) to trip the byte cap"
+        );
+        std::fs::write(&log, body).unwrap();
+
+        let lines = read_agent_log(&log);
+        // Bounded: never more than MAX + 1 (the notice).
+        assert!(
+            lines.len() <= MAX_AGENT_LOG_LINES + 1,
+            "byte-cap path must keep <= MAX + 1 lines, got {}",
+            lines.len()
+        );
+        // The notice is present (byte-cap truncation triggered it).
+        assert_eq!(
+            lines.last(),
+            Some(&format!("… (log truncated at {MAX_AGENT_LOG_LINES} lines)")),
+            "expected trailing truncation notice on byte-cap truncation, got: {:?}",
+            lines.last()
+        );
+        // The first kept line is log content (NOT the stripped byte-truncation
+        // marker — confirms the marker was stripped before line-splitting).
+        let first = lines.first().unwrap();
+        assert!(
+            first.starts_with("line-"),
+            "first kept line must be log content (not the byte-truncation marker), got: {first:?}"
+        );
+        // The last content line (before the notice) is the final written line —
+        // the tail read kept the very end of the file.
+        let expected_last = format!("line-{:05}-{pad}", total - 1);
+        assert_eq!(
+            lines[lines.len() - 2], expected_last,
+            "last kept line before the notice must be the final written line"
+        );
+    }
+
+    // (R4-LOG-2) A log whose LINE count exceeds MAX but whose BYTE size fits
+    // under the byte budget must let the LINE cap bind (keep the last MAX +
+    // notice), NOT spuriously truncate via the byte cap. Guards against the
+    // byte-cap path over-truncating a file that fits in budget.
+    #[test]
+    fn read_agent_log_line_cap_binds_when_bytes_under_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("agent.log");
+        // 5000 short lines (~30KB) — under the 800KB byte budget (so the byte
+        // cap does NOT trip) but over MAX (4000) so the LINE cap binds.
+        let body: String = (0..5_000).map(|i| format!("l{i}\n")).collect();
+        let max_bytes = MAX_AGENT_LOG_LINES.saturating_mul(EST_LINE_WIDTH);
+        assert!(
+            body.len() < max_bytes,
+            "test setup: file ({}) must be under the byte budget ({max_bytes}) so the byte cap doesn't trip",
+            body.len()
+        );
+        std::fs::write(&log, body).unwrap();
+        let lines = read_agent_log(&log);
+        assert_eq!(
+            lines.len(),
+            MAX_AGENT_LOG_LINES + 1,
+            "line cap binds: last MAX + notice, got {}",
+            lines.len()
+        );
+        assert_eq!(
+            lines.last(),
+            Some(&format!("… (log truncated at {MAX_AGENT_LOG_LINES} lines)")),
+            "line-cap truncation must emit the notice"
+        );
+        // The kept tail starts at (5000 - 4000) = 1000 → first kept line l1000.
+        assert_eq!(
+            lines.first(),
+            Some(&"l1000".to_string()),
+            "first kept line must be the tail window start (l1000), got: {:?}",
+            lines.first()
+        );
     }
 
     // MED-6 mtime/size cache: read_agent_log_cached must SKIP the disk read
@@ -7617,6 +7963,166 @@ task = "Do the thing"
                 .iter()
                 .any(|e| matches!(e, TranscriptEntry::ToolResult { name, .. } if name == "nope")),
             "coder tool result must be filtered out, got {lines:?}"
+        );
+    }
+
+    // (R4-1) In-process subagents are registered with `log_path: Some` (a per-
+    // subagent log file created at spawn in `code_task::create_subagent_log
+    // _file`), and the `Subagent*` arms of `handle_agent_msg` tee the streamed
+    // text to that file. The overlay reads via `read_agent_log`, so a STILL-
+    // running subagent's history survives the 5000-entry transcript ring
+    // evicting its earliest entries on a long session. This test guards that:
+    // after flooding the ring past MAX_TRANSCRIPT_ENTRIES (trimming evicts the
+    // subagent's in-memory entries), `agent_transcript` STILL returns the
+    // subagent's history from its log file — NOT empty. Without the fix
+    // (log_path: None), the overlay would fall through to
+    // `agent_transcript_from_memory` which scans the trimmed ring and returns
+    // truncated/empty history.
+    #[test]
+    fn r4_1_subagent_log_file_survives_transcript_ring_eviction() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        // Real temp log file so `read_agent_log` reads actual content.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let log_path = temp.path().join("reviewer.log");
+
+        // Register an in-process subagent WITH a log_path (post-R4-1).
+        app.registry.register(AgentRegistration {
+            name: "reviewer".to_string(),
+            kind: AgentKind::Subagent {
+                depth: 1,
+                parent: None,
+            },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: None,
+            log_path: Some(log_path.clone()),
+        });
+
+        // Stream the subagent's text + a tool outcome via handle_agent_msg.
+        // These arms append to the per-agent log file (the fix).
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::SubagentText {
+                agent_name: "reviewer".into(),
+                text: "investigating the bug…".into(),
+            },
+            &cmd_tx,
+        );
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::SubagentToolStart {
+                agent_name: "reviewer".into(),
+                tool_name: "grep".into(),
+                args: serde_json::json!({"pattern": "TODO"}),
+            },
+            &cmd_tx,
+        );
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::SubagentToolEnd {
+                agent_name: "reviewer".into(),
+                tool_name: "grep".into(),
+                output: "found 3 matches".into(),
+                is_error: false,
+            },
+            &cmd_tx,
+        );
+
+        // The subagent's entries are now in app.transcript AND the log file.
+        // Sanity: before eviction, the in-memory scan would find them too.
+        assert!(!app.transcript.is_empty());
+
+        // FLOOD the transcript ring past MAX_TRANSCRIPT_ENTRIES with
+        // unrelated noise so trim_transcript evicts the subagent's earliest
+        // entries from app.transcript.
+        for i in 0..(MAX_TRANSCRIPT_ENTRIES + 50) {
+            app.transcript.push(TranscriptEntry::System(format!(
+                "noise line {i}"
+            )));
+        }
+        assert!(app.transcript.len() > MAX_TRANSCRIPT_ENTRIES);
+        app.trim_transcript();
+        assert_eq!(
+            app.transcript.len(),
+            MAX_TRANSCRIPT_ENTRIES,
+            "trim should cap the ring"
+        );
+
+        // The subagent's in-memory entries must have been evicted (they were
+        // pushed before the flood). Confirm the ring no longer holds a
+        // SubagentText for `reviewer`.
+        assert!(
+            !app.transcript.iter().any(|e| matches!(
+                e,
+                TranscriptEntry::SubagentText { agent_name, .. } if agent_name == "reviewer"
+            )),
+            "reviewer's in-memory SubagentText should have been evicted by trim, \
+             got: {:?}",
+            app.transcript
+                .iter()
+                .filter(|e| matches!(e, TranscriptEntry::SubagentText { .. }))
+                .collect::<Vec<_>>()
+        );
+
+        // R4-1 guard: the overlay reads the subagent's history from its LOG
+        // FILE (via the log_path short-circuit in `agent_transcript`), NOT
+        // from the trimmed ring — so it is NOT empty.
+        let lines = agent_transcript(&app, "reviewer");
+        assert!(
+            !lines.is_empty(),
+            "R4-1: subagent overlay must read its log file (not the evicted ring) \
+             and return non-empty history, got {lines:?}"
+        );
+        // The log content surfaces as dim System entries (read_agent_log wraps
+        // each line 1:1). The streamed text + tool outcome must appear.
+        let joined: String = lines
+            .iter()
+            .filter_map(|e| match e {
+                TranscriptEntry::System(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("investigating the bug…"),
+            "R4-1: streamed text should be in the log, got {joined:?}"
+        );
+        assert!(
+            joined.contains("grep") && joined.contains("found 3 matches"),
+            "R4-1: tool + outcome should be in the log, got {joined:?}"
+        );
+
+        // Contrast: an agent with NO log_path (pre-R4-1 in-process subagent)
+        // whose in-memory entries were evicted returns EMPTY from the ring
+        // scan — the regression this fix prevents.
+        app.registry.register(AgentRegistration {
+            name: "legacy".to_string(),
+            kind: AgentKind::Subagent {
+                depth: 1,
+                parent: None,
+            },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: None,
+            log_path: None,
+        });
+        // `legacy` has no entries in the (now-flooded) ring, so its overlay
+        // is empty — demonstrating why log_path is required.
+        let legacy = agent_transcript(&app, "legacy");
+        assert!(
+            legacy.is_empty(),
+            "a no-log_path agent with no ring entries returns empty (the \
+             pre-R4-1 regression state for evicted subagents), got {legacy:?}"
         );
     }
 
@@ -10383,6 +10889,231 @@ task = "Do the thing"
                 filtered.len()
             );
         }
+    }
+
+    // (PALETTE-CTRL-CORRUPT) A Ctrl-combo while the palette is open must NOT
+    // be fed to the textarea. tui-textarea-2's `input()` actively interprets
+    // Ctrl-combos (Ctrl+M inserts a newline, Ctrl+H/D/W delete, …), so feeding
+    // one would silently corrupt the filter. Round 3's PALETTE-1 fix fed EVERY
+    // key unconditionally in the `_ =>` arm; this regression guard drives a
+    // Ctrl+M through the REAL `handle_key` path (which returns early into
+    // `handle_slash_palette_key`) and asserts the textarea is unchanged + the
+    // palette stays open. The gated `_ =>` arm now only feeds a Char with NO
+    // modifier, so Ctrl+M is ignored.
+    #[test]
+    fn slash_palette_ctrl_combo_does_not_corrupt_filter() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        // Open palette + textarea "/" (post-open state), as round 3's test does.
+        set_textarea_text(&mut app.textarea, "/");
+        app.slash_palette = Some(SlashPalette { selected: 0 });
+
+        let action = handle_key(
+            &mut app,
+            // Ctrl+M: tui-textarea would interpret as insert_newline.
+            KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(
+            action.is_none(),
+            "Ctrl+M must be ignored (no action), not fed"
+        );
+        assert_eq!(
+            app.textarea.lines().join(""),
+            "/",
+            "Ctrl+M must NOT corrupt the filter (textarea must stay '/')"
+        );
+        assert!(
+            app.slash_palette.is_some(),
+            "palette must stay open — Ctrl+M neither closes nor corrupts"
+        );
+    }
+
+    // (PALETTE-CTRL-BLOCK) While the palette is open in Phase::Streaming,
+    // Ctrl+C MUST abort the running turn (take the shared abort handle + fire
+    // it + transition to Idle). Round 3's palette guard returned early into
+    // `handle_slash_palette_key`, so the main-match Ctrl+C arm was unreachable
+    // while the palette was open — the abort was BLOCKED. The top-of-handle_key
+    // Ctrl+C intercept (PART A) now catches it before the palette guard.
+    #[test]
+    fn slash_palette_open_in_streaming_ctrl_c_aborts_turn() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        // Seed the shared abort slot the way the bg thread does at turn start.
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        *shared_abort.lock().unwrap() = Some(abort_handle);
+        app.phase = Phase::Streaming;
+        app.turn_started = Some(Instant::now());
+        assert!(!abort_signal.is_aborted(), "fresh signal must not be aborted");
+        // Open palette (the guard that previously blocked the abort).
+        set_textarea_text(&mut app.textarea, "/");
+        app.slash_palette = Some(SlashPalette { selected: 0 });
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(action.is_none(), "Ctrl+C aborts inline (no action)");
+        assert!(
+            abort_signal.is_aborted(),
+            "Ctrl+C must fire the shared abort handle (not be swallowed by the palette)"
+        );
+        assert!(
+            shared_abort.lock().unwrap().is_none(),
+            "Ctrl+C must take the abort slot"
+        );
+        assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
+        // The intercept leaves the palette as-is (the user can Esc to close).
+        assert!(
+            app.slash_palette.is_some(),
+            "Ctrl+C aborts but does NOT close the palette (Esc does)"
+        );
+        // No command sent to the bg thread (abort is synchronous on main).
+        assert!(cmd_rx.try_recv().is_err(), "Ctrl+C must not send a Cmd");
+    }
+
+    // (PALETTE-CTRL-O) While the palette is open in Idle, Ctrl+O must open the
+    // external editor. The main-match Ctrl+O arm is unreachable while the palette
+    // is open (handle_key returns early into the palette handler), so the
+    // explicit `Ctrl+O` arm inside `handle_slash_palette_key` handles it: closes
+    // the palette + returns `Some(Action::OpenEditor)`. Guard for the
+    // Ctrl+O-while-palette case.
+    #[test]
+    fn slash_palette_open_in_idle_ctrl_o_opens_editor() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+        set_textarea_text(&mut app.textarea, "/");
+        app.slash_palette = Some(SlashPalette { selected: 0 });
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        match action {
+            Some(Action::OpenEditor) => {}
+            Some(Action::Quit) => panic!("Ctrl+O with palette open must return OpenEditor, got Quit"),
+            Some(Action::Submit(_)) => {
+                panic!("Ctrl+O with palette open must return OpenEditor, got Submit")
+            }
+            Some(Action::ClearTranscript) => panic!(
+                "Ctrl+O with palette open must return OpenEditor, got ClearTranscript"
+            ),
+            None => panic!("Ctrl+O with palette open must return OpenEditor, got None"),
+        }
+        assert!(
+            app.slash_palette.is_none(),
+            "Ctrl+O must close the palette (the editor takes over)"
+        );
+    }
+
+    // (CTRLC-SWALLOWED-OVERLAYS) While a diff-view overlay is open in
+    // Phase::Streaming, Ctrl+C MUST abort the running turn. The diff-view
+    // handler's `_ => {}` arm previously swallowed Ctrl+C (returned None
+    // without aborting), so a runaway streaming turn with the diff overlay
+    // open couldn't be Ctrl+C-interrupted. The top-of-handle_key intercept
+    // (PART A) now catches it before the diff-view guard.
+    #[test]
+    fn diff_view_open_in_streaming_ctrl_c_aborts_turn() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        *shared_abort.lock().unwrap() = Some(abort_handle);
+        app.phase = Phase::Streaming;
+        app.turn_started = Some(Instant::now());
+        assert!(!abort_signal.is_aborted(), "fresh signal must not be aborted");
+        // Open the diff-view overlay (the guard that previously swallowed Ctrl+C).
+        app.diff_view = Some(DiffView {
+            path: None,
+            scroll: 0,
+            follow: true,
+            ..Default::default()
+        });
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(action.is_none(), "Ctrl+C aborts inline (no action)");
+        assert!(
+            abort_signal.is_aborted(),
+            "Ctrl+C must fire the shared abort handle (not be swallowed by the diff overlay)"
+        );
+        assert!(
+            shared_abort.lock().unwrap().is_none(),
+            "Ctrl+C must take the abort slot"
+        );
+        assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
+        // The intercept leaves the overlay as-is (the user can Esc to close).
+        assert!(
+            app.diff_view.is_some(),
+            "Ctrl+C aborts but does NOT close the diff overlay (Esc does)"
+        );
+        assert!(cmd_rx.try_recv().is_err(), "Ctrl+C must not send a Cmd");
+    }
+
+    // (CTRLC-SWALLOWED-OVERLAYS, agent-overlay mirror) While an agent overlay is
+    // open in Phase::Streaming, Ctrl+C MUST abort the running turn. The
+    // agent-overlay handler's `_ => {}` arm previously swallowed Ctrl+C, so a
+    // runaway streaming turn with an agent overlay open couldn't be
+    // Ctrl+C-interrupted. The top-of-handle_key intercept (PART A) catches it
+    // before the agent-overlay guard.
+    #[test]
+    fn agent_overlay_open_in_streaming_ctrl_c_aborts_turn() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        *shared_abort.lock().unwrap() = Some(abort_handle);
+        app.phase = Phase::Streaming;
+        app.turn_started = Some(Instant::now());
+        assert!(!abort_signal.is_aborted(), "fresh signal must not be aborted");
+        // Open an agent overlay (the guard that previously swallowed Ctrl+C).
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "reviewer".into(),
+            scroll: 0,
+            follow: true,
+            ..Default::default()
+        });
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(action.is_none(), "Ctrl+C aborts inline (no action)");
+        assert!(
+            abort_signal.is_aborted(),
+            "Ctrl+C must fire the shared abort handle (not be swallowed by the agent overlay)"
+        );
+        assert!(
+            shared_abort.lock().unwrap().is_none(),
+            "Ctrl+C must take the abort slot"
+        );
+        assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
+        // The intercept leaves the overlay as-is (the user can Esc to close).
+        assert!(
+            app.agent_overlay.is_some(),
+            "Ctrl+C aborts but does NOT close the agent overlay (Esc does)"
+        );
+        assert!(cmd_rx.try_recv().is_err(), "Ctrl+C must not send a Cmd");
     }
 
     // (FEATURE-A-custom) A custom command appears in the palette (via
