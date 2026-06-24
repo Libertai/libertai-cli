@@ -2963,13 +2963,11 @@ fn term_cols() -> usize {
 }
 
 /// Where a [`TurnRenderer`] writes its chrome (markers, previews,
-/// spinner). The REPL keeps everything on stdout — it owns the whole
-/// terminal. The one-shot path sends chrome to stderr so a piped
-/// stdout carries assistant text only.
+/// spinner). The one-shot `code` path sends chrome to stderr so a
+/// piped stdout carries assistant text only; the TUI renders its own
+/// chrome and never constructs a [`TurnRenderer`] against this stream.
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // `Stdout` variant kept for one-shot `ChromeStream::Stdout` callers; the TUI uses `Stderr`.
 pub(crate) enum ChromeStream {
-    Stdout,
     Stderr,
 }
 
@@ -2977,18 +2975,12 @@ impl ChromeStream {
     fn is_tty(self) -> bool {
         use std::io::IsTerminal;
         match self {
-            Self::Stdout => io::stdout().is_terminal(),
             Self::Stderr => io::stderr().is_terminal(),
         }
     }
 
     fn write_str(self, s: &str) {
         match self {
-            Self::Stdout => {
-                let mut out = io::stdout();
-                let _ = out.write_all(s.as_bytes());
-                let _ = out.flush();
-            }
             Self::Stderr => {
                 let mut err = io::stderr();
                 let _ = err.write_all(s.as_bytes());
@@ -5727,5 +5719,648 @@ mod tests {
         // A path with a `$` (shell-significant) is neutralized by the quotes.
         let quoted = quote_sh_string("/tmp/$HOME/x");
         assert_eq!(quoted, "'/tmp/$HOME/x'", "dollar is literal inside single quotes");
+    }
+
+    // ── R2-COV-1: restored behavioral tests for the round-2-purged helpers ─
+    //
+    // The round-2 dead-code purge (dfe99c9) deleted ~155 behavioral tests that
+    // exercised LIVE functions. These tests restore coverage for the helpers
+    // that still exist + have live (non-test) callers. Each test was recovered
+    // from `git show dfe99c9^:src/commands/code_ui.rs` and adapted to the
+    // current signatures; assertions referencing helpers that were ALSO
+    // deleted in the purge (e.g. `*_command_arg` arg extractors,
+    // `help_command_arg_hint`, `tree_usage_text`, `count_runnable_hooks`) were
+    // dropped rather than restored against deleted code.
+
+    // (R2-COV-1) `parse_pr_comments_thread` + `parse_pr_comment_draft` are
+    // the live `/pr_comments thread` parser chain (`stage_pr_comment_draft` →
+    // `parse_pr_comment_draft` → `parse_pr_comments_thread`, exported to
+    // app.rs). SAFETY-RELEVANT: the thread parser splits `<path>:<line>
+    // <body>` and rejects a missing `:`, a zero/missing line, or an empty
+    // body — pin the happy path + every rejection so a malformed target can't
+    // stage a draft on the wrong line.
+    #[test]
+    fn parse_pr_comments_thread_requires_target_line_and_body() {
+        // Happy path: `<path>:<line> <body>` → (path, line, body).
+        assert_eq!(
+            parse_pr_comments_thread("src/lib.rs:42 Needs a test.").unwrap(),
+            ("src/lib.rs", 42, "Needs a test.")
+        );
+        // Missing `:line` → the target has no `:` separator → reject.
+        assert!(parse_pr_comments_thread("src/lib.rs Needs a test.").is_err());
+        // Zero line is not a positive integer → reject.
+        assert!(parse_pr_comments_thread("src/lib.rs:0 Needs a test.").is_err());
+        // Missing body (only the target token) → reject.
+        assert!(parse_pr_comments_thread("src/lib.rs:42").is_err());
+        // `parse_pr_comment_draft` wraps the triple into a `PrCommentDraft`.
+        let draft = parse_pr_comment_draft("src/lib.rs:42 Needs a test.").unwrap();
+        assert_eq!(
+            draft,
+            PrCommentDraft {
+                path: "src/lib.rs".to_string(),
+                line: 42,
+                body: "Needs a test.".to_string(),
+            }
+        );
+    }
+
+    // (R2-COV-1) `parse_changelog_limit` is the live `/changelog` limit
+    // parser (called from app.rs): empty + the default-list aliases yield
+    // `CHANGELOG_DEFAULT_LIMIT`, a number is clamped to `[1, CHANGELOG_MAX_LIMIT]`,
+    // and a non-numeric word is a usage error.
+    #[test]
+    fn parse_changelog_limit_defaults_and_clamps() {
+        assert_eq!(parse_changelog_limit("").unwrap(), CHANGELOG_DEFAULT_LIMIT);
+        assert_eq!(parse_changelog_limit("list").unwrap(), CHANGELOG_DEFAULT_LIMIT);
+        assert_eq!(parse_changelog_limit("recent").unwrap(), CHANGELOG_DEFAULT_LIMIT);
+        assert_eq!(parse_changelog_limit("latest").unwrap(), CHANGELOG_DEFAULT_LIMIT);
+        assert_eq!(parse_changelog_limit("status").unwrap(), CHANGELOG_DEFAULT_LIMIT);
+        assert_eq!(parse_changelog_limit("state").unwrap(), CHANGELOG_DEFAULT_LIMIT);
+        assert_eq!(parse_changelog_limit("show").unwrap(), CHANGELOG_DEFAULT_LIMIT);
+        assert_eq!(parse_changelog_limit("3").unwrap(), 3);
+        assert_eq!(parse_changelog_limit("0").unwrap(), 1);
+        assert_eq!(parse_changelog_limit("999").unwrap(), CHANGELOG_MAX_LIMIT);
+        assert!(parse_changelog_limit("open").is_err());
+    }
+
+    // (R2-COV-1) `changelog_json_request_arg` + `changelog_json_payload` +
+    // `changelog_usage_text` are the live `/changelog --json` plumbing
+    // (called from app.rs). The arg extractor recognizes the bare `json`/
+    // `--json` + the `* --json` aliases (returning the empty arg = no extra)
+    // and `json <n>`/`--json <n>` (returning the limit); the payload reports
+    // the surface/command/limit/commits the terminal renderer expects.
+    #[test]
+    fn changelog_json_helpers_match_terminal_contract() {
+        assert!(changelog_usage_text().contains("list|recent|latest"));
+        assert!(changelog_usage_text().contains("status|state|show"));
+        assert!(changelog_usage_text().contains("json|--json|status --json"));
+        assert!(changelog_usage_text().contains("state --json|show --json"));
+        assert!(changelog_usage_text().contains("list --json|recent --json|latest --json"));
+        assert_eq!(changelog_json_request_arg("json"), Some(String::new()));
+        assert_eq!(changelog_json_request_arg("--json"), Some(String::new()));
+        assert_eq!(changelog_json_request_arg("state --json"), Some(String::new()));
+        assert_eq!(changelog_json_request_arg("show --json"), Some(String::new()));
+        assert_eq!(changelog_json_request_arg("list --json"), Some(String::new()));
+        assert_eq!(changelog_json_request_arg("json 3"), Some("3".to_string()));
+        assert_eq!(changelog_json_request_arg("status"), None);
+        let payload = changelog_json_payload(
+            2,
+            "latest --json",
+            vec![
+                "abc1234 first commit".to_string(),
+                "def5678 (HEAD -> main) second commit".to_string(),
+            ],
+        );
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "latest --json");
+        assert_eq!(payload["aliases"][0], "changelog");
+        assert_eq!(payload["limit"], 2);
+        assert_eq!(payload["count"], 2);
+        assert_eq!(payload["supported_actions"][9], "status --json");
+        assert_eq!(payload["supported_actions"][11], "show --json");
+        assert_eq!(payload["supported_actions"][14], "latest --json");
+        assert_eq!(payload["commits"][0]["hash"], "abc1234");
+        assert_eq!(
+            payload["commits"][1]["summary"],
+            "(HEAD -> main) second commit"
+        );
+    }
+
+    // (R2-COV-1) `parse_forget_command` + `forget_usage_text` +
+    // `forget_json_payload` are the live `/forget` parse + JSON plumbing
+    // (dispatched from app.rs). Status/preview → `Status`, the `json`/`--json`
+    // aliases → `Json`, an unknown word → `Usage`. The payload reports the
+    // approvals state the terminal renderer surfaces.
+    #[test]
+    fn forget_command_parser_and_payload_match_terminal_contract() {
+        assert_eq!(parse_forget_command("status"), ForgetCommand::Status);
+        assert_eq!(parse_forget_command("preview"), ForgetCommand::Status);
+        assert_eq!(parse_forget_command("json"), ForgetCommand::Json);
+        assert_eq!(parse_forget_command("--json"), ForgetCommand::Json);
+        assert_eq!(parse_forget_command("status --json"), ForgetCommand::Json);
+        assert_eq!(parse_forget_command("state --json"), ForgetCommand::Json);
+        assert_eq!(parse_forget_command("show --json"), ForgetCommand::Json);
+        assert_eq!(parse_forget_command("info --json"), ForgetCommand::Json);
+        assert_eq!(parse_forget_command("preview --json"), ForgetCommand::Json);
+        assert_eq!(parse_forget_command("run"), ForgetCommand::Usage);
+        assert!(forget_usage_text().contains("preview|json|--json|status --json"));
+        assert!(forget_usage_text().contains("show --json|info --json|preview --json"));
+        let approvals = ApprovalState::new();
+        let payload = forget_json_payload(&approvals, "status --json");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "forget");
+        assert_eq!(payload["query"], "status --json");
+        assert_eq!(payload["available"], true);
+        assert_eq!(payload["remembered_approvals"], 0);
+        assert_eq!(payload["will_clear_saved_allow_rules"], true);
+        assert_eq!(payload["will_change_permission_mode"], false);
+        assert_eq!(payload["aliases"][0], "forget");
+        assert_eq!(payload["supported_actions"][7], "status --json");
+        assert_eq!(payload["supported_actions"][11], "preview --json");
+    }
+
+    // (R2-COV-1) `parse_notify_command` + `notify_usage_text` +
+    // `notify_json_payload` are the live `/notify` parse + JSON plumbing
+    // (dispatched from app.rs). Empty + status/state/show → `Status`, the
+    // `json`/`--json` aliases → `Json`, on/enable/enabled → `On`,
+    // off/disable/disabled/clear → `Off`, test/ping → `Test`, unknown →
+    // `Usage`. The payload echoes the `code_turn_notifications` flag.
+    #[test]
+    fn notify_command_parser_and_payload_match_terminal_contract() {
+        assert_eq!(parse_notify_command(""), NotifyCommand::Status);
+        assert_eq!(parse_notify_command("status"), NotifyCommand::Status);
+        assert_eq!(parse_notify_command("state"), NotifyCommand::Status);
+        assert_eq!(parse_notify_command("show"), NotifyCommand::Status);
+        assert_eq!(parse_notify_command("json"), NotifyCommand::Json);
+        assert_eq!(parse_notify_command("--json"), NotifyCommand::Json);
+        assert_eq!(parse_notify_command("status --json"), NotifyCommand::Json);
+        assert_eq!(parse_notify_command("state --json"), NotifyCommand::Json);
+        assert_eq!(parse_notify_command("show --json"), NotifyCommand::Json);
+        assert_eq!(parse_notify_command("on"), NotifyCommand::On);
+        assert_eq!(parse_notify_command("enable"), NotifyCommand::On);
+        assert_eq!(parse_notify_command("enabled"), NotifyCommand::On);
+        assert_eq!(parse_notify_command("off"), NotifyCommand::Off);
+        assert_eq!(parse_notify_command("disable"), NotifyCommand::Off);
+        assert_eq!(parse_notify_command("disabled"), NotifyCommand::Off);
+        assert_eq!(parse_notify_command("clear"), NotifyCommand::Off);
+        assert_eq!(parse_notify_command("test"), NotifyCommand::Test);
+        assert_eq!(parse_notify_command("ping"), NotifyCommand::Test);
+        assert_eq!(parse_notify_command("wat"), NotifyCommand::Usage);
+        assert!(notify_usage_text().contains("json|--json|status --json"));
+        assert!(notify_usage_text().contains("state --json|show --json"));
+        let cfg = LibertaiConfig {
+            code_turn_notifications: true,
+            ..LibertaiConfig::default()
+        };
+        let payload = notify_json_payload(&cfg, "status --json");
+        assert_eq!(payload["command"], "notify");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "status --json");
+        assert_eq!(payload["aliases"][1], "notifications");
+        assert_eq!(payload["turn_notifications"], true);
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("ping")));
+    }
+
+    // (R2-COV-1) `parse_hooks_command` is the live `/hooks` parser
+    // (dispatched from app.rs). Empty/list/diagnostics → `Status`, the
+    // `json`/`--json` aliases → `Json`, open/settings/edit → `Open`,
+    // `show <event>`/`inspect <event>` → `Show(event)`, bare `show` or a
+    // multi-word `show` w/o a single event → `Usage`. `HOOKS_USAGE` carries
+    // the terminal-contract substrings.
+    #[test]
+    fn hooks_command_parser_matches_terminal_contract() {
+        assert_eq!(parse_hooks_command(""), HooksCommand::Status);
+        assert_eq!(parse_hooks_command("list"), HooksCommand::Status);
+        assert_eq!(parse_hooks_command("diagnostics"), HooksCommand::Status);
+        assert_eq!(parse_hooks_command("json"), HooksCommand::Json);
+        assert_eq!(parse_hooks_command("--json"), HooksCommand::Json);
+        assert_eq!(parse_hooks_command("status --json"), HooksCommand::Json);
+        assert_eq!(parse_hooks_command("list --json"), HooksCommand::Json);
+        assert_eq!(parse_hooks_command("state --json"), HooksCommand::Json);
+        assert_eq!(parse_hooks_command("diagnostics --json"), HooksCommand::Json);
+        assert_eq!(parse_hooks_command("show --json"), HooksCommand::Json);
+        assert_eq!(parse_hooks_command("open"), HooksCommand::Open);
+        assert_eq!(parse_hooks_command("settings"), HooksCommand::Open);
+        assert_eq!(parse_hooks_command("edit"), HooksCommand::Open);
+        assert_eq!(
+            parse_hooks_command("show PreToolUse"),
+            HooksCommand::Show("PreToolUse".to_string())
+        );
+        assert_eq!(
+            parse_hooks_command("inspect notification"),
+            HooksCommand::Show("notification".to_string())
+        );
+        assert_eq!(parse_hooks_command("show"), HooksCommand::Usage);
+        assert_eq!(parse_hooks_command("show pre post"), HooksCommand::Usage);
+        assert!(HOOKS_USAGE.contains("diagnostics|diag"));
+        assert!(HOOKS_USAGE.contains("json|--json|status --json|list --json"));
+        assert!(HOOKS_USAGE.contains("diagnostics --json|diag --json|show --json"));
+        assert!(HOOKS_USAGE.contains("show|event|inspect"));
+        assert!(HOOKS_USAGE.contains("settings|edit"));
+    }
+
+    // (R2-COV-1) `parse_mcp_command` is the live `/mcp` parser (dispatched
+    // from app.rs). Empty/list/diagnostics → `Status`, the `json`/`--json`
+    // aliases → `Json`, `show <server>`/`inspect <server>` → `Show(server)`,
+    // probe → `Probe`, `probe --save`/`probe --write`/`refresh` → `ProbeSave`,
+    // reset/reset-sessions → `Reset`, open/settings/edit → `Open`, unknown →
+    // `Usage`. `MCP_USAGE` carries the terminal-contract substrings.
+    #[test]
+    fn mcp_command_parser_matches_terminal_contract() {
+        assert_eq!(parse_mcp_command(""), McpCommand::Status);
+        assert_eq!(parse_mcp_command("list"), McpCommand::Status);
+        assert_eq!(parse_mcp_command("json"), McpCommand::Json);
+        assert_eq!(parse_mcp_command("--json"), McpCommand::Json);
+        assert_eq!(parse_mcp_command("status --json"), McpCommand::Json);
+        assert_eq!(parse_mcp_command("list --json"), McpCommand::Json);
+        assert_eq!(parse_mcp_command("state --json"), McpCommand::Json);
+        assert_eq!(parse_mcp_command("diagnostics --json"), McpCommand::Json);
+        assert_eq!(parse_mcp_command("show --json"), McpCommand::Json);
+        assert_eq!(
+            parse_mcp_command("show docs"),
+            McpCommand::Show("docs".to_string())
+        );
+        assert_eq!(
+            parse_mcp_command("inspect github"),
+            McpCommand::Show("github".to_string())
+        );
+        assert_eq!(parse_mcp_command("diagnostics"), McpCommand::Status);
+        assert_eq!(parse_mcp_command("probe"), McpCommand::Probe);
+        assert_eq!(parse_mcp_command("probe --save"), McpCommand::ProbeSave);
+        assert_eq!(parse_mcp_command("probe --write"), McpCommand::ProbeSave);
+        assert_eq!(parse_mcp_command("refresh"), McpCommand::ProbeSave);
+        assert_eq!(parse_mcp_command("reset"), McpCommand::Reset);
+        assert_eq!(parse_mcp_command("reset-sessions"), McpCommand::Reset);
+        assert_eq!(parse_mcp_command("open"), McpCommand::Open);
+        assert_eq!(parse_mcp_command("settings"), McpCommand::Open);
+        assert_eq!(parse_mcp_command("edit"), McpCommand::Open);
+        assert_eq!(parse_mcp_command("remote"), McpCommand::Usage);
+        assert!(MCP_USAGE.contains("show|json|--json|status --json|list --json"));
+        assert!(MCP_USAGE.contains("diagnostics --json|diag --json|show --json"));
+        assert!(MCP_USAGE.contains("probe|probes"));
+        assert!(MCP_USAGE.contains("reset|reset-sessions"));
+        assert!(MCP_USAGE.contains("settings|edit"));
+    }
+
+    // (R2-COV-1) `parse_vim_command` + `vim_json_payload` are the live
+    // `/vim` parse + JSON plumbing (dispatched from app.rs). Empty/status/
+    // current/info → `Status`, the `json`/`--json` aliases → `Json`,
+    // on/enable/enabled/true → `Enable`, off/disable/disabled/false →
+    // `Disable`, unknown → `Usage`. The payload echoes the global
+    // `VIM_INPUT_ENABLED` flag (snapshot/restore to avoid cross-test
+    // pollution). `VIM_USAGE` carries the terminal-contract substrings.
+    #[test]
+    fn vim_command_parser_and_payload_match_terminal_contract() {
+        assert_eq!(parse_vim_command(""), VimCommand::Status);
+        assert_eq!(parse_vim_command("status"), VimCommand::Status);
+        assert_eq!(parse_vim_command("current"), VimCommand::Status);
+        assert_eq!(parse_vim_command("info"), VimCommand::Status);
+        assert_eq!(parse_vim_command("json"), VimCommand::Json);
+        assert_eq!(parse_vim_command("--json"), VimCommand::Json);
+        assert_eq!(parse_vim_command("status --json"), VimCommand::Json);
+        assert_eq!(parse_vim_command("info --json"), VimCommand::Json);
+        assert_eq!(parse_vim_command("on"), VimCommand::Enable);
+        assert_eq!(parse_vim_command("enable"), VimCommand::Enable);
+        assert_eq!(parse_vim_command("enabled"), VimCommand::Enable);
+        assert_eq!(parse_vim_command("true"), VimCommand::Enable);
+        assert_eq!(parse_vim_command("off"), VimCommand::Disable);
+        assert_eq!(parse_vim_command("disable"), VimCommand::Disable);
+        assert_eq!(parse_vim_command("disabled"), VimCommand::Disable);
+        assert_eq!(parse_vim_command("false"), VimCommand::Disable);
+        assert_eq!(parse_vim_command("toggle"), VimCommand::Usage);
+        assert!(VIM_USAGE.contains("current|info"));
+        assert!(VIM_USAGE.contains("json|--json|status --json|state --json|show --json"));
+        assert!(VIM_USAGE.contains("current --json|info --json"));
+        assert!(VIM_USAGE.contains("enable|enabled|true"));
+        assert!(VIM_USAGE.contains("disable|disabled|false"));
+        // `vim_json_payload` reads the process-global flag — snapshot + set
+        // + restore so the assertion is hermetic and doesn't leak into
+        // sibling tests.
+        let prior = VIM_INPUT_ENABLED.load(Ordering::SeqCst);
+        VIM_INPUT_ENABLED.store(true, Ordering::SeqCst);
+        let payload = vim_json_payload("current --json");
+        assert_eq!(payload["command"], "vim");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["aliases"][0], "vim");
+        assert_eq!(payload["query"], "current --json");
+        assert_eq!(payload["enabled"], true);
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("info --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("false")));
+        VIM_INPUT_ENABLED.store(prior, Ordering::SeqCst);
+    }
+
+    // (R2-COV-1) `parse_ide_command` + `ide_json_payload` are the live
+    // `/ide` parse + JSON plumbing (dispatched from app.rs). Empty/status/
+    // state/show → `Status`, the `json`/`--json` aliases → `Json`,
+    // open/settings/edit → `Open`, unknown → `Usage`. `IDE_USAGE` carries
+    // the terminal-contract substrings.
+    #[test]
+    fn ide_command_parser_and_payload_match_terminal_contract() {
+        assert_eq!(parse_ide_command(""), IdeCommand::Status);
+        assert_eq!(parse_ide_command("status"), IdeCommand::Status);
+        assert_eq!(parse_ide_command("state"), IdeCommand::Status);
+        assert_eq!(parse_ide_command("show"), IdeCommand::Status);
+        assert_eq!(parse_ide_command("json"), IdeCommand::Json);
+        assert_eq!(parse_ide_command("--json"), IdeCommand::Json);
+        assert_eq!(parse_ide_command("status --json"), IdeCommand::Json);
+        assert_eq!(parse_ide_command("open"), IdeCommand::Open);
+        assert_eq!(parse_ide_command("settings"), IdeCommand::Open);
+        assert_eq!(parse_ide_command("edit"), IdeCommand::Open);
+        assert_eq!(parse_ide_command("install"), IdeCommand::Usage);
+        assert!(IDE_USAGE.contains("state|show"));
+        assert!(IDE_USAGE.contains("json|--json|status --json|state --json|show --json"));
+        assert!(IDE_USAGE.contains("settings|edit"));
+        let payload = ide_json_payload("status --json");
+        assert_eq!(payload["command"], "ide");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "status --json");
+        assert_eq!(payload["dedicated_ide_bridge"], false);
+        assert_eq!(payload["desktop_workspace_available"], true);
+        assert_eq!(payload["aliases"][0], "ide");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("--json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("show --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("edit")));
+    }
+
+    // (R2-COV-1) `parse_bug_command` + `bug_json_payload` are the live
+    // `/bug` parse + JSON plumbing (dispatched from app.rs). Empty/report/
+    // template/status/show → `Template`, the `json`/`--json` aliases →
+    // `Json`, unknown → `Usage`. `BUG_USAGE` carries the terminal-contract
+    // substrings; the payload reports the session's provider/model/mode/
+    // output-style for the bug template.
+    #[test]
+    fn bug_command_parser_and_payload_match_terminal_contract() {
+        assert_eq!(parse_bug_command(""), BugCommand::Template);
+        assert_eq!(parse_bug_command("report"), BugCommand::Template);
+        assert_eq!(parse_bug_command("template"), BugCommand::Template);
+        assert_eq!(parse_bug_command("status"), BugCommand::Template);
+        assert_eq!(parse_bug_command("show"), BugCommand::Template);
+        assert_eq!(parse_bug_command("json"), BugCommand::Json);
+        assert_eq!(parse_bug_command("--json"), BugCommand::Json);
+        assert_eq!(parse_bug_command("status --json"), BugCommand::Json);
+        assert_eq!(parse_bug_command("show --json"), BugCommand::Json);
+        assert_eq!(parse_bug_command("template --json"), BugCommand::Json);
+        assert_eq!(parse_bug_command("report --json"), BugCommand::Json);
+        assert_eq!(parse_bug_command("open"), BugCommand::Usage);
+        assert!(BUG_USAGE.contains("report|template|status|show|json|--json"));
+        assert!(BUG_USAGE.contains("show --json|template --json|report --json"));
+        let payload = bug_json_payload(
+            "libertai",
+            "test-model",
+            Mode::Plan,
+            Some("review"),
+            "template --json",
+        );
+        assert_eq!(payload["command"], "bug");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "template --json");
+        assert_eq!(payload["app"], "libertai-cli");
+        assert_eq!(payload["mode"], "plan");
+        assert_eq!(payload["output_style"], "review");
+        assert_eq!(payload["aliases"][0], "bug");
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("template --json")));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("report --json")));
+    }
+
+    // (R2-COV-1) `parse_hotkeys_command` + `hotkeys_usage_text` +
+    // `hotkeys_json_payload` are the live `/hotkeys` parse + JSON plumbing
+    // (dispatched from app.rs). Empty/list/help → `Show`, the `json`/`--json`
+    // aliases → `Json`, unknown → `Usage`. The payload lists the `hotkey_lines`
+    // shortcuts (including Shift+Tab).
+    #[test]
+    fn hotkeys_command_parser_and_payload_match_terminal_contract() {
+        assert_eq!(parse_hotkeys_command(""), HotkeysCommand::Show);
+        assert_eq!(parse_hotkeys_command("list"), HotkeysCommand::Show);
+        assert_eq!(parse_hotkeys_command("help"), HotkeysCommand::Show);
+        assert_eq!(parse_hotkeys_command("json"), HotkeysCommand::Json);
+        assert_eq!(parse_hotkeys_command("--json"), HotkeysCommand::Json);
+        assert_eq!(parse_hotkeys_command("status --json"), HotkeysCommand::Json);
+        assert_eq!(parse_hotkeys_command("show --json"), HotkeysCommand::Json);
+        assert_eq!(parse_hotkeys_command("list --json"), HotkeysCommand::Json);
+        assert_eq!(parse_hotkeys_command("edit"), HotkeysCommand::Usage);
+        assert!(hotkeys_usage_text().contains("json|--json|status --json"));
+        assert!(hotkeys_usage_text().contains("show --json|list --json"));
+        let payload = hotkeys_json_payload("list --json");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "hotkeys");
+        assert_eq!(payload["query"], "list --json");
+        assert_eq!(payload["aliases"][0], "hotkeys");
+        assert_eq!(payload["supported_actions"][6], "status --json");
+        assert_eq!(payload["supported_actions"][8], "list --json");
+        assert!(payload["shortcuts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["key"] == "Shift+Tab"));
+    }
+
+    // (R2-COV-1) `parse_theme_command` + `theme_json_payload` are the live
+    // `/theme` parse + JSON plumbing (dispatched from app.rs). Empty/status/
+    // show/current/info → `Status`, the `json`/`--json` aliases → `Json`,
+    // a known theme name → `Requested(name)`.
+    #[test]
+    fn theme_command_parser_and_payload_match_terminal_contract() {
+        assert_eq!(parse_theme_command(""), ThemeCommand::Status);
+        assert_eq!(parse_theme_command("status"), ThemeCommand::Status);
+        assert_eq!(parse_theme_command("show"), ThemeCommand::Status);
+        assert_eq!(parse_theme_command("current"), ThemeCommand::Status);
+        assert_eq!(parse_theme_command("info"), ThemeCommand::Status);
+        assert_eq!(parse_theme_command("json"), ThemeCommand::Json);
+        assert_eq!(parse_theme_command("--json"), ThemeCommand::Json);
+        assert_eq!(parse_theme_command("status --json"), ThemeCommand::Json);
+        assert_eq!(parse_theme_command("current --json"), ThemeCommand::Json);
+        assert_eq!(
+            parse_theme_command("high-contrast"),
+            ThemeCommand::Requested("high-contrast".to_string())
+        );
+        let payload = theme_json_payload("current --json");
+        assert_eq!(payload["command"], "theme");
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["query"], "current --json");
+        assert_eq!(payload["aliases"][0], "theme");
+        assert_eq!(payload["terminal_mutates_theme"], false);
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "status --json"));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "current --json"));
+        assert!(payload["supported_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "high-contrast"));
+    }
+
+    // (R2-COV-1) `normalized_hook_type` normalizes the Claude-MCP hook-type
+    // spellings (`mcp-tool`/`mcptool`) to the canonical `mcp_tool` key used
+    // by the hook grouping/section text. It is called from 6+ live sites in
+    // the hook-rendering path; pin the normalization + the passthrough for
+    // an already-canonical value.
+    #[test]
+    fn normalized_hook_type_accepts_claude_mcp_spellings() {
+        assert_eq!(normalized_hook_type("mcp-tool"), "mcp_tool");
+        assert_eq!(normalized_hook_type("mcptool"), "mcp_tool");
+        assert_eq!(normalized_hook_type("MCP_TOOL"), "mcp_tool");
+        assert_eq!(normalized_hook_type("Prompt"), "prompt");
+    }
+
+    // (R2-COV-1) `custom_slash_invocation_name` + `custom_slash_starts_with`
+    // + `resolve_custom_slash` are the live custom-slash matching helpers
+    // (called from app.rs's slash palette + the custom-slash resolve path).
+    // A namespaced command's invocation name is `<namespace>/<name>`; a bare
+    // command's is just `<name>`. `resolve_custom_slash` resolves a unique
+    // exact-invocation or exact-name match, and reports `Ambiguous(sorted)`
+    // when a bare name/prefix matches multiple commands.
+    #[test]
+    fn custom_slash_matching_accepts_namespace_qualified_names() {
+        let command = crate::commands::code_slash_registry::CustomCommand {
+            name: "audit".to_string(),
+            namespace: Some("team".to_string()),
+            description: None,
+            arg_hint: None,
+            argument_names: Vec::new(),
+            body: "Audit $ARGUMENTS".to_string(),
+            source: crate::commands::code_slash_registry::CommandSource::Project,
+            path: PathBuf::from(".claude/commands/team/audit.md"),
+        };
+        assert_eq!(custom_slash_invocation_name(&command), "team/audit");
+        assert!(custom_slash_starts_with(&command, "team/aud"));
+    }
+
+    // (R2-COV-1) `model_list_source` is the live `/model --json` source URL
+    // builder (called from app.rs): it formats `<api_base>/v1/models`, trimming
+    // a trailing slash from the configured `api_base`.
+    #[test]
+    fn model_list_source_formats_api_base_models_endpoint() {
+        let cfg = LibertaiConfig::default();
+        assert_eq!(
+            model_list_source(&cfg),
+            format!("{}/v1/models", cfg.api_base.trim_end_matches('/'))
+        );
+        assert_eq!(
+            model_list_source(&cfg),
+            "https://api.libertai.io/v1/models",
+            "default api_base → the canonical /v1/models endpoint"
+        );
+        // A trailing slash on a custom api_base must not produce `//v1/models`.
+        let cfg_slash = LibertaiConfig {
+            api_base: "https://example.com/api/".to_string(),
+            ..LibertaiConfig::default()
+        };
+        assert_eq!(model_list_source(&cfg_slash), "https://example.com/api/v1/models");
+    }
+
+    // (R2-COV-1) `render_project_tree` + `tree_json_request_arg` +
+    // `project_tree_json_payload` are the live `/tree` plumbing (called from
+    // app.rs): the renderer prints directories before files + skips the
+    // noise dirs (target/.git/node_modules/...), the arg extractor
+    // recognizes the `json`/`--json` aliases + `json <path>`/`<path> --json`,
+    // and the payload reports the surface/command/entries the terminal
+    // renderer expects.
+    #[test]
+    fn render_project_tree_sorts_dirs_first_and_skips_noise() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("src")).unwrap();
+        std::fs::create_dir(temp.path().join("target")).unwrap();
+        std::fs::write(temp.path().join("README.md"), "readme").unwrap();
+        std::fs::write(temp.path().join("src").join("main.rs"), "fn main() {}").unwrap();
+
+        let rendered = render_project_tree(temp.path(), 20).unwrap();
+        assert!(rendered.contains("src/"));
+        assert!(rendered.contains("main.rs"));
+        assert!(rendered.contains("README.md"));
+        assert!(!rendered.contains("target/"));
+        assert!(
+            rendered.find("src/").unwrap() < rendered.find("README.md").unwrap(),
+            "directories should be printed before files"
+        );
+        assert_eq!(tree_json_request_arg("json"), Some(String::new()));
+        assert_eq!(tree_json_request_arg("--json"), Some(String::new()));
+        assert_eq!(tree_json_request_arg("status --json"), Some(String::new()));
+        assert_eq!(tree_json_request_arg("state --json"), Some(String::new()));
+        assert_eq!(tree_json_request_arg("show --json"), Some(String::new()));
+        assert_eq!(tree_json_request_arg("json src"), Some("src".to_string()));
+        assert_eq!(tree_json_request_arg("src --json"), Some("src".to_string()));
+        assert_eq!(
+            tree_json_request_arg("MyDir --json"),
+            Some("MyDir".to_string())
+        );
+        assert_eq!(tree_json_request_arg("src"), None);
+        let payload = project_tree_json_payload(temp.path(), 20, "src --json").unwrap();
+        assert_eq!(payload["surface"], "terminal");
+        assert_eq!(payload["command"], "tree");
+        assert_eq!(payload["query"], "src --json");
+        assert_eq!(payload["aliases"][0], "tree");
+        assert_eq!(payload["supported_actions"][1], "--json");
+        assert_eq!(payload["supported_actions"][2], "status --json");
+        assert_eq!(payload["supported_actions"][5], "path --json");
+        assert_eq!(payload["entries"][0]["kind"], "dir");
+        assert!(payload["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "main.rs"));
+    }
+
+    // (R2-COV-2) `resolve_editor` falls back to `$EDITOR` when `$VISUAL` is
+    // unset — the middle tier of the precedence chain (siblings cover
+    // VISUAL>EDITOR + vi-fallback). Snapshot + restore the env so the test
+    // doesn't leak VISUAL/EDITOR into sibling tests; the EDITOR_ENV_LOCK
+    // serializes the env-touching tests.
+    #[test]
+    fn resolve_editor_falls_back_to_editor_when_visual_unset() {
+        let _guard = EDITOR_ENV_LOCK.lock().unwrap();
+        let snap = snapshot_editor_env();
+        std::env::remove_var("VISUAL");
+        std::env::set_var("EDITOR", "nano");
+        let resolved = resolve_editor();
+        restore_editor_env(snap);
+        assert_eq!(resolved, "nano", "EDITOR must be used when VISUAL is unset");
+    }
+
+    // (R2-COV-3) `usage_summary` tracks the context-token high-water mark
+    // (max input across records) + the summed output tokens over a multi-
+    // record slice, plus the last record's input/output + the last record's
+    // context window/provider/model. Only the empty test
+    // (`usage_summary_empty_when_no_turns`) survived the purge; this
+    // restores the multi-record coverage.
+    #[test]
+    fn usage_summary_tracks_context_high_water_and_output_total() {
+        let records = vec![
+            UsageRecord {
+                provider: "libertai".to_string(),
+                model: "fast".to_string(),
+                input: 100,
+                output: 25,
+                context_window: 1_000,
+            },
+            UsageRecord {
+                provider: "libertai".to_string(),
+                model: "fast".to_string(),
+                input: 180,
+                output: 40,
+                context_window: 1_000,
+            },
+        ];
+        let summary = usage_summary(&records).unwrap();
+        assert_eq!(summary.turns, 2);
+        assert_eq!(summary.last_input, 180);
+        assert_eq!(summary.last_output, 40);
+        assert_eq!(summary.output_total, 65);
+        assert_eq!(summary.context_high_water, 180);
+        assert_eq!(summary.context_window, 1_000);
     }
 }

@@ -68,7 +68,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_ask_modal(frame, area, app);
     }
 
-    // Draw agent output overlay if active.
+    // Draw agent output overlay if active. draw_agent_overlay takes &mut App
+    // (it splits the borrow to mutate the overlay's log-read cache); the
+    // borrow ends when the call returns, so draw_diff_view can borrow next.
     if app.agent_overlay.is_some() {
         draw_agent_overlay(frame, area, app);
     }
@@ -310,7 +312,12 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
     } else {
         q.options.len() + 4 // question + optional header + hint + blank + options
     };
-    let modal_height = (content_lines as u16 + 4).min(area.height.saturating_sub(2));
+    // (R5) Clamp before the `u16` cast so a pathological >65535-option ask
+    // modal doesn't wrap `content_lines` and corrupt the layout. Saturating
+    // add keeps the +4 padding without overflow.
+    let modal_height = (content_lines.min(u16::MAX as usize - 4) as u16)
+        .saturating_add(4)
+        .min(area.height.saturating_sub(2));
     let modal_width = (area.width as f32 * 0.7) as u16;
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
@@ -406,7 +413,11 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
 
         // Render the header (question + optional header + hint),
         // then the list below it.
-        let header_height = lines.len() as u16 + 1; // +1 for blank separator
+        // (R5) Clamp before the `u16` cast so a >65535-line header doesn't
+        // wrap and corrupt the list area below. The +1 blank separator uses
+        // saturating_add to avoid overflow.
+        let header_height =
+            (lines.len().min(u16::MAX as usize - 1) as u16).saturating_add(1);
         let header_area = Rect {
             height: header_height,
             ..inner
@@ -446,24 +457,36 @@ const MAX_RESULT_LINES: usize = 5;
 /// `ToolResult` per-tool lines that the previous `Vec<String>` path
 /// dropped entirely); [`render_entry_lines`] mirrors the scrollback
 /// match arms so the overlay matches the main transcript cell-for-cell.
-fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &mut App) {
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-    let Some(overlay) = &app.agent_overlay else {
+    // (MED-6 + R2 perf) Split the App borrow into disjoint field paths so we
+    // can hold `&app.registry` + `&app.transcript` immutably AND
+    // `&mut app.agent_overlay` (the log-read cache) at once. The borrow
+    // checker rejects this through a single `&App`/`&mut App`, but permits it
+    // for disjoint fields accessed as separate paths.
+    let registry = &app.registry;
+    let transcript = &app.transcript;
+    let Some(overlay) = app.agent_overlay.as_mut() else {
         return;
     };
 
     // Look up the agent handle for color.
-    let color = app
-        .registry
+    let color = registry
         .find_by_name(&overlay.agent_name)
         .map(|h| theme::agent_color_for(h.color))
         .unwrap_or(theme::MUTED);
 
-    // Collect this agent's transcript as typed entries.
-    let entries = crate::commands::code_tui::app::agent_transcript(app, &overlay.agent_name);
+    // Collect this agent's transcript as typed entries. Goes through the
+    // overlay's mtime/size cache so an unchanged log file is NOT re-read on
+    // every redraw tick.
+    let entries = crate::commands::code_tui::app::agent_transcript_for_overlay(
+        registry,
+        transcript,
+        overlay,
+    );
 
     // Overlay: 80% width, 80% height, centered.
     let overlay_width = (area.width as f32 * 0.8) as u16;
@@ -473,6 +496,13 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let overlay_area = Rect::new(overlay_x, overlay_y, overlay_width, overlay_height);
 
     frame.render_widget(Clear, overlay_area);
+
+    // Re-borrow overlay immutably for the (read-only) name + scroll math below
+    // — the mutable cache borrow above has ended (entries is owned now).
+    let overlay = app
+        .agent_overlay
+        .as_ref()
+        .expect("overlay present (checked above)");
 
     let title = format!(" {} — esc/tab to close ", overlay.agent_name);
     let block = Block::default()
@@ -527,10 +557,23 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
     // No `.wrap()`: content is already pre-wrapped to usable_width, and
     // leaving wrap off stops ratatui from double-counting (and drifting
     // the scroll position against the row count above).
+    // (R4) Saturate the `u16` cast so an overlay taller than 65535 visual
+    // rows doesn't wrap the offset (`70000 as u16 == 4464`).
+    let scroll_from_top_u16 = scroll_from_top.min(u16::MAX as usize) as u16;
     let para = Paragraph::new(lines)
         .block(block)
-        .scroll((scroll_from_top as u16, 0));
+        .scroll((scroll_from_top_u16, 0));
     frame.render_widget(para, overlay_area);
+
+    // (R3-OVERLAY-SCROLL-NOCLAMP) Pin `max_scroll` to the real scrollable
+    // range so the Up key (handle_agent_overlay_key) clamps against it
+    // instead of letting `scroll` run past the top. Done AFTER the render:
+    // `lines` (built from `&overlay.agent_name`) borrows the overlay
+    // immutably until `render_widget` consumes it, so the mutable write must
+    // come after. Saturate to `u16::MAX` for a >65535-row overlay.
+    if let Some(ov) = app.agent_overlay.as_mut() {
+        ov.max_scroll = max_from_top.min(u16::MAX as usize) as u16;
+    }
 }
 
 /// Draw the in-TUI diff viewer overlay (M7b `/diff`). Cloned from
@@ -539,7 +582,7 @@ fn draw_agent_overlay(frame: &mut Frame, area: Rect, app: &App) {
 /// [`crate::commands::code_tui::diff::parse_diff`]. Reuses the same
 /// centered-rect + `Clear` + rounded `Block` + `Paragraph` + scroll-from-top
 /// math so it scrolls identically to the agent overlay.
-fn draw_diff_view(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_diff_view(frame: &mut Frame, area: Rect, app: &mut App) {
     use ratatui::style::{Modifier, Style};
     use ratatui::text::Span;
     use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -605,9 +648,20 @@ fn draw_diff_view(frame: &mut Frame, area: Rect, app: &App) {
         .saturating_sub(view.scroll as usize)
         .min(max_from_top);
 
+    // (R3-OVERLAY-SCROLL-NOCLAMP) Pin `max_scroll` to the real scrollable
+    // range so handle_diff_view_key's Up arm clamps against it. The
+    // immutable `view` borrow above ended at `scroll_from_top`, so this
+    // fresh mutable borrow is borrow-clean. Saturate to `u16::MAX`.
+    if let Some(v) = app.diff_view.as_mut() {
+        v.max_scroll = max_from_top.min(u16::MAX as usize) as u16;
+    }
+
+    // (R4) Saturate the `u16` cast so a diff taller than 65535 visual rows
+    // doesn't wrap the offset.
+    let scroll_from_top_u16 = scroll_from_top.min(u16::MAX as usize) as u16;
     let para = Paragraph::new(lines)
         .block(block)
-        .scroll((scroll_from_top as u16, 0));
+        .scroll((scroll_from_top_u16, 0));
     frame.render_widget(para, overlay_area);
 }
 
@@ -848,6 +902,15 @@ fn render_entry_lines<'a>(
         // extra splitting is needed.
         TranscriptEntry::System(text) => {
             vec![Line::from(Span::styled(text.clone(), theme::muted()))]
+        }
+        // (MED-9) Errors render in the error color — mirrors scrollback's
+        // `TranscriptEntry::Error` arm (scrollback.rs:268-270) so the overlay
+        // stays cell-for-cell parity with the scrollback it claims. The agent
+        // transcript never yields `Error` today (the catch-all below is the
+        // latent path), but an explicit arm prevents a silent debug-repr
+        // render if `agent_transcript` ever surfaces one.
+        TranscriptEntry::Error(text) => {
+            vec![Line::from(Span::styled(text.clone(), theme::error()))]
         }
         // Other variants aren't produced by agent_transcript; render any
         // stray one as dim text so the match stays exhaustive and never

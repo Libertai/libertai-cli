@@ -39,12 +39,6 @@
 //!
 //! Nothing in this module prints. All rendering is the caller's job.
 
-// The adapters below are wired into the TUI dispatch / background thread by
-// the sibling M3a workstreams (router wiring, templates, shell escape). Until
-// those land they are dead code, like the transitional handlers retained in
-// `code_ui` for the same ratatui migration. Match `code_ui`'s convention.
-#![allow(dead_code)]
-
 use std::path::Path;
 
 use crate::commands::code_factory::Mode;

@@ -308,8 +308,13 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     // Render with scroll.  No `.wrap()`: content is already pre-wrapped to
     // usable_width, and leaving wrap off stops ratatui from double-counting
     // (and thus drifting the scroll position against the row count above).
+    // (R4) Saturate before the `u16` cast: a scrollback taller than 65535
+    // visual lines would otherwise wrap the offset (`70000 as u16 == 4464`)
+    // and render the wrong slice. `app.scroll` is itself `u16`, so clamping
+    // to `u16::MAX` loses nothing the renderer could express.
+    let scroll_from_top_u16 = scroll_from_top.min(u16::MAX as usize) as u16;
     let paragraph = Paragraph::new(lines)
-        .scroll((scroll_from_top as u16, 0));
+        .scroll((scroll_from_top_u16, 0));
     frame.render_widget(paragraph, para_area);
 
     // Draw scrollbar in the freed rightmost column.

@@ -51,6 +51,30 @@ use crate::config::{allow_rules_path, Config as LibertaiConfig};
 /// Maximum entries in the input history. Matches the legacy REPL.
 const HISTORY_MAX_LIMIT: usize = 64;
 
+/// Hard cap on the number of entries kept in [`App::transcript`] (a bounded
+/// ring buffer: the oldest entries drop off the top when the cap is exceeded).
+/// Without a cap, a multi-thousand-turn session rebuilds the ENTIRE
+/// `Vec<Line>` from scratch on every dirty frame in `scrollback::draw`,
+/// re-running `markdown::render` (full parse + word_wrap) on every Assistant
+/// entry each draw — the biggest production-readiness perf gap. Capping the
+/// stored transcript bounds the per-draw work to O(MAX) lines. The scroll
+/// math (`visual_line_count` + the `max_from_top`/`scroll_from_top` clamp)
+/// is computed from the (capped) `lines` Vec each frame, so it self-corrects
+/// when oldest entries drop — a user scrolled up simply loses the dropped
+/// oldest content (the intended behavior for a ring buffer).
+const MAX_TRANSCRIPT_ENTRIES: usize = 5000;
+
+/// Hard cap on the number of lines [`read_agent_log`] returns from an agent's
+/// log file. The overlay re-reads the whole file on every redraw tick while
+/// open (~12.5x/sec at the 80ms tick), and a long-running agent can emit tens
+/// of thousands of lines; capping the tail (mirroring `diff::MAX_DIFF_LINES`)
+/// bounds both the file read and the per-line `String` allocation on each
+/// redraw. When the cap is hit, a trailing `… (log truncated at N lines)`
+/// notice is appended so the user sees the tail was clipped. Mirrors
+/// `diff.rs::MAX_DIFF_LINES` (2000) but generous since agent logs are the
+/// primary tail surface.
+const MAX_AGENT_LOG_LINES: usize = 4000;
+
 /// Shared abort handle — the main thread calls `.abort()` on Ctrl+C
 /// to interrupt the background thread's current turn.
 type SharedAbort = Arc<Mutex<Option<AbortHandle>>>;
@@ -362,6 +386,28 @@ impl App {
     pub fn set_dirty(&mut self) {
         self.dirty = true;
     }
+
+    /// (R1 transcript render cache) Trim [`App::transcript`] to the last
+    /// [`MAX_TRANSCRIPT_ENTRIES`] entries (bounded ring buffer: the oldest
+    /// entries drop off the top). Called once per dirty frame in `run_loop`,
+    /// right before `scrollback::draw` iterates the transcript, so the stored
+    /// Vec — and therefore the per-draw `markdown::render` work — is bounded
+    /// to O(MAX) regardless of session length.
+    ///
+    /// The scroll math (`visual_line_count` + the `max_from_top`/
+    /// `scroll_from_top` clamp) is recomputed from the trimmed `lines` Vec
+    /// each frame, so it self-corrects when entries drop: a user scrolled up
+    /// (scroll > 0) simply loses the dropped oldest content and the view
+    /// snaps toward the bottom — the intended behavior for a ring buffer, and
+    /// never a panic (`scroll_from_top` is `saturating_sub`-clamped to 0).
+    /// When the transcript is already within the cap this is O(1) (just a
+    /// length check).
+    pub fn trim_transcript(&mut self) {
+        if self.transcript.len() > MAX_TRANSCRIPT_ENTRIES {
+            let drop_n = self.transcript.len() - MAX_TRANSCRIPT_ENTRIES;
+            self.transcript.drain(0..drop_n);
+        }
+    }
 }
 
 /// REPL phases.
@@ -397,6 +443,42 @@ pub struct AgentOverlay {
     /// bottom). Flipped to false the moment the user scrolls up, and
     /// re-armed when they scroll back to the bottom.
     pub follow: bool,
+    /// (R3-OVERLAY-SCROLL-NOCLAMP) The max legal scroll offset
+    /// (`max_from_top`) computed by the last [`draw_agent_overlay`] — i.e.
+    /// `total_visual_rows − viewport_rows`. The Up key clamps `scroll`
+    /// against this so it can't exceed the scrollable range. Defaults to
+    /// `u16::MAX` so an un-drawn overlay (e.g. a unit test that never calls
+    /// draw) still allows scrolling; the first draw pins it to the real
+    /// range. Stored here (not recomputed in the key handler) because the
+    /// viewport height is only known at draw time.
+    pub max_scroll: u16,
+    /// (MED-6 + R2 perf) Cached `(mtime, size)` of the agent's log file from
+    /// the last [`read_agent_log`] read, plus the cached parsed lines. While
+    /// the overlay is open, `overlay_needs_redraw` forces a redraw every
+    /// 80ms tick — but the log file only changes when the agent writes, so
+    /// most ticks re-read + re-allocate the whole file for nothing. Before
+    /// re-reading, [`draw_agent_overlay`] compares the file's current
+    /// `metadata()` mtime+size against this cache and skips the read (reusing
+    /// `cached_log_lines`) when unchanged. Invalidated to `None` whenever the
+    /// overlay is (re)opened so the first draw always populates it.
+    pub cached_log_meta: Option<(std::time::SystemTime, u64)>,
+    pub cached_log_lines: Vec<String>,
+}
+
+impl Default for AgentOverlay {
+    /// Defaults for the perf cache fields (no log read yet). The
+    /// user-facing `agent_name`/`scroll`/`follow` are always set explicitly
+    /// at construction via `..Default::default()`.
+    fn default() -> Self {
+        Self {
+            agent_name: String::new(),
+            scroll: 0,
+            follow: true,
+            max_scroll: u16::MAX,
+            cached_log_meta: None,
+            cached_log_lines: Vec::new(),
+        }
+    }
 }
 
 /// In-TUI diff viewer state (M7b `/diff`). Mirrors [`AgentOverlay`]'s
@@ -414,6 +496,24 @@ pub struct DiffView {
     /// Auto-tail: when true, sticks to the bottom. Re-armed when the user
     /// scrolls back to scroll 0; flipped false on scroll-up.
     pub follow: bool,
+    /// (R3-OVERLAY-SCROLL-NOCLAMP) Max legal scroll offset, pinned by the
+    /// last [`draw_diff_view`] to `total_visual_rows − viewport_rows`. The Up
+    /// key clamps against it so scroll can't exceed the scrollable range.
+    /// Defaults to `u16::MAX` (an un-drawn viewer still allows scrolling,
+    /// matching the pre-clamp behaviour) so unit tests that never draw keep
+    /// passing.
+    pub max_scroll: u16,
+}
+
+impl Default for DiffView {
+    fn default() -> Self {
+        Self {
+            path: None,
+            scroll: 0,
+            follow: true,
+            max_scroll: u16::MAX,
+        }
+    }
 }
 
 /// Slash-command palette state (FEATURE-A). Opened by typing `/` in an
@@ -949,7 +1049,9 @@ fn spawn_background(
                 match cmd_rx.recv() {
                     Ok(Cmd::Prompt { text: prompt, output_style }) => {
                         let (abort_handle, abort_signal) = AbortHandle::new();
-                        *shared_abort.lock().unwrap() = Some(abort_handle);
+                        *shared_abort
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = Some(abort_handle);
 
                         // Apply turn guidance + user-prompt-submit hooks.
                         let prompt = code_mode_prompt::apply_turn_guidance(
@@ -966,7 +1068,9 @@ fn spawn_background(
                                 let _ = agent_tx.send(AgentMsg::TurnEnd {
                                     elapsed_secs: 0,
                                 });
-                                *shared_abort.lock().unwrap() = None;
+                                *shared_abort
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner()) = None;
                                 continue;
                             }
                         };
@@ -998,7 +1102,9 @@ fn spawn_background(
                             )
                             .await;
 
-                        *shared_abort.lock().unwrap() = None;
+                        *shared_abort
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = None;
                         let elapsed = start.elapsed().as_secs();
 
                         match result {
@@ -1789,6 +1895,21 @@ fn subagent_end_bell_enabled(cfg: &LibertaiConfig, completed: bool) -> bool {
 /// (multi-line paste edits the textarea instead of firing a prompt).
 fn apply_paste(app: &mut App, data: &str) {
     app.textarea.insert_str(data);
+    // (PALETTE-3) Paste bypasses the palette guard in
+    // `handle_slash_palette_key` (it calls `insert_str` directly), so a paste
+    // over an open palette can drop the leading `/` (pasting "/clear" over a
+    // palette whose textarea held "/" yields "//clear" — malformed) or grow
+    // the filter past the clamped `selected`. Mirror the Backspace/`_ =>`
+    // arms: if the palette is open and the textarea no longer starts with
+    // `/`, close it; otherwise clamp `selected` to the new filtered length.
+    if app.slash_palette.is_some() {
+        let text = app.textarea.lines().join("");
+        if !text.starts_with('/') {
+            app.slash_palette = None;
+        } else {
+            clamp_palette_selected(app);
+        }
+    }
     app.set_dirty();
 }
 
@@ -1840,6 +1961,11 @@ fn run_loop(
         // it, so we skip `terminal.draw` and the loop stays near 0% CPU. The
         // flag is cleared after a successful draw.
         if app.dirty {
+            // (R1) Bound the stored transcript to the last
+            // MAX_TRANSCRIPT_ENTRIES before the draw iterates it, so the
+            // per-frame `markdown::render` work is O(MAX) regardless of
+            // session length. O(1) when already within the cap.
+            app.trim_transcript();
             guard.terminal.as_mut().unwrap().draw(|frame| view::draw(frame, app))?;
             app.dirty = false;
         }
@@ -2064,9 +2190,10 @@ fn handle_key(
 
     // Slash-command palette (FEATURE-A) takes priority over scrollback
     // navigation + the diff viewer: while the palette is open it owns
-    // Up/Down/Enter/Tab/Esc/Backspace. Printable chars fall through to the
-    // main match's catch-all (which feeds the textarea) so filter-typing
-    // keeps working — see [`handle_slash_palette_key`].
+    // Up/Down/Enter/Tab/Esc/Backspace. Printable chars for filter-typing are
+    // fed to the textarea INSIDE the handler (not via fall-through to the
+    // main match's catch-all), then the leading-`/` invariant is re-checked
+    // — see [`handle_slash_palette_key`].
     if app.slash_palette.is_some() {
         return handle_slash_palette_key(app, key, cmd_tx);
     }
@@ -2160,6 +2287,7 @@ fn handle_key(
                         agent_name: handle.name.clone(),
                         scroll: 0,
                         follow: true,
+                        ..Default::default()
                     });
                 }
                 return None;
@@ -2458,17 +2586,21 @@ fn handle_shell_escape(app: &mut App, prompt: &str) {
             );
             // Record the last shell command so `!!` can repeat it.
             app.last_shell_command = Some(cmd.clone());
-            // Render the result as transcript: a `$ cmd` header, then stdout
-            // and stderr (each trimmed of trailing whitespace), then the exit
-            // code when non-zero.
+            // Render the result as transcript: a `$ cmd` header, then one
+            // System entry PER line of stdout/stderr, then the exit code when
+            // non-zero. Splitting by `.lines()` (mirroring `read_agent_log`)
+            // is load-bearing: ratatui's wrap-off `LineTruncator` gives `\n`
+            // cell_width 0 + skips it, so a single System entry carrying
+            // embedded newlines loses every line past the first (and the
+            // flat visual-row count models it as one row, so there are no
+            // extra rows to scroll into to recover them). One entry per line
+            // makes each output line its own scrollable row.
             app.transcript.push(TranscriptEntry::System(format!("$ {cmd}")));
-            if !res.stdout.is_empty() {
-                app.transcript
-                    .push(TranscriptEntry::System(res.stdout.trim_end().to_string()));
+            for line in res.stdout.trim_end().lines() {
+                app.transcript.push(TranscriptEntry::System(line.to_string()));
             }
-            if !res.stderr.is_empty() {
-                app.transcript
-                    .push(TranscriptEntry::System(res.stderr.trim_end().to_string()));
+            for line in res.stderr.trim_end().lines() {
+                app.transcript.push(TranscriptEntry::System(line.to_string()));
             }
             if let Some(code) = res.exit_code {
                 if code != 0 {
@@ -2778,10 +2910,17 @@ fn handle_agent_overlay_key(
         }
         // Scrolling up leaves the bottom: stop auto-tailing so new output
         // doesn't yank the user back down.
+        // (R3-OVERLAY-SCROLL-NOCLAMP) Clamp the increment to `max_scroll`
+        // (pinned by the last draw to the real scrollable range) so scroll
+        // can't exceed the content — the user can't scroll past the top, and
+        // Down then re-arms follow after exactly ceil(max_scroll/3) presses.
         KeyCode::Up | KeyCode::PageUp => {
             if let Some(overlay) = &mut app.agent_overlay {
                 overlay.follow = false;
-                overlay.scroll = overlay.scroll.saturating_add(3);
+                overlay.scroll = overlay
+                    .scroll
+                    .saturating_add(3)
+                    .min(overlay.max_scroll);
             }
         }
         // Scrolling down decrements the offset; reaching the bottom
@@ -2868,10 +3007,13 @@ fn handle_diff_view_key(
             app.set_dirty();
         }
         // Scrolling up leaves the bottom: stop auto-tailing.
+        // (R3-OVERLAY-SCROLL-NOCLAMP) Clamp to `max_scroll` (pinned by the
+        // last draw) so scroll can't exceed the scrollable range — same
+        // friction fix as the agent overlay.
         KeyCode::Up | KeyCode::PageUp => {
             if let Some(view) = &mut app.diff_view {
                 view.follow = false;
-                view.scroll = view.scroll.saturating_add(3);
+                view.scroll = view.scroll.saturating_add(3).min(view.max_scroll);
             }
             app.set_dirty();
         }
@@ -2917,18 +3059,35 @@ pub(crate) fn slash_palette_filtered(app: &App) -> Vec<(String, String)> {
 /// Handle a key while the slash-command palette is open (FEATURE-A).
 /// Modeled on [`handle_diff_view_key`]: the palette owns Up/Down (selection),
 /// Enter/Tab (accept), Esc (close), and Backspace (delete, then re-check the
-/// leading-`/` invariant). ALL OTHER keys — including printable chars used
-/// for filter-typing — return `None` so they fall through to the main match's
-/// catch-all, which feeds them to the textarea (and the filter recomputes
-/// next key/redraw). `selected` is clamped to the filtered list length on
-/// every intercepted key because the filtered list shrinks as the user types
-/// and an unclamped index would drift past the end.
+/// leading-`/` invariant). Printable chars used for filter-typing are fed to
+/// the textarea HERE (in the `_ =>` arm) — NOT via fall-through to the main
+/// match's catch-all, because `handle_key` returns early via
+/// `return handle_slash_palette_key(...)` while the palette is open, so the
+/// main-match catch-all is never reached for palette-open keys. Feeding here
+/// is the ONLY feed; the filter recomputes on the next key/redraw.
+/// `selected` is clamped to the filtered list length on every intercepted key
+/// because the filtered list shrinks as the user types and an unclamped index
+/// would drift past the end.
 fn handle_slash_palette_key(
     app: &mut App,
     key: KeyEvent,
     _cmd_tx: &mpsc::Sender<Cmd>,
 ) -> Option<Action> {
-    let filtered_len = slash_palette_filtered(app).len();
+    // (R8) Compute the filtered list ONCE per keypress and reuse the bound
+    // Vec for length/windowing/Enter lookup. The previous code recomputed
+    // `slash_palette_filtered` up to 3x per key (length here, Enter lookup
+    // below, and again in the renderer), each iterates WIRED_COMMANDS +
+    // re-derives custom_invocation_names + re-allocates. `filtered` is the
+    // single source of truth for this keypress.
+    //
+    // NOTE: for the Backspace/`_ =>` arms the textarea changes AFTER this
+    // snapshot, so `filtered` is stale for those arms' post-feed clamp.
+    // Each filter-changing arm recomputes its own length (via the
+    // `clamp_palette_selected` helper) so `selected` never exceeds the new
+    // filtered_len-1 for a render. The Esc/Up/Down/Enter arms don't change
+    // the filter, so `filtered` is accurate for them.
+    let filtered = slash_palette_filtered(app);
+    let filtered_len = filtered.len();
     match key.code {
         // Esc: close the palette and clear the textarea.
         KeyCode::Esc => {
@@ -2967,9 +3126,10 @@ fn handle_slash_palette_key(
         }
         // Enter/Tab: accept the selected entry — set the textarea to
         // "{name} " (trailing space so the user can keep typing args) and
-        // close the palette. No-op if the filtered list is empty.
+        // close the palette. No-op if the filtered list is empty. (R8) Reuses
+        // the once-computed `filtered` Vec instead of recomputing.
         KeyCode::Enter | KeyCode::Tab => {
-            let picked = slash_palette_filtered(app)
+            let picked = filtered
                 .get(
                     app.slash_palette
                         .as_ref()
@@ -2987,21 +3147,64 @@ fn handle_slash_palette_key(
         // Backspace: delete, then re-check the leading-`/` invariant. If the
         // textarea no longer starts with `/` (the user backspaced past it),
         // close the palette — otherwise the filter would be left matching
-        // against stale text. Otherwise leave the palette open (the filter
-        // recomputes on the next key/redraw).
+        // against stale text. Otherwise leave the palette open and (PALETTE-2)
+        // clamp `selected` to the NEW filtered length so it never exceeds
+        // filtered_len-1 for the next render (the snapshot above is stale
+        // because the textarea just changed).
         KeyCode::Backspace => {
             app.textarea.input(key);
             let text = app.textarea.lines().join("");
             if !text.starts_with('/') {
                 app.slash_palette = None;
-                app.set_dirty();
+            } else {
+                clamp_palette_selected(app);
             }
+            app.set_dirty();
             None
         }
-        // All other keys (printable chars for filter-typing, etc.) fall
-        // through to the main match's catch-all, which feeds them to the
-        // textarea. We MUST NOT swallow them or filter-typing breaks.
-        _ => None,
+        // Printable chars (filter-typing) are fed to the textarea HERE —
+        // NOT via fall-through to the main match's catch-all. handle_key
+        // returns early via `return handle_slash_palette_key(...)` while the
+        // palette is open, so the main-match catch-all is NEVER reached for
+        // palette-open keys; feeding here is the ONLY feed. After feeding, re-
+        // check the leading-`/` invariant (same as Backspace): if the user
+        // backspaced/deleted past the leading '/', close the palette so the
+        // filter doesn't match against stale text. Otherwise (PALETTE-2) clamp
+        // `selected` to the new filtered length so an unclamped index can't
+        // drift past the (now-shrunk) filtered list for a render.
+        _ => {
+            app.textarea.input(key);
+            let text = app.textarea.lines().join("");
+            if !text.starts_with('/') {
+                app.slash_palette = None;
+            } else {
+                clamp_palette_selected(app);
+            }
+            app.set_dirty();
+            None
+        }
+    }
+}
+
+/// (PALETTE-2) Clamp `slash_palette.selected` to the current filtered list
+/// length (minus one, guarded for an empty list). Called after every
+/// keystroke that changes the filter (Backspace + printable `_ =>`) so the
+/// selection never exceeds `filtered_len-1` for a render. Recomputes the
+/// filtered length here because the textarea changed since the
+/// `handle_slash_palette_key` top-of-frame snapshot. Cheap and idempotent.
+fn clamp_palette_selected(app: &mut App) {
+    if app.slash_palette.is_some() {
+        // Compute the filtered length with an immutable borrow, THEN mutate
+        // `selected` — the two-phase borrow across `&mut app.slash_palette`
+        // and `slash_palette_filtered(&app)` would otherwise conflict.
+        let filtered_len = slash_palette_filtered(app).len();
+        if let Some(palette) = &mut app.slash_palette {
+            palette.selected = if filtered_len > 0 {
+                palette.selected.min(filtered_len - 1)
+            } else {
+                0
+            };
+        }
     }
 }
 
@@ -3033,12 +3236,50 @@ pub fn agent_transcript(app: &App, agent_name: &str) -> Vec<TranscriptEntry> {
         }
     }
 
-    // Fall back to transcript entries (in-process subagents). The leading
-    // "{agent} · " prefix on `ToolResult` (see `SubagentToolEnd` storage)
-    // is what binds a per-tool result to this agent.
+    agent_transcript_from_memory(&app.transcript, agent_name)
+}
+
+/// (MED-6 + R2 perf) Like [`agent_transcript`] but reads the agent's log file
+/// through [`read_agent_log_cached`], reusing the [`AgentOverlay`]'s mtime/size
+/// cache to skip the disk read on redraw ticks where the log didn't grow.
+/// Used by [`crate::commands::code_tui::view::draw_agent_overlay`] (the only
+/// call site that owns a `&mut AgentOverlay`). The in-process path (no log_path)
+/// falls back to [`agent_transcript_from_memory`] — those entries live in the
+/// in-memory transcript and set `dirty` on change, so no cache is needed.
+///
+/// Takes the `registry` + `transcript` slices separately (not `&App`) so the
+/// caller can split the borrow: it holds `&app.registry` / `&app.transcript`
+/// immutably AND `&mut app.agent_overlay` (the cache) mutably at once —
+/// disjoint fields of [`App`], which the borrow checker permits as separate
+/// field paths but rejects through a single `&App`/`&mut App`.
+pub fn agent_transcript_for_overlay(
+    registry: &AgentRegistry,
+    transcript: &[TranscriptEntry],
+    overlay: &mut AgentOverlay,
+) -> Vec<TranscriptEntry> {
+    if let Some(handle) = registry.find_by_name(&overlay.agent_name) {
+        if let Some(log_path) = &handle.log_path {
+            return read_agent_log_cached(overlay, log_path)
+                .into_iter()
+                .map(TranscriptEntry::System)
+                .collect();
+        }
+    }
+    agent_transcript_from_memory(transcript, &overlay.agent_name)
+}
+
+/// In-process (no log_path) tail of [`agent_transcript`] /
+/// [`agent_transcript_for_overlay`]: scan the transcript for the agent's
+/// `SubagentText` / `SubagentTool` / `SubagentEnd` entries plus the per-tool
+/// result lines (stored as `ToolResult` with the name prefixed
+/// `"{agent} · {tool}"` — see the `SubagentToolEnd` arm of [`handle_agent_msg`]).
+fn agent_transcript_from_memory(transcript: &[TranscriptEntry], agent_name: &str) -> Vec<TranscriptEntry> {
+    // The leading "{agent} · " prefix on `ToolResult` (see
+    // `SubagentToolEnd` storage) is what binds a per-tool result to this
+    // agent.
     let prefix = format!("{agent_name} · ");
     let mut entries = Vec::new();
-    for entry in &app.transcript {
+    for entry in transcript {
         match entry {
             TranscriptEntry::SubagentText {
                 agent_name: name,
@@ -3094,10 +3335,71 @@ pub fn agent_transcript(app: &App, agent_name: &str) -> Vec<TranscriptEntry> {
 /// Read an agent's log file and return its contents as lines. The log
 /// file is the combined stdout+stderr of the background `libertai code
 /// --print` process. Returns an empty vec if the file can't be read.
+///
+/// Output is capped at the LAST [`MAX_AGENT_LOG_LINES`] lines (the tail —
+/// what's visible when the overlay sticks to the bottom). When the file has
+/// more lines than the cap, only the tail is kept and a trailing
+/// `… (log truncated at N lines)` notice is appended. This bounds the per-
+/// redraw work while the overlay is open: without the cap, a multi-thousand-
+/// line log is re-read and re-allocated on every 80ms tick.
 fn read_agent_log(log_path: &std::path::Path) -> Vec<String> {
     match std::fs::read_to_string(log_path) {
-        Ok(content) => content.lines().map(String::from).collect(),
+        Ok(content) => {
+            let lines: Vec<String> = content.lines().map(String::from).collect();
+            if lines.len() > MAX_AGENT_LOG_LINES {
+                let start = lines.len() - MAX_AGENT_LOG_LINES;
+                let mut tail: Vec<String> = lines[start..].to_vec();
+                tail.push(format!(
+                    "… (log truncated at {MAX_AGENT_LOG_LINES} lines)"
+                ));
+                tail
+            } else {
+                lines
+            }
+        }
         Err(_) => Vec::new(),
+    }
+}
+
+/// (MED-6 + R2 perf) Read an agent's log file through an [`AgentOverlay`]'s
+/// mtime/size cache. While the overlay is open, `overlay_needs_redraw` forces
+/// a redraw every 80ms tick, but the log file only changes when the agent
+/// writes — so most ticks re-read + re-allocate the whole file for nothing.
+/// Before re-reading, this compares the file's current `metadata()` mtime+size
+/// against `overlay.cached_log_meta` and, when unchanged, returns the cached
+/// `overlay.cached_log_lines` (cloned) instead of hitting the disk. On a cache
+/// miss (or first read), it reads via [`read_agent_log`] and caches the
+/// `(mtime, size)` + lines.
+///
+/// `overlay.cached_log_meta` is `None` after the overlay is (re)opened, so the
+/// first draw always populates the cache; subsequent unchanged-file ticks hit
+/// the cache. Returns an empty vec if the file is missing/unreadable (mirrors
+/// `read_agent_log`).
+fn read_agent_log_cached(overlay: &mut AgentOverlay, log_path: &std::path::Path) -> Vec<String> {
+    // Cheap metadata probe before the (potentially multi-thousand-line) read.
+    // `metadata()` is a single stat() — far cheaper than reading the file +
+    // splitting into owned `String`s per line.
+    let meta = std::fs::metadata(log_path).ok();
+    let mtime = meta.as_ref().and_then(|m| m.modified().ok());
+    let size = meta.as_ref().map(|m| m.len());
+    if let (Some(mtime), Some(size)) = (mtime, size) {
+        if overlay.cached_log_meta == Some((mtime, size)) && !overlay.cached_log_lines.is_empty() {
+            // Cache hit: file unchanged since the last read. Reuse the cached
+            // parsed lines (clone — the cache must persist across ticks).
+            return overlay.cached_log_lines.clone();
+        }
+        let lines = read_agent_log(log_path);
+        overlay.cached_log_meta = Some((mtime, size));
+        overlay.cached_log_lines = lines.clone();
+        lines
+    } else {
+        // Missing or unreadable file: invalidate the cache and return empty
+        // (mirrors `read_agent_log`'s error arm). Don't cache an empty vec —
+        // an empty cache would otherwise suppress recovery reads once the
+        // agent starts writing.
+        overlay.cached_log_meta = None;
+        overlay.cached_log_lines = Vec::new();
+        Vec::new()
     }
 }
 
@@ -3421,7 +3723,14 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             // built prompt. `mention_command_arg` guards the `/mention ` prefix.
             match code_ui::mention_command_arg(trimmed) {
                 Some(rest) => {
-                    match code_ui::build_mention_prompt(rest, app.bar.output_style.as_deref()) {
+                    // (MED-7) Pass `None` here: the shared bg `Cmd::Prompt`
+                    // handler (app.rs ~979) already applies `apply_output_style`
+                    // from the `output_style` threaded via Cmd::Prompt. The
+                    // `Action::Submit` path sends `app.bar.output_style`, so the
+                    // style is honored exactly once. `build_mention_prompt`
+                    // applies it internally too, so passing the live style here
+                    // would stack TWO `[Session output style: ...]` blocks.
+                    match code_ui::build_mention_prompt(rest, None) {
                         Ok(prompt) => {
                             if app.history.back().is_none_or(|last| last != input) {
                                 app.history.push_back(input.to_string());
@@ -5134,6 +5443,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                 path,
                 scroll: 0,
                 follow: true,
+                ..Default::default()
             });
             app.set_dirty();
         }
@@ -5499,6 +5809,7 @@ mod tests {
             agent_name: "coder".to_string(),
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
         assert!(
             overlay_needs_redraw(&app),
@@ -5523,6 +5834,7 @@ mod tests {
             agent_name: "inline".to_string(),
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
         assert!(
             !overlay_needs_redraw(&app),
@@ -5534,8 +5846,274 @@ mod tests {
             agent_name: "ghost".to_string(),
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
         assert!(!overlay_needs_redraw(&app), "unknown agent must not request redraw");
+    }
+
+    // R3-SHELL-MULTILINE: `!`/`!!` shell escape must push ONE System entry per
+    // output line, not a single entry with embedded `\n`. ratatui's wrap-off
+    // LineTruncator gives `\n` cell_width 0 + skips it, so embedded newlines
+    // lose every line past the first (and the flat visual-row count models a
+    // single System entry as one row, leaving nothing to scroll into). This
+    // runs a real `printf` (guaranteed present) emitting 3 stdout lines +
+    // 2 stderr lines and asserts the transcript carries exactly those lines
+    // as separate System entries (plus the `$ printf ...` header + trailing
+    // Blank).
+    #[test]
+    fn handle_shell_escape_splits_multiline_output_into_one_entry_per_line() {
+        let mut app = test_app();
+        // `printf` emits 3 newline-separated stdout lines + 2 stderr lines
+        // (stderr via a redirect so it's deterministic across shells).
+        let cmd = "printf 'line-a\nline-b\nline-c\n'; printf 'err-1\nerr-2\n' >&2";
+        handle_shell_escape(&mut app, &format!("!{cmd}"));
+
+        // Collect the System entries (skip the `$ cmd` header for the body
+        // comparison, keep the trailing Blank out of the line set).
+        let systems: Vec<String> = app
+            .transcript
+            .iter()
+            .filter_map(|e| match e {
+                TranscriptEntry::System(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // First System entry is the `$ cmd` header.
+        assert_eq!(systems.first(), Some(&format!("$ {cmd}")));
+        // The remaining System entries are exactly the output lines, one per
+        // line — NOT collapsed into a single `\n`-joined entry.
+        let body = &systems[1..];
+        assert_eq!(
+            body,
+            &[
+                "line-a".to_string(),
+                "line-b".to_string(),
+                "line-c".to_string(),
+                "err-1".to_string(),
+                "err-2".to_string(),
+            ],
+            "expected one System entry per output line, got: {:?}",
+            body
+        );
+        // Trailing entry is a Blank separator (matching every shell-escape
+        // arm).
+        assert!(matches!(
+            app.transcript.last(),
+            Some(TranscriptEntry::Blank)
+        ));
+        // last_shell_command recorded so `!!` can repeat.
+        assert_eq!(app.last_shell_command.as_deref(), Some(cmd));
+    }
+
+    // MED-6 + R2 overlay perf: read_agent_log must cap the output at the LAST
+    // MAX_AGENT_LOG_LINES lines + append a truncation notice. Without the cap
+    // the overlay re-reads + re-allocates a multi-thousand-line log on every
+    // 80ms redraw tick while open.
+    #[test]
+    fn read_agent_log_caps_to_last_n_lines_with_truncation_notice() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("agent.log");
+        // Write MAX + 50 lines so the cap triggers.
+        let body: String = (0..(MAX_AGENT_LOG_LINES + 50))
+            .map(|i| format!("line-{i}\n"))
+            .collect();
+        std::fs::write(&log, body).unwrap();
+
+        let lines = read_agent_log(&log);
+        // The cap keeps the last MAX lines + appends exactly ONE notice line.
+        assert_eq!(
+            lines.len(),
+            MAX_AGENT_LOG_LINES + 1,
+            "expected MAX + 1 (notice), got {}",
+            lines.len()
+        );
+        // The kept lines are the TAIL: the window starts at index
+        // (total - MAX) = 50, so the first kept line is line-50 and the last
+        // kept (just before the notice) is the final written line.
+        assert_eq!(
+            lines.first(),
+            Some(&"line-50".to_string()),
+            "first kept line must be the tail window start (line-50), got: {:?}",
+            lines.first()
+        );
+        assert_eq!(
+            lines[lines.len() - 2],
+            format!("line-{}", MAX_AGENT_LOG_LINES + 50 - 1),
+            "last kept line before the notice must be the final written line"
+        );
+        // The trailing notice is exactly the truncation message.
+        assert_eq!(
+            lines.last(),
+            Some(&format!("… (log truncated at {MAX_AGENT_LOG_LINES} lines)")),
+            "expected trailing truncation notice, got: {:?}",
+            lines.last()
+        );
+    }
+
+    // A log with FEWER than MAX lines passes through unchanged (no notice).
+    #[test]
+    fn read_agent_log_under_cap_passes_through_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("agent.log");
+        std::fs::write(&log, "alpha\nbeta\ngamma\n").unwrap();
+        let lines = read_agent_log(&log);
+        assert_eq!(lines, vec!["alpha", "beta", "gamma"]);
+    }
+
+    // A missing log file returns an empty vec (no panic) — confirms the
+    // missing-file concern the plan flagged as a non-issue.
+    #[test]
+    fn read_agent_log_missing_file_returns_empty_vec() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("does-not-exist.log");
+        let lines = read_agent_log(&log);
+        assert!(lines.is_empty());
+    }
+
+    // MED-6 mtime/size cache: read_agent_log_cached must SKIP the disk read
+    // when the file's mtime+size is unchanged since the last call, returning
+    // the cached lines. The test writes a log, reads it twice, then mutates
+    // the file (size change) and confirms the second read refreshes.
+    #[test]
+    fn read_agent_log_cached_skips_reread_when_mtime_size_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("agent.log");
+        std::fs::write(&log, "first\nsecond\n").unwrap();
+
+        let mut overlay = AgentOverlay {
+            agent_name: "bg".to_string(),
+            ..Default::default()
+        };
+        // First read: cache miss → reads disk, populates the cache.
+        let first = read_agent_log_cached(&mut overlay, &log);
+        assert_eq!(first, vec!["first", "second"]);
+        assert!(overlay.cached_log_meta.is_some(), "cache must be populated on first read");
+        assert_eq!(
+            overlay.cached_log_lines, first,
+            "cached lines must match the returned lines"
+        );
+
+        // Second read, file UNCHANGED → cache hit, returns the same lines
+        // without re-reading. (We can't easily assert "didn't read disk"
+        // directly, but the cache meta is unchanged and lines match.)
+        let second = read_agent_log_cached(&mut overlay, &log);
+        assert_eq!(second, first, "cache hit must return identical lines");
+
+        // Mutate the file (size grows) → cache miss → re-reads the new tail.
+        // Writing changes the size, so the mtime+size gate trips.
+        std::fs::write(&log, "first\nsecond\nthird\n").unwrap();
+        let third = read_agent_log_cached(&mut overlay, &log);
+        assert_eq!(third, vec!["first", "second", "third"], "cache miss after growth must re-read");
+        assert_eq!(overlay.cached_log_lines, third, "cache refreshed after growth");
+    }
+
+    // R1 transcript render cache: trim_transcript caps app.transcript to the
+    // last MAX_TRANSCRIPT_ENTRIES (ring buffer: oldest dropped off the top).
+    // A multi-thousand-entry session would otherwise re-run markdown::render
+    // on every Assistant entry on every 80ms-tick dirty frame.
+    #[test]
+    fn trim_transcript_caps_to_last_max_entries_dropping_oldest() {
+        let mut app = test_app();
+        // Push MAX + 250 System entries so the cap trips.
+        for i in 0..(MAX_TRANSCRIPT_ENTRIES + 250) {
+            app.transcript.push(TranscriptEntry::System(format!("entry-{i}")));
+        }
+        assert_eq!(
+            app.transcript.len(),
+            MAX_TRANSCRIPT_ENTRIES + 250,
+            "sanity: pre-trim length"
+        );
+        app.trim_transcript();
+        assert_eq!(
+            app.transcript.len(),
+            MAX_TRANSCRIPT_ENTRIES,
+            "post-trim length must equal the cap"
+        );
+        // The oldest entries (entry-0 .. entry-249) were dropped; the first
+        // kept entry is the (drop_n)th — the tail window start.
+        let drop_n = 250;
+        assert!(
+            matches!(
+                app.transcript.first(),
+                Some(TranscriptEntry::System(s)) if s == &format!("entry-{drop_n}"),
+            ),
+            "first kept entry must be the tail window start (entry-{drop_n}), got: {:?}",
+            app.transcript.first()
+        );
+        // The last kept entry is the final pushed one (the newest survives).
+        let last_idx = MAX_TRANSCRIPT_ENTRIES + 250 - 1;
+        assert!(
+            matches!(
+                app.transcript.last(),
+                Some(TranscriptEntry::System(s)) if s == &format!("entry-{last_idx}"),
+            ),
+            "last kept entry must be the newest pushed (entry-{last_idx}), got: {:?}",
+            app.transcript.last()
+        );
+    }
+
+    // trim_transcript is a no-op when the transcript is within the cap.
+    #[test]
+    fn trim_transcript_noop_when_within_cap() {
+        let mut app = test_app();
+        for i in 0..(MAX_TRANSCRIPT_ENTRIES - 1) {
+            app.transcript.push(TranscriptEntry::System(format!("entry-{i}")));
+        }
+        let before = app.transcript.len();
+        app.trim_transcript();
+        assert_eq!(app.transcript.len(), before, "within-cap trim must not drop anything");
+        assert!(
+            matches!(
+                app.transcript.first(),
+                Some(TranscriptEntry::System(s)) if s == "entry-0",
+            ),
+            "first entry unchanged when within cap, got: {:?}",
+            app.transcript.first()
+        );
+    }
+
+    // After trimming, the scroll clamp must NOT panic and stays within bounds
+    // (scroll_from_top <= max_from_top). This is the R1 scroll-invariant guard
+    // the plan called out: the scroll math is recomputed from the trimmed
+    // `lines` Vec each frame, so it self-corrects when oldest entries drop —
+    // a user scrolled far up (large scroll) just loses the dropped content
+    // rather than panicking or rendering blank rows.
+    #[test]
+    fn trim_transcript_preserves_scroll_clamp_no_panic() {
+        let mut app = test_app();
+        for i in 0..(MAX_TRANSCRIPT_ENTRIES + 500) {
+            app.transcript.push(TranscriptEntry::System(format!("entry-{i}")));
+        }
+        // Simulate a user scrolled up (large offset from bottom). Use a value
+        // larger than what the trimmed transcript can satisfy — the clamp must
+        // saturate rather than underflow/panic.
+        app.scroll = u16::MAX;
+        app.trim_transcript();
+        assert_eq!(app.transcript.len(), MAX_TRANSCRIPT_ENTRIES);
+
+        // Reproduce the scrollback::draw clamp math against the trimmed
+        // transcript (flat visual-row count: one row per System entry).
+        let total_visual_lines: usize =
+            app.transcript.iter().map(|_| 1usize).sum();
+        // A small viewport so max_from_top is nonzero and the clamp exercises
+        // the saturating_sub path.
+        let viewport = 40usize;
+        let max_from_top = total_visual_lines.saturating_sub(viewport);
+        let scroll_from_top =
+            max_from_top.saturating_sub(app.scroll as usize).min(max_from_top);
+        // The invariant: scroll_from_top never exceeds max_from_top and never
+        // underflows (saturating_sub clamps to 0).
+        assert!(
+            scroll_from_top <= max_from_top,
+            "scroll_from_top ({scroll_from_top}) must not exceed max_from_top ({max_from_top})"
+        );
+        // A huge scroll clamps down to 0 (everything visible from the top) — no
+        // panic, no underflow.
+        assert_eq!(
+            scroll_from_top, 0,
+            "huge scroll clamps to 0 (top), not a negative/panic"
+        );
     }
 
     // --- Category (1): queued drain ----------------------------------------
@@ -7052,6 +7630,7 @@ task = "Do the thing"
             agent_name: "reviewer".into(),
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
 
         handle_agent_msg(
@@ -7081,6 +7660,7 @@ task = "Do the thing"
             agent_name: "reviewer".into(),
             scroll: 5,
             follow: false,
+            ..Default::default()
         });
 
         handle_agent_msg(
@@ -7111,6 +7691,7 @@ task = "Do the thing"
             agent_name: "reviewer".into(),
             scroll: 7,
             follow: true,
+            ..Default::default()
         });
 
         handle_agent_msg(
@@ -7139,6 +7720,7 @@ task = "Do the thing"
             agent_name: "reviewer".into(),
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
 
         handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &cmd_tx);
@@ -7161,6 +7743,7 @@ task = "Do the thing"
             agent_name: "reviewer".into(),
             scroll: 0,
             follow: false,
+            ..Default::default()
         });
 
         handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &cmd_tx);
@@ -7183,6 +7766,7 @@ task = "Do the thing"
             agent_name: "reviewer".into(),
             scroll: 4,
             follow: false,
+            ..Default::default()
         });
 
         handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &cmd_tx);
@@ -7204,6 +7788,7 @@ task = "Do the thing"
             agent_name: "reviewer".into(),
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
 
         handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &cmd_tx);
@@ -7244,6 +7829,7 @@ task = "Do the thing"
             agent_name: "reviewer".into(),
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
 
         handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &cmd_tx);
@@ -7288,6 +7874,7 @@ task = "Do the thing"
             agent_name: "reviewer".into(),
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
 
         handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE), &cmd_tx);
@@ -7382,6 +7969,7 @@ task = "Do the thing"
             agent_name: "reviewer".into(),
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
 
         let action = handle_key(
@@ -7423,6 +8011,7 @@ task = "Do the thing"
             agent_name: "ghost".into(),
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
 
         handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &cmd_tx);
@@ -7459,6 +8048,7 @@ task = "Do the thing"
             agent_name: "done".into(),
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
 
         handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &cmd_tx);
@@ -7499,6 +8089,7 @@ task = "Do the thing"
             agent_name: "reviewer".into(),
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
 
         handle_agent_overlay_key(&mut app, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE), &cmd_tx);
@@ -7737,6 +8328,63 @@ task = "Do the thing"
         assert!(
             lines.iter().any(|s| s.contains("usage:") && s.contains("/mention")),
             "bare /mention should push the usage System line, got: {lines:?}"
+        );
+    }
+
+    // (3b) (MED-7) /mention must NOT double-apply the output style. The bg
+    // `Cmd::Prompt` handler applies `apply_output_style` from the
+    // `output_style` threaded via Cmd::Prompt (which the `Action::Submit`
+    // path sets from `app.bar.output_style`). `build_mention_prompt` also
+    // applies it internally, so the /mention arm must pass `None` to avoid
+    // stacking two `[Session output style: ...]` blocks. This mirrors the
+    // real model-facing prompt: the /mention arm produces `Action::Submit`,
+    // the run_loop sends `Cmd::Prompt { output_style: app.bar.output_style }`,
+    // and the bg handler applies the style once.
+    #[test]
+    fn slash_mention_does_not_double_apply_output_style() {
+        let mut app = test_app();
+        // Simulate an active `/output-style concise` override.
+        app.bar.output_style = Some("concise".to_string());
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("ctx.txt");
+        std::fs::write(&file, "context body").unwrap();
+        let input = format!("/mention \"{}\" summarize this", file.display());
+
+        // The prompt that the /mention arm returns via Action::Submit.
+        let submit_prompt = match handle_slash_command(&mut app, &input, &cmd_tx) {
+            Some(Action::Submit(p)) => p,
+            Some(Action::Quit) => panic!("expected Submit for /mention, got Quit"),
+            Some(Action::ClearTranscript) => {
+                panic!("expected Submit for /mention, got ClearTranscript")
+            }
+            Some(Action::OpenEditor) => panic!("expected Submit for /mention, got OpenEditor"),
+            None => panic!("expected Submit for /mention, got None"),
+        };
+
+        // The /mention arm must NOT bake the style in (it threads `None` to
+        // build_mention_prompt); the style is applied later by the bg handler.
+        assert_eq!(
+            submit_prompt.matches("[Session output style:").count(),
+            0,
+            "MED-7 regression: /mention arm baked the output style into the Submit prompt \
+             (it should pass `None` to build_mention_prompt); got: {submit_prompt}"
+        );
+
+        // Simulate the bg Cmd::Prompt handler, which applies the style exactly
+        // once from the threaded `output_style` (mirrors app.rs ~979).
+        let model_prompt = crate::commands::code_output_style::apply_output_style(
+            app.bar.output_style.as_deref(),
+            &submit_prompt,
+            std::env::current_dir().ok().as_deref(),
+        );
+        assert_eq!(
+            model_prompt.matches("[Session output style:").count(),
+            1,
+            "MED-7: the model-facing prompt must contain EXACTLY ONE \
+             `[Session output style:` block (style applied once by the bg handler); \
+             got: {model_prompt}"
         );
     }
 
@@ -9183,6 +9831,7 @@ task = "Do the thing"
             path: None,
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
         app.pending_diff = Some("diff --git a/x b/x\n".to_string());
 
@@ -9209,6 +9858,7 @@ task = "Do the thing"
             path: None,
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
 
         handle_diff_view_key(
@@ -9230,6 +9880,7 @@ task = "Do the thing"
             path: None,
             scroll: 0,
             follow: true,
+            ..Default::default()
         });
 
         handle_diff_view_key(
@@ -9256,6 +9907,7 @@ task = "Do the thing"
             path: None,
             scroll: 0,
             follow: false,
+            ..Default::default()
         });
 
         handle_diff_view_key(
@@ -9283,6 +9935,7 @@ task = "Do the thing"
             path: None,
             scroll: 4,
             follow: false,
+            ..Default::default()
         });
 
         handle_diff_view_key(
@@ -9663,55 +10316,45 @@ task = "Do the thing"
     }
 
     // (FEATURE-A-filter) Typing a letter narrows the filter and clamps the
-    // selection into the new (smaller) list. A printable char is NOT
-    // swallowed by the palette handler — it falls through to the main match's
-    // catch-all, which feeds it to the textarea.
+    // selection into the new (smaller) list. A printable char is fed to the
+    // textarea by the REAL handle_key path (handle_key returns early via
+    // `return handle_slash_palette_key(...)` while the palette is open, and
+    // the `_ =>` arm inside that handler feeds the char itself — there is no
+    // fall-through to the main match's catch-all).
     #[test]
     fn slash_palette_typing_a_letter_filters_and_clamps() {
         let mut app = test_app();
         let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
         let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
-        // Open the palette with `/`.
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
-            &cmd_tx,
-            &shared_abort,
-        );
-        assert!(app.slash_palette.is_some());
+        // Start with an open palette + textarea "/" (the post-open state),
+        // rather than re-driving the opening key, so the test exercises the
+        // real printable-feed path in isolation.
+        set_textarea_text(&mut app.textarea, "/");
+        app.slash_palette = Some(SlashPalette { selected: 0 });
 
-        // Move selection down a few rows so it's likely out of the post-filter
-        // window, then type `c` (filter → names starting with `c`: /clear,
-        // /copy, /commit, /changelog, /compact, /cost …). The fall-through
-        // feeds the `c` to the textarea.
-        for _ in 0..5 {
-            handle_slash_palette_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-                &cmd_tx,
-            );
-        }
-        // A printable char returns None (fall-through) — it is NOT swallowed.
-        let action = handle_slash_palette_key(
+        // Drive a printable `c` through the REAL handle_key path. The palette
+        // is open, so handle_key returns early into handle_slash_palette_key,
+        // whose `_ =>` arm feeds the char to the textarea (NOT via fall-through).
+        let action = handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
             &cmd_tx,
+            &shared_abort,
         );
         assert!(
             action.is_none(),
-            "printable chars must fall through (not be swallowed by the palette handler)"
+            "printable chars must be fed (return None), not produce an action"
         );
+        assert!(app.slash_palette.is_some(), "palette must stay open for `/c`");
 
-        // The fall-through would normally feed the textarea via the main
-        // match; here we simulate that by feeding it explicitly, then verify
-        // the filter narrows and selected clamps.
-        app.textarea.input(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
-        let filtered = slash_palette_filtered(&app);
+        // The real handler fed the `c` — the textarea must now be `/c`.
         assert_eq!(
             app.textarea.lines().join(""),
             "/c",
-            "filter prefix should be /c"
+            "the real handler must feed the printable to the textarea"
         );
+
+        let filtered = slash_palette_filtered(&app);
         assert!(
             filtered.iter().all(|(n, _)| n
                 .strip_prefix('/')
@@ -9720,8 +10363,13 @@ task = "Do the thing"
                 .starts_with('c')),
             "filtered list must only contain names starting with 'c'"
         );
-        // selected must be within the new filtered length after the next
-        // intercepted key (Down) clamps it.
+        assert!(
+            !filtered.is_empty(),
+            "test needs >=1 filtered entry for /c"
+        );
+
+        // selected must stay in bounds; clamp on the next intercepted key
+        // (Down) if the (now smaller) filtered list pushed it out of range.
         if app.slash_palette.as_ref().unwrap().selected >= filtered.len() {
             handle_slash_palette_key(
                 &mut app,

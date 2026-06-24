@@ -43,11 +43,19 @@ pub fn word_wrap(text: &str, width: usize, first_line_indent: usize) -> Vec<Stri
             let word_len = word.width();
             if current.is_empty() {
                 if word_len > budget {
-                    // Word wider than the line — hard-break it at the
-                    // display-column budget (taking whole code points whose
-                    // cumulative width fits, so we never split a wide glyph).
-                    let (take, rest) = split_at_width(word, budget);
-                    result.push(take);
+                    // (R3-WORDWRAP-BREAK-ONCE) Word wider than the line —
+                    // hard-break it at the display-column budget (taking
+                    // whole code points whose cumulative width fits, so we
+                    // never split a wide glyph). Loop until the remainder
+                    // fits the budget: a single 200-col no-space run at
+                    // width 50 now yields 4 chunks of 50, not [50, 150] with
+                    // the 150 remainder overflowing the truncator.
+                    let mut rest = word.to_string();
+                    while rest.width() > budget {
+                        let (take, remainder) = split_at_width(&rest, budget);
+                        result.push(take);
+                        rest = remainder;
+                    }
                     if !rest.is_empty() {
                         current = rest;
                         current_len = current.width();
@@ -60,8 +68,15 @@ pub fn word_wrap(text: &str, width: usize, first_line_indent: usize) -> Vec<Stri
                 // Word doesn't fit — flush current line, start new.
                 result.push(std::mem::take(&mut current));
                 if word_len > width {
-                    let (take, rest) = split_at_width(word, width);
-                    result.push(take);
+                    // (R3-WORDWRAP-BREAK-ONCE) Same loop as the empty-line
+                    // branch: keep splitting until the remainder fits a full
+                    // line so a long no-space word never overflows.
+                    let mut rest = word.to_string();
+                    while rest.width() > width {
+                        let (take, remainder) = split_at_width(&rest, width);
+                        result.push(take);
+                        rest = remainder;
+                    }
                     if !rest.is_empty() {
                         current = rest;
                         current_len = current.width();
@@ -167,15 +182,38 @@ mod tests {
 
     #[test]
     fn long_word_hard_breaks_ascii_once() {
-        // A word longer than the line is hard-broken ONCE at the column
-        // budget; the remainder is left as its own (possibly overflowing)
-        // line — this matches the original char-count wrapper's behaviour
-        // exactly. Only the first segment is guaranteed within budget.
+        // A word longer than the line is hard-broken at the column budget,
+        // and the loop continues splitting the remainder until every chunk
+        // fits the budget (R3-WORDWRAP-BREAK-ONCE): a 20-char no-space run
+        // at width 5 yields 4 chunks of 5 — not [5, 15] with the 15-col
+        // remainder overflowing the truncator.
         let out = word_wrap("supercalifragilistic", 5, 0);
+        assert_eq!(out.len(), 4, "20 cols / width 5 = 4 chunks");
         assert_eq!(out[0], "super");
-        assert_eq!(out[1], "califragilistic");
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].width(), 5);
+        assert_eq!(out[1], "calif");
+        assert_eq!(out[2], "ragil");
+        assert_eq!(out[3], "istic");
+        assert_within_width(&out, 5);
+    }
+
+    #[test]
+    fn long_word_hard_breaks_loop_to_budget() {
+        // (R3-WORDWRAP-BREAK-ONCE) A 200-col no-space run at width 50 must
+        // split into exactly 4 chunks of 50 — the previous single-break
+        // behaviour yielded [50, 150] and let the 150-col remainder overflow
+        // the wrap-off truncator (losing 100 cols). Every chunk now fits.
+        let run = "x".repeat(200);
+        let out = word_wrap(&run, 50, 0);
+        assert_eq!(out.len(), 4, "200 cols / width 50 = 4 chunks");
+        for (i, chunk) in out.iter().enumerate() {
+            assert_eq!(
+                chunk.width(),
+                50,
+                "chunk {i} should be exactly 50 cols, got {}",
+                chunk.width()
+            );
+        }
+        assert_within_width(&out, 50);
     }
 
     #[test]

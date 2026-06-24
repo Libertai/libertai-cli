@@ -1,11 +1,8 @@
 //! Terminal primitives shared by the `libertai code` UI modules.
 //!
-//! Lives here so both the REPL's input bar (`code_ui.rs`) and the
+//! Lives here so both the interactive input bar (`code_ui.rs`) and the
 //! approval micro-prompt (the `TerminalApprovalUi` implementation
 //! below) use the same RAII guard — otherwise a panic during an
-//! approval prompt would leave the terminal in raw mode.
-
-#![allow(dead_code)]
 //! approval prompt would leak raw mode and leave the user's terminal
 //! broken.
 
@@ -198,6 +195,12 @@ pub(crate) fn terminal_event_gate() -> &'static std::sync::Mutex<()> {
 
 static TERMINAL_PROMPT_CLAIMS: AtomicUsize = AtomicUsize::new(0);
 
+/// Query whether a terminal approval prompt is currently active.
+///
+/// Exposed as a `pub(crate)` query API for callers that want to inspect
+/// prompt state without holding a claim; the TUI does not call it today
+/// but it is exercised by `terminal_prompt_claim_marks_pending_until_dropped`.
+#[allow(dead_code)] // query API retained for future callers; exercised by the test below.
 pub(crate) fn terminal_prompt_pending() -> bool {
     TERMINAL_PROMPT_CLAIMS.load(Ordering::SeqCst) > 0
 }

@@ -906,11 +906,20 @@ fn wrap_spans(
 ) -> Vec<Line<'static>> {
     let prefix_w = prefix.width();
     let content: String = spans.iter().map(|s| s.content.as_ref()).collect();
-    let content_w = content.width();
+    // (R3-OSC8-WIDTH) Measure the VISIBLE width, not the raw escaped-string
+    // width. An OSC-8 hyperlink span carries the URL twice inside ESC
+    // sequences (`\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\`); each ESC byte
+    // counts as 1 display column under `UnicodeWidthStr`, so a 10-col label
+    // with a 60-char URL measures ~84 cols and spuriously overflows, sending
+    // the line into the wrap branch where `split_at_width` slices INTO the
+    // URL escape and produces a broken OSC-8. Strip control chars for the
+    // width decision so it keys off what the user actually sees. The raw
+    // `content` (escape intact) is still what's emitted on the fits branch.
+    let visible_w = visible_width(&content);
 
     // Fits (or no width budget for content) — emit the styled line
     // exactly as before, behavior-preserving for short inputs.
-    if prefix_w + content_w <= width {
+    if prefix_w + visible_w <= width {
         let mut line_spans = Vec::with_capacity(spans.len() + 1);
         if !prefix.is_empty() {
             line_spans.push(Span::styled(prefix.to_string(), prefix_style));
@@ -919,9 +928,18 @@ fn wrap_spans(
         return vec![Line::from(line_spans)];
     }
 
-    // Overflow — pre-wrap the content to the remaining budget.
+    // Overflow — the VISIBLE content doesn't fit. If the line carries an
+    // OSC-8 escape, wrapping the raw escaped string would slice into the URL
+    // escape (broken hyperlink). Fall back to label-only rendering (mirror
+    // the >200-char-url fallback in the link parser): strip the OSC-8
+    // wrapper and wrap just the visible label, so the escape is never split.
+    let content_for_wrap = if content.contains("\u{1b}]8;;") {
+        strip_osc8(&content)
+    } else {
+        content.clone()
+    };
     let usable = width.saturating_sub(prefix_w).max(1);
-    let wrapped = wrap::word_wrap(&content, usable, 0);
+    let wrapped = wrap::word_wrap(&content_for_wrap, usable, 0);
     let mut out = Vec::with_capacity(wrapped.len());
     for (i, chunk) in wrapped.into_iter().enumerate() {
         if i == 0 && !prefix.is_empty() {
@@ -933,6 +951,98 @@ fn wrap_spans(
         }
     }
     out
+}
+
+/// (R3-OSC8-WIDTH) Display width of `s` measured against what the terminal
+/// actually DRAWS — i.e. the visible text, not the raw escaped string. OSC-8
+/// hyperlink spans embed ESC (`\x1b`) and other control bytes around the
+/// label AND carry the URL twice inside the escape; `UnicodeWidthStr` counts
+/// every byte as 1 column, so the raw width massively overstates the visible
+/// width (a 2-col label with a 60-char URL measures ~84 cols) and breaks the
+/// wrap decision. This projects to visible cells by:
+///   1. Replacing each OSC-8 wrapper with just its visible label (the URL +
+///      escape framing are terminal-consumed, never drawn).
+///   2. Stripping any remaining C0 control chars.
+fn visible_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    let projected = strip_all_osc8_labels(s);
+    let stripped: String = projected.chars().filter(|c| !c.is_control()).collect();
+    stripped.width()
+}
+
+/// (R3-OSC8-WIDTH) Replace every OSC-8 hyperlink wrapper in `s` with just its
+/// visible label, leaving surrounding text intact. An OSC-8 span is
+/// `\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\`; the terminal draws only
+/// `{label}`. Handles multiple links in one string (e.g. a paragraph with
+/// several links). Anything that doesn't match the OSC-8 shape is left as-is
+/// (the trailing control-strip in [`visible_width`] cleans up stray ESCs).
+fn strip_all_osc8_labels(s: &str) -> String {
+    let open = "\u{1b}]8;;";
+    let st = "\u{1b}\\";
+    let close = "\u{1b}]8;;\u{1b}\\";
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find(open) {
+        // Emit any text before the opener.
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + open.len()..];
+        // Skip the URL up to the first ST, then take the label up to the close.
+        match after_open.split_once(st) {
+            Some((_, label_and_close)) => {
+                if let Some(before_close) = label_and_close.strip_suffix(close) {
+                    out.push_str(before_close);
+                    rest = &label_and_close[before_close.len() + close.len()..];
+                } else {
+                    // Malformed — take up to the next ESC as label, drop the rest.
+                    let (label, _) = label_and_close
+                        .split_once('\u{1b}')
+                        .unwrap_or((label_and_close, ""));
+                    out.push_str(label);
+                    rest = "";
+                }
+            }
+            None => {
+                // No ST after the opener — malformed; emit nothing for the escape.
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// (R3-OSC8-WIDTH) Strip an OSC-8 hyperlink wrapper, returning just the
+/// visible label. An OSC-8 span looks like
+/// `\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\`; the label is the text between
+/// the first `\x1b\\` (ST) and the final `\x1b]8;;\x1b\\`. If the shape
+/// doesn't match, returns the input with control chars stripped (safe
+/// fallback — never emits a half-escape).
+fn strip_osc8(s: &str) -> String {
+    // OSC-8: ESC ] 8 ; ; <url> ESC \ <label> ESC ] 8 ; ; ESC \
+    // The label sits between the first `ST` (`\x1b\\`) and the closing
+    // `\x1b]8;;\x1b\\`.
+    let open = "\u{1b}]8;;";
+    let st = "\u{1b}\\";
+    if let Some(rest) = s.strip_prefix(open) {
+        // Skip the URL up to the first ST.
+        if let Some(after_url) = rest.split_once(st) {
+            let label_and_close = after_url.1;
+            // The label runs until the closing OSC-8 (`\x1b]8;;\x1b\\`).
+            let close = "\u{1b}]8;;\u{1b}\\";
+            let label = if let Some(before_close) = label_and_close.strip_suffix(close) {
+                before_close
+            } else {
+                // Malformed tail — take everything up to the next ESC as label.
+                label_and_close
+                    .split_once('\u{1b}')
+                    .map(|(l, _)| l)
+                    .unwrap_or(label_and_close)
+            };
+            return label.to_string();
+        }
+    }
+    // Fallback: strip all control chars so we never return a half-escape.
+    s.chars().filter(|c| !c.is_control()).collect()
 }
 
 #[cfg(test)]
@@ -1098,21 +1208,23 @@ mod tests {
         // A fenced code block whose code line is wider than `width` is
         // PRE-WRAPPED to `width` (with the 2-space indent budget) so the
         // wrap-off Paragraph renderer does not truncate it and the flat
-        // 1-row-per-`Line` count stays correct. word_wrap emits one chunk
-        // per visual row, each becoming its own `Line` (a single long
-        // no-space word is hard-broken once at the budget — see
-        // `wrap::word_wrap` — so the remainder may overflow, but it is no
-        // longer a single over-wide line that the truncator would cut).
+        // 1-row-per-`Line` count stays correct. word_wrap now LOOPS the
+        // hard-break until every chunk fits the budget
+        // (R3-WORDWRAP-BREAK-ONCE): a 50-char no-space word at width 20
+        // (first-line budget 18) splits 18 + 20 + 12 -> 3 code Lines, none
+        // overflowing.
         let long_code = "x".repeat(50);
         let src = format!("```rust\n{long_code}\n```");
         let lines = render(&src, 20);
-        // first-line budget = 20 - 2 (indent) = 18; the 50-char word is
-        // hard-broken once -> 18 + 32 -> 2 code Lines.
-        // header + top border + 2 code lines + bottom border == 5 lines.
+        // word_wrap gets a single line (one code line), so every chunk uses
+        // that line's budget = 20 - 2 (indent) = 18. The loop now splits the
+        // 50-x run 18 + 18 + 14 -> 3 code Lines (previously [18, 32] with the
+        // 32-col remainder overflowing the wrap-off truncator).
+        // header + top border + 3 code lines + bottom border == 6 lines.
         assert_eq!(
             lines.len(),
-            5,
-            "code block should be header + border + 2 wrapped code + border, got {}",
+            6,
+            "code block should be header + border + 3 wrapped code + border, got {}",
             lines.len()
         );
         // The header line names the language and is dim (muted).
@@ -1129,11 +1241,14 @@ mod tests {
         let first: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(first, format!("  {}", "x".repeat(18)));
         assert_eq!(first.width(), 20);
-        // The second code line is the remainder (32 x's + indent); it may
-        // overflow width 20, but it is its own Line (counted as 1 row),
-        // not merged with the first — so the row count matches the render.
+        // (R3-WORDWRAP-BREAK-ONCE) The second chunk is another 18-x segment
+        // (the line budget is constant 18 within a single code line), and the
+        // third is the final 14-x remainder — so every chunk fits the budget
+        // and no remainder overflows the truncator.
         let second: String = lines[3].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(second, format!("  {}", "x".repeat(32)));
+        assert_eq!(second, format!("  {}", "x".repeat(18)));
+        let third: String = lines[4].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(third, format!("  {}", "x".repeat(14)));
     }
 
     #[test]
@@ -1360,6 +1475,68 @@ mod tests {
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains("\x1b]8;;"), "long URL omits OSC-8: {text:?}");
         assert!(text.contains("label"), "label still shown");
+    }
+
+    #[test]
+    fn osc8_link_wraps_on_visible_width_without_breaking_escape() {
+        // (R3-OSC8-WIDTH) An OSC-8 link whose VISIBLE label fits the width
+        // but whose escaped-string width (each ESC = 1 col) far exceeds it
+        // must NOT enter the wrap branch — the raw width overstates visible
+        // width and `split_at_width` would slice INTO the URL escape. The
+        // line stays one Line with the OSC-8 escape intact.
+        let _guard = OSC8_TEST_GUARD.lock().unwrap();
+        let url = format!("https://example.com/{}", "x".repeat(60)); // 80-char URL (<200 -> OSC-8 emitted)
+        let src = format!("[hi]({url})");
+        // Visible content is "hi" (2 cols); escaped width is ~84. At width
+        // 30 the visible content fits, so the line is NOT wrapped.
+        let lines = render(&src, 30);
+        assert_eq!(lines.len(), 1, "visible-fitting link must not wrap: got {} lines", lines.len());
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        // The OSC-8 escape is intact: the opener (`\x1b]8;;{url}\x1b\\`) and
+        // the closer (`\x1b]8;;\x1b\\`) are both present exactly once and
+        // un-sliced. (The opener-with-URL is the load-bearing check: if
+        // split_at_width had sliced into the escape, the URL terminator `\x1b\\`
+        // would be missing or the opener split across a wrap boundary.)
+        let opener = format!("\u{1b}]8;;{url}\u{1b}\\");
+        assert_eq!(
+            text.matches(&opener).count(),
+            1,
+            "OSC-8 opener (with full URL) present exactly once: {text:?}"
+        );
+        assert_eq!(
+            text.matches("\u{1b}]8;;\u{1b}\\").count(),
+            1,
+            "OSC-8 closer present exactly once: {text:?}"
+        );
+        assert!(text.contains("hi"), "visible label present: {text:?}");
+    }
+
+    #[test]
+    fn osc8_link_visible_overflow_falls_back_to_label_only() {
+        // (R3-OSC8-WIDTH) When the VISIBLE label itself exceeds the width,
+        // the line must wrap on the LABEL only — never slice the OSC-8
+        // escape. Here a 30-col label at width 10 wraps to label chunks; the
+        // output must contain NO OSC-8 escape (only the wrapped label text).
+        let _guard = OSC8_TEST_GUARD.lock().unwrap();
+        let url = format!("https://example.com/{}", "x".repeat(60));
+        let label = "a".repeat(30);
+        let src = format!("[{label}]({url})");
+        let lines = render(&src, 10);
+        // Every line is label-only (no OSC-8 escape sequence anywhere).
+        for (i, line) in lines.iter().enumerate() {
+            let t: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                !t.contains("\x1b]8;;"),
+                "line {i} must be label-only (no OSC-8) when visible label overflows: {t:?}"
+            );
+        }
+        // The full label is recoverable from the wrapped chunks.
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert_eq!(joined.chars().filter(|c| *c == 'a').count(), 30, "all 30 label cols preserved");
     }
 
     #[test]
