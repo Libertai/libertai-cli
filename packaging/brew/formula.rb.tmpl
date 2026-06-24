@@ -20,6 +20,8 @@ class Libertai < Formula
     else
       bin.install "libertai-macos-x86_64" => "libertai"
     end
+    # Bare release asset arrives as 0644; make it executable before we run it.
+    chmod 0755, bin/"libertai"
     generate_completions_from_executable(bin/"libertai", "completions")
     (man1/"libertai.1").write Utils.safe_popen_read(bin/"libertai", "man")
   end
