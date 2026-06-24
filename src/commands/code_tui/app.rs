@@ -6102,6 +6102,16 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.turn_started = None;
             app.current_tool = None;
             app.current_tool_detail = String::new();
+            // (Round-10) If a teammate (Remote) approval modal is up, the
+            // parent's TurnEnd makes the stashed `pre_approval_phase` STALE
+            // (it was saved as Streaming by the IPC poll). Without this the
+            // Remote-arm restore would later resurrect a phantom Streaming
+            // phase — a forever-animating spinner + a disabled slash palette.
+            // Reflect that the parent is now idle so the `unwrap_or(Phase::Idle)`
+            // in both Remote arms restores Idle.
+            if app.approval.is_some() {
+                app.pre_approval_phase = Some(Phase::Idle);
+            }
             app.transcript.push(TranscriptEntry::Blank);
             app.scroll = 0; // auto-scroll to bottom
 
@@ -6126,13 +6136,35 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             always_rule,
             responder,
         } => {
-            app.approval = Some(ApprovalModal {
-                tool_name,
-                preview,
-                always_rule,
-                responder: ApprovalResponder::Local(responder),
-            });
-            app.phase = Phase::Approval;
+            // (Round-10) Symmetric with the IPC poll's `if app.approval.is_none()`
+            // guard (app.rs run_loop): a Remote (teammate) approval modal may be
+            // up while the parent's bg thread keeps streaming. The IPC poll
+            // queues a second teammate request in the socket backlog rather than
+            // clobbering; this Local arm used to have NO guard, so a Local
+            // request (the parent's own bg thread hitting an approval-needing
+            // tool) would unconditionally OVERWRITE `app.approval`, dropping the
+            // in-flight Remote `ApprovalResponder` (closing the socket) — the
+            // teammate's blocking read then returns EOF -> PromptChoice::Deny
+            // (code_approval_ipc.rs), silently DENYING the teammate's approval
+            // with no user input. Local-over-Local is unreachable (the bg
+            // thread blocks on resp_rx.recv() after its first send, so it can't
+            // emit a second Local request until the first resolves), so this
+            // guard only fires Local-over-Remote. When it does, deny the Local
+            // request IMMEDIATELY (the safe direction — the same false-DENY that
+            // the clobber produced, but now intentional and with the Remote modal
+            // PRESERVED for the user to decide) rather than orphan the teammate
+            // modal. The Local bg thread unblocks on the Deny and continues.
+            if app.approval.is_some() {
+                let _ = responder.send(PromptChoice::Deny);
+            } else {
+                app.approval = Some(ApprovalModal {
+                    tool_name,
+                    preview,
+                    always_rule,
+                    responder: ApprovalResponder::Local(responder),
+                });
+                app.phase = Phase::Approval;
+            }
         }
         AgentMsg::AskRequest { payload, responder } => {
             let resp_clone = responder.clone();
@@ -8268,6 +8300,110 @@ task = "Do the thing"
         assert_eq!(app.phase, Phase::Streaming, "Local approval resumes Streaming");
         // The Local arm leaves the stash untouched (it doesn't take() it).
         assert_eq!(app.pre_approval_phase, Some(Phase::Idle), "Local arm ignores the stash");
+    }
+
+    // (Round-10 repro) Reproduce the stale-stash scenario: a teammate (Remote)
+    // approval modal pops while the parent is Streaming (stash=Streaming saved
+    // by the IPC poll), the parent turn then finishes and emits
+    // AgentMsg::TurnEnd (handled while the modal is still up → phase=Idle, but
+    // the stash is NOT invalidated), and finally the user resolves the modal.
+    // Expected: phase == Idle (the parent already ended). Actual (buggy):
+    // phase == Streaming restored from the stale stash → phantom spinner +
+    // disabled slash palette.
+    #[test]
+    fn remote_approval_stale_stash_after_parent_turnend_restores_idle() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+
+        // 1. Parent is streaming; a teammate approval arrives mid-stream.
+        app.phase = Phase::Streaming;
+        app.turn_started = Some(Instant::now());
+        app.pre_approval_phase = Some(app.phase); // IPC poll save (app.rs:2255)
+        app.approval = Some(remote_approval_modal());
+        app.phase = Phase::Approval;
+
+        // 2. The parent turn finishes and emits TurnEnd while the modal is up.
+        handle_agent_msg(&mut app, AgentMsg::TurnEnd { elapsed_secs: 5 }, &cmd_tx);
+        // The TurnEnd handler sets phase=Idle unconditionally (app.rs:6101).
+        assert_eq!(app.phase, Phase::Idle);
+        assert!(app.turn_started.is_none(), "parent turn ended");
+        // (Round-10 fix) The stash MUST be invalidated to Idle when the parent
+        // turn ends under a modal, so the Remote-arm restore can't resurrect a
+        // phantom Streaming phase.
+        assert_eq!(
+            app.pre_approval_phase,
+            Some(Phase::Idle),
+            "stash invalidated to Idle by TurnEnd under a modal"
+        );
+        assert!(app.approval.is_some(), "modal still up");
+
+        // 3. User resolves the teammate modal.
+        let action = handle_approval_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &shared_abort,
+        );
+        assert!(action.is_none());
+
+        // EXPECTED after fix: Idle. ACTUAL (buggy): Streaming from the stale stash.
+        assert_eq!(
+            app.phase,
+            Phase::Idle,
+            "resolving a teammate modal whose parent already ended must NOT restore a phantom Streaming phase"
+        );
+    }
+
+    #[test]
+    fn local_approval_request_does_not_clobber_in_flight_remote_modal() {
+        // (Round-10) Symmetry with the IPC poll's `if app.approval.is_none()`
+        // guard. A Remote (teammate) approval modal is up while the parent's bg
+        // thread keeps streaming. When the parent's bg thread then hits an
+        // approval-needing tool it sends a LOCAL AgentMsg::ApprovalRequest.
+        // Before the fix this arm had NO guard: it unconditionally overwrote
+        // `app.approval`, dropping the in-flight Remote ApprovalResponder (closing
+        // the socket → the teammate's blocking read returns EOF → Deny), silently
+        // denying the teammate's approval with no user input. The fix denies the
+        // Local request IMMEDIATELY (safe direction) and PRESERVES the Remote
+        // modal for the user to decide. Local-over-Local is unreachable (the bg
+        // thread blocks on resp_rx.recv() after its first send), so this guard
+        // only fires Local-over-Remote.
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        // A teammate (Remote) modal is already up.
+        let remote = remote_approval_modal();
+        app.approval = Some(remote);
+        app.phase = Phase::Approval;
+
+        // A Local approval request arrives (parent bg thread hit a tool).
+        let (resp_tx, resp_rx) = mpsc::channel::<PromptChoice>();
+        let local_req = AgentMsg::ApprovalRequest {
+            tool_name: "write".to_string(),
+            preview: "write(src/x.rs)".to_string(),
+            always_rule: "write(src/x.rs)".to_string(),
+            responder: resp_tx,
+        };
+        handle_agent_msg(&mut app, local_req, &cmd_tx);
+
+        // The Local request is immediately denied (the bg thread unblocks).
+        assert_eq!(
+            resp_rx.recv().unwrap(),
+            PromptChoice::Deny,
+            "Local request colliding with an in-flight Remote modal is auto-denied, not clobbered"
+        );
+        // The Remote teammate modal SURVIVES — the user still decides it.
+        assert!(
+            app.approval.is_some(),
+            "the in-flight Remote (teammate) modal must NOT be clobbered by a Local request"
+        );
+        assert!(
+            matches!(
+                app.approval.as_ref().unwrap().responder,
+                ApprovalResponder::Remote(_)
+            ),
+            "the surviving modal is still the Remote (teammate) one"
+        );
+        assert_eq!(app.phase, Phase::Approval, "phase stays Approval for the surviving modal");
     }
 
     #[test]

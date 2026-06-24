@@ -324,53 +324,42 @@ pub fn approval_subject_with_base(
                 format!("kill_bash({s})"),
             )
         }
-        "write" => {
+        "write" | "edit" | "hashline_edit" | "notebook_edit" | "notebook_execute" => {
+            // The model passes `path` as a string. A MISSING field falls back
+            // to the `<missing path>` placeholder (non-empty, safe). An
+            // EXPLICIT empty string `{"path": ""}` resolves to `s = ""` after
+            // absolutization (`absolutize_for_match` early-returns the empty
+            // string), which would record `AllowRule::exact(tool, "")` — and
+            // `AllowRule::matches` treats an EMPTY pattern as match-ALL (the
+            // `self.pattern.is_empty() -> true` path reserved for
+            // `AllowRule::tool_all`). That is a FALSE-ALLOW: a single "always
+            // allow" on a malformed empty-path write/edit would silently
+            // pre-approve every future write/edit against ANY path
+            // (e.g. /etc/passwd, ~/.ssh/id_rsa) for the rest of the session.
+            //
+            // (Round-10) Mirror the round-9 bash sentinel: when the resolved
+            // path is empty, record a non-empty sentinel pattern (`<missing
+            // path>`, which no real path equals and which `absolutize_for_match`
+            // passes through unchanged via the `starts_with('<')` early-return)
+            // so the rule can NEVER match-all. The matched VALUE stays the
+            // real (possibly empty) path `s` — only the recorded rule narrows
+            // to the sentinel. This closes the false-allow the round-9 audit
+            // found left open for the path-edit sibling arms.
             let path = input
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<missing path>");
             let s = abs(path);
-            (
-                s.clone(),
-                AllowRule::exact(tool, s.clone()),
-                format!("write({s})"),
-            )
-        }
-        "edit" => {
-            let path = input
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<missing path>");
-            let s = abs(path);
-            (
-                s.clone(),
-                AllowRule::exact(tool, s.clone()),
-                format!("edit({s})"),
-            )
-        }
-        "hashline_edit" => {
-            let path = input
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<missing path>");
-            let s = abs(path);
-            (
-                s.clone(),
-                AllowRule::exact(tool, s.clone()),
-                format!("hashline_edit({s})"),
-            )
-        }
-        "notebook_edit" | "notebook_execute" => {
-            let path = input
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<missing path>");
-            let s = abs(path);
-            (
-                s.clone(),
-                AllowRule::exact(tool, s.clone()),
-                format!("{tool}({s})"),
-            )
+            let (rule, label) = if s.is_empty() {
+                let sentinel = "<missing path>".to_string();
+                (
+                    AllowRule::exact(tool, sentinel.clone()),
+                    format!("{tool}({sentinel})"),
+                )
+            } else {
+                (AllowRule::exact(tool, s.clone()), format!("{tool}({s})"))
+            };
+            (s, rule, label)
         }
         // Unknown/future wrapped tools fall back to exact raw-JSON matching
         // instead of whole-tool approval.
@@ -2401,6 +2390,83 @@ mod tests {
         assert!(
             !state.is_pre_allowed("bash", "rm -rf /"),
             "missing-command allow must not bypass a real command"
+        );
+    }
+
+    #[test]
+    fn path_edit_empty_path_always_allow_is_not_a_blanket_bypass() {
+        // (Round-10) The round-9 audit found the empty-pattern match-ALL
+        // false-allow left OPEN for the path-edit sibling arms: a model sending
+        // `{"path": ""}` (explicit empty string, NOT a missing field) resolved
+        // to `s = ""` (absolutize_for_match early-returns ""), which recorded
+        // `AllowRule::exact(tool, "")` — and `AllowRule::matches` treats an
+        // empty pattern as match-ALL (the `self.pattern.is_empty() -> true`
+        // path reserved for `AllowRule::tool_all`). A single "always allow"
+        // on a malformed empty-path write/edit/notebook would silently
+        // pre-approve every future call of that tool against ANY path
+        // (e.g. /etc/passwd, ~/.ssh/id_rsa). The fix records a non-empty
+        // sentinel (`<missing path>`) when the resolved path is empty, so the
+        // rule can never match-all. The matched VALUE stays the real (empty)
+        // path. Covers write/edit/hashline_edit/notebook_edit/notebook_execute.
+        let state = ApprovalState::new();
+        for tool in [
+            "write",
+            "edit",
+            "hashline_edit",
+            "notebook_edit",
+            "notebook_execute",
+        ] {
+            let input = serde_json::json!({"path": ""});
+            let subj = approval_subject(tool, &input);
+            assert_eq!(subj.value, "", "{tool}: value is the real (empty) path");
+            assert!(
+                !subj.suggested_rule.pattern.is_empty(),
+                "{tool}: empty-path rule pattern must NOT be empty (would match-all)"
+            );
+            assert!(
+                !subj.suggested_rule.wildcard,
+                "{tool}: empty-path rule is exact (a sentinel), not a wildcard"
+            );
+            assert_eq!(
+                subj.suggested_rule.pattern, "<missing path>",
+                "{tool}: empty-path rule uses the sentinel pattern"
+            );
+            state.record_always(subj.suggested_rule.clone());
+            // The recorded rule must NOT pre-allow any real path.
+            assert!(
+                !state.is_pre_allowed(tool, "/etc/passwd"),
+                "{tool}: empty-path allow must not bypass a real path"
+            );
+            assert!(
+                !state.is_pre_allowed(tool, "/home/jon/.ssh/id_rsa"),
+                "{tool}: empty-path allow must not bypass the ssh key either"
+            );
+            assert!(
+                !state.is_pre_allowed(tool, ""),
+                "{tool}: empty-path allow does not even match the empty path again"
+            );
+            state.forget(); // reset between tools so they don't accumulate
+        }
+    }
+
+    #[test]
+    fn path_edit_missing_path_uses_safe_sentinel() {
+        // (Round-10) A MISSING path field already fell back to the `<missing
+        // path>` placeholder (non-empty, safe). Pin it so a future refactor of
+        // the placeholder / the path-edit arm doesn't reopen the empty-pattern
+        // hole (mirrors the bash missing-command pin).
+        let state = ApprovalState::new();
+        let input = serde_json::json!({});
+        let subj = approval_subject("write", &input);
+        assert_eq!(subj.value, "<missing path>");
+        assert!(
+            !subj.suggested_rule.pattern.is_empty(),
+            "missing-path rule pattern must not be empty"
+        );
+        state.record_always(subj.suggested_rule);
+        assert!(
+            !state.is_pre_allowed("write", "/etc/passwd"),
+            "missing-path allow must not bypass a real path"
         );
     }
 
