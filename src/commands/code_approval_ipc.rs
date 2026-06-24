@@ -128,6 +128,16 @@ impl ApprovalResponder {
         }
     }
 
+    /// (Round-9) Test-only constructor: build a `Remote` responder from an
+    /// arbitrary `UnixStream` so `app.rs` unit tests can drive
+    /// `handle_approval_key`'s Remote (teammate) arm + assert the pre-modal
+    /// phase is restored. `respond` is best-effort, so a test stream that is
+    /// never read (or already closed) is harmless.
+    #[cfg(test)]
+    pub(crate) fn for_test(conn: UnixStream, id: String) -> Self {
+        Self::new(conn, id)
+    }
+
     /// Send the user's choice to the teammate. Best-effort: a write failure
     /// (the teammate already exited) is silently ignored — the teammate's
     /// blocking read already returned EOF→Deny in that case.

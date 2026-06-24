@@ -306,6 +306,16 @@ pub struct App {
     pub stashed_live: Option<String>,
     /// Approval modal state (if active).
     pub approval: Option<ApprovalModal>,
+    /// (Round-9) The parent's phase BEFORE a teammate (Remote) approval modal
+    /// appeared, saved so resolving the modal RESTORES it instead of clobbering
+    /// to Idle. Without this, a teammate approval arriving DURING a parent
+    /// streaming turn would overwrite `phase` Streaming→Approval, and resolving
+    /// it would set Idle — freezing the spinner + making the still-running
+    /// parent turn uninterruptible (Ctrl+C is gated on `phase == Streaming`).
+    /// `None` outside a Remote modal. The Local (in-process) approval path
+    /// doesn't use this — it always resumes Streaming (the bg thread it unblocks
+    /// IS the parent turn).
+    pub pre_approval_phase: Option<Phase>,
     /// Path to the parent-side approval socket passed to teammate children
     /// via `LIBERTAI_APPROVAL_SOCKET` (Issue-1). `None` if the socket bind
     /// failed (teammates fall back to auto-deny).
@@ -1803,6 +1813,7 @@ pub fn run(
         history_idx: None,
         stashed_live: None,
             approval: None,
+            pre_approval_phase: None,
             approval_socket_path: None,
             ask: None,
             focus: Focus::default(),
@@ -2230,6 +2241,18 @@ fn run_loop(
                         // tool name so it's clear this is a teammate
                         // (background) approval, not the parent turn.
                         let tool_name = format!("[teammate] {}", req.tool);
+                        // (Round-9) Save the parent's phase BEFORE the modal
+                        // clobbers it, so resolving the teammate approval
+                        // RESTORES it (Streaming if the parent was streaming,
+                        // Idle if it was idle) instead of unconditionally
+                        // Idle. Without this, a teammate approval arriving
+                        // mid-stream would freeze the spinner + make the
+                        // still-running parent turn uninterruptible (Ctrl+C
+                        // is gated on phase == Streaming). The guard above
+                        // (`app.approval.is_none()`) means no modal is up, so
+                        // `pre_approval_phase` is currently None (cleared on
+                        // the previous modal's resolution) — safe to overwrite.
+                        app.pre_approval_phase = Some(app.phase);
                         app.approval = Some(ApprovalModal {
                             tool_name,
                             preview: req.preview,
@@ -5668,9 +5691,13 @@ fn handle_approval_key(
             }
             app.phase = Phase::Idle;
         } else {
-            // A teammate approval: the parent phase was Streaming or Idle
-            // before Approval — return to Idle (no parent turn to resume).
-            app.phase = Phase::Idle;
+            // (Round-9) A teammate approval: RESTORE the parent's pre-modal
+            // phase (Streaming if it was streaming, else Idle) instead of
+            // unconditionally Idle — otherwise a teammate approval that
+            // arrived mid-stream would freeze the spinner + make the still-
+            // running parent turn uninterruptible. `pre_approval_phase` was
+            // saved by the IPC poll when the modal appeared.
+            app.phase = app.pre_approval_phase.take().unwrap_or(Phase::Idle);
         }
         return None;
     }
@@ -5691,8 +5718,14 @@ fn handle_approval_key(
     approval.responder.respond(choice);
     // The turn resumes while the background thread processes the choice. For a
     // Local approval the parent turn IS the blocked bg thread → Streaming.
-    // For a Remote (teammate) approval there's no parent turn to resume → Idle.
-    app.phase = if is_remote { Phase::Idle } else { Phase::Streaming };
+    // For a Remote (teammate) approval, RESTORE the parent's pre-modal phase
+    // (Streaming if it was streaming, else Idle) — the teammate is a separate
+    // process; resolving its approval unblocks the teammate, not the parent.
+    app.phase = if is_remote {
+        app.pre_approval_phase.take().unwrap_or(Phase::Idle)
+    } else {
+        Phase::Streaming
+    };
     None
 }
 
@@ -6453,6 +6486,7 @@ mod tests {
             history_idx: None,
             stashed_live: None,
             approval: None,
+            pre_approval_phase: None,
             approval_socket_path: None,
             ask: None,
             focus: Focus::default(),
@@ -8066,6 +8100,174 @@ task = "Do the thing"
             launch.approval_socket_path.as_deref(),
             Some(sock.as_path()),
         );
+    }
+
+    // (Round-9) A teammate (Remote) approval modal that appears DURING a
+    // parent streaming turn must RESTORE the parent's Streaming phase on
+    // resolution — not clobber to Idle. Without the pre_approval_phase
+    // save/restore, resolving the teammate modal mid-stream would freeze the
+    // spinner + make the still-running parent turn uninterruptible (Ctrl+C is
+    // gated on phase == Streaming). These tests drive handle_approval_key's
+    // Remote arm directly: seed pre_approval_phase=Streaming + a Remote
+    // modal, resolve it, assert phase returns to Streaming (not Idle) + the
+    // stash is cleared. Tests all three resolution keys (allow / deny / Esc)
+    // + Ctrl+C.
+    fn remote_approval_modal() -> ApprovalModal {
+        // A dummy connected socket pair — respond() is best-effort, so a
+        // stream nobody reads (or that's closed) is harmless. We only need a
+        // valid Remote responder to exercise the phase-restore arm.
+        let (a, _b) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let responder = crate::commands::code_approval_ipc::ApprovalResponder::for_test(
+            a,
+            "test-req".to_string(),
+        );
+        ApprovalModal {
+            tool_name: "[teammate] bash".to_string(),
+            preview: "bash(echo hi)".to_string(),
+            always_rule: "bash(echo *)".to_string(),
+            responder: ApprovalResponder::Remote(responder),
+        }
+    }
+
+    #[test]
+    fn remote_approval_resolving_restores_streaming_phase() {
+        let mut app = test_app();
+        let (_cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        // Simulate a teammate approval arriving mid-stream: the IPC poll
+        // saved the parent's Streaming phase, then set the Remote modal +
+        // phase=Approval.
+        app.pre_approval_phase = Some(Phase::Streaming);
+        app.phase = Phase::Approval;
+        app.approval = Some(remote_approval_modal());
+
+        let action = handle_approval_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &shared_abort,
+        );
+        assert!(action.is_none());
+        assert_eq!(app.phase, Phase::Streaming, "resolve must RESTORE Streaming, not Idle");
+        assert!(app.approval.is_none(), "modal consumed");
+        assert!(app.pre_approval_phase.is_none(), "stash cleared after restore");
+    }
+
+    #[test]
+    fn remote_approval_deny_restores_streaming_phase() {
+        let mut app = test_app();
+        let (_cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.pre_approval_phase = Some(Phase::Streaming);
+        app.phase = Phase::Approval;
+        app.approval = Some(remote_approval_modal());
+
+        let action = handle_approval_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            &shared_abort,
+        );
+        assert!(action.is_none());
+        assert_eq!(app.phase, Phase::Streaming, "deny must RESTORE Streaming");
+        assert!(app.approval.is_none());
+        assert!(app.pre_approval_phase.is_none());
+    }
+
+    #[test]
+    fn remote_approval_ctrlc_restores_streaming_phase_and_does_not_abort_parent() {
+        let mut app = test_app();
+        let (_cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        // Seed the shared abort slot the way the parent's streaming turn does.
+        // Resolving a REMOTE (teammate) approval with Ctrl+C must NOT fire it
+        // (the teammate is a separate process; the parent turn keeps running).
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        *shared_abort.lock().unwrap() = Some(abort_handle);
+        app.pre_approval_phase = Some(Phase::Streaming);
+        app.phase = Phase::Approval;
+        app.approval = Some(remote_approval_modal());
+
+        let action = handle_approval_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &shared_abort,
+        );
+        assert!(action.is_none());
+        assert!(!abort_signal.is_aborted(), "Ctrl+C on a teammate approval must NOT abort the parent turn");
+        assert!(shared_abort.lock().unwrap().is_some(), "parent abort slot preserved");
+        assert_eq!(app.phase, Phase::Streaming, "Ctrl+C must RESTORE Streaming");
+        assert!(app.approval.is_none());
+        assert!(app.pre_approval_phase.is_none());
+    }
+
+    #[test]
+    fn remote_approval_from_idle_restores_idle_phase() {
+        // The teammate approval arrived while the parent was Idle (no turn).
+        // Resolving it restores Idle (the pre-modal phase), not Streaming.
+        let mut app = test_app();
+        let (_cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.pre_approval_phase = Some(Phase::Idle);
+        app.phase = Phase::Approval;
+        app.approval = Some(remote_approval_modal());
+
+        let _ = handle_approval_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &shared_abort,
+        );
+        assert_eq!(app.phase, Phase::Idle, "resolve from Idle restores Idle");
+        assert!(app.pre_approval_phase.is_none());
+    }
+
+    #[test]
+    fn remote_approval_without_stash_falls_back_to_idle() {
+        // Defensive: if pre_approval_phase was never saved (shouldn't happen
+        // via the IPC poll, but guard against regressions), the Remote arm
+        // falls back to Idle rather than panic.
+        let mut app = test_app();
+        let (_cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.pre_approval_phase = None;
+        app.phase = Phase::Approval;
+        app.approval = Some(remote_approval_modal());
+
+        let _ = handle_approval_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &shared_abort,
+        );
+        assert_eq!(app.phase, Phase::Idle, "no stash -> Idle fallback");
+    }
+
+    #[test]
+    fn local_approval_resolution_goes_streaming_and_ignores_stash() {
+        // The Local (in-process) approval path is UNCHANGED by round 9: the
+        // bg thread it unblocks IS the parent turn, so it always resumes
+        // Streaming. It must NOT consult/restore pre_approval_phase (a stale
+        // stash from a prior Remote modal would wrongly force Idle).
+        let mut app = test_app();
+        let (_cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        // A stale stash left over from a prior teammate modal — the Local arm
+        // must ignore it.
+        app.pre_approval_phase = Some(Phase::Idle);
+        app.phase = Phase::Approval;
+        let (resp_tx, _resp_rx) = mpsc::channel::<PromptChoice>();
+        app.approval = Some(ApprovalModal {
+            tool_name: "bash".to_string(),
+            preview: "bash(echo hi)".to_string(),
+            always_rule: "bash(echo *)".to_string(),
+            responder: ApprovalResponder::Local(resp_tx),
+        });
+
+        let _ = handle_approval_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &shared_abort,
+        );
+        assert_eq!(app.phase, Phase::Streaming, "Local approval resumes Streaming");
+        // The Local arm leaves the stash untouched (it doesn't take() it).
+        assert_eq!(app.pre_approval_phase, Some(Phase::Idle), "Local arm ignores the stash");
     }
 
     #[test]

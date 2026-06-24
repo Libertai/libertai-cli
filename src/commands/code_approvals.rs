@@ -270,11 +270,23 @@ pub fn approval_subject_with_base(
             // no real binary to key on — fall back to an exact rule on the
             // full string (which never matches a real command, so it won't
             // auto-allow anything; the label stays readable).
+            //
+            // (Round-9) The recorded rule's PATTERN must be non-empty: an
+            // empty pattern means `AllowRule::matches` returns true for ANY
+            // command of this tool (`self.pattern.is_empty() -> true`), so
+            // "always allow" on a genuinely-empty bash command
+            // (`{"command": ""}`) would silently grant a blanket bash bypass.
+            // Use a sentinel that no real command matches. The matched VALUE
+            // stays the real command (`s`, even if empty) — only the recorded
+            // rule narrows to the sentinel. (Pre-existing latent: the empty-
+            // pattern = match-all `matches()` semantics is intentional via
+            // `AllowRule::tool_all`, but this fallback arm must not reach it.)
             let no_real_binary = cmd.trim().is_empty()
                 || first_token.is_empty()
                 || first_token == "<missing";
             let (rule, label) = if no_real_binary {
-                (AllowRule::exact(tool, s.clone()), format!("bash({s})"))
+                let rule_pattern = if s.is_empty() { "<no command>".to_string() } else { s.clone() };
+                (AllowRule::exact(tool, rule_pattern.clone()), format!("bash({rule_pattern})"))
             } else if cmd_trimmed_has_args(cmd) {
                 (
                     AllowRule::wildcard(tool, format!("{first_token} *")),
@@ -2335,6 +2347,64 @@ mod tests {
     }
 
     #[test]
+    fn bash_empty_command_always_allow_is_not_a_blanket_bypass() {
+        // (Round-9) A genuinely-empty bash command (`{"command": ""}`) has no
+        // binary to key on, so "always allow" falls to the no-real-binary
+        // arm. The recorded rule's pattern MUST be non-empty: an empty
+        // pattern means `AllowRule::matches` returns true for ANY bash
+        // command (the `self.pattern.is_empty() -> true` path reserved for
+        // `AllowRule::tool_all`), which would silently grant a blanket bash
+        // bypass. The fix records a sentinel (`<no command>`) that no real
+        // command matches. The matched VALUE stays the real (empty) command.
+        let state = ApprovalState::new();
+        let input = serde_json::json!({"command": ""});
+        let subj = approval_subject("bash", &input);
+        assert_eq!(subj.value, "", "value is the real (empty) command");
+        assert!(
+            !subj.suggested_rule.wildcard,
+            "empty-command rule is exact (a sentinel), not a wildcard"
+        );
+        assert!(
+            !subj.suggested_rule.pattern.is_empty(),
+            "empty-command rule pattern must NOT be empty (would match-all)"
+        );
+        state.record_always(subj.suggested_rule);
+        // The recorded rule must NOT pre-allow any real bash command.
+        assert!(
+            !state.is_pre_allowed("bash", "rm -rf /"),
+            "empty-command allow must not bypass a real command"
+        );
+        assert!(
+            !state.is_pre_allowed("bash", "echo hi"),
+            "empty-command allow must not bypass echo either"
+        );
+        assert!(
+            !state.is_pre_allowed("bash", ""),
+            "empty-command allow does not even match the empty command again"
+        );
+    }
+
+    #[test]
+    fn bash_missing_command_always_allow_is_not_a_blanket_bypass() {
+        // (Round-9) A MISSING command field falls back to the `<missing
+        // command>` placeholder (non-empty), so its rule is already safe —
+        // but pin it so a future refactor of the placeholder doesn't reopen
+        // the empty-pattern hole. The rule must not match-all.
+        let state = ApprovalState::new();
+        let input = serde_json::json!({});
+        let subj = approval_subject("bash", &input);
+        assert!(
+            !subj.suggested_rule.pattern.is_empty(),
+            "missing-command rule pattern must not be empty"
+        );
+        state.record_always(subj.suggested_rule);
+        assert!(
+            !state.is_pre_allowed("bash", "rm -rf /"),
+            "missing-command allow must not bypass a real command"
+        );
+    }
+
+    #[test]
     fn subject_write_extracts_path() {
         let input = serde_json::json!({"path": "src/main.rs", "content": "..."});
         let subj = approval_subject("write", &input);
@@ -2601,3 +2671,5 @@ scope = "session"
         assert!(!state.is_pre_allowed("bash", "echo bye"));
     }
 }
+
+
