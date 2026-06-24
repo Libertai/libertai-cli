@@ -1773,6 +1773,67 @@ mod tests {
         let _ = std::fs::remove_file(&stray_prefix);
     }
 
+    // --- R6HUNT-1: startup sweep reaps cross-restart stale logs -----------------
+
+    // (R6HUNT-1) A prior session that HARD-CRASHED (no Drop ran) leaves stale
+    // subagent logs on disk. The per-subagent log name is
+    // subagent-{millis}-{seq}-{name}.log where seq is a process-wide
+    // AtomicU64 (SUBAGENT_SEQ) that RESETS to 0 on every restart, so the
+    // effective cross-restart key is millis + name. A fresh session's first
+    // same-named subagent created in the same 1ms window would collide on the
+    // path + (append-only open) append onto the stale file, corrupting the
+    // overlay. The fix: app::run calls cleanup_subagent_logs() at STARTUP
+    // (before run_loop) to reap stale logs first. This test seeds a stale log
+    // with the EXACT cross-restart-collision name shape a prior crashed session
+    // would leave (millis=1700000000000, seq=0 — the fresh process's first
+    // subagent's seq), plus a non-conforming file, into an ISOLATED temp dir,
+    // then calls sweep_subagent_logs_in (the exact function cleanup_subagent_logs
+    // delegates to at startup), and asserts the stale log IS reaped while
+    // non-conforming files SURVIVE — pinning that the startup sweep closes the
+    // collision window without harming user files. Uses a temp dir (not the
+    // real subagent_log_dir) so it doesn't race with the other tests that
+    // share the real config dir.
+    #[test]
+    fn r6hunt1_startup_sweep_reaps_cross_restart_stale_log() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().to_path_buf();
+        // A stale log a prior HARD-CRASHED session left behind. The exact
+        // cross-restart-collision shape: a prior session's seq reset to 0 is
+        // indistinguishable from THIS process's first subagent's seq=0, and if
+        // the millis + name coincide, create_subagent_log_file (append-only)
+        // would append onto this file. The startup sweep must reap it first.
+        let stale = dir.join("subagent-1700000000000-0-researcher.log");
+        std::fs::write(&stale, b"prior crashed session\n").expect("seed stale log");
+        assert!(stale.exists(), "stale log seeded");
+        // A second stale log with a different name — also reaped (all
+        // subagent-*.log are swept, not just collisions).
+        let stale2 = dir.join("subagent-1700000000001-1-coder.log");
+        std::fs::write(&stale2, b"another stale log\n").expect("seed stale2");
+        // Non-conforming files a user/tool might drop — must SURVIVE the
+        // startup sweep (R5HUNT-2 name guard).
+        let notes = dir.join("NOTES.md");
+        let stray_prefix = dir.join("subagent-notes.txt"); // prefix but no .log
+        std::fs::write(&notes, b"keep me").expect("seed notes");
+        std::fs::write(&stray_prefix, b"keep me").expect("seed stray_prefix");
+
+        // The startup sweep app::run performs — cleanup_subagent_logs() is
+        // exactly `subagent_log_dir().map(sweep_subagent_logs_in)`, so this
+        // exercises the identical sweep logic against an isolated dir.
+        sweep_subagent_logs_in(&dir);
+
+        // Both stale subagent logs are reaped — the cross-restart collision
+        // window is closed before create_subagent_log_file can append to them.
+        assert!(!stale.exists(), "R6HUNT-1: stale cross-restart log reaped at startup");
+        assert!(stale2.exists() == false, "R6HUNT-1: second stale log reaped at startup");
+        // Non-conforming files SURVIVE (R5HUNT-2 name guard honored at startup).
+        assert!(notes.exists(), "R6HUNT-1: NOTES.md survives the startup sweep");
+        assert!(
+            stray_prefix.exists(),
+            "R6HUNT-1: subagent-notes.txt survives the startup sweep"
+        );
+        // The temp dir cleans itself up on drop.
+    }
+
     // --- R5-HUNT-A: panic-safe teardown Drop guard ------------------------------
 
     // (R5-HUNT-A) The subagent-log teardown sweep MUST run even when `run_loop`

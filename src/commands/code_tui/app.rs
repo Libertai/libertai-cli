@@ -1632,6 +1632,30 @@ pub fn run(
     // it reaps leftover logs from a prior crashed session.
     let _log_sweeper = crate::commands::code_task::SubagentLogSweeper::new();
 
+    // (R6HUNT-1) STARTUP sweep: reap stale subagent logs from a prior HARD-
+    // CRASHED session BEFORE any new subagent log can be created. The
+    // teardown-only sweep above (guard Drop + the explicit call after
+    // run_loop) covers the normal + panic exit paths but NOT a prior session
+    // that crashed so hard no Drop ran — its stale logs linger on disk. The
+    // per-subagent log name is subagent-{millis}-{seq}-{name}.log where seq is
+    // a process-wide AtomicU64 (SUBAGENT_SEQ, code_task.rs:760) that RESETS to
+    // 0 on every process restart — so the effective cross-restart key is just
+    // millis + name. A fresh session's first same-named subagent created in
+    // the same 1ms wall-clock window as a stale log would collide on the path,
+    // and since create_subagent_log_file opens APPEND-only (no truncate), the
+    // new session's typed markers would append onto the prior session's stale
+    // file — corrupting the overlay (stale lines rendered as dim System
+    // entries, R6HUNT-1). This one startup sweep removes every stale
+    // subagent-*.log BEFORE run_loop, closing the cross-restart collision
+    // window entirely. It runs before enable_raw_mode? below, so it fires on
+    // EVERY session start (including the success path the teardown-only sweep
+    // misses). It is idempotent (R5HUNT-2 name-guarded) + panic-safe (no
+    // unwrapping constructs), so on a clean prior shutdown (dir already empty)
+    // it's a harmless no-op. Belt-and-suspenders: the (pid) axis would also
+    // rule out cross-restart collision if folded into the filename, but this
+    // startup sweep is the higher-value, lower-risk fix and is sufficient.
+    crate::commands::code_task::cleanup_subagent_logs();
+
     // Set up terminal — guard created first so any early-return
     // between enable_raw_mode and the end of run_loop is cleaned up.
     let mut guard = TerminalGuard::new(true);
