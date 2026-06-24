@@ -474,6 +474,26 @@ pub struct AgentOverlay {
     /// overlay is (re)opened so the first draw always populates it.
     pub cached_log_meta: Option<(std::time::SystemTime, u64)>,
     pub cached_log_lines: Vec<String>,
+    /// (R4HUNT-2) Cached TYPED entries for a subagent's marker log, mirroring
+    /// `cached_log_lines` (the flat-stdout cache) but holding the re-parsed
+    /// `TranscriptEntry` variants. Pairs with `cached_log_meta` (the same
+    /// mtime/size gate): when the file is unchanged since the last read, the
+    /// typed overlay re-uses these instead of re-reading + re-parsing the
+    /// markers on every 80ms redraw tick. Invalidated to `None` on (re)open
+    /// (the cache must be keyed by the SAME mtime/size the flat path uses, so
+    /// only one of the two entry caches is populated at a time — the typed
+    /// path clears the flat cache and vice-versa).
+    pub cached_typed_entries: Option<Vec<TranscriptEntry>>,
+    /// (R4HUNT-3) The log file path captured from the agent handle WHEN the
+    /// overlay opens. Stored on the overlay (not re-resolved from the
+    /// registry on every read) so a COMPLETED in-process subagent's overlay
+    /// keeps reading its log even after `execute`'s success arm calls
+    /// `registry.remove` (which makes the handle — and its `log_path` —
+    /// unreachable from the registry). The success path now DEFERS log
+    /// deletion to session teardown (R4HUNT-3), so the file persists here.
+    /// `None` for an agent that had no log path at open time (the in-memory
+    /// `agent_transcript_from_memory` path is used instead).
+    pub log_path: Option<PathBuf>,
 }
 
 impl Default for AgentOverlay {
@@ -488,6 +508,8 @@ impl Default for AgentOverlay {
             max_scroll: u16::MAX,
             cached_log_meta: None,
             cached_log_lines: Vec::new(),
+            cached_typed_entries: None,
+            log_path: None,
         }
     }
 }
@@ -1760,6 +1782,13 @@ pub fn run(
     // Run the event loop.
     let result = run_loop(&mut guard, &mut app, agent_rx, cmd_tx, &shared_abort);
 
+    // (R4HUNT-3) Session teardown: sweep the deferred subagent log files.
+    // The SUCCESS-path subagent logs are intentionally kept until teardown
+    // (not deleted on completion) so a COMPLETED subagent's overlay keeps
+    // its final output. Remove them all here once the loop exits — best-
+    // effort; a missing dir or unreadable file is silently ignored.
+    crate::commands::code_task::cleanup_subagent_logs();
+
     // Restore terminal (also done by guard on drop, but do it explicitly
     // on the success path so `result` is returned after cleanup). Drop the
     // paste guard first so `DisableBracketedPaste` is emitted while still in
@@ -2221,16 +2250,28 @@ fn handle_key(
     // palette/overlay open the dedicated handler's now-printable-gated `_ =>`
     // arm ignores Ctrl+C (no corruption, no close; the user can Esc to close
     // the overlay), and with NO overlay open the fall-through reaches the
-    // main-match arm which quits. Crucially the intercept does NOT close the
-    // open palette/overlay after aborting — same as the main-match Ctrl+C arm
-    // (it touches neither `slash_palette` nor `diff_view` nor `agent_overlay`),
-    // so the user can Esc to dismiss it. Ctrl+C is purely an interrupt here.
-    // Only the Streaming case returns early (abort + Idle). The Idle case is
-    // intentionally NOT an early return: it falls through so the key reaches the
-    // palette/overlay guard (ignored, no corruption) or, with no overlay open,
-    // the main-match Ctrl+C arm (quit). Combining the two conditions into one
-    // `if` (rather than nesting) keeps clippy's `collapsible_if` happy and makes
-    // the early-return intent explicit.
+    // main-match arm which quits.
+    //
+    // (R5-CTRLC-OVERLAY-DIVERGE) Unlike the main-match Ctrl+C arm, the
+    // Streaming intercept ALSO closes any open overlay/palette after aborting.
+    // This diverges from Esc's semantics on purpose: while streaming with an
+    // overlay open, Esc routes to the overlay handler (it closes the overlay
+    // but does NOT stop the turn — the Esc-to-stop arm at ~2395 is unreachable
+    // while an overlay is open), so Esc -> overlay closed, turn keeps
+    // streaming. Ctrl+C is the user's "interrupt everything" gesture: it stops
+    // the turn AND dismisses the foreground surface, matching the mental model
+    // that an interrupt clears the foreground. Without the close, a Ctrl+C
+    // would leave the palette/diff/agent overlay lingering over the now-Idle
+    // screen — a pure UX inconsistency (no corruption: overlays render purely
+    // on `is_some()`, view.rs:~74-87). Pending diff state is cleared too so a
+    // half-staged `/diff` doesn't reopen the viewer later. Idle Ctrl+C is
+    // unaffected (it falls through, closing nothing).
+    // Only the Streaming case returns early (abort + Idle + close). The Idle
+    // case is intentionally NOT an early return: it falls through so the key
+    // reaches the palette/overlay guard (ignored, no corruption) or, with no
+    // overlay open, the main-match Ctrl+C arm (quit). Combining the two
+    // conditions into one `if` (rather than nesting) keeps clippy's
+    // `collapsible_if` happy and makes the early-return intent explicit.
     if key.code == KeyCode::Char('c')
         && key.modifiers == KeyModifiers::CONTROL
         && app.phase == Phase::Streaming
@@ -2246,6 +2287,14 @@ fn handle_key(
             abort.abort();
         }
         app.phase = Phase::Idle;
+        // (R5-CTRLC-OVERLAY-DIVERGE) An interrupt also dismisses any open
+        // foreground surface so a single Ctrl+C both stops the turn and clears
+        // the overlay/palette (Esc closes the overlay but keeps streaming).
+        app.slash_palette = None;
+        app.diff_view = None;
+        app.pending_diff = None;
+        app.agent_overlay = None;
+        app.set_dirty();
         return None;
     }
     // (Ctrl+C in Idle falls through here — see the comment above the guard.)
@@ -2347,6 +2396,12 @@ fn handle_key(
                 if let Some(handle) = agents.get(app.agent_selection) {
                     app.agent_overlay = Some(AgentOverlay {
                         agent_name: handle.name.clone(),
+                        // (R4HUNT-3) Capture the log path at open time so the
+                        // overlay keeps reading a COMPLETED in-process
+                        // subagent's log after registry.remove (the handle's
+                        // log_path becomes unreachable from the registry on
+                        // the success path).
+                        log_path: handle.log_path.clone(),
                         scroll: 0,
                         follow: true,
                         ..Default::default()
@@ -3234,7 +3289,14 @@ fn handle_slash_palette_key(
         KeyCode::Char('o')
             if key.modifiers == KeyModifiers::CONTROL && app.phase == Phase::Idle =>
         {
+            // (PALETTE-CTRL-O-LEAK) Clear the textarea BEFORE returning, mirroring
+            // the Esc arm. Without this the filter text (e.g. "/cl") stays in the
+            // textarea, and `open_external_editor` seeds the temp file from
+            // `app.textarea.lines().join("\n")` and writes the edited text back —
+            // leaking the filter into the main input bar as a literal slash command.
+            // Clearing opens the editor on an empty buffer + leaves the main bar clean.
             app.slash_palette = None;
+            set_textarea_text(&mut app.textarea, "");
             app.set_dirty();
             Some(Action::OpenEditor)
         }
@@ -3249,25 +3311,56 @@ fn handle_slash_palette_key(
         // clamp `selected` to the new filtered length so an unclamped index
         // can't drift past the (now-shrunk) filtered list for a render.
         //
-        // CRITICAL: feed ONLY a Char with NO modifier. tui-textarea-2's
-        // `input()` ACTIVELY INTERPRETS Ctrl-combos — Ctrl+M inserts a newline
-        // into the filter, Ctrl+H/D/W delete filter chars, etc. — silently
-        // corrupting the filter (PALETTE-CTRL-CORRUPT). So a Ctrl-combo must
-        // NOT be fed. Ctrl+C is handled by the top-of-handle_key intercept
-        // (PART A) BEFORE this handler is even called, and Ctrl+O is handled by
-        // the explicit arm above; other non-printable/Ctrl keys (arrows,
-        // PageUp/Down, F-keys, …) are already matched by earlier arms or are
-        // ignored here. `key.modifiers == KeyModifiers::NONE` also rejects
-        // Shift+chars / Alt+chars so only a plain typed letter feeds the
-        // filter (matches the round-3 typing test, which uses a bare 'c').
+        // CRITICAL: feed ONLY keys with NO modifier that tui-textarea-2
+        // interprets as filter-affecting/caret ops. tui-textarea-2's `input()`
+        // ACTIVELY INTERPRETS Ctrl-combos — Ctrl+M inserts a newline into the
+        // filter, Ctrl+H/D/W delete filter chars, etc. — silently corrupting the
+        // filter (PALETTE-CTRL-CORRUPT). So a Ctrl-combo must NOT be fed. Ctrl+C
+        // is handled by the top-of-handle_key intercept (PART A) BEFORE this
+        // handler is even called, and Ctrl+O is handled by the explicit arm
+        // above; `key.modifiers == KeyModifiers::NONE` also rejects Shift+chars
+        // / Alt+chars so only a plain typed letter feeds the filter (matches the
+        // round-3 typing test, which uses a bare 'c').
+        //
+        // (PALETTE-GATE-DROPS-HOME-END-DELETE) The round-4 gate fed ONLY
+        // `Char(_)`. tui-textarea-2 also interprets Home -> cursor-to-line-start,
+        // End -> cursor-to-line-end, and Delete -> forward-delete (each with NO
+        // modifier), so those fell to the `None` return and were DROPPED — the
+        // user lost filter caret-jump + forward-delete, while the main input bar
+        // (catch-all ~2555-2557) fed them unconditionally. Now we feed all three
+        // too, but SPLIT the post-feed handling:
+        //   - Char(_) + Delete CHANGE the filter text -> re-check the leading-'/'
+        //     invariant (close the palette if the '/' was deleted) + clamp
+        //     `selected` to the new filtered length (mirroring the Backspace arm).
+        //   - Home + End MOVE the caret but DON'T change the filter text -> only
+        //     `set_dirty()` (to redraw the caret); the leading-'/' re-check +
+        //     `clamp_palette_selected` would be no-ops against unchanged text, so
+        //     they're skipped to avoid a needless filtered-list recompute.
+        // The NONE-modifier guard is kept on ALL three (Home/End/Delete) so
+        // Ctrl+Home/Ctrl+End/Ctrl+D stay excluded (those are different ops /
+        // Ctrl-combos that must not corrupt the filter).
         _ => {
-            if key.modifiers == KeyModifiers::NONE && matches!(key.code, KeyCode::Char(_)) {
+            if key.modifiers == KeyModifiers::NONE
+                && matches!(
+                    key.code,
+                    KeyCode::Char(_) | KeyCode::Home | KeyCode::End | KeyCode::Delete
+                )
+            {
                 app.textarea.input(key);
-                let text = app.textarea.lines().join("");
-                if !text.starts_with('/') {
-                    app.slash_palette = None;
-                } else {
-                    clamp_palette_selected(app);
+                match key.code {
+                    // Filter-text-changing keys: re-check '/' + clamp, mirroring
+                    // the Backspace arm.
+                    KeyCode::Char(_) | KeyCode::Delete => {
+                        let text = app.textarea.lines().join("");
+                        if !text.starts_with('/') {
+                            app.slash_palette = None;
+                        } else {
+                            clamp_palette_selected(app);
+                        }
+                    }
+                    // Caret-move keys: text unchanged, just redraw the caret.
+                    KeyCode::Home | KeyCode::End => {}
+                    _ => {}
                 }
                 app.set_dirty();
             }
@@ -3317,11 +3410,16 @@ fn clamp_palette_selected(app: &mut App) {
 /// dropped the results and lost the coloring.
 pub fn agent_transcript(app: &App, agent_name: &str) -> Vec<TranscriptEntry> {
     // If this agent has a log file, read it — that's the authoritative
-    // output for background agents / teammates. Wrap each raw stdout/stderr
-    // line as a dim System entry so the overlay renders it uniformly
-    // (the log is already the final-formatted text, so dim styling fits).
+    // output. (R4HUNT-2) For a Subagent-kind handle, re-parse the TYPED
+    // markers so the per-variant overlay rendering (agent-colored markers,
+    // ↳ result line, theme::error) is preserved instead of flattening to dim
+    // System lines. For Background/Teammate handles, the log is raw stdout —
+    // keep the flat System path.
     if let Some(handle) = app.registry.find_by_name(agent_name) {
         if let Some(log_path) = &handle.log_path {
+            if matches!(handle.kind, AgentKind::Subagent { .. }) {
+                return read_agent_log_typed(log_path);
+            }
             return read_agent_log(log_path)
                 .into_iter()
                 .map(TranscriptEntry::System)
@@ -3330,6 +3428,33 @@ pub fn agent_transcript(app: &App, agent_name: &str) -> Vec<TranscriptEntry> {
     }
 
     agent_transcript_from_memory(&app.transcript, agent_name)
+}
+
+/// (R4HUNT-2) Decide whether `log_path` is a typed-markers subagent log (read
+/// via `read_agent_log_typed`) vs a flat background/teammate stdout log (read
+/// via `read_agent_log_cached`). True when either the live registry handle
+/// for `agent_name` is `AgentKind::Subagent` (still-registered), OR the path
+/// lives under the `code-subagents/` dir (R4HUNT-4) — the latter covers a
+/// COMPLETED subagent whose registry entry was removed on the success path
+/// (R4HUNT-3) so `find_by_name` returns None but the overlay's captured
+/// `log_path` still points into the subagents dir.
+fn subagent_log_kind(registry: &AgentRegistry, agent_name: &str, log_path: &std::path::Path) -> bool {
+    if let Some(handle) = registry.find_by_name(agent_name) {
+        if matches!(handle.kind, AgentKind::Subagent { .. }) {
+            return true;
+        }
+    }
+    // Path-based classification (covers a removed completed subagent): the
+    // subagent log dir is a sibling of code-background-agents/, so compare
+    // the path's parent directory against it. Defensive: a relative test
+    // path may not match; that's fine (it falls through to the flat reader,
+    // which is the pre-R4HUNT-2 behaviour).
+    if let Ok(dir) = crate::commands::code_task::subagent_log_dir() {
+        if let Some(parent) = log_path.parent() {
+            return parent == dir.as_path();
+        }
+    }
+    false
 }
 
 /// (MED-6 + R2 perf) Like [`agent_transcript`] but reads the agent's log file
@@ -3350,9 +3475,37 @@ pub fn agent_transcript_for_overlay(
     transcript: &[TranscriptEntry],
     overlay: &mut AgentOverlay,
 ) -> Vec<TranscriptEntry> {
+    // (R4HUNT-3) Prefer the log path captured on the overlay at open time —
+    // a COMPLETED in-process subagent's registry entry is removed on the
+    // success path (so the overlay can't be RE-opened), making the handle
+    // unreachable from `find_by_name`. The overlay's own `log_path` survives
+    // that removal, so the read keeps working.
+    //
+    // (R4HUNT-2) For a Subagent-kind handle/overlay, re-parse the log's TYPED
+    // markers (via `read_agent_log_typed`) so the overlay keeps the per-
+    // variant rendering (agent-colored markers, ↳ result line, theme::error)
+    // instead of a flat dim-System dump. For Background/Teammate handles the
+    // log is raw stdout — keep the flat `read_agent_log_cached` → System path.
+    //
+    // First: the overlay's captured path (clone it so the `&mut overlay` for
+    // the cached reader isn't blocked by an immutable borrow of the field).
+    if let Some(log_path) = overlay.log_path.clone() {
+        if subagent_log_kind(registry, &overlay.agent_name, &log_path) {
+            return read_agent_log_typed_cached(overlay, &log_path);
+        }
+        return read_agent_log_cached(overlay, &log_path)
+            .into_iter()
+            .map(TranscriptEntry::System)
+            .collect();
+    }
+    // Then: a live registry handle's path (overlay opened before R4HUNT-3
+    // captured the path, or a background agent opened directly).
     if let Some(handle) = registry.find_by_name(&overlay.agent_name) {
-        if let Some(log_path) = &handle.log_path {
-            return read_agent_log_cached(overlay, log_path)
+        if let Some(log_path) = handle.log_path.clone() {
+            if matches!(handle.kind, AgentKind::Subagent { .. }) {
+                return read_agent_log_typed_cached(overlay, &log_path);
+            }
+            return read_agent_log_cached(overlay, &log_path)
                 .into_iter()
                 .map(TranscriptEntry::System)
                 .collect();
@@ -3509,6 +3662,9 @@ fn read_agent_log_cached(overlay: &mut AgentOverlay, log_path: &std::path::Path)
         let lines = read_agent_log(log_path);
         overlay.cached_log_meta = Some((mtime, size));
         overlay.cached_log_lines = lines.clone();
+        // (R4HUNT-2) Invalidate the typed cache so a cross-kind switch can't
+        // serve stale typed entries for a flat stdout log.
+        overlay.cached_typed_entries = None;
         lines
     } else {
         // Missing or unreadable file: invalidate the cache and return empty
@@ -3517,27 +3673,112 @@ fn read_agent_log_cached(overlay: &mut AgentOverlay, log_path: &std::path::Path)
         // agent starts writing.
         overlay.cached_log_meta = None;
         overlay.cached_log_lines = Vec::new();
+        overlay.cached_typed_entries = None;
         Vec::new()
     }
 }
 
-/// (R4-1) Append a line to the in-process subagent's per-agent log file
-/// (created at registration in `code_task::create_subagent_log_file`).
-/// The overlay reads this file via [`read_agent_log_cached`] so a still-
-/// running subagent's history survives the 5000-entry transcript ring
-/// evicting its earliest entries on a long session.
+/// (R4-1 + R4HUNT-2) One typed record written to an in-process subagent's
+/// log file. The overlay re-parses these into the per-variant
+/// [`TranscriptEntry`] shapes (agent-colored markers, `↳` result line,
+/// `theme::error` on `is_error`) that R4-1's RAW-text `append_subagent_log`
+/// had discarded (flattening everything to `TranscriptEntry::System`). The
+/// marker wire format is a single line `\x1e<kind>\x1f<json-payload>\n`
+/// (see [`subagent_log_marker`]); a non-marker line is treated as a legacy
+/// `System` entry for back-compat with logs written before this fix.
+#[derive(Debug, Clone)]
+enum SubagentLogRecord {
+    /// Streamed text delta (concatenates naturally; consecutive `text`
+    /// records from the same agent render as one SubagentText block by the
+    /// scrollback renderer, same as the in-memory path).
+    Text { agent: String, text: String },
+    /// Tool-start marker. `args` is the tool's argument JSON (kept so the
+    /// overlay renderer can reuse `tool_preview` instead of re-parsing).
+    Tool { agent: String, tool: String, args: serde_json::Value },
+    /// Per-tool result line. `output` is the rendered output body; `tool`
+    /// is the bare tool name (the `{agent} · ` prefix is reconstructed by
+    /// the overlay renderer, mirroring `agent_transcript_from_memory`).
+    ToolResult { agent: String, tool: String, output: String, is_error: bool },
+    /// Terminal state. `outcome` is the typed [`SubagentOutcome`].
+    End { agent: String, outcome: SubagentOutcome },
+}
+
+/// (R4HUNT-2) Marker kind tag written into the log line. Kept short +
+/// stable so the parser can match it exactly; the JSON payload carries the
+/// record-specific fields.
+const SUBAGENT_LOG_REC_SEP: char = '\x1e'; // record separator
+const SUBAGENT_LOG_FIELD_SEP: char = '\x1f'; // unit separator
+
+impl SubagentLogRecord {
+    /// The single-letter-ish kind tag for the marker line.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Text { .. } => "text",
+            Self::Tool { .. } => "tool",
+            Self::ToolResult { .. } => "toolresult",
+            Self::End { .. } => "end",
+        }
+    }
+
+    /// The JSON payload (record-specific fields). `agent` is included so a
+    /// single re-parsed entry is self-describing (the overlay is scoped to
+    /// one agent by name, but carrying it keeps the format uniform + lets a
+    /// future mixed-agent log re-parse correctly).
+    fn payload(&self) -> serde_json::Value {
+        match self {
+            Self::Text { agent, text } => serde_json::json!({ "agent": agent, "text": text }),
+            Self::Tool { agent, tool, args } => {
+                serde_json::json!({ "agent": agent, "tool": tool, "args": args })
+            }
+            Self::ToolResult { agent, tool, output, is_error } => serde_json::json!({
+                "agent": agent,
+                "tool": tool,
+                "output": output,
+                "is_error": is_error,
+            }),
+            Self::End { agent, outcome } => {
+                let label = match outcome {
+                    SubagentOutcome::Completed => "completed",
+                    SubagentOutcome::Failed => "failed",
+                    SubagentOutcome::Stopped => "stopped",
+                };
+                serde_json::json!({ "agent": agent, "outcome": label })
+            }
+        }
+    }
+
+    /// Encode as one marker line: `\x1e<kind>\x1f<json>\n`. The record + field
+    /// separators can't appear inside a compact JSON string (`\x1e`/`\x1f`
+    /// would be ``/``-escaped by serde), so the parser splits
+    /// cleanly on the first `\x1f`.
+    fn marker_line(&self) -> String {
+        format!(
+            "{SUBAGENT_LOG_REC_SEP}{kind}{SUBAGENT_LOG_FIELD_SEP}{payload}\n",
+            kind = self.kind(),
+            payload = self.payload(),
+        )
+    }
+}
+
+/// (R4HUNT-2) Append a TYPED record to the in-process subagent's per-agent
+/// log file (created at registration in `code_task::create_subagent_log_file`).
+/// The overlay re-parses these via [`read_agent_log_typed`] so a still-running
+/// OR completed subagent's history survives the 5000-entry transcript ring
+/// evicting its earliest entries on a long session AND keeps the per-variant
+/// overlay rendering (the R4-1 raw-text writer flattened everything to dim
+/// `System` lines, discarding the typed markers).
 ///
-/// Called from the `Subagent*` arms of [`handle_agent_msg`] on the main
-/// thread (between draws), so the write satisfies the out-of-band stdout
-/// constraint. The `log_path` is per-handle (no shared mutation); a failed
-/// append is best-effort and MUST NOT crash the turn — mirroring
-/// [`read_agent_log`]'s error handling (returns empty on read failure).
-/// Only appends when the handle has a `log_path` (in-process subagents
-/// after the R4-1 fix); background agents / teammates write their log
-/// via the child process's stdout redirect, so this is a no-op for them.
-fn append_subagent_log(registry: &AgentRegistry, agent_name: &str, line: &str) {
+/// Called from the `Subagent*` arms of [`handle_agent_msg`] on the main thread
+/// (between draws), so the write satisfies the out-of-band stdout constraint.
+/// The `log_path` is per-handle (no shared mutation); a failed append is
+/// best-effort and MUST NOT crash the turn — mirroring [`read_agent_log`]'s
+/// error handling (returns empty on read failure). Only appends when the
+/// handle has a `log_path` (in-process subagents after the R4-1 fix);
+/// background agents / teammates write their log via the child process's
+/// stdout redirect, so this is a no-op for them.
+fn append_subagent_log_typed(registry: &AgentRegistry, record: &SubagentLogRecord) {
     use std::io::Write;
-    let Some(handle) = registry.find_by_name(agent_name) else {
+    let Some(handle) = registry.find_by_name(&record_agent_name(record)) else {
         return;
     };
     let Some(log_path) = handle.log_path.as_ref() else {
@@ -3558,7 +3799,190 @@ fn append_subagent_log(registry: &AgentRegistry, agent_name: &str, line: &str) {
     // Best-effort: a failed write is ignored (the overlay will show whatever
     // was last successfully flushed). Never propagate `io::Error` to the caller
     // — a logging failure must not crash the turn.
-    let _ = file.write_all(line.as_bytes());
+    let _ = file.write_all(record.marker_line().as_bytes());
+}
+
+/// (R4HUNT-2) Borrow the agent name out of a record (avoids duplicating the
+/// `find_by_name` lookup pattern across the four variants).
+fn record_agent_name(record: &SubagentLogRecord) -> String {
+    match record {
+        SubagentLogRecord::Text { agent, .. }
+        | SubagentLogRecord::Tool { agent, .. }
+        | SubagentLogRecord::ToolResult { agent, .. }
+        | SubagentLogRecord::End { agent, .. } => agent.clone(),
+    }
+}
+
+/// (R4HUNT-2) Read an in-process subagent's typed log file and re-constitute
+/// the per-variant [`TranscriptEntry`] shapes, mirroring
+/// [`agent_transcript_from_memory`]'s match arms (agent-colored `SubagentText`
+/// / `SubagentTool` / `SubagentEnd` + per-tool `ToolResult`). The wire format
+/// is `\x1e<kind>\x1f<json>\n` per line (see [`SubagentLogRecord::marker_line`]).
+///
+/// Back-compat: a line that is NOT a marker (no leading `\x1e`, or a malformed
+/// payload) is treated as a legacy raw-text line and wrapped as
+/// `TranscriptEntry::System` — so a log written before this fix (raw text from
+/// R4-1's writer) and a post-fix typed log BOTH parse, including across a
+/// session that spans the upgrade. Do NOT break the existing
+/// [`read_agent_log`] (Background/Teammate flat-stdout) callers — they still
+/// read flat stdout + map to `System`.
+///
+/// Output is capped at the LAST [`MAX_AGENT_LOG_LINES`] lines (the tail),
+/// same bound as [`read_agent_log`]; the cap is applied AFTER parsing so a
+/// legacy `System` line that splits across the truncation boundary is
+/// dropped wholesale (we never split a marker line mid-record).
+fn read_agent_log_typed(log_path: &std::path::Path) -> Vec<TranscriptEntry> {
+    // Reuse the seek-based tail read + the MAX_AGENT_LOG_LINES cap so the
+    // typed reader has the same O(tail) cost + line bound as the flat reader.
+    let max_bytes = MAX_AGENT_LOG_LINES.saturating_mul(EST_LINE_WIDTH);
+    let content = match read_log_tail(log_path, max_bytes) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let prefix = format!("[truncated to last {max_bytes} bytes]\n");
+    let (tail, byte_truncated) = if let Some(rest) = content.strip_prefix(&prefix) {
+        (rest.to_string(), true)
+    } else {
+        (content, false)
+    };
+    let mut lines: Vec<&str> = tail.lines().collect();
+    if byte_truncated || lines.len() > MAX_AGENT_LOG_LINES {
+        let start = lines.len().saturating_sub(MAX_AGENT_LOG_LINES);
+        lines = lines.split_off(start);
+    }
+    let mut entries = Vec::with_capacity(lines.len());
+    for line in lines {
+        // Split off the kind tag + JSON payload on the FIRST `\x1f`. The
+        // record separator must be the very first char; otherwise it's a
+        // legacy raw-text line.
+        let Some(rest) = line.strip_prefix(SUBAGENT_LOG_REC_SEP) else {
+            // Legacy raw-text line (pre-R4HUNT-2 log, or a stray line). Back-
+            // compat: render as a dim System entry, matching the R4-1 overlay.
+            if !line.is_empty() {
+                entries.push(TranscriptEntry::System(line.to_string()));
+            }
+            continue;
+        };
+        let (kind, payload_str) = match rest.split_once(SUBAGENT_LOG_FIELD_SEP) {
+            Some((k, p)) => (k, p),
+            None => {
+                // Malformed marker (no field separator): treat as legacy.
+                entries.push(TranscriptEntry::System(line.to_string()));
+                continue;
+            }
+        };
+        let payload: serde_json::Value = match serde_json::from_str(payload_str) {
+            Ok(v) => v,
+            Err(_) => {
+                // Malformed JSON: degrade to a System line rather than drop it.
+                entries.push(TranscriptEntry::System(line.to_string()));
+                continue;
+            }
+        };
+        let agent = payload
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        match kind {
+            "text" => {
+                let text = payload
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                entries.push(TranscriptEntry::SubagentText { agent_name: agent, text });
+            }
+            "tool" => {
+                let tool = payload
+                    .get("tool")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let args = payload.get("args").cloned().unwrap_or(serde_json::Value::Null);
+                entries.push(TranscriptEntry::SubagentTool {
+                    agent_name: agent,
+                    tool_name: tool,
+                    args,
+                });
+            }
+            "toolresult" => {
+                let tool = payload
+                    .get("tool")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let output = payload
+                    .get("output")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let is_error = payload
+                    .get("is_error")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                entries.push(TranscriptEntry::ToolResult {
+                    name: tool,
+                    output,
+                    is_error,
+                });
+            }
+            "end" => {
+                let outcome = parse_outcome(
+                    payload.get("outcome").and_then(|v| v.as_str()).unwrap_or(""),
+                );
+                entries.push(TranscriptEntry::SubagentEnd { agent_name: agent, outcome });
+            }
+            // Unknown kind: back-compat — render as a dim System line so a
+            // future-added kind degrades gracefully instead of dropping data.
+            _ => entries.push(TranscriptEntry::System(line.to_string())),
+        }
+    }
+    entries
+}
+
+/// (R4HUNT-2 perf) Like [`read_agent_log_cached`] but for the TYPED marker
+/// log: gates the [`read_agent_log_typed`] parse on the [`AgentOverlay`]'s
+/// mtime/size cache (the SAME `cached_log_meta` the flat path uses) + caches
+/// the re-parsed `TranscriptEntry` variants in `cached_typed_entries`. While
+/// the overlay is open, `overlay_needs_redraw` forces a redraw every 80ms
+/// tick — without this gate, the typed path would re-seek + re-parse the
+/// whole marker log on every tick for nothing. On a cache hit (file
+/// unchanged since the last read + cache populated) returns the cached
+/// entries; on a miss, parses via [`read_agent_log_typed`] + caches the
+/// `(mtime, size)` + entries. The flat + typed caches are mutually exclusive
+/// (a given overlay reads ONE log kind): the flat path clears `cached_typed_
+/// entries` and the typed path clears `cached_log_lines` so a stale
+/// cross-kind cache can't leak.
+fn read_agent_log_typed_cached(
+    overlay: &mut AgentOverlay,
+    log_path: &std::path::Path,
+) -> Vec<TranscriptEntry> {
+    let meta = std::fs::metadata(log_path).ok();
+    let mtime = meta.as_ref().and_then(|m| m.modified().ok());
+    let size = meta.as_ref().map(|m| m.len());
+    if let (Some(mtime), Some(size)) = (mtime, size) {
+        if overlay.cached_log_meta == Some((mtime, size)) {
+            if let Some(entries) = overlay.cached_typed_entries.as_ref() {
+                return entries.clone();
+            }
+        }
+        let entries = read_agent_log_typed(log_path);
+        overlay.cached_log_meta = Some((mtime, size));
+        overlay.cached_typed_entries = Some(entries.clone());
+        // Invalidate the flat cache so a cross-kind switch can't serve stale
+        // raw lines for a typed log (or vice-versa).
+        overlay.cached_log_lines = Vec::new();
+        entries
+    } else {
+        // Missing/unreadable file: invalidate both caches + return empty
+        // (mirrors `read_agent_log_typed`'s error arm). Don't cache an empty
+        // vec — an empty cache would otherwise suppress recovery reads.
+        overlay.cached_log_meta = None;
+        overlay.cached_typed_entries = None;
+        overlay.cached_log_lines = Vec::new();
+        Vec::new()
+    }
 }
 
 /// Best-effort current git branch, read directly from `.git/HEAD` (no
@@ -5606,13 +6030,18 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.set_dirty();
         }
         AgentMsg::SubagentText { agent_name, text } => {
-            // (R4-1) Tee the streamed text to the per-agent log file so the
-            // overlay (read via `read_agent_log_cached`) survives the
-            // transcript ring evicting this subagent's entries on a long
-            // session. The raw delta is appended verbatim — consecutive
-            // deltas concatenate naturally in the file, mirroring the
-            // in-memory coalesce below. Best-effort (see `append_subagent_log`).
-            append_subagent_log(&app.registry, &agent_name, &text);
+            // (R4HUNT-2) Tee a TYPED text record to the per-agent log so the
+            // overlay re-parses it as `SubagentText` (agent-colored) via
+            // `read_agent_log_typed`, not a dim `System` line. Consecutive
+            // text records concatenate naturally; the in-memory coalesce
+            // below is unchanged. Best-effort.
+            append_subagent_log_typed(
+                &app.registry,
+                &SubagentLogRecord::Text {
+                    agent: agent_name.clone(),
+                    text: text.clone(),
+                },
+            );
             // Append to last subagent text from same agent, or create new entry.
             if let Some(TranscriptEntry::SubagentText {
                 agent_name: name,
@@ -5638,20 +6067,18 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             tool_name,
             args,
         } => {
-            // (R4-1) Tee a tool-start marker line to the per-agent log. Format
-            // mirrors the scrollback marker (tool name + detail) so the
-            // overlay's dim System line is informative. Best-effort.
-            let detail = crate::commands::code_tool_preview::tool_preview(&tool_name, &args)
-                .strip_prefix(&tool_name)
-                .map(str::trim_start)
-                .unwrap_or("")
-                .to_string();
-            let marker = if detail.is_empty() {
-                format!("→ {tool_name}\n")
-            } else {
-                format!("→ {tool_name} ({detail})\n")
-            };
-            append_subagent_log(&app.registry, &agent_name, &marker);
+            // (R4HUNT-2) Tee a TYPED tool-start record (tool name + args) so
+            // the overlay re-parses it as `SubagentTool` and the renderer can
+            // reuse `tool_preview` on the kept args (mirroring the in-memory
+            // entry). Best-effort.
+            append_subagent_log_typed(
+                &app.registry,
+                &SubagentLogRecord::Tool {
+                    agent: agent_name.clone(),
+                    tool: tool_name.clone(),
+                    args: args.clone(),
+                },
+            );
             // Store args on the entry; the scrollback renderer calls
             // `tool_preview` (reused, not duplicated) to format the marker.
             app.transcript.push(TranscriptEntry::SubagentTool {
@@ -5689,15 +6116,20 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                 output
             };
             let rendered = render_tool_output(&serde_json::Value::String(body));
-            // (R4-1) Tee the per-tool result line to the per-agent log. Mirrors
-            // the early-return guard above (no line for a non-error empty
-            // result) so the log and the in-memory entry stay consistent.
-            // Prefix with the tool name so the dim System line reads
-            // "{tool}: {result}". Best-effort.
-            append_subagent_log(
+            // (R4HUNT-2) Tee a TYPED toolresult record (bare tool name +
+            // rendered output + is_error) so the overlay re-parses it as a
+            // `ToolResult` with the per-variant coloring (theme::error on
+            // is_error). Mirrors the early-return guard above (no line for a
+            // non-error empty result) so the log and the in-memory entry stay
+            // consistent. Best-effort.
+            append_subagent_log_typed(
                 &app.registry,
-                &agent_name,
-                &format!("{tool_name}: {rendered}\n"),
+                &SubagentLogRecord::ToolResult {
+                    agent: agent_name.clone(),
+                    tool: tool_name.clone(),
+                    output: rendered.clone(),
+                    is_error,
+                },
             );
             app.transcript.push(TranscriptEntry::ToolResult {
                 name,
@@ -5726,17 +6158,15 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             if subagent_end_bell_enabled(&app.cfg, completed) {
                 crate::commands::code_term::tui_bell();
             }
-            // (R4-1) Tee the outcome line to the per-agent log so the overlay
-            // shows the terminal state after the subagent finishes. Best-effort.
-            let outcome_label = match outcome {
-                SubagentOutcome::Completed => "done",
-                SubagentOutcome::Failed => "failed",
-                SubagentOutcome::Stopped => "stopped",
-            };
-            append_subagent_log(
+            // (R4HUNT-2) Tee a TYPED end record so the overlay re-parses it
+            // as `SubagentEnd` (agent-colored outcome line) instead of a dim
+            // System line. Best-effort.
+            append_subagent_log_typed(
                 &app.registry,
-                &agent_name,
-                &format!("{outcome_label}\n"),
+                &SubagentLogRecord::End {
+                    agent: agent_name.clone(),
+                    outcome,
+                },
             );
             app.transcript.push(TranscriptEntry::SubagentEnd {
                 agent_name: agent_name.clone(),
@@ -6352,6 +6782,77 @@ mod tests {
         let third = read_agent_log_cached(&mut overlay, &log);
         assert_eq!(third, vec!["first", "second", "third"], "cache miss after growth must re-read");
         assert_eq!(overlay.cached_log_lines, third, "cache refreshed after growth");
+    }
+
+    // (R4HUNT-2 perf) The typed-marker cache mirrors the flat cache: a first
+    // read parses + caches the entries; an unchanged-file second read returns
+    // the cached entries (no re-parse); a growing file trips the mtime/size
+    // gate and re-parses. Pins the perf-preserving gate on the typed overlay
+    // read path (every 80ms tick while the overlay is open).
+    #[test]
+    fn read_agent_log_typed_cached_skips_reparse_when_mtime_size_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("sub.log");
+        let rec = SubagentLogRecord::Text {
+            agent: "reviewer".into(),
+            text: "hello".into(),
+        };
+        use std::io::Write;
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .unwrap();
+            write!(f, "{}", rec.marker_line()).unwrap();
+        }
+
+        let mut overlay = AgentOverlay {
+            agent_name: "reviewer".to_string(),
+            ..Default::default()
+        };
+        // First read: cache miss → parses + populates the typed cache.
+        let first = read_agent_log_typed_cached(&mut overlay, &log);
+        assert_eq!(first.len(), 1);
+        assert!(overlay.cached_log_meta.is_some(), "cache meta populated");
+        assert!(overlay.cached_typed_entries.is_some(), "typed cache populated");
+        assert!(
+            overlay.cached_log_lines.is_empty(),
+            "flat cache invalidated by the typed path (cross-kind)"
+        );
+
+        // Second read, file UNCHANGED → cache hit, returns the cached entries.
+        let second = read_agent_log_typed_cached(&mut overlay, &log);
+        assert_eq!(second.len(), 1, "cache hit returns the cached entry");
+        match &second[0] {
+            TranscriptEntry::SubagentText { agent_name, text } => {
+                assert_eq!(agent_name, "reviewer");
+                assert_eq!(text, "hello");
+            }
+            other => panic!("cache hit should return SubagentText, got {other:?}"),
+        }
+
+        // Grow the file (size grows) → cache miss → re-parse the new tail.
+        let rec2 = SubagentLogRecord::End {
+            agent: "reviewer".into(),
+            outcome: SubagentOutcome::Completed,
+        };
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .unwrap();
+            write!(f, "{}", rec2.marker_line()).unwrap();
+        }
+        let third = read_agent_log_typed_cached(&mut overlay, &log);
+        assert_eq!(third.len(), 2, "cache miss after growth re-parses both markers");
+        assert!(matches!(third[1], TranscriptEntry::SubagentEnd { .. }));
+        assert_eq!(
+            overlay.cached_typed_entries.as_ref().unwrap().len(),
+            2,
+            "cache refreshed after growth"
+        );
     }
 
     // R1 transcript render cache: trim_transcript caps app.transcript to the
@@ -8079,23 +8580,41 @@ task = "Do the thing"
             "R4-1: subagent overlay must read its log file (not the evicted ring) \
              and return non-empty history, got {lines:?}"
         );
-        // The log content surfaces as dim System entries (read_agent_log wraps
-        // each line 1:1). The streamed text + tool outcome must appear.
-        let joined: String = lines
-            .iter()
-            .filter_map(|e| match e {
-                TranscriptEntry::System(s) => Some(s.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            joined.contains("investigating the bug…"),
-            "R4-1: streamed text should be in the log, got {joined:?}"
+        // (R4HUNT-2) The log content now re-parses into TYPED transcript
+        // variants (agent-colored markers, per-tool ToolResult) instead of
+        // flat dim System lines — the round-3 R4-1 writer flattened everything
+        // to System, discarding the per-variant overlay rendering. Assert the
+        // re-parsed variants + their payloads.
+        let text = lines.iter().find_map(|e| match e {
+            TranscriptEntry::SubagentText { agent_name, text } if agent_name == "reviewer" => {
+                Some(text.clone())
+            }
+            _ => None,
+        });
+        assert_eq!(
+            text.as_deref(),
+            Some("investigating the bug…"),
+            "R4HUNT-2: streamed text should re-parse as SubagentText, got {lines:?}"
         );
-        assert!(
-            joined.contains("grep") && joined.contains("found 3 matches"),
-            "R4-1: tool + outcome should be in the log, got {joined:?}"
+        let tool = lines.iter().find_map(|e| match e {
+            TranscriptEntry::SubagentTool {
+                agent_name,
+                tool_name,
+                ..
+            } if agent_name == "reviewer" => Some(tool_name.clone()),
+            _ => None,
+        });
+        assert_eq!(tool.as_deref(), Some("grep"), "tool start should re-parse, got {lines:?}");
+        let result = lines.iter().find_map(|e| match e {
+            TranscriptEntry::ToolResult { name, output, .. } if name == "grep" => {
+                Some(output.clone())
+            }
+            _ => None,
+        });
+        assert_eq!(
+            result.as_deref(),
+            Some("found 3 matches"),
+            "R4HUNT-2: tool outcome should re-parse as ToolResult, got {lines:?}"
         );
 
         // Contrast: an agent with NO log_path (pre-R4-1 in-process subagent)
@@ -10970,10 +11489,12 @@ task = "Do the thing"
             "Ctrl+C must take the abort slot"
         );
         assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
-        // The intercept leaves the palette as-is (the user can Esc to close).
+        // (R5-CTRLC-OVERLAY-DIVERGE) Ctrl+C now ALSO dismisses the palette — a
+        // single interrupt both stops the turn and clears the foreground (Esc
+        // closes the overlay but keeps streaming).
         assert!(
-            app.slash_palette.is_some(),
-            "Ctrl+C aborts but does NOT close the palette (Esc does)"
+            app.slash_palette.is_none(),
+            "Ctrl+C must close the palette (interrupt clears the foreground)"
         );
         // No command sent to the bg thread (abort is synchronous on main).
         assert!(cmd_rx.try_recv().is_err(), "Ctrl+C must not send a Cmd");
@@ -11015,6 +11536,165 @@ task = "Do the thing"
         assert!(
             app.slash_palette.is_none(),
             "Ctrl+O must close the palette (the editor takes over)"
+        );
+        // (PALETTE-CTRL-O-LEAK) The textarea must be cleared so the filter
+        // (here "/") does NOT leak into the main input bar: open_external_editor
+        // seeds the temp file from the textarea + writes the edited text back,
+        // so a leftover filter would become a literal slash command in the bar.
+        assert!(
+            app.textarea.is_empty(),
+            "Ctrl+O with palette open must clear the textarea (the filter must not leak into the main input bar), got: {:?}",
+            app.textarea.lines()
+        );
+    }
+
+    // (PALETTE-GATE-DROPS-HOME-END-DELETE) Home/End/Delete-forward (with NO
+    // modifier) must be fed to the textarea while the palette is open, mirroring
+    // the main input bar's unconditional catch-all. Round 4's gate fed ONLY
+    // `Char(_)`, so tui-textarea-2's interpretations — Home -> cursor-to-line-
+    // start, End -> cursor-to-line-end, Delete -> forward-delete — were DROPPED
+    // (fell to the `None` return), losing filter caret-jump + forward-delete.
+    // This test drives the REAL handle_key -> handle_slash_palette_key dispatch
+    // (NOT textarea.input directly), per the rounds-3/4 lesson that a green
+    // suite can mask a behavioral break when the test bypasses the real dispatch.
+    #[test]
+    fn slash_palette_home_end_delete_forward_edit_filter() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+        // Open the palette with a 2-char filter "/cl" so Home/End have room to
+        // move the caret and Delete-forward has a char to remove. Start the
+        // caret at the END (set_textarea_text places it at the last col).
+        set_textarea_text(&mut app.textarea, "/cl");
+        app.slash_palette = Some(SlashPalette { selected: 0 });
+
+        let before_text = app.textarea.lines().join("");
+        assert_eq!(before_text, "/cl");
+        let (_, col_end) = app.textarea.cursor();
+        assert_eq!(col_end, 3, "caret must start at end-of-text (col 3)");
+
+        let filtered_before = slash_palette_filtered(&app);
+        let count_before = filtered_before.len();
+        assert!(
+            count_before > 0,
+            "test needs >=1 filtered entry for /cl (got 0)"
+        );
+
+        // Home (NO modifier) -> caret jumps to line start, text + filtered count
+        // UNCHANGED. Drives the real dispatch.
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+        assert!(action.is_none(), "Home must return None (caret move, no action)");
+        assert_eq!(
+            app.textarea.lines().join(""),
+            "/cl",
+            "Home must NOT change the filter text"
+        );
+        let (_, col_after_home) = app.textarea.cursor();
+        assert_eq!(
+            col_after_home, 0,
+            "Home must move the caret to line start (col 0)"
+        );
+        assert_eq!(
+            slash_palette_filtered(&app).len(),
+            count_before,
+            "Home must NOT change the filtered count"
+        );
+        assert!(
+            app.slash_palette.is_some(),
+            "Home must keep the palette open (text still starts with '/')"
+        );
+
+        // End (NO modifier) -> caret jumps back to line end, text + count
+        // UNCHANGED.
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+        assert!(action.is_none(), "End must return None (caret move, no action)");
+        assert_eq!(
+            app.textarea.lines().join(""),
+            "/cl",
+            "End must NOT change the filter text"
+        );
+        let (_, col_after_end) = app.textarea.cursor();
+        assert_eq!(
+            col_after_end, 3,
+            "End must move the caret to line end (col 3)"
+        );
+        assert_eq!(
+            slash_palette_filtered(&app).len(),
+            count_before,
+            "End must NOT change the filtered count"
+        );
+
+        // Delete-forward removes the char AFTER the caret. tui-textarea-2's
+        // delete_next_char is a no-op when the caret is at end-of-text (it
+        // can't move forward), so step the caret one back via test setup (NOT
+        // via the feed-under-test) to position it before the trailing 'l'. This
+        // isolates the Delete-forward FEED behavior: with the caret at col 2,
+        // Delete-forward removes 'l' -> filter text shortens to "/c", which
+        // CHANGES the filtered list. The arm must re-check the '/' invariant +
+        // clamp `selected` into the new list.
+        app.textarea.move_cursor(tui_textarea::CursorMove::Back);
+        let (_, col_pre_delete) = app.textarea.cursor();
+        assert_eq!(
+            col_pre_delete, 2,
+            "test setup: caret must be one back from end (col 2), before the trailing 'l'"
+        );
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+        assert!(action.is_none(), "Delete-forward must return None (no action)");
+        assert_eq!(
+            app.textarea.lines().join(""),
+            "/c",
+            "Delete-forward must remove the trailing 'l' (caret was at col 2)"
+        );
+        assert!(
+            app.slash_palette.is_some(),
+            "Delete-forward must keep the palette open (text still starts with '/')"
+        );
+        // clamp_palette_selected keeps `selected` in range for the new list.
+        let filtered_after = slash_palette_filtered(&app);
+        let sel = app.slash_palette.as_ref().unwrap().selected;
+        assert!(
+            filtered_after.is_empty() || sel < filtered_after.len(),
+            "Delete-forward must clamp selected ({sel}) into the new filtered list of {}",
+            filtered_after.len()
+        );
+        // Sanity: the filter text still starts with '/' (the re-check kept the
+        // palette open because the leading '/' survived).
+        assert!(
+            app.textarea.lines().join("").starts_with('/'),
+            "after Delete-forward the filter must still start with '/'"
+        );
+
+        // Ctrl+Home (CONTROL modifier) must NOT be fed — it's a different op
+        // (cursor to document top) and a Ctrl-combo that must not corrupt the
+        // filter. The gate's NONE-modifier guard excludes it.
+        let text_before_ctrl_home = app.textarea.lines().join("");
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+        assert!(action.is_none(), "Ctrl+Home must return None (not fed)");
+        assert_eq!(
+            app.textarea.lines().join(""),
+            text_before_ctrl_home,
+            "Ctrl+Home must NOT change the filter text (excluded by the NONE-modifier guard)"
         );
     }
 
@@ -11059,10 +11739,12 @@ task = "Do the thing"
             "Ctrl+C must take the abort slot"
         );
         assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
-        // The intercept leaves the overlay as-is (the user can Esc to close).
+        // (R5-CTRLC-OVERLAY-DIVERGE) Ctrl+C now ALSO dismisses the diff overlay —
+        // a single interrupt both stops the turn and clears the foreground (Esc
+        // closes the overlay but keeps streaming).
         assert!(
-            app.diff_view.is_some(),
-            "Ctrl+C aborts but does NOT close the diff overlay (Esc does)"
+            app.diff_view.is_none(),
+            "Ctrl+C must close the diff overlay (interrupt clears the foreground)"
         );
         assert!(cmd_rx.try_recv().is_err(), "Ctrl+C must not send a Cmd");
     }
@@ -11108,11 +11790,70 @@ task = "Do the thing"
             "Ctrl+C must take the abort slot"
         );
         assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
-        // The intercept leaves the overlay as-is (the user can Esc to close).
+        // (R5-CTRLC-OVERLAY-DIVERGE) Ctrl+C now ALSO dismisses the agent overlay —
+        // a single interrupt both stops the turn and clears the foreground (Esc
+        // closes the overlay but keeps streaming).
         assert!(
-            app.agent_overlay.is_some(),
-            "Ctrl+C aborts but does NOT close the agent overlay (Esc does)"
+            app.agent_overlay.is_none(),
+            "Ctrl+C must close the agent overlay (interrupt clears the foreground)"
         );
+        assert!(cmd_rx.try_recv().is_err(), "Ctrl+C must not send a Cmd");
+    }
+
+    // (R5-CTRLC-OVERLAY-DIVERGE) End-to-end guard for the Ctrl+C-while-streaming-
+    // and-overlay-open path: a single Ctrl+C must BOTH abort the turn (take +
+    // fire the shared abort handle, transition to Idle) AND dismiss the open
+    // agent overlay. This is the regression that round 4 introduced — its
+    // intercept aborted + set Idle but left the overlay lingering over Idle,
+    // diverging from Esc (Esc closes the overlay but keeps streaming). Drives
+    // the REAL handle_key dispatch (not the intercept in isolation) so the
+    // overlay-closing addition at the top of handle_key is exercised end-to-end.
+    #[test]
+    fn ctrl_c_closes_overlay_and_aborts() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        // Seed the shared abort slot the way the bg thread does at turn start.
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        *shared_abort.lock().unwrap() = Some(abort_handle);
+        app.phase = Phase::Streaming;
+        app.turn_started = Some(Instant::now());
+        assert!(!abort_signal.is_aborted(), "fresh signal must not be aborted");
+        assert!(app.agent_overlay.is_none(), "precondition: overlay starts closed");
+        // Open an agent overlay — the foreground surface Ctrl+C must clear.
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "reviewer".into(),
+            scroll: 0,
+            follow: true,
+            ..Default::default()
+        });
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        // Ctrl+C aborts inline (no quit/submit action).
+        assert!(action.is_none(), "Ctrl+C aborts inline (no action)");
+        // The shared abort handle is taken + fired — the turn is interrupted.
+        assert!(
+            abort_signal.is_aborted(),
+            "Ctrl+C must fire the shared abort handle (the turn is interrupted)"
+        );
+        assert!(
+            shared_abort.lock().unwrap().is_none(),
+            "Ctrl+C must take the abort slot"
+        );
+        // The phase transitions back to Idle.
+        assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
+        // AND the foreground overlay is dismissed — the diverge fix.
+        assert!(
+            app.agent_overlay.is_none(),
+            "Ctrl+C must ALSO close the agent overlay (interrupt clears the foreground)"
+        );
+        // No command sent to the bg thread (abort is synchronous on main).
         assert!(cmd_rx.try_recv().is_err(), "Ctrl+C must not send a Cmd");
     }
 
@@ -11211,6 +11952,215 @@ task = "Do the thing"
             text.contains("~$1.50"),
             "non-zero cost must render '~$1.50': {text:?}"
         );
+    }
+
+    // --- R4HUNT-2: typed subagent-log markers round-trip + back-compat --------
+
+    // (R4HUNT-2) Writing the four typed record variants via
+    // `append_subagent_log_typed` then re-parsing via `read_agent_log_typed`
+    // must re-constitute the per-variant TranscriptEntry shapes with their
+    // payloads intact (SubagentText text, SubagentTool tool/args, ToolResult
+    // name/output/is_error, SubagentEnd outcome). This pins the wire format
+    // (`\x1e<kind>\x1f<json>\n`) against silent drift: a wrong kind tag, a
+    // missing field, or a serde mismatch would surface here.
+    #[test]
+    fn r4hunt2_typed_markers_round_trip_through_log() {
+        let app = test_app();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let log_path = temp.path().join("reviewer.log");
+        // Register an in-process subagent whose log_path is the temp file so
+        // `append_subagent_log_typed` (which resolves the path via the
+        // registry handle) writes to it.
+        app.registry.register(AgentRegistration {
+            name: "reviewer".to_string(),
+            kind: AgentKind::Subagent {
+                depth: 1,
+                parent: None,
+            },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: None,
+            log_path: Some(log_path.clone()),
+        });
+
+        append_subagent_log_typed(
+            &app.registry,
+            &SubagentLogRecord::Text {
+                agent: "reviewer".into(),
+                text: "investigating…".into(),
+            },
+        );
+        append_subagent_log_typed(
+            &app.registry,
+            &SubagentLogRecord::Tool {
+                agent: "reviewer".into(),
+                tool: "grep".into(),
+                args: serde_json::json!({"pattern": "TODO"}),
+            },
+        );
+        append_subagent_log_typed(
+            &app.registry,
+            &SubagentLogRecord::ToolResult {
+                agent: "reviewer".into(),
+                tool: "grep".into(),
+                output: "3 matches".into(),
+                is_error: false,
+            },
+        );
+        append_subagent_log_typed(
+            &app.registry,
+            &SubagentLogRecord::End {
+                agent: "reviewer".into(),
+                outcome: SubagentOutcome::Completed,
+            },
+        );
+
+        let entries = read_agent_log_typed(&log_path);
+        // Expect exactly four entries in write order.
+        assert_eq!(entries.len(), 4, "round-trip: {entries:?}");
+        match &entries[0] {
+            TranscriptEntry::SubagentText { agent_name, text } => {
+                assert_eq!(agent_name, "reviewer");
+                assert_eq!(text, "investigating…");
+            }
+            other => panic!("entry[0] should be SubagentText, got {other:?}"),
+        }
+        match &entries[1] {
+            TranscriptEntry::SubagentTool {
+                agent_name,
+                tool_name,
+                args,
+            } => {
+                assert_eq!(agent_name, "reviewer");
+                assert_eq!(tool_name, "grep");
+                assert_eq!(args["pattern"], "TODO", "args payload preserved");
+            }
+            other => panic!("entry[1] should be SubagentTool, got {other:?}"),
+        }
+        match &entries[2] {
+            TranscriptEntry::ToolResult {
+                name,
+                output,
+                is_error,
+            } => {
+                assert_eq!(name, "grep");
+                assert_eq!(output, "3 matches");
+                assert!(!*is_error, "is_error payload preserved");
+            }
+            other => panic!("entry[2] should be ToolResult, got {other:?}"),
+        }
+        match &entries[3] {
+            TranscriptEntry::SubagentEnd { agent_name, outcome } => {
+                assert_eq!(agent_name, "reviewer");
+                assert_eq!(*outcome, SubagentOutcome::Completed, "outcome payload preserved");
+            }
+            other => panic!("entry[3] should be SubagentEnd, got {other:?}"),
+        }
+    }
+
+    // (R4HUNT-2 back-compat) A log file that ALSO contains pre-R5 raw-text
+    // lines (written by R4-1's writer before this fix) must still parse: the
+    // non-marker lines degrade to dim System entries, the typed markers still
+    // re-parse. This covers a session that spans the upgrade.
+    #[test]
+    fn r4hunt2_typed_log_back_compat_with_legacy_raw_lines() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let log_path = temp.path().join("legacy.log");
+        use std::io::Write;
+        // A legacy raw-text line (no leading \x1e) + a typed marker line.
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .expect("open log");
+        writeln!(f, "raw legacy line from R4-1").expect("write legacy");
+        let record = SubagentLogRecord::Text {
+            agent: "reviewer".into(),
+            text: "typed after upgrade".into(),
+        };
+        write!(f, "{}", record.marker_line()).expect("write marker");
+        drop(f);
+
+        let entries = read_agent_log_typed(&log_path);
+        assert_eq!(entries.len(), 2, "back-compat: {entries:?}");
+        // Legacy raw line -> dim System.
+        match &entries[0] {
+            TranscriptEntry::System(s) => assert_eq!(s, "raw legacy line from R4-1"),
+            other => panic!("legacy line should re-parse as System, got {other:?}"),
+        }
+        // Typed marker -> SubagentText.
+        match &entries[1] {
+            TranscriptEntry::SubagentText { agent_name, text } => {
+                assert_eq!(agent_name, "reviewer");
+                assert_eq!(text, "typed after upgrade");
+            }
+            other => panic!("marker should re-parse as SubagentText, got {other:?}"),
+        }
+    }
+
+    // --- R4HUNT-3: completed subagent overlay survives registry.remove --------
+
+    // (R4HUNT-3) The success path now keeps the log file + removes the registry
+    // entry. `agent_transcript_for_overlay` must still read the log via the
+    // path captured on the AgentOverlay at open time (which survives
+    // registry.remove), re-parsing the typed markers. This pins the overlay-
+    // path-survival design: storing log_path on the overlay (option (a)) so the
+    // completed subagent's final output isn't blanked.
+    #[test]
+    fn r4hunt3_overlay_reads_log_after_registry_remove_via_captured_path() {
+        let app = test_app();
+        // Write the log into the REAL code-subagents/ dir so the path-based
+        // classifier (`subagent_log_kind`) recognizes it as a typed-markers log
+        // even though the registry handle was removed (the production success
+        // path puts the log here via `create_subagent_log_file`).
+        let dir = crate::commands::code_task::subagent_log_dir().expect("subagent_log_dir");
+        std::fs::create_dir_all(&dir).expect("mkdir subagents dir");
+        let log_path = dir.join("r4hunt3-coder-test.log");
+        // Seed the log with a typed marker (simulating the subagent's streamed
+        // output landing on disk via append_subagent_log_typed).
+        let record = SubagentLogRecord::Text {
+            agent: "coder".into(),
+            text: "final answer".into(),
+        };
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .expect("open log");
+        write!(f, "{}", record.marker_line()).expect("write marker");
+        drop(f);
+
+        // The overlay captured the log path at open time (the production
+        // KeyCode::Enter site clones handle.log_path onto the overlay). Here
+        // the handle is already removed (success path), so the overlay's own
+        // captured path is the ONLY way to reach the log.
+        let mut overlay = AgentOverlay {
+            agent_name: "coder".into(),
+            log_path: Some(log_path.clone()),
+            scroll: 0,
+            follow: true,
+            ..Default::default()
+        };
+        // registry is empty (handle removed) — find_by_name returns None, so
+        // the path-based classifier is the only signal.
+        let entries = agent_transcript_for_overlay(&app.registry, &[], &mut overlay);
+        assert_eq!(entries.len(), 1, "overlay must read the captured-path log, got {entries:?}");
+        match &entries[0] {
+            TranscriptEntry::SubagentText { agent_name, text } => {
+                assert_eq!(agent_name, "coder");
+                assert_eq!(text, "final answer");
+            }
+            other => panic!("should re-parse as SubagentText, got {other:?}"),
+        }
+        assert!(overlay.log_path.is_some(), "captured path retained for next read");
+
+        // Clean up the test log (don't leak into the user's config dir).
+        let _ = std::fs::remove_file(&log_path);
     }
 }
 

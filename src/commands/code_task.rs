@@ -60,6 +60,79 @@ pub struct TaskTool {
     registry: Arc<AgentRegistry>,
 }
 
+/// (R4HUNT-1) RAII guard for an INLINE subagent's log-file + registry +
+/// abort lifetime, held across the `prompt_with_abort` await. The parent's
+/// abort (Ctrl+C / Esc / shared_abort) or any panic drops the
+/// `prompt_with_abort` future (pi's `select(all_fut, abort_fut)` returns on
+/// `Either::Right`/abort and DROPS `all_fut`, which holds the `execute`
+/// future) BEFORE the manual cleanup arms in `execute` run. Without this
+/// guard, that drop orphaned the log file + left the registry entry stuck at
+/// `AgentStatus::Working` with `pid: None` — `poll_agent_status` SKIPS
+/// `pid: None` handles (so it's NEVER reaped) and the agents panel showed a
+/// stuck "working" subagent FOREVER, occupying the abort slot.
+///
+/// Held as `let _guard = SubagentGuard { ... }` AFTER `register` and ACROSS
+/// the `prompt_with_abort(...).await`. Its [`Drop`] is idempotent via
+/// `cleaned`: the explicit return arms in `execute` (Ok + Err) set
+/// `guard.cleaned = true` AFTER their own `take_abort`/`set_status`/`remove`
+/// (the SUCCESS arm leaves the log per R4HUNT-3; the FAILURE arm removes
+/// it), so on the normal path Drop is a NO-OP. On the abort-drop path
+/// (`cleaned` still `false`) Drop fires the cleanup the skipped arms would
+/// have: `remove_subagent_log_file` + `registry.remove` + `take_abort`
+/// (ignore Err) + `set_status(Failed)` (best-effort, only if still active).
+///
+/// Borrows the registry via a cloned `Arc<AgentRegistry>` — `self.registry`
+/// is already `Arc<AgentRegistry>` (thread-shared through the tool factory
+/// for `poll_agent_status`'s snapshot path), so the guard owns its own
+/// `Arc` clone and the registry stays reachable from a moved guard without
+/// borrowing across the await (a `&'a AgentRegistry` can't span the await).
+struct SubagentGuard {
+    log_path: Option<PathBuf>,
+    handle: Arc<AgentHandle>,
+    registry: Arc<AgentRegistry>,
+    cleaned: bool,
+}
+
+impl SubagentGuard {
+    /// Build the guard AFTER `register`. The guard borrows nothing from the
+    /// caller's stack — it owns its `Arc` clones — so it's safe to hold
+    /// across the await + drop out of order.
+    fn new(log_path: Option<PathBuf>, handle: Arc<AgentHandle>, registry: Arc<AgentRegistry>) -> Self {
+        Self {
+            log_path,
+            handle,
+            registry,
+            cleaned: false,
+        }
+    }
+}
+
+impl Drop for SubagentGuard {
+    fn drop(&mut self) {
+        // No-op on the normal path: the explicit return arms set `cleaned`
+        // after running their own cleanup, so Drop never re-enters here.
+        if self.cleaned {
+            return;
+        }
+        // Abort/panic-drop path: the `execute` future was dropped before its
+        // manual arms ran. Reap everything the skipped arms would have, so the
+        // subagent doesn't leak as a stuck "working" entry with an orphaned log.
+        if let Some(p) = self.log_path.as_ref() {
+            remove_subagent_log_file(p);
+        }
+        // Take the abort slot so a dropped mid-run agent can't be re-aborted
+        // later; ignore the (already-None) Err — the whole point is recovery.
+        let _ = self.handle.take_abort();
+        // Only flip to Failed if still active — best-effort, mirrors the
+        // explicit arms' set_status(Failed). `set_status` is poison-recovered
+        // (see code_team.rs), so this never panics the dropping thread.
+        if self.handle.status().is_active() {
+            self.handle.set_status(AgentStatus::Failed);
+        }
+        self.registry.remove(self.handle.id);
+    }
+}
+
 impl TaskTool {
     pub fn new(
         mode: ModeFlag,
@@ -409,10 +482,36 @@ impl Tool for TaskTool {
         // guarantees a finished agent can't be aborted afterward.
         let (abort_handle, abort_signal) = AbortHandle::new();
         handle_arc.set_abort(abort_handle);
+
+        // (R4HUNT-1) Hold the SubagentGuard ACROSS the prompt_with_abort
+        // await. If the parent aborts (Ctrl+C / Esc / shared_abort) or the
+        // future panics, pi's `select(all_fut, abort_fut)` returns on the
+        // abort and DROPS all_fut (holding this `execute` future) BEFORE
+        // the manual cleanup arms below run. The guard's Drop reaps the
+        // log file + registry entry + abort slot + Failed status so the
+        // subagent doesn't leak as a stuck "working" entry (poll_agent_
+        // status skips pid:None handles, so an unreaped one stays forever).
+        // The explicit arms below set `guard.cleaned = true` after their
+        // own cleanup, so on the normal path Drop is a no-op. Built here
+        // (after register + set_abort) so it owns the live handle Arc +
+        // log_path + a registry Arc clone; dropped at the end of `execute`.
+        let mut guard = SubagentGuard::new(
+            subagent_log_path.clone(),
+            Arc::clone(&handle_arc),
+            Arc::clone(&self.registry),
+        );
+
         let assistant = match handle.prompt_with_abort(prompt, abort_signal, render).await {
             Ok(msg) => {
                 let _ = handle_arc.take_abort();
                 handle_arc.set_status(AgentStatus::Completed);
+                // (R4HUNT-3) SUCCESS path: remove from the registry (the
+                // overlay can't be RE-opened after completion) but DEFER the
+                // log-file deletion to session teardown so the already-open
+                // overlay keeps its final output (it reads via the path
+                // stored on the AgentOverlay, surviving registry.remove).
+                self.registry.remove(handle_arc.id);
+                guard.cleaned = true;
                 msg
             }
             Err(e) => {
@@ -422,14 +521,15 @@ impl Tool for TaskTool {
                     remove_subagent_log_file(p);
                 }
                 self.registry.remove(handle_arc.id);
+                guard.cleaned = true;
                 return Ok(err_output(&format!("task: run failed: {e}")));
             }
         };
-        let _ = handle_arc.take_abort();
-        if let Some(p) = &subagent_log_path {
-            remove_subagent_log_file(p);
-        }
-        self.registry.remove(handle_arc.id);
+        // Ok fall-through (non-early-return): the Success arm above already
+        // ran take_abort + set_status(Completed) + registry.remove + marked
+        // the guard cleaned. Nothing more to do — the guard drops as a
+        // no-op. (The log is intentionally NOT removed here; see R4HUNT-3.)
+        let _ = guard;
 
         // Collapse the child assistant's text blocks into a single
         // string; tool-call / thinking blocks are dropped (the parent
@@ -803,55 +903,115 @@ fn err_output(text: &str) -> ToolExecution {
     .into()
 }
 
-/// (R4-1) Create a per-subagent log file (mirroring background agents /
-/// teammates via [`crate::commands::code_ui::background_agent_log_path`])
-/// so the TUI overlay reads the subagent's streamed text via
-/// `read_agent_log_cached` instead of the capped 5000-entry transcript
+/// (R4HUNT-4) Directory holding per-subagent log files, a sibling of the
+/// background-agents dir under the LibertAI config root. Distinct from
+/// `code-background-agents/` so two agents (or a subagent + a background
+/// agent) with the same name in the same millisecond can never collide on
+/// the same path — the old code reused [`code_ui::background_agent_log_path`]
+/// which names files `<millis>-<safe_name>.log` in the shared dir, so a
+/// same-name-same-millis pair got the SAME path and two writers corrupted
+/// both logs.
+pub(crate) fn subagent_log_dir() -> std::io::Result<PathBuf> {
+    let root = crate::config::libertai_config_dir()
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(root.join("code-subagents"))
+}
+
+/// (R4-1 + R4HUNT-4) Create a per-subagent log file so the TUI overlay
+/// reads the subagent's streamed text via `read_agent_log_cached` /
+/// `read_agent_log_typed` instead of the capped 5000-entry transcript
 /// ring. Without this, a still-running in-process subagent's earliest
 /// entries get evicted once the ring trims, leaving its overlay
 /// truncated/empty.
 ///
-/// Reuses the background-agent log path helper (same `code-background-
-/// agents/` dir + 0600 perms via [`config::open_append_secure`]). The
-/// file is appended to in the `Subagent*` arms of `handle_agent_msg` on
-/// the main thread (between draws), and deleted on subagent return
-/// (in-process subagents are ephemeral — see the `registry.remove` calls
-/// in `run`). Returns the path on success; a creation failure is non-
-/// fatal (the caller falls back to `log_path: None`, the prior in-
-/// memory-only path).
+/// (R4HUNT-4) Lives in its OWN `code-subagents/` subdir (sibling of
+/// `code-background-agents/`) with a distinct name `subagent-<millis>-
+/// <nanos>-<safe_name>.log`. The `<millis>`+`<nanos>` pair is unique even
+/// across two subagents created in the same millisecond (the nanos suffix
+/// is monotonic enough in practice; combined with millis it rules out the
+/// same-name-same-ms collision that the old shared-dir `<millis>-<name>`
+/// naming had). 0600 perms via [`config::open_append_secure`]. The file is
+/// appended to in the `Subagent*` arms of `handle_agent_msg` on the main
+/// thread (between draws), and (on the SUCCESS path) deferred to session
+/// teardown via `cleanup_subagent_logs` (R4HUNT-3); the FAILURE/abort paths
+/// remove it immediately via the `SubagentGuard` Drop (R4HUNT-1). Returns
+/// the path on success; a creation failure is non-fatal (the caller falls
+/// back to `log_path: None`, the prior in-memory-only path).
 fn create_subagent_log_file(name: &str) -> std::io::Result<PathBuf> {
-    let log_path = crate::commands::code_ui::background_agent_log_path(name)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    if let Some(parent) = log_path.parent() {
-        config::create_dir_secure(parent)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        let _ = config::tighten_dir_mode_700(parent);
-    }
+    let dir = subagent_log_dir()?;
+    config::create_dir_secure(&dir).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let _ = config::tighten_dir_mode_700(&dir);
+    let safe_name: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let safe_name = safe_name.trim_matches('-');
+    let safe_name = if safe_name.is_empty() { "agent" } else { safe_name };
+    let started_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let suffix = unique_suffix();
+    let log_path = dir.join(format!("subagent-{started_at}-{suffix}-{safe_name}.log"));
     // Create + open (append) so the file exists immediately (the overlay
     // may read it before the first SubagentText lands) and is 0600.
     let _ = config::open_append_secure(&log_path);
     Ok(log_path)
 }
 
-/// (R4-1) Best-effort delete of a subagent's log file on return. In-
-/// process subagents are removed from the registry on completion, so the
-/// log file (the overlay's source while running) is no longer reachable —
-/// remove it to avoid accumulating temp files. Mirrors the ephemeral
-/// lifetime of the handle. A missing/unreadable file is silently ignored.
+/// (R4-1 + R4HUNT-1) Best-effort delete of a subagent's log file. In-
+/// process subagents have the log removed on the FAILURE/abort paths
+/// (via the `SubagentGuard` Drop); on the SUCCESS path the log PERSISTS
+/// until session teardown (R4HUNT-3) so the completed subagent's overlay
+/// keeps its final output. A missing/unreadable file is silently ignored.
 fn remove_subagent_log_file(log_path: &Path) {
     let _ = std::fs::remove_file(log_path);
+}
+
+/// (R4HUNT-3) Remove every file in the `code-subagents/` dir at session
+/// teardown. The SUCCESS-path subagent logs are deferred (not deleted on
+/// completion, so the completed subagent's overlay keeps reading its final
+/// output until the user closes it); this sweeps them all once the session
+/// tears down so temp files don't accumulate across sessions. Best-effort —
+/// a missing dir or an unreadable file is silently ignored. Called from
+/// `app::run`'s exit path.
+pub fn cleanup_subagent_logs() {
+    let Ok(dir) = subagent_log_dir() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Only sweep regular files in our subdir (defensive: never recurse,
+        // never follow a stray symlink out of the dir).
+        if path.is_file() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        named_subagent_prompt, render_child, should_skip_snapshot_entry, task_wants_same_cwd,
-        task_wants_worktree, TaskWorktree,
+        create_subagent_log_file, named_subagent_prompt, render_child, should_skip_snapshot_entry,
+        subagent_log_dir, task_wants_same_cwd, task_wants_worktree, SubagentGuard, TaskWorktree,
     };
     use crate::commands::code_agents::{AgentDefinition, AgentSource};
+    use crate::commands::code_team::{
+        AgentKind, AgentRegistration, AgentStatus, AgentRegistry,
+    };
     use pi::model::{ContentBlock, TextContent};
-    use pi::sdk::{AgentEvent, ToolOutput, ToolUpdate};
+    use pi::sdk::{AbortHandle, AgentEvent, ToolOutput, ToolUpdate};
     use serde_json::json;
+    use std::path::PathBuf;
     use std::process::Command;
     use std::sync::{Arc, Mutex};
 
@@ -1120,5 +1280,190 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?} failed with {status}");
+    }
+
+    // --- R4HUNT-1: SubagentGuard Drop reaps the abort-dropped subagent --------
+
+    // (R4HUNT-1) The load-bearing regression: parent abort (Ctrl+C / Esc /
+    // shared_abort) or a panic drops the `prompt_with_abort` future BEFORE the
+    // manual cleanup arms in `execute` run — orphaning the log + leaving the
+    // registry entry stuck at Working (pid:None → poll_agent_status SKIPS it →
+    // never reaped → stuck "working" subagent FOREVER, abort slot occupied).
+    // This test constructs a SubagentGuard in the aborted state (`cleaned`
+    // still false, i.e. the explicit arms never ran) and drops it WITHOUT
+    // running the explicit-arm cleanup, then asserts the guard's Drop fired
+    // the full reaping sequence: log file removed, registry entry removed,
+    // abort slot drained, status flipped to Failed.
+    #[test]
+    fn r4hunt1_guard_drop_reaps_aborted_subagent_lifecycle() {
+        let registry = AgentRegistry::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let log_path = temp.path().join("aborted.log");
+        // Create the log file so we can assert its deletion by Drop.
+        std::fs::write(&log_path, b"partial subagent output\n").expect("seed log");
+        // Register a subagent in Working state with an abort handle set (the
+        // exact state at the point `execute` awaits prompt_with_abort).
+        let handle = registry.register(AgentRegistration {
+            name: "aborted".to_string(),
+            kind: AgentKind::Subagent {
+                depth: 1,
+                parent: None,
+            },
+            color: crate::commands::code_team::AgentColor::Dim,
+            capability: crate::commands::code_team::AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: None,
+            log_path: Some(log_path.clone()),
+        });
+        handle.set_status(AgentStatus::Working);
+        let (abort_handle, _signal) = AbortHandle::new();
+        handle.set_abort(abort_handle);
+
+        assert_eq!(registry.snapshot().len(), 1, "registered");
+        assert!(handle.abort.lock().unwrap().is_some(), "abort slot set");
+        assert!(log_path.exists(), "log file seeded");
+
+        // Build the guard as `execute` does (right before the await), then
+        // drop it WITHOUT marking `cleaned = true` — simulating the abort/
+        // panic drop path where the explicit arms never ran.
+        {
+            let _guard = SubagentGuard::new(
+                Some(log_path.clone()),
+                Arc::clone(&handle),
+                Arc::clone(&registry),
+            );
+            // Guard is dropped here, before any explicit-arm cleanup.
+        }
+
+        // The guard's Drop fired the full reaping sequence:
+        assert!(!log_path.exists(), "Drop removed the log file");
+        assert_eq!(registry.snapshot().len(), 0, "Drop removed the registry entry");
+        assert!(
+            handle.abort.lock().unwrap().is_none(),
+            "Drop drained the abort slot (take_abort ran)"
+        );
+        assert_eq!(
+            handle.status(),
+            AgentStatus::Failed,
+            "Drop flipped the active status to Failed (not stuck Working)"
+        );
+    }
+
+    // (R4HUNT-1) The normal path: the explicit Ok/Err arms mark `cleaned = true`
+    // AFTER their own cleanup, so the guard's Drop is a no-op. Assert the guard
+    // does NOT re-remove an already-gone log file or re-flip a Completed status.
+    #[test]
+    fn r4hunt1_guard_drop_is_noop_when_cleaned_on_normal_path() {
+        let registry = AgentRegistry::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let log_path = temp.path().join("completed.log");
+        std::fs::write(&log_path, b"done\n").expect("seed log");
+        let handle = registry.register(AgentRegistration {
+            name: "completed".to_string(),
+            kind: AgentKind::Subagent {
+                depth: 1,
+                parent: None,
+            },
+            color: crate::commands::code_team::AgentColor::Dim,
+            capability: crate::commands::code_team::AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: None,
+            log_path: Some(log_path.clone()),
+        });
+        // Simulate the explicit Ok arm: take_abort + set_status(Completed) +
+        // registry.remove + mark guard.cleaned = true (the Ok arm does NOT
+        // remove the log — R4HUNT-3 defers it to teardown).
+        let _ = handle.take_abort();
+        handle.set_status(AgentStatus::Completed);
+        registry.remove(handle.id);
+
+        {
+            let mut guard = SubagentGuard::new(
+                Some(log_path.clone()),
+                Arc::clone(&handle),
+                Arc::clone(&registry),
+            );
+            guard.cleaned = true; // explicit arm already cleaned up
+            // Guard drops here as a no-op.
+        }
+        // No-op Drop: the log file is NOT removed (R4HUNT-3 defers it), the
+        // status stays Completed (not overwritten to Failed), and the registry
+        // stays empty (no double-remove, though remove is idempotent anyway).
+        assert!(log_path.exists(), "no-op Drop left the success-path log intact (R4HUNT-3)");
+        assert_eq!(handle.status(), AgentStatus::Completed, "no-op Drop kept Completed");
+        assert_eq!(registry.snapshot().len(), 0, "registry stays empty");
+    }
+
+    // --- R4HUNT-4: distinct subagent log path -----------------------------------
+
+    // (R4HUNT-4) A subagent log path lives in the `code-subagents/` dir (NOT
+    // the shared `code-background-agents/` dir) and carries a `subagent-`
+    // prefix + a unique millis+nanos suffix, so two same-name subagents (or a
+    // subagent + a background agent) created in the same millisecond get
+    // DISTINCT paths instead of colliding. This pins the new naming against a
+    // regression that re-introduces the shared-dir collision.
+    #[test]
+    fn r4hunt4_subagent_log_path_is_distinct_from_background_dir() {
+        let path = create_subagent_log_file("researcher").expect("create log");
+        let parent = path.parent().expect("path has parent");
+        // Lives under code-subagents/, NOT code-background-agents/.
+        assert!(
+            parent.ends_with("code-subagents"),
+            "subagent log must live in code-subagents/, got {}",
+            parent.display()
+        );
+        // The file name carries the subagent- prefix (distinct from the
+        // background dir's `<millis>-<name>` naming).
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("file name");
+        assert!(
+            name.starts_with("subagent-"),
+            "subagent log name must start with 'subagent-', got {name}"
+        );
+        assert!(
+            name.ends_with("-researcher.log"),
+            "subagent log name must end with the safe name, got {name}"
+        );
+        // The dir is the registered subagent_log_dir().
+        let dir = subagent_log_dir().expect("subagent_log_dir");
+        assert_eq!(parent, dir.as_path(), "parent matches subagent_log_dir()");
+        // 0600 perms (unix only).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .expect("file exists")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "subagent log must be 0600, got {mode:o}");
+        }
+        // Clean up the temp file we created in the shared config dir. Don't
+        // remove the dir itself — other concurrent tests (and the production
+        // path) write into it; a `remove_dir` here would race them (nuking the
+        // dir out from under a sibling test's open). The dir is a persistent
+        // cache; `cleanup_subagent_logs` sweeps stray files at teardown.
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // (R4HUNT-4) Two same-name subagents created back-to-back get DISTINCT
+    // paths (the millis+nanos suffix disambiguates even within one ms). The
+    // old shared-dir naming would have collided here.
+    #[test]
+    fn r4hunt4_two_same_name_subagents_get_distinct_paths() {
+        let a = create_subagent_log_file("coder").expect("create log a");
+        let b = create_subagent_log_file("coder").expect("create log b");
+        assert_ne!(a, b, "same-name same-ms subagents must get distinct paths");
+        // Clean up the files (not the shared dir — see the test above).
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
     }
 }
