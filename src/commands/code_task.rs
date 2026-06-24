@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -60,26 +61,37 @@ pub struct TaskTool {
     registry: Arc<AgentRegistry>,
 }
 
-/// (R4HUNT-1) RAII guard for an INLINE subagent's log-file + registry +
-/// abort lifetime, held across the `prompt_with_abort` await. The parent's
+/// (R4HUNT-1) RAII guard for an INLINE subagent's registry + abort
+/// lifetime, held across the `prompt_with_abort` await. The parent's
 /// abort (Ctrl+C / Esc / shared_abort) or any panic drops the
 /// `prompt_with_abort` future (pi's `select(all_fut, abort_fut)` returns on
 /// `Either::Right`/abort and DROPS `all_fut`, which holds the `execute`
 /// future) BEFORE the manual cleanup arms in `execute` run. Without this
-/// guard, that drop orphaned the log file + left the registry entry stuck at
+/// guard, that drop left the registry entry stuck at
 /// `AgentStatus::Working` with `pid: None` — `poll_agent_status` SKIPS
 /// `pid: None` handles (so it's NEVER reaped) and the agents panel showed a
 /// stuck "working" subagent FOREVER, occupying the abort slot.
+///
+/// (R5-HUNT-B) The guard no longer owns the log-file lifetime — the SUCCESS,
+/// FAILURE, and ABORT paths ALL defer log deletion to session teardown
+/// (`cleanup_subagent_logs`, made panic-safe by R5-HUNT-A) so an overlay
+/// already open on the subagent keeps its final output / failure reason /
+/// partial output. The guard now reaps only the registry entry + abort slot
+/// + status on the abort-drop path; the log file is left for teardown.
 ///
 /// Held as `let _guard = SubagentGuard { ... }` AFTER `register` and ACROSS
 /// the `prompt_with_abort(...).await`. Its [`Drop`] is idempotent via
 /// `cleaned`: the explicit return arms in `execute` (Ok + Err) set
 /// `guard.cleaned = true` AFTER their own `take_abort`/`set_status`/`remove`
-/// (the SUCCESS arm leaves the log per R4HUNT-3; the FAILURE arm removes
-/// it), so on the normal path Drop is a NO-OP. On the abort-drop path
-/// (`cleaned` still `false`) Drop fires the cleanup the skipped arms would
-/// have: `remove_subagent_log_file` + `registry.remove` + `take_abort`
-/// (ignore Err) + `set_status(Failed)` (best-effort, only if still active).
+/// (NEITHER arm removes the log — both defer it to session teardown per
+/// R4HUNT-3 / R5-HUNT-B, so an overlay already open on the subagent keeps its
+/// final output + failure reason), so on the normal path Drop is a NO-OP. On
+/// the abort-drop path (`cleaned` still `false`) Drop fires the cleanup the
+/// skipped arms would have: `registry.remove` + `take_abort` (ignore Err) +
+/// `set_status(Failed)` (best-effort, only if still active) — but, per
+/// R5-HUNT-B, it does NOT remove the log file (deferred to teardown too, so an
+/// overlay open on an ABORTED subagent keeps the partial output). The log is
+/// swept later by `cleanup_subagent_logs` (made panic-safe by R5-HUNT-A).
 ///
 /// Borrows the registry via a cloned `Arc<AgentRegistry>` — `self.registry`
 /// is already `Arc<AgentRegistry>` (thread-shared through the tool factory
@@ -87,7 +99,6 @@ pub struct TaskTool {
 /// `Arc` clone and the registry stays reachable from a moved guard without
 /// borrowing across the await (a `&'a AgentRegistry` can't span the await).
 struct SubagentGuard {
-    log_path: Option<PathBuf>,
     handle: Arc<AgentHandle>,
     registry: Arc<AgentRegistry>,
     cleaned: bool,
@@ -97,9 +108,8 @@ impl SubagentGuard {
     /// Build the guard AFTER `register`. The guard borrows nothing from the
     /// caller's stack — it owns its `Arc` clones — so it's safe to hold
     /// across the await + drop out of order.
-    fn new(log_path: Option<PathBuf>, handle: Arc<AgentHandle>, registry: Arc<AgentRegistry>) -> Self {
+    fn new(handle: Arc<AgentHandle>, registry: Arc<AgentRegistry>) -> Self {
         Self {
-            log_path,
             handle,
             registry,
             cleaned: false,
@@ -116,10 +126,13 @@ impl Drop for SubagentGuard {
         }
         // Abort/panic-drop path: the `execute` future was dropped before its
         // manual arms ran. Reap everything the skipped arms would have, so the
-        // subagent doesn't leak as a stuck "working" entry with an orphaned log.
-        if let Some(p) = self.log_path.as_ref() {
-            remove_subagent_log_file(p);
-        }
+        // subagent doesn't leak as a stuck "working" entry with an orphaned
+        // registry slot + abort handle. (R5-HUNT-B) The LOG file is NOT removed
+        // here — like the SUCCESS + FAILURE arms it is deferred to session
+        // teardown (cleanup_subagent_logs, made panic-safe by R5-HUNT-A) so an
+        // overlay ALREADY OPEN on an aborted subagent keeps its partial output
+        // instead of going blank the moment the parent aborts it. The old code
+        // deleted the log here immediately, blanking any open overlay.
         // Take the abort slot so a dropped mid-run agent can't be re-aborted
         // later; ignore the (already-None) Err — the whole point is recovery.
         let _ = self.handle.take_abort();
@@ -488,15 +501,17 @@ impl Tool for TaskTool {
         // future panics, pi's `select(all_fut, abort_fut)` returns on the
         // abort and DROPS all_fut (holding this `execute` future) BEFORE
         // the manual cleanup arms below run. The guard's Drop reaps the
-        // log file + registry entry + abort slot + Failed status so the
+        // registry entry + abort slot + Failed status so the
         // subagent doesn't leak as a stuck "working" entry (poll_agent_
         // status skips pid:None handles, so an unreaped one stays forever).
         // The explicit arms below set `guard.cleaned = true` after their
         // own cleanup, so on the normal path Drop is a no-op. Built here
         // (after register + set_abort) so it owns the live handle Arc +
-        // log_path + a registry Arc clone; dropped at the end of `execute`.
+        // a registry Arc clone; dropped at the end of `execute`. (R5-HUNT-B)
+        // The guard no longer owns the log path — log deletion is deferred
+        // to session teardown on ALL paths (SUCCESS/FAILURE/ABORT) so an
+        // overlay open on the subagent keeps its output.
         let mut guard = SubagentGuard::new(
-            subagent_log_path.clone(),
             Arc::clone(&handle_arc),
             Arc::clone(&self.registry),
         );
@@ -517,9 +532,17 @@ impl Tool for TaskTool {
             Err(e) => {
                 let _ = handle_arc.take_abort();
                 handle_arc.set_status(AgentStatus::Failed);
-                if let Some(p) = &subagent_log_path {
-                    remove_subagent_log_file(p);
-                }
+                // (R5-HUNT-B) FAILURE path: like the SUCCESS path (R4HUNT-3),
+                // remove from the registry (the overlay can't be RE-opened
+                // after failure) but DEFER the log-file deletion to session
+                // teardown so an overlay ALREADY OPEN on this subagent keeps
+                // its final output AND the failure reason (it reads via the
+                // path stored on the AgentOverlay, surviving registry.remove).
+                // The old code deleted the log here immediately, blanking any
+                // overlay open on a subagent that then FAILED — the user lost
+                // the final output + the error. Teardown's
+                // cleanup_subagent_logs (made panic-safe by R5-HUNT-A) sweeps
+                // it later.
                 self.registry.remove(handle_arc.id);
                 guard.cleaned = true;
                 return Ok(err_output(&format!("task: run failed: {e}")));
@@ -721,11 +744,23 @@ fn should_skip_snapshot_entry(name: &str) -> bool {
     )
 }
 
-fn unique_suffix() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
+/// (R5HUNT-1) Process-wide monotonic counter used as the per-subagent log
+/// path's uniqueness suffix. The old `unique_suffix` was a PURE wall-clock
+/// `SystemTime::now().as_nanos()` — two subagents created in the same
+/// nanosecond with the same display name collided on the path (the exact
+/// hazard R4HUNT-4 set out to eliminate), and a cross-restart same-nanos +
+/// same-name collision would APPEND to a stale log (worse now that the
+/// success path defers deletion — a stale log from a prior session could be
+/// appended to if the clock repeats). A monotonic `AtomicU64` guarantees
+/// uniqueness WITHIN a process regardless of wall-clock resolution or
+/// repeats; combined with `started_at` millis (kept for human-readability)
+/// and the safe_name, the path is unique across the session. Cross-PROCESS
+/// uniqueness still relies on millis + the safe_name not colliding
+/// simultaneously — acceptable; the in-process collision was the real hazard.
+static SUBAGENT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn unique_suffix() -> u64 {
+    SUBAGENT_SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
 fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String, String> {
@@ -925,18 +960,21 @@ pub(crate) fn subagent_log_dir() -> std::io::Result<PathBuf> {
 /// truncated/empty.
 ///
 /// (R4HUNT-4) Lives in its OWN `code-subagents/` subdir (sibling of
-/// `code-background-agents/`) with a distinct name `subagent-<millis>-
-/// <nanos>-<safe_name>.log`. The `<millis>`+`<nanos>` pair is unique even
-/// across two subagents created in the same millisecond (the nanos suffix
-/// is monotonic enough in practice; combined with millis it rules out the
-/// same-name-same-ms collision that the old shared-dir `<millis>-<name>`
-/// naming had). 0600 perms via [`config::open_append_secure`]. The file is
-/// appended to in the `Subagent*` arms of `handle_agent_msg` on the main
-/// thread (between draws), and (on the SUCCESS path) deferred to session
-/// teardown via `cleanup_subagent_logs` (R4HUNT-3); the FAILURE/abort paths
-/// remove it immediately via the `SubagentGuard` Drop (R4HUNT-1). Returns
-/// the path on success; a creation failure is non-fatal (the caller falls
-/// back to `log_path: None`, the prior in-memory-only path).
+/// `code-background-agents/`) with a distinct name
+/// `subagent-<millis>-<seq>-<safe_name>.log`. The `<millis>` (wall clock,
+/// human-readable) + `<seq>` (a process-wide MONOTONIC counter — see
+/// `unique_suffix`, R5HUNT-1) pair is unique across two subagents created
+/// in the same millisecond: the monotonic `seq` never repeats within a
+/// process, so combined with millis it rules out the same-name-same-ms
+/// collision the old shared-dir `<millis>-<name>` naming had (and the
+/// same-nanos collision the wall-clock `as_nanos()` suffix had). 0600 perms
+/// via [`config::open_append_secure`]. The file is appended to in the
+/// `Subagent*` arms of `handle_agent_msg` on the main thread (between
+/// draws), and (on the SUCCESS path) deferred to session teardown via
+/// `cleanup_subagent_logs` (R4HUNT-3); the FAILURE/abort paths remove it
+/// immediately via the `SubagentGuard` Drop (R4HUNT-1). Returns the path on
+/// success; a creation failure is non-fatal (the caller falls back to
+/// `log_path: None`, the prior in-memory-only path).
 fn create_subagent_log_file(name: &str) -> std::io::Result<PathBuf> {
     let dir = subagent_log_dir()?;
     config::create_dir_secure(&dir).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -965,35 +1003,125 @@ fn create_subagent_log_file(name: &str) -> std::io::Result<PathBuf> {
     Ok(log_path)
 }
 
-/// (R4-1 + R4HUNT-1) Best-effort delete of a subagent's log file. In-
-/// process subagents have the log removed on the FAILURE/abort paths
-/// (via the `SubagentGuard` Drop); on the SUCCESS path the log PERSISTS
-/// until session teardown (R4HUNT-3) so the completed subagent's overlay
-/// keeps its final output. A missing/unreadable file is silently ignored.
+/// (R4-1 + R5-HUNT-B) Best-effort delete of a subagent's log file. As of
+/// R5-HUNT-B, the SUCCESS, FAILURE, and ABORT paths all DEFER log deletion to
+/// session teardown (`cleanup_subagent_logs`) so an overlay already open on
+/// the subagent keeps its final output / failure reason / partial output. The
+/// ONE remaining caller of this helper is the Session-init-fail arm of
+/// `execute`: that arm runs synchronously on a `create_agent_session` error,
+/// BEFORE the guard is built and before any `await`, so no overlay could be
+/// open yet — an immediate delete is correct there. A missing/unreadable file
+/// is silently ignored.
 fn remove_subagent_log_file(log_path: &Path) {
     let _ = std::fs::remove_file(log_path);
 }
 
-/// (R4HUNT-3) Remove every file in the `code-subagents/` dir at session
-/// teardown. The SUCCESS-path subagent logs are deferred (not deleted on
-/// completion, so the completed subagent's overlay keeps reading its final
-/// output until the user closes it); this sweeps them all once the session
-/// tears down so temp files don't accumulate across sessions. Best-effort —
-/// a missing dir or an unreadable file is silently ignored. Called from
-/// `app::run`'s exit path.
+/// (R4HUNT-3 + R5HUNT-2 + R5-HUNT-A) Remove every SUBAGENT LOG file in the
+/// `code-subagents/` dir at session teardown. The SUCCESS-path subagent logs
+/// are deferred (not deleted on completion, so the completed subagent's
+/// overlay keeps reading its final output until the user closes it); this
+/// sweeps them all once the session tears down so temp files don't
+/// accumulate across sessions. Best-effort — a missing dir or an unreadable
+/// file is silently ignored. Called from `app::run`'s exit path (the explicit
+/// call documents the intent) AND by the [`SubagentLogSweeper`] Drop guard
+/// (R5-HUNT-A) so the sweep ALSO fires on a panic mid-`run_loop` (Drop runs
+/// during unwind). Both are idempotent; the guard's Drop sweeping an
+/// already-swept dir on the success path is harmless.
+///
+/// (R5HUNT-2) Removal is GATED on the file name matching what
+/// [`create_subagent_log_file`] produces — `subagent-<millis>-<seq>-<name>.log`
+/// — i.e. `starts_with("subagent-")` AND `ends_with(".log")`. The old loop
+/// removed EVERY `is_file()` entry with NO name guard, silently destroying
+/// any user/tool-dropped file (NOTES, .tmp, README, a stray non-log file) in
+/// `code-subagents/`. The guard keeps non-conforming files intact.
 pub fn cleanup_subagent_logs() {
-    let Ok(dir) = subagent_log_dir() else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    if let Ok(dir) = subagent_log_dir() {
+        sweep_subagent_logs_in(&dir);
+    }
+}
+
+/// (R5-HUNT-A) Sweep the subagent-log files in `dir` using the R5HUNT-2
+/// name guard. Split out of [`cleanup_subagent_logs`] so the
+/// [`SubagentLogSweeper`] Drop guard (and its unit test) can target an
+/// arbitrary directory — the production guard points at `subagent_log_dir()`
+/// (via [`SubagentLogSweeper::new`]), the test guard points at a temp dir
+/// (via [`SubagentLogSweeper::for_dir`]). Best-effort; a missing/unreadable
+/// dir or file is silently ignored. Only regular files matching the
+/// `subagent-...-<name>.log` naming are removed (defensive: never recurse,
+/// never follow a stray symlink out of the dir).
+fn sweep_subagent_logs_in(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        // Only sweep regular files in our subdir (defensive: never recurse,
-        // never follow a stray symlink out of the dir).
-        if path.is_file() {
+        if !path.is_file() {
+            continue;
+        }
+        // (R5HUNT-2) Only remove files whose name matches what
+        // `create_subagent_log_file` produces (`subagent-...-<name>.log`),
+        // so a user/tool-dropped non-log file (NOTES, README, .tmp) in the
+        // dir survives the teardown sweep.
+        let is_subagent_log = path
+            .file_name()
+            .is_some_and(|n| {
+                n.to_str().is_some_and(|s| {
+                    s.starts_with("subagent-") && s.ends_with(".log")
+                })
+            });
+        if is_subagent_log {
             let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// (R5-HUNT-A) RAII guard whose [`Drop`] runs [`sweep_subagent_logs_in`] (and
+/// thus [`cleanup_subagent_logs`] for the production dir), so the deferred
+/// subagent-log sweep fires on BOTH the normal return path AND a panic
+/// mid-`run_loop`. Constructed early in `app::run`, right after the
+/// `TerminalGuard` + `BracketedPasteGuard` are acquired, so it drops LAST (in
+/// reverse declaration order): terminal restore + paste-disable run first,
+/// THEN this sweep. The explicit `cleanup_subagent_logs()` call at the end of
+/// `run` (R4HUNT-3) still fires on the success path — this guard covers the
+/// panic path the explicit call is skipped on (a plain statement after
+/// `run_loop` is unreachable once `run_loop` panics). `app::run` is NOT
+/// `catch_unwind`-wrapped, but the release profile is `panic = unwind` (no
+/// `panic =` in `Cargo.toml`, so the Rust default applies), so a panic
+/// unwinds through `run` and this Drop runs during the unwind — exactly the
+/// `TerminalGuard`/`BracketedPasteGuard` discipline already used in `run`.
+///
+/// Holds an `Option<PathBuf>`: `None` (the production default via [`new`])
+/// resolves to `subagent_log_dir()` at drop time (so a config-dir move/tilde
+/// expansion between construction and drop is honored); `Some(dir)` (the test
+/// ctor [`for_dir`]) sweeps a fixed temp dir. The guard is `Send` (it holds
+/// only an `Option<PathBuf>`).
+pub(crate) struct SubagentLogSweeper {
+    dir: Option<PathBuf>,
+}
+
+impl SubagentLogSweeper {
+    /// Production ctor: sweep `subagent_log_dir()` on drop. Resolves the dir
+    /// lazily at drop time (not at construction) so the sweep honors the
+    /// config dir as it exists at teardown.
+    pub(crate) fn new() -> Self {
+        Self { dir: None }
+    }
+
+    /// Test ctor: sweep a fixed `dir` on drop. Used by the R5-HUNT-A unit
+    /// test to point the guard at a temp dir with a sentinel subagent log.
+    #[cfg(test)]
+    fn for_dir(dir: PathBuf) -> Self {
+        Self { dir: Some(dir) }
+    }
+}
+
+impl Drop for SubagentLogSweeper {
+    fn drop(&mut self) {
+        match &self.dir {
+            // Test path: sweep the fixed temp dir.
+            Some(dir) => sweep_subagent_logs_in(dir),
+            // Production path: resolve the config dir lazily + sweep.
+            None => cleanup_subagent_logs(),
         }
     }
 }
@@ -1001,8 +1129,9 @@ pub fn cleanup_subagent_logs() {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_subagent_log_file, named_subagent_prompt, render_child, should_skip_snapshot_entry,
-        subagent_log_dir, task_wants_same_cwd, task_wants_worktree, SubagentGuard, TaskWorktree,
+        cleanup_subagent_logs, create_subagent_log_file, named_subagent_prompt, render_child,
+        should_skip_snapshot_entry, subagent_log_dir, sweep_subagent_logs_in,
+        task_wants_same_cwd, task_wants_worktree, SubagentGuard, SubagentLogSweeper, TaskWorktree,
     };
     use crate::commands::code_agents::{AgentDefinition, AgentSource};
     use crate::commands::code_team::{
@@ -1286,20 +1415,24 @@ mod tests {
 
     // (R4HUNT-1) The load-bearing regression: parent abort (Ctrl+C / Esc /
     // shared_abort) or a panic drops the `prompt_with_abort` future BEFORE the
-    // manual cleanup arms in `execute` run — orphaning the log + leaving the
-    // registry entry stuck at Working (pid:None → poll_agent_status SKIPS it →
-    // never reaped → stuck "working" subagent FOREVER, abort slot occupied).
-    // This test constructs a SubagentGuard in the aborted state (`cleaned`
-    // still false, i.e. the explicit arms never ran) and drops it WITHOUT
-    // running the explicit-arm cleanup, then asserts the guard's Drop fired
-    // the full reaping sequence: log file removed, registry entry removed,
-    // abort slot drained, status flipped to Failed.
+    // manual cleanup arms in `execute` run — leaving the registry entry stuck
+    // at Working (pid:None → poll_agent_status SKIPS it → never reaped → stuck
+    // "working" subagent FOREVER, abort slot occupied). This test constructs a
+    // SubagentGuard in the aborted state (`cleaned` still false, i.e. the
+    // explicit arms never ran) and drops it WITHOUT running the explicit-arm
+    // cleanup, then asserts the guard's Drop fired the reaping sequence:
+    // registry entry removed, abort slot drained, status flipped to Failed.
+    //
+    // (R5-HUNT-B) The log file is now KEPT by the abort-drop path (deferred to
+    // teardown) so an overlay already open on an ABORTED subagent keeps its
+    // partial output instead of going blank. The old assertion that Drop
+    // removes the log is inverted here to pin the new deferral behavior.
     #[test]
     fn r4hunt1_guard_drop_reaps_aborted_subagent_lifecycle() {
         let registry = AgentRegistry::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let log_path = temp.path().join("aborted.log");
-        // Create the log file so we can assert its deletion by Drop.
+        // Create the log file so we can assert its SURVIVAL under R5-HUNT-B.
         std::fs::write(&log_path, b"partial subagent output\n").expect("seed log");
         // Register a subagent in Working state with an abort handle set (the
         // exact state at the point `execute` awaits prompt_with_abort).
@@ -1331,15 +1464,16 @@ mod tests {
         // panic drop path where the explicit arms never ran.
         {
             let _guard = SubagentGuard::new(
-                Some(log_path.clone()),
                 Arc::clone(&handle),
                 Arc::clone(&registry),
             );
             // Guard is dropped here, before any explicit-arm cleanup.
         }
 
-        // The guard's Drop fired the full reaping sequence:
-        assert!(!log_path.exists(), "Drop removed the log file");
+        // The guard's Drop fired the reaping sequence (registry/abort/status),
+        // but (R5-HUNT-B) the log SURVIVES — deferred to teardown so an overlay
+        // already open on the aborted subagent keeps its partial output.
+        assert!(log_path.exists(), "Drop KEPT the log file (R5-HUNT-B deferral)");
         assert_eq!(registry.snapshot().len(), 0, "Drop removed the registry entry");
         assert!(
             handle.abort.lock().unwrap().is_none(),
@@ -1385,7 +1519,6 @@ mod tests {
 
         {
             let mut guard = SubagentGuard::new(
-                Some(log_path.clone()),
                 Arc::clone(&handle),
                 Arc::clone(&registry),
             );
@@ -1400,11 +1533,88 @@ mod tests {
         assert_eq!(registry.snapshot().len(), 0, "registry stays empty");
     }
 
+    // --- R5-HUNT-B: FAILURE path keeps the log for an open overlay -------------
+
+    // (R5-HUNT-B) An overlay can be open on a still-running subagent (Tab into
+    // the agents panel + Enter-to-open-overlay are NOT gated on
+    // Phase::Streaming). If that subagent then FAILS, the Err arm of `execute`
+    // must DEFER the log deletion to teardown (not delete it immediately) so
+    // the already-open overlay keeps its final output AND the failure reason
+    // — the user can see WHY it failed. The old Err arm deleted the log right
+    // away, blanking the overlay. This test drives the Err-arm body (the exact
+    // sequence the production arm runs: take_abort + set_status(Failed) +
+    // registry.remove + guard.cleaned=true, NO log removal) and asserts the log
+    // SURVIVES + the status is Failed + the registry is empty + the overlay's
+    // captured path still reads the failure output.
+    #[test]
+    fn r5huntb_failure_arm_keeps_log_for_open_overlay() {
+        let registry = AgentRegistry::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let log_path = temp.path().join("failed-subagent.log");
+        // The subagent wrote some output then failed — the log carries BOTH the
+        // partial work AND the failure reason (simulated by seeding the file).
+        let failure_output = "partial work...\nERROR: tool rejected: permission denied";
+        std::fs::write(&log_path, failure_output).expect("seed failed-subagent log");
+        let handle = registry.register(AgentRegistration {
+            name: "failed".to_string(),
+            kind: AgentKind::Subagent {
+                depth: 1,
+                parent: None,
+            },
+            color: crate::commands::code_team::AgentColor::Dim,
+            capability: crate::commands::code_team::AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: None,
+            // The overlay captures log_path at OPEN time; the registry entry
+            // carries the same path.
+            log_path: Some(log_path.clone()),
+        });
+        handle.set_status(AgentStatus::Working);
+        let (abort_handle, _signal) = AbortHandle::new();
+        handle.set_abort(abort_handle);
+
+        // Simulate the Err arm of `execute` EXACTLY (R5-HUNT-B fix): the arm
+        // does take_abort + set_status(Failed) + registry.remove + marks the
+        // guard cleaned — and NO longer calls remove_subagent_log_file.
+        {
+            let mut guard = SubagentGuard::new(
+                Arc::clone(&handle),
+                Arc::clone(&registry),
+            );
+            // --- Err-arm body (mirrors code_task.rs `Err(e) => { ... }`) ---
+            let _ = handle.take_abort();
+            handle.set_status(AgentStatus::Failed);
+            // (R5-HUNT-B) NO remove_subagent_log_file here — deferred to teardown.
+            registry.remove(handle.id);
+            guard.cleaned = true;
+            // Guard drops here as a no-op (cleaned == true).
+        }
+
+        // The log SURVIVES the Err arm — an overlay open on this subagent keeps
+        // the final output + the failure reason instead of going blank.
+        assert!(log_path.exists(), "Err arm KEPT the log (R5-HUNT-B deferral)");
+        let on_disk = std::fs::read_to_string(&log_path).expect("log readable");
+        assert!(
+            on_disk.contains("ERROR: tool rejected"),
+            "overlay can read the failure reason from the deferred log"
+        );
+        // Status flipped to Failed (so the panel reflects the failure), the
+        // registry entry is gone (overlay can't be RE-opened, but the one
+        // already open keeps reading via its captured path).
+        assert_eq!(handle.status(), AgentStatus::Failed, "Err arm set Failed");
+        assert_eq!(registry.snapshot().len(), 0, "Err arm removed the registry entry");
+    }
+
     // --- R4HUNT-4: distinct subagent log path -----------------------------------
 
-    // (R4HUNT-4) A subagent log path lives in the `code-subagents/` dir (NOT
-    // the shared `code-background-agents/` dir) and carries a `subagent-`
-    // prefix + a unique millis+nanos suffix, so two same-name subagents (or a
+    // (R4HUNT-4 + R5HUNT-1) A subagent log path lives in the `code-subagents/`
+    // dir (NOT the shared `code-background-agents/` dir) and carries a
+    // `subagent-` prefix + a `subagent-<millis>-<seq>-<safe_name>.log` name
+    // whose `<seq>` is a process-wide MONOTONIC counter (R5HUNT-1, replacing
+    // the wall-clock `as_nanos()` suffix), so two same-name subagents (or a
     // subagent + a background agent) created in the same millisecond get
     // DISTINCT paths instead of colliding. This pins the new naming against a
     // regression that re-introduces the shared-dir collision.
@@ -1454,16 +1664,219 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    // (R4HUNT-4) Two same-name subagents created back-to-back get DISTINCT
-    // paths (the millis+nanos suffix disambiguates even within one ms). The
-    // old shared-dir naming would have collided here.
+    // (R4HUNT-4 + R5HUNT-1) Two same-name subagents created back-to-back get
+    // DISTINCT paths. With the old wall-clock `as_nanos()` suffix two calls in
+    // the same nanosecond would have collided; the monotonic counter (R5HUNT-1)
+    // guarantees distinctness regardless of wall-clock resolution. The old
+    // shared-dir naming would also have collided here.
     #[test]
     fn r4hunt4_two_same_name_subagents_get_distinct_paths() {
         let a = create_subagent_log_file("coder").expect("create log a");
         let b = create_subagent_log_file("coder").expect("create log b");
         assert_ne!(a, b, "same-name same-ms subagents must get distinct paths");
+        // Parse the monotonic `<seq>` out of each name and assert it strictly
+        // increases — the load-bearing guarantee of R5HUNT-1. Name shape is
+        // `subagent-<millis>-<seq>-<safe_name>.log`.
+        let seq_of = |p: &std::path::Path| -> u64 {
+            let name = p.file_name().and_then(|n| n.to_str()).expect("file name");
+            // Strip the `subagent-` prefix + the `-coder.log` tail.
+            let inner = name
+                .strip_prefix("subagent-")
+                .expect("subagent- prefix");
+            let core = inner.strip_suffix("-coder.log").expect("-coder.log suffix");
+            // core == `<millis>-<seq>`; the seq is the last `-`-delimited run.
+            core.rsplit_once('-')
+                .expect("<millis>-<seq> shape")
+                .1
+                .parse::<u64>()
+                .expect("seq is a u64")
+        };
+        let seq_a = seq_of(&a);
+        let seq_b = seq_of(&b);
+        assert!(
+            seq_b > seq_a,
+            "monotonic counter must strictly increase: a={seq_a} b={seq_b}"
+        );
         // Clean up the files (not the shared dir — see the test above).
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
+    }
+
+    // (R5HUNT-1) The monotonic counter is process-wide, so a burst of many
+    // back-to-back same-name subagent-log creations all get DISTINCT paths
+    // (no two share a `<seq>`). Under the old wall-clock `as_nanos()` suffix a
+    // tight loop could repeat a nanos value on platforms with coarse clocks
+    // and two creations would collide. This pins the monotonic guarantee
+    // against a regression back to a clock-based suffix.
+    #[test]
+    fn r5hunt1_unique_suffix_is_monotonic_across_burst() {
+        let paths: Vec<_> = (0..64)
+            .map(|_| create_subagent_log_file("burst").expect("create log"))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for p in &paths {
+            assert!(seen.insert(p.clone()), "duplicate path in burst — monotonic counter regressed");
+        }
+        for p in &paths {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    // --- R5HUNT-2: cleanup_subagent_logs name guard -----------------------------
+
+    // (R5HUNT-2) cleanup_subagent_logs must ONLY remove files whose name
+    // matches what create_subagent_log_file produces (`subagent-...-<name>.log`).
+    // The old loop removed EVERY is_file() entry with NO name guard, silently
+    // destroying any user/tool-dropped file (NOTES, README, .tmp) in
+    // code-subagents/. This drops a real subagent log + several non-conforming
+    // files into subagent_log_dir(), runs cleanup, and asserts the subagent
+    // log IS removed while the non-conforming files SURVIVE.
+    #[test]
+    fn r5hunt2_cleanup_subagent_logs_keeps_non_conforming_files() {
+        let dir = subagent_log_dir().expect("subagent_log_dir");
+        let _ = std::fs::create_dir_all(&dir);
+        // A real subagent log produced by the production creator — must be swept.
+        let real_log = create_subagent_log_file("hunter").expect("create real subagent log");
+        assert!(real_log.starts_with(&dir), "real log lives in subagent dir");
+        // Non-conforming files a user/tool might drop in the dir — must survive.
+        let notes = dir.join("NOTES.md");
+        let readme = dir.join("README");
+        let tmp = dir.join("scratch.tmp");
+        let stray_log = dir.join("agent.log"); // ends .log but no subagent- prefix
+        let stray_prefix = dir.join("subagent-notes.txt"); // prefix but no .log
+        std::fs::write(&notes, b"keep me").expect("seed notes");
+        std::fs::write(&readme, b"keep me").expect("seed readme");
+        std::fs::write(&tmp, b"keep me").expect("seed tmp");
+        std::fs::write(&stray_log, b"keep me").expect("seed stray_log");
+        std::fs::write(&stray_prefix, b"keep me").expect("seed stray_prefix");
+
+        cleanup_subagent_logs();
+
+        // The real subagent log (subagent-...-hunter.log) IS removed.
+        assert!(!real_log.exists(), "real subagent log swept by cleanup");
+        // Every non-conforming file SURVIVES.
+        assert!(notes.exists(), "NOTES.md survives (R5HUNT-2 name guard)");
+        assert!(readme.exists(), "README survives (R5HUNT-2 name guard)");
+        assert!(tmp.exists(), "scratch.tmp survives (R5HUNT-2 name guard)");
+        assert!(stray_log.exists(), "agent.log (no subagent- prefix) survives");
+        assert!(
+            stray_prefix.exists(),
+            "subagent-notes.txt (no .log suffix) survives"
+        );
+
+        // Clean up the survivors + the dir's now-empty state. Don't remove the
+        // dir itself — see r4hunt4_subagent_log_path_is_distinct_from_background_dir.
+        let _ = std::fs::remove_file(&notes);
+        let _ = std::fs::remove_file(&readme);
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&stray_log);
+        let _ = std::fs::remove_file(&stray_prefix);
+    }
+
+    // --- R5-HUNT-A: panic-safe teardown Drop guard ------------------------------
+
+    // (R5-HUNT-A) The subagent-log teardown sweep MUST run even when `run_loop`
+    // panics — `app::run` is NOT `catch_unwind`-wrapped, so the explicit
+    // `cleanup_subagent_logs()` after `run_loop` is skipped on a panic, and the
+    // deferred subagent logs would be orphaned on disk. The `SubagentLogSweeper`
+    // RAII guard (constructed at the top of `run`) fires its Drop during the
+    // unwind, sweeping the logs. This test pins that the guard's Drop runs DURING
+    // an unwind: it constructs a `SubagentLogSweeper::for_dir(temp)` over a temp
+    // dir holding a sentinel subagent log, holds the guard inside a
+    // `catch_unwind` closure that PANICS, and asserts the sentinel was removed
+    // (Drop ran during the unwind) — mirroring how a panic mid-`run_loop` drops
+    // the sweeper.
+    #[test]
+    fn r5hunta_sweeper_drop_runs_during_unwind_and_sweeps_logs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().to_path_buf();
+        // Seed a sentinel subagent log (R5HUNT-2 name shape) + a non-conforming
+        // file (must survive — pins that the sweeper uses the name guard).
+        let sentinel = dir.join("subagent-12345-7-hunter.log");
+        std::fs::write(&sentinel, b"orphaned log\n").expect("seed sentinel");
+        let stray = dir.join("NOTES.md");
+        std::fs::write(&stray, b"keep me\n").expect("seed stray");
+
+        assert!(sentinel.exists(), "sentinel seeded");
+        assert!(stray.exists(), "stray seeded");
+
+        // Hold the sweeper across a panic. catch_unwind lets the panic unwind
+        // (running the guard's Drop during the unwind) then resumes; AssertUnwindSafe
+        // is sound here — the sweeper holds only an Option<PathBuf> (UnwindSafe)
+        // and the closure doesn't share mutable state with the outside.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Construct the guard INSIDE the closure so it's dropped during the
+            // unwind when the panic propagates — the exact `run` shape (guard
+            // constructed early, dropped by the unwind).
+            let _sweeper = SubagentLogSweeper::for_dir(dir.clone());
+            panic!("simulated panic in run_loop");
+        }));
+        assert!(result.is_err(), "the closure panicked as expected");
+
+        // The guard's Drop ran DURING the unwind + swept the sentinel subagent log.
+        assert!(
+            !sentinel.exists(),
+            "R5-HUNT-A: sweeper Drop removed the subagent log during the unwind"
+        );
+        // (R5HUNT-2) The non-conforming file SURVIVES the sweeper too.
+        assert!(
+            stray.exists(),
+            "R5-HUNT-A: sweeper honored the R5HUNT-2 name guard (NOTES.md survived)"
+        );
+    }
+
+    // (R5-HUNT-A) The production `SubagentLogSweeper::new()` (dir == None)
+    // resolves to `subagent_log_dir()` at drop time and sweeps it. This pins
+    // that the None arm actually sweeps the real config dir (so a regression
+    // that no-ops the None arm is caught): seed a real subagent log into
+    // `subagent_log_dir()`, drop a `new()` sweeper, assert the log is gone.
+    #[test]
+    fn r5hunta_sweeper_new_sweeps_real_config_dir() {
+        let real = create_subagent_log_file("sweeper-target").expect("create real log");
+        assert!(real.exists(), "real log seeded in config dir");
+        {
+            let _sweeper = SubagentLogSweeper::new();
+            // Sweeper drops here on the normal return path.
+        }
+        assert!(
+            !real.exists(),
+            "R5-HUNT-A: SubagentLogSweeper::new() swept the real config dir on drop"
+        );
+    }
+
+    // (R5-HUNT-A) Normal-return drop: a `for_dir` sweeper dropped normally (no
+    // panic) also sweeps. This pins the success-path behavior (the explicit
+    // `cleanup_subagent_logs()` call in `run` documents the intent, but the
+    // sweeper's Drop is the actual mechanism on the early-return/panic paths).
+    #[test]
+    fn r5hunta_sweeper_drop_sweeps_on_normal_return() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().to_path_buf();
+        let sentinel = dir.join("subagent-9-3-researcher.log");
+        std::fs::write(&sentinel, b"done\n").expect("seed sentinel");
+        {
+            let _sweeper = SubagentLogSweeper::for_dir(dir.clone());
+            // Normal return — no panic. Sweeper drops here.
+        }
+        assert!(
+            !sentinel.exists(),
+            "R5-HUNT-A: sweeper Drop swept the log on normal return"
+        );
+    }
+
+    // (R5-HUNT-A + R5HUNT-2) Direct unit test of `sweep_subagent_logs_in` — the
+    // helper the sweeper + `cleanup_subagent_logs` delegate to — to pin the
+    // name guard independent of the guard's Drop timing.
+    #[test]
+    fn r5hunta_sweep_subagent_logs_in_name_guard() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path();
+        let real = dir.join("subagent-1-1-x.log");
+        let stray = dir.join("README");
+        std::fs::write(&real, b"log\n").expect("seed real");
+        std::fs::write(&stray, b"keep\n").expect("seed stray");
+        sweep_subagent_logs_in(dir);
+        assert!(!real.exists(), "subagent log swept");
+        assert!(stray.exists(), "non-conforming file survived");
     }
 }

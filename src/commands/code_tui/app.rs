@@ -1615,6 +1615,23 @@ pub fn run(
     cfg: Arc<LibertaiConfig>,
     registry: Arc<AgentRegistry>,
 ) -> anyhow::Result<()> {
+    // (R5-HUNT-A) Subagent-log sweep RAII guard. Declared FIRST so it drops
+    // LAST (reverse declaration order): the terminal restore + paste-disable
+    // (the `TerminalGuard` + `BracketedPasteGuard` below) run before the log
+    // sweep on every exit path. The SUCCESS path's explicit
+    // `cleanup_subagent_logs()` call further down documents the intent + runs
+    // on normal return; this guard covers the PANIC path — a panic in
+    // `run_loop` unwinds through `run` (release profile is `panic = unwind`,
+    // the Rust default — no `panic =` in `Cargo.toml`), the explicit call
+    // after `run_loop` is skipped, but this Drop runs during the unwind so the
+    // deferred subagent logs are swept instead of orphaned on disk. Mirrors
+    // the `TerminalGuard`/`BracketedPasteGuard` RAII discipline already used
+    // here. The sweep is idempotent (R5HUNT-2 name-guarded), so the success
+    // path sweeping an already-swept dir is harmless. On a failed startup
+    // (e.g. `enable_raw_mode?` early-returns) this drops too — harmless, and
+    // it reaps leftover logs from a prior crashed session.
+    let _log_sweeper = crate::commands::code_task::SubagentLogSweeper::new();
+
     // Set up terminal — guard created first so any early-return
     // between enable_raw_mode and the end of run_loop is cleaned up.
     let mut guard = TerminalGuard::new(true);
@@ -1782,11 +1799,16 @@ pub fn run(
     // Run the event loop.
     let result = run_loop(&mut guard, &mut app, agent_rx, cmd_tx, &shared_abort);
 
-    // (R4HUNT-3) Session teardown: sweep the deferred subagent log files.
-    // The SUCCESS-path subagent logs are intentionally kept until teardown
-    // (not deleted on completion) so a COMPLETED subagent's overlay keeps
-    // its final output. Remove them all here once the loop exits — best-
-    // effort; a missing dir or unreadable file is silently ignored.
+    // (R4HUNT-3 + R5-HUNT-A) Session teardown: sweep the deferred subagent log
+    // files. The SUCCESS-path subagent logs are intentionally kept until
+    // teardown (not deleted on completion) so a COMPLETED subagent's overlay
+    // keeps its final output. Remove them all here once the loop exits — best-
+    // effort; a missing dir or unreadable file is silently ignored. This
+    // explicit call runs on the NORMAL return path (documents the intent);
+    // the `SubagentLogSweeper` guard constructed at the top of `run` covers
+    // the PANIC path (its Drop fires during unwind). Both are idempotent, so
+    // running both on the success path is harmless — the guard sweeps an
+    // already-swept dir.
     crate::commands::code_task::cleanup_subagent_logs();
 
     // Restore terminal (also done by guard on drop, but do it explicitly
@@ -2252,24 +2274,25 @@ fn handle_key(
     // the overlay), and with NO overlay open the fall-through reaches the
     // main-match arm which quits.
     //
-    // (R5-CTRLC-OVERLAY-DIVERGE) Unlike the main-match Ctrl+C arm, the
-    // Streaming intercept ALSO closes any open overlay/palette after aborting.
-    // This diverges from Esc's semantics on purpose: while streaming with an
-    // overlay open, Esc routes to the overlay handler (it closes the overlay
-    // but does NOT stop the turn — the Esc-to-stop arm at ~2395 is unreachable
-    // while an overlay is open), so Esc -> overlay closed, turn keeps
-    // streaming. Ctrl+C is the user's "interrupt everything" gesture: it stops
-    // the turn AND dismisses the foreground surface, matching the mental model
-    // that an interrupt clears the foreground. Without the close, a Ctrl+C
-    // would leave the palette/diff/agent overlay lingering over the now-Idle
-    // screen — a pure UX inconsistency (no corruption: overlays render purely
-    // on `is_some()`, view.rs:~74-87). Pending diff state is cleared too so a
-    // half-staged `/diff` doesn't reopen the viewer later. Idle Ctrl+C is
-    // unaffected (it falls through, closing nothing).
-    // Only the Streaming case returns early (abort + Idle + close). The Idle
-    // case is intentionally NOT an early return: it falls through so the key
-    // reaches the palette/overlay guard (ignored, no corruption) or, with no
-    // overlay open, the main-match Ctrl+C arm (quit). Combining the two
+    // (R5-CTRLC-ORPHANS-SUBAGENT-LOG) The Streaming intercept stops the turn
+    // AND clears the TRANSIENT slash-palette filter — but it does NOT close a
+    // persistent overlay/diff the user opened deliberately. This reverts the
+    // overlay-close half of the round-5 R5-CTRLC-OVERLAY-DIVERGE fix (which
+    // went too far) while KEEPING the Ctrl+C-always-aborts behavior that fixed
+    // CTRLC-SWALLOWED-OVERLAYS. Rationale: an agent overlay opened on a
+    // COMPLETED in-process subagent whose handle is `registry.remove`d has no
+    // UI path back to re-open it once dismissed (its `log_path` is unreachable
+    // from the registry — see AgentOverlay::log_path / R4HUNT-3), so a Ctrl+C
+    // on an UNRELATED turn silently destroying that overlay would orphan it.
+    // Same for a `/diff` the user opened intentionally. The slash palette is a
+    // transient FILTER UI (the user didn't open it as a persistent view), so
+    // clearing it on an interrupt is fine. The user can Esc the overlay/diff
+    // deliberately (matching the round-4 behavior the round-5 fix changed).
+    // Idle Ctrl+C is unaffected (it falls through, closing nothing).
+    // Only the Streaming case returns early (abort + Idle + clear palette). The
+    // Idle case is intentionally NOT an early return: it falls through so the
+    // key reaches the palette/overlay guard (ignored, no corruption) or, with
+    // no overlay open, the main-match Ctrl+C arm (quit). Combining the two
     // conditions into one `if` (rather than nesting) keeps clippy's
     // `collapsible_if` happy and makes the early-return intent explicit.
     if key.code == KeyCode::Char('c')
@@ -2287,13 +2310,14 @@ fn handle_key(
             abort.abort();
         }
         app.phase = Phase::Idle;
-        // (R5-CTRLC-OVERLAY-DIVERGE) An interrupt also dismisses any open
-        // foreground surface so a single Ctrl+C both stops the turn and clears
-        // the overlay/palette (Esc closes the overlay but keeps streaming).
+        // (R5-CTRLC-ORPHANS-SUBAGENT-LOG) Clear ONLY the transient slash-palette
+        // filter UI. Persistent overlays/diffs the user opened deliberately
+        // (incl. a COMPLETED subagent's overlay whose handle is
+        // registry-removed — no re-open path once dismissed) are LEFT for the
+        // user to Esc. This reverts the overlay-close half of R5-CTRLC-OVERLAY-
+        // DIVERGE (round 5 went too far) while keeping the Ctrl+C-always-aborts
+        // behavior that fixed CTRLC-SWALLOWED-OVERLAYS.
         app.slash_palette = None;
-        app.diff_view = None;
-        app.pending_diff = None;
-        app.agent_overlay = None;
         app.set_dirty();
         return None;
     }
@@ -11489,12 +11513,13 @@ task = "Do the thing"
             "Ctrl+C must take the abort slot"
         );
         assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
-        // (R5-CTRLC-OVERLAY-DIVERGE) Ctrl+C now ALSO dismisses the palette — a
-        // single interrupt both stops the turn and clears the foreground (Esc
-        // closes the overlay but keeps streaming).
+        // (R5-CTRLC-ORPHANS-SUBAGENT-LOG) The slash palette is a TRANSIENT
+        // filter UI (not a persistent view the user opened deliberately), so
+        // Ctrl+C clears it — the one foreground surface the interrupt dismisses.
+        // Persistent overlays/diffs are left for the user to Esc.
         assert!(
             app.slash_palette.is_none(),
-            "Ctrl+C must close the palette (interrupt clears the foreground)"
+            "Ctrl+C must clear the transient palette filter (the one surface the interrupt dismisses)"
         );
         // No command sent to the bg thread (abort is synchronous on main).
         assert!(cmd_rx.try_recv().is_err(), "Ctrl+C must not send a Cmd");
@@ -11739,12 +11764,14 @@ task = "Do the thing"
             "Ctrl+C must take the abort slot"
         );
         assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
-        // (R5-CTRLC-OVERLAY-DIVERGE) Ctrl+C now ALSO dismisses the diff overlay —
-        // a single interrupt both stops the turn and clears the foreground (Esc
-        // closes the overlay but keeps streaming).
+        // (R5-CTRLC-ORPHANS-SUBAGENT-LOG) Ctrl+C stops the turn + clears the
+        // transient palette, but does NOT close a diff the user opened
+        // deliberately — it survives for the user to Esc (reverts the overlay-
+        // close half of R5-CTRLC-OVERLAY-DIVERGE; keeps the Ctrl+C-always-aborts
+        // behavior that fixed CTRLC-SWALLOWED-OVERLAYS).
         assert!(
-            app.diff_view.is_none(),
-            "Ctrl+C must close the diff overlay (interrupt clears the foreground)"
+            app.diff_view.is_some(),
+            "Ctrl+C must NOT close the diff overlay (user opens it deliberately; Esc to close)"
         );
         assert!(cmd_rx.try_recv().is_err(), "Ctrl+C must not send a Cmd");
     }
@@ -11790,26 +11817,29 @@ task = "Do the thing"
             "Ctrl+C must take the abort slot"
         );
         assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
-        // (R5-CTRLC-OVERLAY-DIVERGE) Ctrl+C now ALSO dismisses the agent overlay —
-        // a single interrupt both stops the turn and clears the foreground (Esc
-        // closes the overlay but keeps streaming).
+        // (R5-CTRLC-ORPHANS-SUBAGENT-LOG) Ctrl+C stops the turn + clears the
+        // transient palette, but does NOT close an agent overlay the user
+        // opened deliberately — it survives for the user to Esc (reverts the
+        // overlay-close half of R5-CTRLC-OVERLAY-DIVERGE; keeps the Ctrl+C-
+        // always-aborts behavior that fixed CTRLC-SWALLOWED-OVERLAYS).
         assert!(
-            app.agent_overlay.is_none(),
-            "Ctrl+C must close the agent overlay (interrupt clears the foreground)"
+            app.agent_overlay.is_some(),
+            "Ctrl+C must NOT close the agent overlay (user opens it deliberately; Esc to close)"
         );
         assert!(cmd_rx.try_recv().is_err(), "Ctrl+C must not send a Cmd");
     }
 
-    // (R5-CTRLC-OVERLAY-DIVERGE) End-to-end guard for the Ctrl+C-while-streaming-
-    // and-overlay-open path: a single Ctrl+C must BOTH abort the turn (take +
-    // fire the shared abort handle, transition to Idle) AND dismiss the open
-    // agent overlay. This is the regression that round 4 introduced — its
-    // intercept aborted + set Idle but left the overlay lingering over Idle,
-    // diverging from Esc (Esc closes the overlay but keeps streaming). Drives
+    // (R5-CTRLC-ORPHANS-SUBAGENT-LOG) End-to-end guard for the Ctrl+C-while-
+    // streaming-and-overlay-open path: a single Ctrl+C must abort the turn
+    // (take + fire the shared abort handle, transition to Idle) while LEAVING
+    // the open agent overlay intact for the user to Esc deliberately. This
+    // reverts the overlay-close half of the round-5 R5-CTRLC-OVERLAY-DIVERGE
+    // fix (round 5 went too far by closing the overlay) while keeping the
+    // Ctrl+C-always-aborts behavior that fixed CTRLC-SWALLOWED-OVERLAYS. Drives
     // the REAL handle_key dispatch (not the intercept in isolation) so the
-    // overlay-closing addition at the top of handle_key is exercised end-to-end.
+    // top-of-handle_key behavior is exercised end-to-end.
     #[test]
-    fn ctrl_c_closes_overlay_and_aborts() {
+    fn ctrl_c_aborts_turn_but_keeps_overlay() {
         let mut app = test_app();
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
         let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
@@ -11820,7 +11850,7 @@ task = "Do the thing"
         app.turn_started = Some(Instant::now());
         assert!(!abort_signal.is_aborted(), "fresh signal must not be aborted");
         assert!(app.agent_overlay.is_none(), "precondition: overlay starts closed");
-        // Open an agent overlay — the foreground surface Ctrl+C must clear.
+        // Open an agent overlay — the persistent view Ctrl+C must NOT close.
         app.agent_overlay = Some(AgentOverlay {
             agent_name: "reviewer".into(),
             scroll: 0,
@@ -11848,12 +11878,111 @@ task = "Do the thing"
         );
         // The phase transitions back to Idle.
         assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
-        // AND the foreground overlay is dismissed — the diverge fix.
+        // (R5-CTRLC-ORPHANS-SUBAGENT-LOG) The overlay SURVIVES the Ctrl+C —
+        // the user opened it deliberately, so it stays for an explicit Esc.
+        // Closing it on an unrelated turn's interrupt would orphan a
+        // completed-subagent overlay (registry-removed, no re-open path).
         assert!(
-            app.agent_overlay.is_none(),
-            "Ctrl+C must ALSO close the agent overlay (interrupt clears the foreground)"
+            app.agent_overlay.is_some(),
+            "Ctrl+C must NOT close the agent overlay (user opens it deliberately; Esc to close)"
         );
         // No command sent to the bg thread (abort is synchronous on main).
+        assert!(cmd_rx.try_recv().is_err(), "Ctrl+C must not send a Cmd");
+    }
+
+    // (R5-CTRLC-ORPHANS-SUBAGENT-LOG) A COMPLETED in-process subagent's handle
+    // is `registry.remove`d on the success arm of `execute`, so once the user
+    // dismisses an overlay opened on it there is NO UI path back to re-open it
+    // (its `log_path` is unreachable from the registry — see
+    // AgentOverlay::log_path / R4HUNT-3). Round 5's Ctrl+C intercept closed any
+    // open agent_overlay on interrupt, so Ctrl+C'ing a SEPARATE streaming turn
+    // silently destroyed a completed-subagent overlay the user opened
+    // deliberately — orphaning it. This test pins the fix: the overlay SURVIVES
+    // a Ctrl+C on an unrelated turn (only the transient palette is cleared),
+    // while the turn is still aborted + transitions to Idle. Drives the REAL
+    // handle_key dispatch with a registry-removed subagent + a captured
+    // log_path (mirroring the live open path at app.rs:~2419-2430).
+    #[test]
+    fn ctrl_c_on_unrelated_turn_keeps_completed_subagent_overlay() {
+        let mut app = test_app();
+        let temp = tempfile::tempdir().unwrap();
+        // A subagent log file that the completed subagent wrote (kept on disk
+        // because the success arm defers log deletion to session teardown).
+        let log_path = temp.path().join("subagent-1234-abc-reviewer.log");
+        std::fs::write(&log_path, "[tool] reviewer done\n").unwrap();
+        // Register the subagent, capture its handle (so we can remove it), and
+        // open the overlay the way the live Enter path does — capturing the
+        // log_path from the handle AT open time (R4HUNT-3).
+        let handle = app.registry.register(AgentRegistration {
+            name: "reviewer".to_string(),
+            kind: AgentKind::Subagent { depth: 0, parent: None },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: PathBuf::from("."),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: None,
+            log_path: Some(log_path.clone()),
+        });
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "reviewer".into(),
+            // (R4HUNT-3) Captured at open time — survives registry.remove.
+            log_path: Some(log_path.clone()),
+            scroll: 0,
+            follow: true,
+            ..Default::default()
+        });
+        // The success arm fires registry.remove once the subagent returns — the
+        // handle (and its log_path) is now unreachable from the registry, exactly
+        // the state in which round 5 orphaned the overlay on a Ctrl+C.
+        app.registry.remove(handle.id);
+        // (sanity) the overlay's log_path still points at the persisted log even
+        // though the registry no longer resolves the name.
+        assert!(app.agent_overlay.as_ref().unwrap().log_path.is_some());
+
+        // A SEPARATE streaming turn is in flight (unrelated to the viewed,
+        // already-completed subagent). Seed the shared abort slot the way the bg
+        // thread does at turn start.
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        let (abort_handle, abort_signal) = AbortHandle::new();
+        *shared_abort.lock().unwrap() = Some(abort_handle);
+        app.phase = Phase::Streaming;
+        app.turn_started = Some(Instant::now());
+        assert!(!abort_signal.is_aborted(), "fresh signal must not be aborted");
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        // The unrelated turn IS interrupted (Ctrl+C-always-aborts, the
+        // CTRLC-SWALLOWED-OVERLAYS fix is preserved).
+        assert!(action.is_none(), "Ctrl+C aborts inline (no action)");
+        assert!(
+            abort_signal.is_aborted(),
+            "Ctrl+C must fire the shared abort handle (the unrelated turn is interrupted)"
+        );
+        assert!(
+            shared_abort.lock().unwrap().is_none(),
+            "Ctrl+C must take the abort slot"
+        );
+        assert_eq!(app.phase, Phase::Idle, "Ctrl+C must transition back to Idle");
+        // The completed-subagent overlay SURVIVES the interrupt — not orphaned.
+        // The user can Esc it deliberately; its captured log_path is intact so
+        // the overlay can still tail the persisted log.
+        assert!(
+            app.agent_overlay.is_some(),
+            "Ctrl+C must NOT close a completed-subagent overlay (registry-removed, no re-open path) — it would orphan it"
+        );
+        assert_eq!(
+            app.agent_overlay.as_ref().unwrap().log_path.as_deref(),
+            Some(log_path.as_path()),
+            "the survived overlay must keep its captured log_path (still tailing the persisted log)"
+        );
         assert!(cmd_rx.try_recv().is_err(), "Ctrl+C must not send a Cmd");
     }
 
