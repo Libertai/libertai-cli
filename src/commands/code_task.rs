@@ -1824,7 +1824,7 @@ mod tests {
         // Both stale subagent logs are reaped — the cross-restart collision
         // window is closed before create_subagent_log_file can append to them.
         assert!(!stale.exists(), "R6HUNT-1: stale cross-restart log reaped at startup");
-        assert!(stale2.exists() == false, "R6HUNT-1: second stale log reaped at startup");
+        assert!(!stale2.exists(), "R6HUNT-1: second stale log reaped at startup");
         // Non-conforming files SURVIVE (R5HUNT-2 name guard honored at startup).
         assert!(notes.exists(), "R6HUNT-1: NOTES.md survives the startup sweep");
         assert!(
