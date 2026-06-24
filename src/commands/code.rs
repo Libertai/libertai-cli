@@ -153,7 +153,22 @@ pub fn run(
             let has_teammate = std::env::var("LIBERTAI_TEAMMATE")
                 .map(|v| !v.trim().is_empty())
                 .unwrap_or(false);
-            if has_team && has_teammate {
+            // (Issue-1: approval IPC) Any `--print` child the TUI spawned
+            // carries `LIBERTAI_APPROVAL_SOCKET` pointing at the parent's
+            // approval socket — route its approvals there so the user decides
+            // in the TUI instead of the child auto-denying every mutating
+            // tool. This covers BOTH teammates (`/team` spawns, which also set
+            // LIBERTAI_TEAM/LIBERTAI_TEAMMATE) and plain background `/agent`
+            // spawns. If the env var is unset (child launched outside a TUI,
+            // or the parent's socket bind failed) fall back to the safe
+            // pre-IPC headless behavior: teammates auto-allow
+            // team_task/mailbox and auto-deny the rest; non-team children just
+            // auto-deny.
+            if let Some(ipc) =
+                crate::commands::code_approval_ipc::IpcApprovalUi::from_env()
+            {
+                Arc::new(ipc)
+            } else if has_team && has_teammate {
                 Arc::new(
                     PrintModeApprovalUi::new()
                         .with_auto_allow(vec!["team_task".into(), "mailbox".into()]),
@@ -303,6 +318,7 @@ fn run_background(
         agent: None,
         team,
         teammate_name: teammate,
+        approval_socket_path: None,
     };
     let started = start_background_agent(&launch)?;
     let started_at_ms = std::time::SystemTime::now()

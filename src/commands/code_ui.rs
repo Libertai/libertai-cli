@@ -1668,6 +1668,11 @@ pub(crate) struct BackgroundAgentLaunch {
     /// Teammate name within the team. Emitted as
     /// `LIBERTAI_TEAMMATE=<name>` env var.
     pub teammate_name: Option<String>,
+    /// (Issue-1) Path to the parent TUI's approval socket, emitted as
+    /// `LIBERTAI_APPROVAL_SOCKET` so the teammate routes its approvals to the
+    /// parent instead of auto-denying. `None` for spawns outside a TUI (the
+    /// child falls back to `PrintModeApprovalUi` auto-deny).
+    pub approval_socket_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1756,6 +1761,15 @@ fn background_agent_command(exe: &Path, launch: &BackgroundAgentLaunch) -> Comma
     }
     if let Some(teammate) = launch.teammate_name.as_ref() {
         command.env("LIBERTAI_TEAMMATE", teammate);
+    }
+    // (Issue-1) Pass the parent TUI's approval-socket path so the teammate
+    // routes its approvals back here instead of auto-denying. Absent for
+    // spawns outside a TUI (the child falls back to PrintModeApprovalUi).
+    if let Some(path) = launch.approval_socket_path.as_ref() {
+        command.env(
+            crate::commands::code_approval_ipc::APPROVAL_SOCKET_ENV,
+            path,
+        );
     }
     command
 }
@@ -5415,6 +5429,7 @@ mod tests {
             agent: None,
             team: None,
             teammate_name: None,
+            approval_socket_path: None,
         };
         assert_eq!(
             background_agent_args(Path::new("/usr/bin/libertai"), &launch),
@@ -5457,6 +5472,7 @@ mod tests {
             agent: None,
             team: None,
             teammate_name: None,
+            approval_socket_path: None,
         };
         assert_eq!(
             background_agent_args(Path::new("/usr/bin/libertai"), &launch),
@@ -5476,6 +5492,7 @@ mod tests {
             agent: None,
             team: None,
             teammate_name: None,
+            approval_socket_path: None,
         };
         let started = StartedBackgroundAgent {
             pid: 4242,

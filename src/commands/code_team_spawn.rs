@@ -172,6 +172,7 @@ fn format_teammate_prompt(task: &str, team_name: &str, teammate_name: &str) -> S
 /// only). Team context (`LIBERTAI_TEAM` / `LIBERTAI_TEAMMATE` env vars)
 /// is threaded via [`BackgroundAgentLaunch`]'s `team` and `teammate_name`
 /// fields, which `start_background_agent` sets on the child process.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_team(
     team_name: &str,
     manifest: &TeamManifest,
@@ -180,6 +181,7 @@ pub fn spawn_team(
     model: &str,
     mode: Mode,
     registry: Option<&crate::commands::code_team::AgentRegistry>,
+    approval_socket_path: Option<&std::path::Path>,
 ) -> Result<Vec<SpawnedTeammate>> {
     use crate::commands::code_team::{AgentKind, AgentRegistration, AgentCapability, AgentColor};
     let mut spawned = Vec::with_capacity(manifest.teammates.len());
@@ -208,6 +210,7 @@ pub fn spawn_team(
             agent: Some(teammate.agent.clone()),
             team: Some(team_name.to_string()),
             teammate_name: Some(teammate.name.clone()),
+            approval_socket_path: approval_socket_path.map(std::path::PathBuf::from),
         };
         let started = start_background_agent(&launch)
             .with_context(|| format!("spawning teammate `{}`", teammate.name))?;

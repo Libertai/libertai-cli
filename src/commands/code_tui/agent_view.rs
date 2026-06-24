@@ -648,6 +648,12 @@ fn dispatch(config: &ViewConfig, prompt: &str) -> Result<crate::commands::code_u
         team: None,
         teammate_name: None,
         agent: config.agent.clone(),
+        // The `libertai agents` panel runs as its own process (not inside a
+        // TUI), so there is no parent approval socket to route to. The
+        // dispatched background child therefore auto-denies mutating tools
+        // (safe headless behavior — same as any `--print` run launched outside
+        // a TUI).
+        approval_socket_path: None,
     };
     start_background_agent(&launch)
 }

@@ -7,6 +7,7 @@ pub mod claude_code_import_cli;
 pub mod code;
 pub mod code_agents;
 pub mod code_approvals;
+pub mod code_approval_ipc;
 pub mod code_ask_user;
 pub mod code_aux;
 pub mod code_diff;

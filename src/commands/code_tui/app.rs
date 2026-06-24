@@ -306,6 +306,10 @@ pub struct App {
     pub stashed_live: Option<String>,
     /// Approval modal state (if active).
     pub approval: Option<ApprovalModal>,
+    /// Path to the parent-side approval socket passed to teammate children
+    /// via `LIBERTAI_APPROVAL_SOCKET` (Issue-1). `None` if the socket bind
+    /// failed (teammates fall back to auto-deny).
+    pub approval_socket_path: Option<PathBuf>,
     /// Ask-user modal state (if active).
     pub ask: Option<AskModal>,
     /// Which pane has keyboard focus.
@@ -634,7 +638,36 @@ pub struct ApprovalModal {
     pub tool_name: String,
     pub preview: String,
     pub always_rule: String,
-    pub responder: mpsc::Sender<PromptChoice>,
+    /// Where to send the user's choice. `Local` for an in-process tool
+    /// (parent or inline subagent) — the bg thread is blocked on the mpsc
+    /// receiver. `Remote` for a teammate subprocess approval routed over the
+    /// approval socket (Issue-1) — the teammate is blocked on its socket
+    /// read + the responder writes the choice back over the connection.
+    pub responder: ApprovalResponder,
+}
+
+/// The channel a resolved approval choice goes back through.
+pub enum ApprovalResponder {
+    /// In-process tool: the bg thread's `RatatuiApprovalUi::decide` is
+    /// blocked on `resp_rx.recv()`.
+    Local(mpsc::Sender<PromptChoice>),
+    /// Teammate subprocess: write the choice over the socket connection held
+    /// by the `ApprovalResponder`.
+    Remote(crate::commands::code_approval_ipc::ApprovalResponder),
+}
+
+impl ApprovalResponder {
+    /// Send the user's choice. Best-effort on both arms: a write/send
+    /// failure (the blocked side already exited) is silently ignored — its
+    /// block already returned Deny via `unwrap_or(Deny)`.
+    pub fn respond(&self, choice: PromptChoice) {
+        match self {
+            ApprovalResponder::Local(tx) => {
+                let _ = tx.send(choice);
+            }
+            ApprovalResponder::Remote(r) => r.respond(choice),
+        }
+    }
 }
 
 /// A single question in an ask_user flow.
@@ -1770,6 +1803,7 @@ pub fn run(
         history_idx: None,
         stashed_live: None,
             approval: None,
+            approval_socket_path: None,
             ask: None,
             focus: Focus::default(),
             agent_selection: 0,
@@ -1820,8 +1854,30 @@ pub fn run(
     let discover_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     app.custom_commands = code_slash_registry::discover(&discover_cwd);
 
+    // (Issue-1: teammate approval IPC) Bind the parent-side approval socket
+    // so teammate subprocesses can route their approvals here (via
+    // `LIBERTAI_APPROVAL_SOCKET`) instead of auto-denying. Bound BEFORE
+    // run_loop so teammates spawned during the session can connect. Best-
+    // effort: if the config dir isn't usable the TUI still runs — teammates
+    // just fall back to auto-deny (the pre-IPC behavior). Drop runs at run()
+    // exit (after run_loop) + unlinks the socket file; declared here so it
+    // outlives run_loop. The socket path is stashed on `app` so the
+    // `start_background_agent` spawn path can pass it to children via env.
+    let approval_server = crate::commands::code_approval_ipc::ApprovalServer::bind()
+        .ok();
+    if let Some(ref srv) = approval_server {
+        app.approval_socket_path = Some(srv.path().clone());
+    }
+
     // Run the event loop.
-    let result = run_loop(&mut guard, &mut app, agent_rx, cmd_tx, &shared_abort);
+    let result = run_loop(
+        &mut guard,
+        &mut app,
+        agent_rx,
+        cmd_tx,
+        &shared_abort,
+        approval_server.as_ref(),
+    );
 
     // (R4HUNT-3 + R5-HUNT-A) Session teardown: sweep the deferred subagent log
     // files. The SUCCESS-path subagent logs are intentionally kept until
@@ -2024,6 +2080,7 @@ fn run_loop(
     agent_rx: mpsc::Receiver<AgentMsg>,
     cmd_tx: mpsc::Sender<Cmd>,
     shared_abort: &SharedAbort,
+    approval_server: Option<&crate::commands::code_approval_ipc::ApprovalServer>,
 ) -> anyhow::Result<()> {
     let tick = Duration::from_millis(theme::TICK_RATE_MS);
 
@@ -2154,6 +2211,40 @@ fn run_loop(
                         ));
                     guard.terminal.as_mut().unwrap().draw(|frame| view::draw(frame, app))?;
                     return Ok(());
+                }
+            }
+        }
+
+        // (Issue-1) Poll the teammate-approval socket non-blocking. Only
+        // accept a new request when no approval modal is already shown — the
+        // modal is single, so a second teammate's request stays queued in the
+        // socket backlog (its connection isn't accepted yet) until the user
+        // resolves the current one. This tick we then re-poll + accept the
+        // next. An accepted request becomes an `ApprovalModal` with a
+        // `Remote` responder (the choice is written back over the socket).
+        if let Some(server) = approval_server {
+            if app.approval.is_none() {
+                match server.poll_accept() {
+                    Ok(Some((req, responder))) => {
+                        // Show the teammate's prompt to the user. Tag the
+                        // tool name so it's clear this is a teammate
+                        // (background) approval, not the parent turn.
+                        let tool_name = format!("[teammate] {}", req.tool);
+                        app.approval = Some(ApprovalModal {
+                            tool_name,
+                            preview: req.preview,
+                            always_rule: req.always_rule,
+                            responder: ApprovalResponder::Remote(responder),
+                        });
+                        app.phase = Phase::Approval;
+                        app.set_dirty();
+                    }
+                    Ok(None) => {} // no pending connection this tick
+                    Err(_) => {
+                        // A transient accept/read failure — don't stall the
+                        // tick; the teammate's blocking read will get EOF→Deny
+                        // when its connection is dropped.
+                    }
                 }
             }
         }
@@ -3037,6 +3128,7 @@ fn build_agent_invocation(
     provider: &str,
     model: &str,
     mode: Mode,
+    approval_socket_path: Option<&std::path::Path>,
 ) -> anyhow::Result<BackgroundAgentLaunch> {
     let rest = rest.trim();
     let Some((name, task)) = rest.split_once(char::is_whitespace) else {
@@ -3057,6 +3149,12 @@ fn build_agent_invocation(
         agent: Some(name.to_string()),
         team: None,
         teammate_name: None,
+        // (Issue-1) A background `/agent` run spawned from inside the TUI
+        // carries the parent's approval socket so its approvals route back to
+        // the user's TUI modal (see code_approval_ipc). `None` when the TUI's
+        // socket bind failed — the child then auto-denies (safe headless
+        // behavior).
+        approval_socket_path: approval_socket_path.map(std::path::PathBuf::from),
     })
 }
 
@@ -5292,6 +5390,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                         &model,
                         mode,
                         Some(&app.registry),
+                        app.approval_socket_path.as_deref(),
                     ) {
                         Ok(spawned) => {
                             // Clear the one-shot completion notification so
@@ -5358,7 +5457,14 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             };
             let (provider, model) = app_provider_model(app);
             let mode = app.mode.get();
-            match build_agent_invocation(rest, &cwd, &provider, &model, mode) {
+            match build_agent_invocation(
+                rest,
+                &cwd,
+                &provider,
+                &model,
+                mode,
+                app.approval_socket_path.as_deref(),
+            ) {
                 Ok(launch) => {
                     let name = launch.name.clone();
                     let prompt_preview: String =
@@ -5534,24 +5640,42 @@ fn handle_approval_key(
     key: KeyEvent,
     shared_abort: &SharedAbort,
 ) -> Option<Action> {
-    // Ctrl+C: deny the approval and abort the current turn.
+    use crate::commands::code_approvals::PromptChoice;
+    // Whether this modal is a teammate (Remote) approval — its resolution
+    // shouldn't touch the parent turn's abort/phase (the teammate is a
+    // separate process; the parent turn may be idle or streaming its own
+    // unrelated turn).
+    let is_remote = app
+        .approval
+        .as_ref()
+        .is_some_and(|a| matches!(a.responder, ApprovalResponder::Remote(_)));
+
+    // Ctrl+C: deny the approval. For a Local (in-process) approval also abort
+    // the current turn (the bg thread blocked on the approval IS the parent
+    // turn). For a Remote (teammate) approval, DON'T abort the parent turn —
+    // the teammate gets Deny + continues; the parent turn is unaffected.
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         let approval = app.approval.take()?;
-        let _ = approval.responder.send(PromptChoice::Deny);
-        // Poison-recovery (#21): see the streaming Ctrl+C path.
-        if let Some(abort) = shared_abort
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            abort.abort();
+        approval.responder.respond(PromptChoice::Deny);
+        if !is_remote {
+            // Poison-recovery (#21): see the streaming Ctrl+C path.
+            if let Some(abort) = shared_abort
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                abort.abort();
+            }
+            app.phase = Phase::Idle;
+        } else {
+            // A teammate approval: the parent phase was Streaming or Idle
+            // before Approval — return to Idle (no parent turn to resume).
+            app.phase = Phase::Idle;
         }
-        app.phase = Phase::Idle;
         return None;
     }
 
     let approval = app.approval.take()?;
-    use crate::commands::code_approvals::PromptChoice;
     let choice = match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => PromptChoice::Allow,
         KeyCode::Char('a') | KeyCode::Char('A') => PromptChoice::AlwaysAllow,
@@ -5564,9 +5688,11 @@ fn handle_approval_key(
             return None;
         }
     };
-    let _ = approval.responder.send(choice);
-    // The turn resumes while the background thread processes the choice.
-    app.phase = Phase::Streaming;
+    approval.responder.respond(choice);
+    // The turn resumes while the background thread processes the choice. For a
+    // Local approval the parent turn IS the blocked bg thread → Streaming.
+    // For a Remote (teammate) approval there's no parent turn to resume → Idle.
+    app.phase = if is_remote { Phase::Idle } else { Phase::Streaming };
     None
 }
 
@@ -5971,7 +6097,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                 tool_name,
                 preview,
                 always_rule,
-                responder,
+                responder: ApprovalResponder::Local(responder),
             });
             app.phase = Phase::Approval;
         }
@@ -6327,6 +6453,7 @@ mod tests {
             history_idx: None,
             stashed_live: None,
             approval: None,
+            approval_socket_path: None,
             ask: None,
             focus: Focus::default(),
             agent_selection: 0,
@@ -7902,7 +8029,7 @@ task = "Do the thing"
     #[test]
     fn build_agent_invocation_parses_name_and_task() {
         let cwd = PathBuf::from(".");
-        let launch = build_agent_invocation("coder fix the parser", &cwd, "openai", "gpt-4o", Mode::AcceptEdits)
+        let launch = build_agent_invocation("coder fix the parser", &cwd, "openai", "gpt-4o", Mode::AcceptEdits, None)
             .expect("agent parses");
         assert_eq!(launch.name, "coder");
         assert_eq!(launch.prompt, "fix the parser");
@@ -7914,12 +8041,37 @@ task = "Do the thing"
         assert_eq!(launch.agent.as_deref(), Some("coder"));
         assert!(launch.team.is_none());
         assert!(launch.teammate_name.is_none());
+        // (Issue-1) No socket passed → child won't route approvals to a TUI
+        // (it auto-denies). Pins the `None` path of the wiring.
+        assert!(launch.approval_socket_path.is_none());
+    }
+
+    #[test]
+    fn build_agent_invocation_threads_approval_socket_when_provided() {
+        // (Issue-1) When the TUI passes its approval socket, the background
+        // `/agent` child must carry it so its approvals route back to the
+        // user's TUI modal instead of auto-denying. Pins the `Some` path.
+        let cwd = PathBuf::from(".");
+        let sock = std::path::PathBuf::from("/tmp/libertai-approval-test.sock");
+        let launch = build_agent_invocation(
+            "coder fix the parser",
+            &cwd,
+            "openai",
+            "gpt-4o",
+            Mode::Normal,
+            Some(sock.as_path()),
+        )
+        .expect("agent parses");
+        assert_eq!(
+            launch.approval_socket_path.as_deref(),
+            Some(sock.as_path()),
+        );
     }
 
     #[test]
     fn build_agent_invocation_missing_task_is_usage_error() {
         let cwd = PathBuf::from(".");
-        let err = build_agent_invocation("coder", &cwd, "openai", "gpt-4o", Mode::Normal)
+        let err = build_agent_invocation("coder", &cwd, "openai", "gpt-4o", Mode::Normal, None)
             .expect_err("no task should error");
         assert!(format!("{err:#}").contains("usage:"), "err: {err:#}");
     }
@@ -7927,7 +8079,7 @@ task = "Do the thing"
     #[test]
     fn build_agent_invocation_empty_is_usage_error() {
         let cwd = PathBuf::from(".");
-        let err = build_agent_invocation("   ", &cwd, "openai", "gpt-4o", Mode::Normal)
+        let err = build_agent_invocation("   ", &cwd, "openai", "gpt-4o", Mode::Normal, None)
             .expect_err("empty rest should error");
         assert!(format!("{err:#}").contains("usage:"), "err: {err:#}");
     }
