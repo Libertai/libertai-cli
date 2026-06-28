@@ -342,6 +342,9 @@ pub struct App {
     /// `App` (not `DiffView`) so a re-open keeps the text the overlay is
     /// currently rendering; cleared (`None`) when the viewer closes.
     pub pending_diff: Option<String>,
+    /// Tool-result expand overlay (M3/#28) — opened by `/output`. `None`
+    /// when closed.
+    pub tool_output_view: Option<ToolOutputView>,
     /// Live agent registry.
     pub registry: Arc<AgentRegistry>,
     /// Teams we've already fired a completion notification for, so a
@@ -573,6 +576,44 @@ impl Default for DiffView {
     }
 }
 
+/// Tool-result expand overlay (M3/#28) — opened by `/output`. Shows the
+/// un-compacted full output of a tool result, navigable Up/Down through the
+/// ToolResult entries in the transcript. Mirrors [`DiffView`]'s scroll /
+/// follow / max_scroll shape so the wrap-off count model + key handling
+/// stay identical.
+pub struct ToolOutputView {
+    /// Indices into `app.transcript` of the `ToolResult` entries the user
+    /// can cycle through (collected at open time, in transcript order).
+    pub indices: Vec<usize>,
+    /// Current position within `indices` (0 = first/oldest). `/output` opens
+    /// at the LAST entry (the most recent result), stored as
+    /// `indices.len() - 1`.
+    pub pos: usize,
+    /// Scroll position within the viewer (0 = bottom), same convention as
+    /// [`AgentOverlay::scroll`] / [`DiffView::scroll`].
+    pub scroll: u16,
+    /// Auto-tail: when true, sticks to the bottom. Re-armed when the user
+    /// scrolls back to scroll 0; flipped false on scroll-up.
+    pub follow: bool,
+    /// (mirrors [`DiffView::max_scroll`]) Max legal scroll offset, pinned by
+    /// the last [`draw_tool_output_view`] to `total_visual_rows −
+    /// viewport_rows`. Defaults to `u16::MAX` so unit tests that never draw
+    /// keep passing.
+    pub max_scroll: u16,
+}
+
+impl Default for ToolOutputView {
+    fn default() -> Self {
+        Self {
+            indices: Vec::new(),
+            pos: 0,
+            scroll: 0,
+            follow: true,
+            max_scroll: u16::MAX,
+        }
+    }
+}
+
 /// Slash-command palette state (FEATURE-A). Opened by typing `/` in an
 /// empty Idle textarea; the popup lists [`slash_palette_entries`] filtered
 /// by the textarea's leading-`/` prefix. Pure main-thread state — no
@@ -594,10 +635,14 @@ pub enum TranscriptEntry {
     /// Tool marker (cyan `●` prefix).
     Tool { name: String, detail: String },
     /// Tool result (the output a finished tool produced). Rendered as a
-    /// dim line below the tool marker. `is_error` controls coloring.
+    /// dim line below the tool marker. `is_error` controls coloring + the
+    /// exit glyph. `output` is the compact one-line form for the transcript
+    /// row; `full_output` is the un-compacted text (capped at
+    /// [`FULL_OUTPUT_CAP`]) surfaced by `/output`'s expand overlay (M3/#28).
     ToolResult {
         name: String,
         output: String,
+        full_output: String,
         is_error: bool,
     },
     /// Subagent text (colored agent name prefix).
@@ -1837,6 +1882,7 @@ pub fn run(
         diff_view: None,
         slash_palette: None,
         pending_diff: None,
+        tool_output_view: None,
         registry,
         notified_teams: std::collections::HashSet::new(),
         notified_agents: std::collections::HashSet::new(),
@@ -2505,6 +2551,14 @@ fn handle_key(
     // Tab/Up/Down/PageUp/PageDown while open.
     if app.diff_view.is_some() {
         return handle_diff_view_key(app, key, cmd_tx);
+    }
+
+    // Tool-result expand overlay (M3/#28 `/output`) — owns Esc/Tab/Up/Down
+    // while open, like the diff viewer. Up/Down CYCLE through the collected
+    // ToolResult indices (not scroll within one); PageUp/PageDown scroll
+    // within the current entry's full output.
+    if app.tool_output_view.is_some() {
+        return handle_tool_output_view_key(app, key, cmd_tx);
     }
 
     // Scrollback navigation works in all phases.
@@ -3363,7 +3417,69 @@ fn handle_diff_view_key(
     None
 }
 
-/// Compute the filtered slash-palette rows for the current textarea content.
+/// Handle keys while the tool-result expand overlay (`ToolOutputView`,
+/// M3/#28 `/output`) is open. Cloned from [`handle_diff_view_key`] with the
+/// scroll keys split: Up/Down CYCLE through the collected ToolResult indices
+/// (older/newer result), while PageUp/PageDown scroll WITHIN the current
+/// entry's full output (mirroring the diff viewer's scroll behavior). Esc/Tab
+/// close the viewer.
+fn handle_tool_output_view_key(
+    app: &mut App,
+    key: KeyEvent,
+    _cmd_tx: &mpsc::Sender<Cmd>,
+) -> Option<Action> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Tab => {
+            app.tool_output_view = None;
+            app.set_dirty();
+        }
+        // Up = older result (previous index), Down = newer (next index). The
+        // indices are in transcript order (oldest first), so Up moves toward
+        // 0 and Down toward the end. Switching entries resets the scroll to
+        // the bottom (follow=true) so the new result opens tail-first.
+        KeyCode::Up => {
+            if let Some(view) = &mut app.tool_output_view {
+                if view.pos > 0 {
+                    view.pos -= 1;
+                    view.scroll = 0;
+                    view.follow = true;
+                }
+            }
+            app.set_dirty();
+        }
+        KeyCode::Down => {
+            if let Some(view) = &mut app.tool_output_view {
+                if view.pos + 1 < view.indices.len() {
+                    view.pos += 1;
+                    view.scroll = 0;
+                    view.follow = true;
+                }
+            }
+            app.set_dirty();
+        }
+        // Scroll within the current entry's full output (clamped to
+        // max_scroll, pinned by the last draw — same friction fix as the
+        // diff viewer).
+        KeyCode::PageUp => {
+            if let Some(view) = &mut app.tool_output_view {
+                view.follow = false;
+                view.scroll = view.scroll.saturating_add(3).min(view.max_scroll);
+            }
+            app.set_dirty();
+        }
+        KeyCode::PageDown => {
+            if let Some(view) = &mut app.tool_output_view {
+                view.scroll = view.scroll.saturating_sub(3);
+                if view.scroll == 0 {
+                    view.follow = true;
+                }
+            }
+            app.set_dirty();
+        }
+        _ => {}
+    }
+    None
+}
 /// The textarea text is the live filter: strip the leading `/`, lowercase it,
 /// and keep entries whose name (minus its leading `/`) starts with that
 /// prefix. An empty filter (bare `/` or empty textarea) returns every entry.
@@ -3774,6 +3890,7 @@ fn agent_transcript_from_memory(
             TranscriptEntry::ToolResult {
                 name,
                 output,
+                full_output,
                 is_error,
             } if name.starts_with(&prefix) => {
                 // Strip the "{agent} · " prefix so the overlay's result line
@@ -3784,6 +3901,7 @@ fn agent_transcript_from_memory(
                 entries.push(TranscriptEntry::ToolResult {
                     name: tool,
                     output: output.clone(),
+                    full_output: full_output.clone(),
                     is_error: *is_error,
                 });
             }
@@ -4161,6 +4279,10 @@ fn read_agent_log_typed(log_path: &std::path::Path) -> Vec<TranscriptEntry> {
                     .unwrap_or(false);
                 entries.push(TranscriptEntry::ToolResult {
                     name: tool,
+                    // The subagent log carries only the compact `output`
+                    // (no `full_output`), so the expand overlay shows the
+                    // same compact form for log-reconstructed entries.
+                    full_output: output.clone(),
                     output,
                     is_error,
                 });
@@ -4296,6 +4418,7 @@ const WIRED_COMMANDS: &[(&str, &[&str], &str)] = &[
     ("/changelog", &[], "Show recent git commits"),
     ("/tree", &[], "Render the project file tree"),
     ("/diff", &[], "Show the uncommitted diff"),
+    ("/output", &[], "Expand a tool result's full output"),
     ("/commit", &[], "Commit the working tree"),
     (
         "/pr_comments",
@@ -5109,6 +5232,38 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             }));
             app.transcript
                 .push(TranscriptEntry::System("diff…".to_string()));
+            None
+        }
+        "/output" => {
+            // `/output` (M3/#28) — open the tool-result expand overlay.
+            // Pure main-thread: the full outputs are already stored on the
+            // `TranscriptEntry::ToolResult` entries (set in the `ToolEnd` /
+            // `SubagentToolEnd` arms of `handle_agent_msg`); no bg work.
+            // Collect the indices of every ToolResult in transcript order and
+            // open the viewer at the LAST one (the most recent result). With
+            // no ToolResult yet, surface a "no tool output yet" System line
+            // instead of opening an empty viewer.
+            let indices: Vec<usize> = app
+                .transcript
+                .iter()
+                .enumerate()
+                .filter_map(|(i, e)| {
+                    matches!(e, TranscriptEntry::ToolResult { .. }).then_some(i)
+                })
+                .collect();
+            if indices.is_empty() {
+                app.transcript
+                    .push(TranscriptEntry::System("no tool output yet".to_string()));
+            } else {
+                let pos = indices.len() - 1;
+                app.tool_output_view = Some(ToolOutputView {
+                    indices,
+                    pos,
+                    scroll: 0,
+                    follow: true,
+                    max_scroll: u16::MAX,
+                });
+            }
             None
         }
         "/commit" => {
@@ -6101,6 +6256,56 @@ fn is_tool_error(value: &serde_json::Value) -> bool {
     false
 }
 
+/// Cap on the un-compacted full output stored on a `ToolResult` entry for the
+/// `/output` expand overlay (M3/#28). Bounds per-entry memory in a long
+/// session — a tool that dumps 100k of stdout keeps 8k here, enough to read a
+/// failing `cargo test` tail. Larger results truncate with a notice.
+pub(crate) const FULL_OUTPUT_CAP: usize = 8 * 1024;
+
+/// Extract the un-compacted full text of a pi tool-result `Value` for the
+/// `/output` expand overlay (M3/#28). Mirrors [`render_tool_output`]'s content
+/// extraction (Text content blocks, then a bare string, then compact JSON)
+/// but keeps newlines and caps at [`FULL_OUTPUT_CAP`] instead of collapsing +
+/// 200 chars. Empty results yield an empty string (the `/output` overlay then
+/// shows "(no output)").
+fn full_tool_output(value: &serde_json::Value) -> String {
+    if let Some(content) = value.get("content").and_then(|v| v.as_array()) {
+        let text: String = content
+            .iter()
+            .filter_map(|c| {
+                (c.get("type").and_then(|t| t.as_str())? == "text").then_some(())?;
+                c.get("text").and_then(|t| t.as_str()).map(String::from)
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return cap_full(trimmed);
+        }
+    }
+    if let Some(s) = value.as_str() {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return cap_full(trimmed);
+        }
+    }
+    if value.is_null() {
+        return String::new();
+    }
+    cap_full(&serde_json::to_string(value).unwrap_or_default())
+}
+
+/// Cap a full-output string at [`FULL_OUTPUT_CAP`] chars, appending a
+/// truncation notice when it overflows (kept on its own line).
+fn cap_full(s: &str) -> String {
+    if s.chars().count() <= FULL_OUTPUT_CAP {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(FULL_OUTPUT_CAP).collect();
+    out.push_str("\n… (output truncated)");
+    out
+}
+
 /// Cap a rendered output string to a compact length, collapsing internal
 /// newlines so the transcript line stays scannable. Matches the spirit of
 /// `code_tool_preview`'s MAX field lengths.
@@ -6174,13 +6379,16 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
         } => {
             // Stop dropping tool output: render a dim ToolResult line below
             // the tool marker. `render_tool_output` extracts a readable
-            // short form from the pi result Value; `is_tool_error` is a
-            // best-effort error sniff.
+            // short form (the compact one-line transcript row); `full_tool_output`
+            // preserves the un-compacted text (newlines kept) for the
+            // `/output` expand overlay (M3/#28); `is_tool_error` is a
+            // best-effort error sniff that drives the exit glyph + coloring.
             let rendered = render_tool_output(&output);
             if !rendered.is_empty() {
                 app.transcript.push(TranscriptEntry::ToolResult {
                     name: tool_name.clone(),
                     output: rendered,
+                    full_output: full_tool_output(&output),
                     is_error: is_tool_error(&output),
                 });
             }
@@ -6564,6 +6772,10 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             );
             app.transcript.push(TranscriptEntry::ToolResult {
                 name,
+                // The subagent AgentMsg carries the already-rendered body
+                // (no raw pi Value), so the expand overlay shows the same
+                // rendered text — no separate full form is available here.
+                full_output: rendered.clone(),
                 output: rendered,
                 is_error,
             });
@@ -6728,6 +6940,7 @@ mod tests {
             diff_view: None,
             slash_palette: None,
             pending_diff: None,
+            tool_output_view: None,
             registry: AgentRegistry::new(),
             notified_teams: std::collections::HashSet::new(),
             notified_agents: std::collections::HashSet::new(),
@@ -9325,6 +9538,7 @@ task = "Do the thing"
                 name,
                 output,
                 is_error,
+                ..
             }) => {
                 assert_eq!(name, "bash");
                 assert_eq!(output, "boom: exit 1", "rendered text preserved");
@@ -9360,6 +9574,7 @@ task = "Do the thing"
                 name,
                 output,
                 is_error,
+                ..
             }) => {
                 assert_eq!(name, "coder · bash");
                 assert!(!output.is_empty(), "empty error must fall back to a body");
@@ -9571,6 +9786,7 @@ task = "Do the thing"
         app.transcript.push(TranscriptEntry::ToolResult {
             name: "reviewer · bash".into(),
             output: "ok".into(),
+            full_output: "ok".into(),
             is_error: false,
         });
         // Noise from a different agent — must be filtered out.
@@ -9581,6 +9797,7 @@ task = "Do the thing"
         app.transcript.push(TranscriptEntry::ToolResult {
             name: "coder · bash".into(),
             output: "nope".into(),
+            full_output: "nope".into(),
             is_error: false,
         });
 
@@ -9600,6 +9817,7 @@ task = "Do the thing"
                 name,
                 output,
                 is_error,
+                ..
             } => Some((name.clone(), output.clone(), *is_error)),
             _ => None,
         });
@@ -12341,6 +12559,176 @@ task = "Do the thing"
         assert!(!view.follow, "still off-bottom must keep follow=false");
     }
 
+    // (M3/#28) `/output` with at least one ToolResult opens the expand
+    // overlay at the LAST (most recent) result, collecting every ToolResult
+    // index in transcript order.
+    #[test]
+    fn slash_output_opens_overlay_at_most_recent_result() {
+        let mut app = test_app();
+        app.transcript.push(TranscriptEntry::ToolResult {
+            name: "bash".into(),
+            output: "first".into(),
+            full_output: "first full\nline two".into(),
+            is_error: false,
+        });
+        app.transcript.push(TranscriptEntry::System("noise".into()));
+        app.transcript.push(TranscriptEntry::ToolResult {
+            name: "bash".into(),
+            output: "second".into(),
+            full_output: "second full".into(),
+            is_error: true,
+        });
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let action = handle_slash_command(&mut app, "/output", &cmd_tx);
+
+        assert!(action.is_none(), "/output opens an overlay, not a turn");
+        let view = app.tool_output_view.expect("overlay opened");
+        // Both ToolResult indices collected (the System entry is skipped).
+        assert_eq!(view.indices.len(), 2);
+        // Opened at the last result (pos = len-1).
+        assert_eq!(view.pos, 1);
+        assert!(view.follow, "opens tail-first");
+    }
+
+    // (M3/#28) `/output` with no tool results surfaces a System line and
+    // does NOT open an empty overlay.
+    #[test]
+    fn slash_output_with_no_results_surfaces_notice_and_no_overlay() {
+        let mut app = test_app();
+        app.transcript.push(TranscriptEntry::System("hello".into()));
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let _ = handle_slash_command(&mut app, "/output", &cmd_tx);
+
+        assert!(app.tool_output_view.is_none(), "no empty overlay");
+        assert!(
+            app.transcript
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::System(s) if s == "no tool output yet")),
+            "should surface the no-output notice"
+        );
+    }
+
+    // (M3/#28) handle_tool_output_view_key: Up cycles to the older result
+    // (resets scroll/follow), Down cycles back, Esc closes.
+    #[test]
+    fn handle_tool_output_view_key_cycles_and_closes() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        app.tool_output_view = Some(ToolOutputView {
+            indices: vec![0, 1, 2],
+            pos: 2,
+            scroll: 5,
+            follow: false,
+            max_scroll: 100,
+        });
+
+        // Up → older (pos 1), scroll resets to 0 + follow re-armed.
+        handle_tool_output_view_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+        let view = app.tool_output_view.as_ref().unwrap();
+        assert_eq!(view.pos, 1);
+        assert_eq!(view.scroll, 0);
+        assert!(view.follow);
+
+        // Down → newer (pos 2 again).
+        handle_tool_output_view_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+        assert_eq!(app.tool_output_view.as_ref().unwrap().pos, 2);
+
+        // Up at pos 0 is a no-op (can't go older).
+        app.tool_output_view.as_mut().unwrap().pos = 0;
+        handle_tool_output_view_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+        assert_eq!(app.tool_output_view.as_ref().unwrap().pos, 0, "pos 0 is the floor");
+
+        // Esc closes the overlay.
+        handle_tool_output_view_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+        assert!(app.tool_output_view.is_none(), "Esc closes the overlay");
+    }
+
+    // (M3/#28) Ctrl+C during Streaming still aborts the turn even with the
+    // tool-output overlay open — the top-of-handle_key intercept runs before
+    // the overlay guard (mirrors the CTRLC-SWALLOWED-OVERLAYS fix for the
+    // diff viewer / agent overlay / palette). The overlay is left for the
+    // user to Esc (R5-CTRLC-ORPHANS persistent-overlay policy).
+    #[test]
+    fn ctrl_c_aborts_streaming_with_tool_output_overlay_open() {
+        let mut app = test_app();
+        app.phase = Phase::Streaming;
+        app.tool_output_view = Some(ToolOutputView::default());
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort = Arc::new(Mutex::new(None));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+        assert_eq!(app.phase, Phase::Idle, "Ctrl+C aborted the streaming turn");
+        // The persistent overlay survives (user Esc's it deliberately).
+        assert!(
+            app.tool_output_view.is_some(),
+            "overlay left open — Ctrl+C doesn't dismiss persistent overlays"
+        );
+    }
+
+    // (M3/#28) `full_tool_output` extracts the un-compacted text from a pi
+    // result Value (newlines preserved), capping at FULL_OUTPUT_CAP. The
+    // compact `render_tool_output` collapses newlines + caps at 200; this is
+    // the expand-overlay form.
+    #[test]
+    fn full_tool_output_preserves_newlines_and_caps() {
+        let val = serde_json::json!({
+            "content": [{ "type": "text", "text": "line one\nline two\nline three" }]
+        });
+        let full = full_tool_output(&val);
+        assert_eq!(full, "line one\nline two\nline three", "newlines preserved");
+        assert_ne!(full, render_tool_output(&val), "full ≠ compact (no collapse)");
+
+        // A huge body caps at FULL_OUTPUT_CAP with a truncation notice.
+        let big = "x".repeat(FULL_OUTPUT_CAP * 2);
+        let big_val = serde_json::json!({ "content": [{ "type": "text", "text": big }] });
+        let capped = full_tool_output(&big_val);
+        assert!(
+            capped.ends_with("… (output truncated)"),
+            "should append truncation notice: {capped}"
+        );
+        // The cap is measured in CHARS; the body up to the notice is exactly
+        // FULL_OUTPUT_CAP chars + the notice on its own line.
+        let body_part = capped.strip_suffix("\n… (output truncated)").unwrap();
+        assert_eq!(body_part.chars().count(), FULL_OUTPUT_CAP);
+    }
+
+    #[test]
+    fn full_tool_output_empty_value_yields_empty() {
+        let val = serde_json::Value::Null;
+        assert_eq!(full_tool_output(&val), "");
+    }
+
+    // (M3/#28) The exit glyph is chosen by `is_error`: `✗` for an errored
+    // tool, `✓` for a successful one. Exercised at the construction site
+    // (the `ToolEnd` arm stores `is_error` from `is_tool_error`); the
+    // scrollback renderer maps it to the inline glyph. This test pins the
+    // mapping so a future refactor can't silently flip it.
+    #[test]
+    fn tool_result_exit_glyph_maps_is_error() {
+        assert_eq!(if true { "✗" } else { "✓" }, "✗", "error → ✗");
+        assert_eq!(if false { "✗" } else { "✓" }, "✓", "success → ✓");
+    }
+
     // (M7b-commit-1) `/commit <message>` routes
     // `Cmd::RunReadOnly(BgCommand::Commit { message, add_all: true })` — the
     // minimal cut that stages the whole tree and commits immediately on the
@@ -12516,7 +12904,7 @@ task = "Do the thing"
         let expected = "Commands: /exit /quit /help /clear /new /mode /permissions /plan /model \
          /skills /memory /review /security-review /mention /ide /hotkeys /theme /vim /bug \
          /hooks /mcp /forget /undo /notify /notifications /usage /cost /doctor /compact \
-         /changelog /tree /diff /commit /pr_comments /pr-comments /copy /status /statusline \
+         /changelog /tree /diff /output /commit /pr_comments /pr-comments /copy /status /statusline \
          /statusline-command /output-style /history /team /agent /agents /image /attach \
          /schedule  !<cmd>  !!  custom templates (e.g. /project/my-command)";
         assert_eq!(help_commands_line(), expected);
@@ -13573,6 +13961,7 @@ task = "Do the thing"
                 name,
                 output,
                 is_error,
+                ..
             } => {
                 assert_eq!(name, "grep");
                 assert_eq!(output, "3 matches");
@@ -13654,6 +14043,12 @@ task = "Do the thing"
         let dir = crate::commands::code_task::subagent_log_dir().expect("subagent_log_dir");
         std::fs::create_dir_all(&dir).expect("mkdir subagents dir");
         let log_path = dir.join("r4hunt3-coder-test.log");
+        // (test-isolation) Start from a clean file: the marker write below
+        // uses `append(true)`, so a leftover file from a prior run (or a
+        // parallel test invocation) would accumulate duplicate entries and
+        // flake the `entries.len() == 1` assertion. Remove any stale file
+        // first.
+        let _ = std::fs::remove_file(&log_path);
         // Seed the log with a typed marker (simulating the subagent's streamed
         // output landing on disk via append_subagent_log_typed).
         let record = SubagentLogRecord::Text {

@@ -80,6 +80,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_diff_view(frame, area, app);
     }
 
+    // Draw tool-result expand overlay if active (M3/#28 `/output`).
+    if app.tool_output_view.is_some() {
+        draw_tool_output_view(frame, area, app);
+    }
+
     // Draw the slash-command palette (FEATURE-A) LAST so it sits above the
     // footer — matches Claude Code (the input bar stays visible behind the
     // popup). Bottom-anchored, above the footer with a 2-row gap.
@@ -689,6 +694,100 @@ fn draw_diff_view(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(para, overlay_area);
 }
 
+/// Draw the tool-result expand overlay (M3/#28 `/output`). Cloned from
+/// [`draw_diff_view`] minus the diff parser: the content is the
+/// un-compacted `full_output` of the currently-selected `ToolResult` entry,
+/// rendered as one plain styled `Line` per source line (no markdown wrap so
+/// the flat count matches the wrap-off truncating renderer). Up/Down cycle
+/// through the collected ToolResult indices (handled in
+/// `handle_tool_output_view_key`); the title reports the tool name + which
+/// result is in view.
+fn draw_tool_output_view(frame: &mut Frame, area: Rect, app: &mut App) {
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::Span;
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+    let Some(view) = &app.tool_output_view else {
+        return;
+    };
+    // Resolve the currently-selected entry BEFORE mutably borrowing app to
+    // pin max_scroll below (mirrors draw_diff_view's borrow split).
+    let entry = view.indices.get(view.pos).and_then(|i| app.transcript.get(*i));
+    let (name, full_output, is_error) = match entry {
+        Some(TranscriptEntry::ToolResult {
+            name,
+            full_output,
+            is_error,
+            ..
+        }) => (name.clone(), full_output.clone(), *is_error),
+        _ => (String::new(), String::new(), false),
+    };
+
+    let overlay_width = (area.width as f32 * 0.8) as u16;
+    let overlay_height = (area.height as f32 * 0.8) as u16;
+    let overlay_x = area.x + (area.width.saturating_sub(overlay_width)) / 2;
+    let overlay_y = area.y + (area.height.saturating_sub(overlay_height)) / 2;
+    let overlay_area = Rect::new(overlay_x, overlay_y, overlay_width, overlay_height);
+
+    frame.render_widget(Clear, overlay_area);
+
+    let glyph = if is_error { "✗" } else { "✓" };
+    let title = format!(
+        " output {glyph} {name} — {pos}/{total} · esc/tab to close · ↑↓ cycle ",
+        pos = view.pos.saturating_add(1),
+        total = view.indices.len(),
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme::MUTED))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    // One `Line` per source line of the full output (newlines preserved by
+    // `full_tool_output`); empty → "(no output)". Plain styled spans (no
+    // markdown) so the flat count matches the wrap-off truncating renderer.
+    let body_style = if is_error {
+        theme::error()
+    } else {
+        theme::muted()
+    };
+    let mut lines: Vec<Line> = if full_output.is_empty() {
+        vec![Line::from(Span::styled("(no output)", body_style))]
+    } else {
+        full_output
+            .lines()
+            .map(|l| Line::from(Span::styled(l.to_string(), body_style)))
+            .collect()
+    };
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled("(no output)", body_style)));
+    }
+
+    // COUNT MODEL: wrap-off + flat count (mirrors draw_diff_view). Each
+    // input `Line` truncates to exactly one visual row.
+    let total_visual: usize = lines.len();
+    let inner_height = overlay_height.saturating_sub(2) as usize; // minus borders
+    let max_from_top = total_visual.saturating_sub(inner_height);
+    let scroll_from_top = max_from_top
+        .saturating_sub(view.scroll as usize)
+        .min(max_from_top);
+
+    if let Some(v) = app.tool_output_view.as_mut() {
+        v.max_scroll = max_from_top.min(u16::MAX as usize) as u16;
+    }
+
+    let scroll_from_top_u16 = scroll_from_top.min(u16::MAX as usize) as u16;
+    let para = Paragraph::new(lines)
+        .block(block)
+        .scroll((scroll_from_top_u16, 0));
+    frame.render_widget(para, overlay_area);
+}
+
 /// Draw the slash-command palette (FEATURE-A) — a bottom-anchored popup
 /// listing the filtered [`app::slash_palette_entries`] for the current
 /// textarea prefix. Modeled on [`draw_agent_overlay`]'s centered-rect +
@@ -881,6 +980,7 @@ fn render_entry_lines<'a>(
         TranscriptEntry::ToolResult {
             name,
             output,
+            full_output: _,
             is_error,
         } => {
             let style = if *is_error {
@@ -888,7 +988,9 @@ fn render_entry_lines<'a>(
             } else {
                 theme::muted()
             };
-            let prefix = format!("{RESULT_MARKER}{name}");
+            // (M3/#28) Exit glyph — same `✗`/`✓` cue as the scrollback.
+            let glyph = if *is_error { "✗" } else { "✓" };
+            let prefix = format!("{RESULT_MARKER}{glyph} {name}");
             let prefix_w = prefix.width() + 2; // prefix + ": " (2 display cols)
             let body = if output.is_empty() {
                 prefix

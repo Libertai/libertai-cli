@@ -322,6 +322,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             TranscriptEntry::ToolResult {
                 name,
                 output,
+                full_output: _,
                 is_error,
             } => {
                 let style = if *is_error {
@@ -329,7 +330,13 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
                 } else {
                     theme::muted()
                 };
-                let prefix = format!("{RESULT_MARKER}{name}");
+                // (M3/#28) Exit glyph: `✗` for an errored tool, `✓` for a
+                // successful one — a one-glance pass/fail signal before the
+                // tool name. Both render in the line's style (error=red,
+                // success=green-ish via muted here; the glyph itself is the
+                // cue, the body stays scannable-dim).
+                let glyph = if *is_error { "✗" } else { "✓" };
+                let prefix = format!("{RESULT_MARKER}{glyph} {name}");
                 let prefix_w = prefix.width() + 2; // prefix + ": " (2 display cols)
                 let body = if output.is_empty() {
                     prefix
