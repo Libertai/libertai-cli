@@ -66,6 +66,15 @@ pub enum Mode {
     /// Mutating tools (`bash`, `edit`, `write`, `hashline_edit`) are
     /// auto-denied without prompting; read-only tools still run.
     Plan,
+    /// All mutating tools auto-allow without prompting — `ApprovalTool`
+    /// short-circuits to `Allow` before consulting the UI, mirroring
+    /// Codex's `AskForApproval::Never`. Gated behind a one-time
+    /// interactive consent (`--dangerously-skip-permissions`): the flag
+    /// is refused in `--print` (and by background teammates) unless a
+    /// sentinel file shows the user already accepted the risk in an
+    /// interactive session. Intended for sandboxed or trusted CI runs
+    /// where stopping to approve every bash call would defeat the run.
+    Bypass,
 }
 
 impl Mode {
@@ -74,6 +83,7 @@ impl Mode {
             Mode::Normal => 0,
             Mode::AcceptEdits => 1,
             Mode::Plan => 2,
+            Mode::Bypass => 3,
         }
     }
 
@@ -81,7 +91,8 @@ impl Mode {
         match v {
             0 => Mode::Normal,
             1 => Mode::AcceptEdits,
-            _ => Mode::Plan,
+            2 => Mode::Plan,
+            _ => Mode::Bypass,
         }
     }
 }
@@ -854,5 +865,19 @@ mod tests {
         assert_eq!(factory.child().bash_command_wrapper, wrapper);
         // Smoke: the tool was constructed without panic.
         let _ = tool;
+    }
+
+    #[test]
+    fn mode_u8_encoding_round_trips_all_variants() {
+        // The u8 encoding is the wire format `ModeFlag` uses to share mode
+        // across tools and subagents; a gap or collision here would silently
+        // flip a session's permission tier. Pin every variant + the
+        // "unknown clamps to the tail" behavior.
+        for mode in [Mode::Normal, Mode::AcceptEdits, Mode::Plan, Mode::Bypass] {
+            assert_eq!(Mode::from_u8(mode.as_u8()), mode);
+        }
+        // Unknown high values clamp to Bypass (the new tail), matching the
+        // pre-existing Plan-was-tail behavior.
+        assert_eq!(Mode::from_u8(255), Mode::Bypass);
     }
 }

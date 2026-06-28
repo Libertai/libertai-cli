@@ -1800,7 +1800,14 @@ fn background_agent_args(exe: &Path, launch: &BackgroundAgentLaunch) -> Vec<Stri
         args.push("--model".to_string());
         args.push(launch.model.clone());
     }
-    if launch.mode != Mode::Normal {
+    if launch.mode == Mode::Bypass {
+        // Bypass is gated by a one-time consent sentinel; emit the flag
+        // (not `--mode bypass`) so the child re-runs the consent gate,
+        // which reads the already-granted sentinel. `--mode bypass` is
+        // deliberately NOT accepted by `parse_initial_mode` — that would
+        // bypass the gate from any caller.
+        args.push("--dangerously-skip-permissions".to_string());
+    } else if launch.mode != Mode::Normal {
         args.push("--mode".to_string());
         args.push(mode_label(launch.mode).to_string());
     }
@@ -1872,6 +1879,7 @@ fn background_agent_record(
             Mode::Normal => "normal",
             Mode::AcceptEdits => "accept-edits",
             Mode::Plan => "plan",
+            Mode::Bypass => "bypass",
         }
         .to_string(),
         prompt_preview: preview_text(&launch.prompt, 160),
@@ -2995,6 +3003,7 @@ pub(crate) fn mode_label(mode: Mode) -> &'static str {
         Mode::Normal => "normal",
         Mode::AcceptEdits => "accept-edits",
         Mode::Plan => "plan",
+        Mode::Bypass => "bypass",
     }
 }
 

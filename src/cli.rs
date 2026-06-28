@@ -219,7 +219,18 @@ pub enum Command {
         /// Also honours the `LIBERTAI_SANDBOX` env var.
         #[arg(long, value_enum, env = "LIBERTAI_SANDBOX", default_value_t = crate::commands::code_sandbox::SandboxMode::Off)]
         sandbox: crate::commands::code_sandbox::SandboxMode,
-        /// Print mode (like `claude -p`): run a single agent turn
+        /// Bypass ALL tool approvals: run bash, edits, and every other
+        /// mutating tool without prompting — like Codex's
+        /// `--ask-for-approval never` / Claude Code's
+        /// `--dangerously-skip-permissions`. DANGEROUS: the model can run
+        /// arbitrary commands and rewrite files with no gate. Pair with
+        /// `--sandbox=strict` (once shipped) or only use against a repo
+        /// you control. Refused in `--print`/`--bg` and by background
+        /// teammates unless you have first accepted the risk in an
+        /// interactive session (a consent sentinel is written then).
+        /// Also honours the `LIBERTAI_DANGEROUSLY_SKIP_PERMISSIONS` env var.
+        #[arg(long, env = "LIBERTAI_DANGEROUSLY_SKIP_PERMISSIONS")]
+        dangerously_skip_permissions: bool,        /// Print mode (like `claude -p`): run a single agent turn
         /// headlessly and exit — no TUI, no interactive prompts. The
         /// assistant's text streams to stdout; turn/tool noise goes to
         /// stderr. Tool calls not already covered by an allow rule are
@@ -552,6 +563,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             team,
             teammate,
             args,
+            dangerously_skip_permissions,
         } => crate::commands::code::run(
             model,
             provider,
@@ -570,6 +582,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             team,
             teammate,
             args,
+            dangerously_skip_permissions,
         ),
         Command::Agents {
             cwd,

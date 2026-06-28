@@ -51,6 +51,9 @@ struct LcodeCli {
     /// `libertai code --help` for full details.
     #[arg(long, short = 'p', conflicts_with = "list_sessions")]
     print: bool,
+    /// Skip ALL tool approvals (DANGEROUS). See `libertai code --help`.
+    #[arg(long, env = "LIBERTAI_DANGEROUSLY_SKIP_PERMISSIONS")]
+    dangerously_skip_permissions: bool,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -76,6 +79,7 @@ fn main() {
             team: None,
             teammate: None,
             args: parsed.args,
+            dangerously_skip_permissions: parsed.dangerously_skip_permissions,
         },
     };
     if let Err(e) = libertai_cli::cli::dispatch(cli) {

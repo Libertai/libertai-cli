@@ -2578,17 +2578,22 @@ fn handle_key(
     }
 
     // Shift+Tab: cycle mode (Normal → AcceptEdits → Plan → Normal).
+    // Bypass is a consent-gated startup mode (`--dangerously-skip-permissions`)
+    // and is never entered or left via this cycle — from Bypass, Shift+Tab
+    // drops to Normal (an escape hatch back to the prompting flow).
     if key.code == KeyCode::BackTab {
         let new_mode = match app.mode.get() {
             Mode::Normal => Mode::AcceptEdits,
             Mode::AcceptEdits => Mode::Plan,
             Mode::Plan => Mode::Normal,
+            Mode::Bypass => Mode::Normal,
         };
         app.mode.set(new_mode);
         let label = match new_mode {
             Mode::Normal => "normal mode",
             Mode::AcceptEdits => "accept-edits mode",
             Mode::Plan => "plan mode",
+            Mode::Bypass => "bypass mode",
         };
         app.transcript
             .push(TranscriptEntry::System(format!("→ {label}")));
@@ -4559,6 +4564,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     Mode::Normal => "normal",
                     Mode::AcceptEdits => "accept-edits",
                     Mode::Plan => "plan",
+                    Mode::Bypass => "bypass (approvals skipped)",
                 };
                 app.transcript
                     .push(TranscriptEntry::System(format!("mode: {label}")));
@@ -4575,6 +4581,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                         Mode::Normal => "normal",
                         Mode::AcceptEdits => "accept-edits",
                         Mode::Plan => "plan",
+                        Mode::Bypass => "bypass",
                     };
                     app.transcript
                         .push(TranscriptEntry::System(format!("→ {label} mode")));
@@ -4589,12 +4596,14 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             let new_mode = match app.mode.get() {
                 Mode::Normal | Mode::AcceptEdits => Mode::Plan,
                 Mode::Plan => Mode::Normal,
+                Mode::Bypass => Mode::Plan,
             };
             app.mode.set(new_mode);
             let label = match new_mode {
                 Mode::Normal => "normal",
                 Mode::AcceptEdits => "accept-edits",
                 Mode::Plan => "plan",
+                Mode::Bypass => "bypass",
             };
             app.transcript
                 .push(TranscriptEntry::System(format!("→ {label} mode")));
@@ -5504,6 +5513,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                 Mode::Normal => "normal",
                 Mode::AcceptEdits => "accept-edits",
                 Mode::Plan => "plan",
+                Mode::Bypass => "bypass",
             };
             // Build the status line segment-by-segment, each guarded for
             // missing data so we never show a bare "·  ·" gap. Reuses the

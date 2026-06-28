@@ -521,7 +521,7 @@ _libertai() {
             return 0
             ;;
         libertai__subcmd__code)
-            opts="-p -h -V --model --provider --plan --mode --resume --continue --list-sessions --all --json --sandbox --print --bg --name --agent --team --teammate --help --version [ARGS]..."
+            opts="-p -h -V --model --provider --plan --mode --resume --continue --list-sessions --all --json --sandbox --dangerously-skip-permissions --print --bg --name --agent --team --teammate --help --version [ARGS]..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

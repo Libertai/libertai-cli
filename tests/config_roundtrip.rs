@@ -119,6 +119,7 @@ fn save_then_load_preserves_fields() {
                 command: "scripts/team-complete.sh".into(),
                 ..HookCommandConfig::default()
             }],
+            ..HooksConfig::default()
         },
         mcp_servers: std::collections::HashMap::from([(
             "policy".to_string(),

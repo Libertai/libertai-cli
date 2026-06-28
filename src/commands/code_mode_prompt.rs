@@ -60,7 +60,7 @@ pub fn apply(append: Option<String>, mode: Mode) -> Option<String> {
 /// rebuilding the session or mutating pi's system prompt.
 pub fn apply_turn_guidance(prompt: String, mode: Mode) -> String {
     let guidance = match mode {
-        Mode::Normal => NORMAL_MODE_TURN_GUIDANCE,
+        Mode::Normal | Mode::Bypass => NORMAL_MODE_TURN_GUIDANCE,
         Mode::AcceptEdits => ACCEPT_EDITS_MODE_TURN_GUIDANCE,
         Mode::Plan => PLAN_MODE_TURN_GUIDANCE,
     };

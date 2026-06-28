@@ -48,6 +48,7 @@ pub fn run(
     team: Option<String>,
     teammate: Option<String>,
     args: Vec<String>,
+    dangerously_skip_permissions: bool,
 ) -> Result<()> {
     let cfg = config::load()?;
     // Pi's HTTP client reads PI_HTTP_REQUEST_TIMEOUT_SECS once via
@@ -58,6 +59,35 @@ pub fn run(
     let model = model.unwrap_or_else(|| cfg.default_code_model.clone());
     let provider = provider.unwrap_or_else(|| cfg.default_code_provider.clone());
     let mode = parse_initial_mode(plan, mode.as_deref())?;
+
+    // Bypass consent gate (M4/#5): `--dangerously-skip-permissions`
+    // flips the session to `Mode::Bypass` (auto-allow every mutating
+    // tool, no prompts). We refuse to enter Bypass in non-interactive /
+    // detached contexts (`--print`, `--bg`, background teammates) UNLESS
+    // a sentinel file proves the user already accepted the risk in an
+    // interactive session. Interactive sessions (the REPL) accept on
+    // the spot and write the sentinel. This mirrors Claude Code's
+    // `allowDangerouslySkipPermissions` one-time-consent model.
+    let bypass_consent = BypassConsent::load()?;
+    let mode = if dangerously_skip_permissions {
+        if bypass_consent.is_granted() {
+            Mode::Bypass
+        } else if print || bg || is_background_teammate() {
+            bail!(
+                "--dangerously-skip-permissions cannot be used in --print/--bg or a \
+                 background teammate without prior interactive consent. Run \
+                 `libertai code --dangerously-skip-permissions` once interactively to \
+                 accept the risk, then re-run headless."
+            );
+        } else {
+            // Interactive REPL: accept the risk now and persist the
+            // sentinel so future headless runs can bypass too.
+            prompt_bypass_consent()?;
+            Mode::Bypass
+        }
+    } else {
+        mode
+    };
 
     // --team / --teammate: set env vars so the factory (and any child
     // background agents) register the team_task tool. This lets a user
@@ -179,10 +209,11 @@ pub fn run(
             } else if has_team && has_teammate {
                 Arc::new(
                     PrintModeApprovalUi::new()
+                        .with_bypass(matches!(mode, Mode::Bypass))
                         .with_auto_allow(vec!["team_task".into(), "mailbox".into()]),
                 )
             } else {
-                Arc::new(PrintModeApprovalUi::new())
+                Arc::new(PrintModeApprovalUi::new().with_bypass(matches!(mode, Mode::Bypass)))
             }
         } else {
             Arc::new(TerminalApprovalUi)
@@ -251,6 +282,84 @@ fn parse_initial_mode(plan: bool, mode: Option<&str>) -> Result<Mode> {
         bail!("--plan conflicts with --mode {}", mode.unwrap_or_default());
     }
     Ok(parsed)
+}
+
+/// Sentinel file recording that the user accepted `--dangerously-skip-permissions`
+/// in an interactive session. Lets later headless (`--print`/`--bg`) and
+/// background-teammate runs enter `Mode::Bypass` without re-prompting — they
+/// can't prompt. Mirrors Claude Code's `allowDangerouslySkipPermissions`.
+fn bypass_consent_path() -> Result<PathBuf> {
+    Ok(config::libertai_config_dir()?.join("dangerously-skip-permissions-consent"))
+}
+
+/// One-time consent state for `Mode::Bypass`.
+struct BypassConsent {
+    granted: bool,
+}
+
+impl BypassConsent {
+    fn load() -> Result<Self> {
+        let granted = std::fs::metadata(bypass_consent_path()?).is_ok();
+        Ok(Self { granted })
+    }
+
+    fn is_granted(&self) -> bool {
+        self.granted
+    }
+
+    /// Persist the consent sentinel so future headless runs can bypass.
+    fn grant() -> Result<()> {
+        let path = bypass_consent_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Body is a short, human-readable note (the file's mere presence
+        // is what the gate checks, but a note aids `cat`-debugging).
+        std::fs::write(&path, "dangerously-skip-permissions consent accepted\n")?;
+        config::set_file_mode_600(&path)?;
+        Ok(())
+    }
+}
+
+/// True when this process is a background teammate (spawned by `/team` or
+/// `/agent` with the team env vars set) — i.e. can't prompt the user.
+fn is_background_teammate() -> bool {
+    let has_team = std::env::var("LIBERTAI_TEAM")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let has_teammate = std::env::var("LIBERTAI_TEAMMATE")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    has_team && has_teammate
+}
+
+/// Interactively ask the user to accept the `--dangerously-skip-permissions`
+/// risk, and on "yes" persist the consent sentinel. Refusing (or a non-TTY)
+/// returns an error so the session never silently enters Bypass.
+fn prompt_bypass_consent() -> Result<()> {
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "--dangerously-skip-permissions needs interactive consent but stdin is not a TTY. \
+             Run `libertai code --dangerously-skip-permissions` in an interactive terminal once \
+             to accept the risk."
+        );
+    }
+    eprintln!(
+        "  \u{1b}[1m--dangerously-skip-permissions\u{1b}[0m: the agent will run bash, edits, and \
+         all other mutating tools WITHOUT asking. This is dangerous -- only use it against a \
+         repo you control, or pair it with --sandbox=strict (when shipped)."
+    );
+    let accepted = dialoguer::Confirm::new()
+        .with_prompt("I understand the risk and want to skip all approvals")
+        .default(false)
+        .interact()
+        .map_err(|e| anyhow::anyhow!("consent prompt: {e}"))?;
+    if !accepted {
+        bail!("--dangerously-skip-permissions declined; not entering bypass mode.");
+    }
+    BypassConsent::grant()?;
+    eprintln!("  Consent recorded. Future --print/--bg runs may bypass without re-prompting.");
+    Ok(())
 }
 
 /// `--bg` path: spawn a detached `libertai code` for the prompt, print
@@ -611,17 +720,30 @@ fn read_piped_stdin() -> Option<String> {
 /// un-approved tools are still denied.
 struct PrintModeApprovalUi {
     auto_allow: Vec<String>,
+    /// When `Mode::Bypass` is active, approve every call that reaches the
+    /// UI. The `ApprovalTool` short-circuits before consulting the UI for
+    /// mutating tools, but a tool that slips through (read-only path
+    /// variants, future additions) still shouldn't hang headless — so
+    /// `decide` honors the bypass flag as a backstop. Set only after the
+    /// consent gate has cleared.
+    bypass: bool,
 }
 
 impl PrintModeApprovalUi {
     fn new() -> Self {
         Self {
             auto_allow: Vec::new(),
+            bypass: false,
         }
     }
 
     fn with_auto_allow(mut self, tools: Vec<String>) -> Self {
         self.auto_allow = tools;
+        self
+    }
+
+    fn with_bypass(mut self, bypass: bool) -> Self {
+        self.bypass = bypass;
         self
     }
 }
@@ -633,6 +755,9 @@ impl ApprovalUi for PrintModeApprovalUi {
     }
 
     async fn decide(&self, tool_name: &str, _preview: &str, always_rule: &str) -> PromptChoice {
+        if self.bypass {
+            return PromptChoice::Allow;
+        }
         if self.auto_allow.iter().any(|t| t == tool_name) {
             return PromptChoice::Allow;
         }
@@ -809,5 +934,49 @@ fn format_relative_age(diff_ms: i64) -> String {
         format!("{}h ago", s / 3600)
     } else {
         format!("{}d ago", s / 86_400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn print_mode_ui_bypass_approves_everything() {
+        // With bypass armed, `decide` must Allow even a tool that isn't in
+        // `auto_allow` — the headless backstop for `Mode::Bypass`.
+        let ui = PrintModeApprovalUi::new().with_bypass(true);
+        let choice = futures::executor::block_on(ui.decide("bash", "rm -rf /", "bash rm -rf *"));
+        assert_eq!(choice, PromptChoice::Allow);
+    }
+
+    #[test]
+    fn print_mode_ui_without_bypass_still_denies_unknown_tools() {
+        // The bypass flag is opt-in: without it the pre-existing headless
+        // auto-deny holds for anything not in `auto_allow`.
+        let ui = PrintModeApprovalUi::new().with_bypass(false);
+        let choice = futures::executor::block_on(ui.decide("bash", "echo hi", "bash echo hi"));
+        assert_eq!(choice, PromptChoice::Deny);
+    }
+
+    #[test]
+    fn print_mode_ui_auto_allow_still_works_without_bypass() {
+        // Teammates rely on `auto_allow` for team_task/mailbox; bypass=false
+        // must not regress that.
+        let ui = PrintModeApprovalUi::new()
+            .with_bypass(false)
+            .with_auto_allow(vec!["team_task".into(), "mailbox".into()]);
+        assert_eq!(
+            futures::executor::block_on(ui.decide("team_task", "", "team_task")),
+            PromptChoice::Allow
+        );
+        assert_eq!(
+            futures::executor::block_on(ui.decide("mailbox", "", "mailbox")),
+            PromptChoice::Allow
+        );
+        assert_eq!(
+            futures::executor::block_on(ui.decide("bash", "", "bash")),
+            PromptChoice::Deny
+        );
     }
 }

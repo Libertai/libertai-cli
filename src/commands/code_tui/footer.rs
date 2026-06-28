@@ -187,6 +187,7 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
         Mode::Normal => "",
         Mode::AcceptEdits => "accept-edits",
         Mode::Plan => "plan",
+        Mode::Bypass => "bypass",
     };
     if !mode_label.is_empty() {
         spans.push(Span::raw("  "));

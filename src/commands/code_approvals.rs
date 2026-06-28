@@ -905,6 +905,22 @@ impl Tool for ApprovalTool {
             return Ok(plan_denial_output(self.inner.name()).into());
         }
 
+        // Bypass mode short-circuit: mutating tools auto-allow with no
+        // UI consultation — the whole point of `--dangerously-skip-permissions`.
+        // Read-only tools pass straight through (they always would). The
+        // consent gate that *enables* this mode lives in `code.rs`
+        // (it refuses to enter Bypass in `--print`/background unless a
+        // sentinel file shows prior interactive consent); by the time
+        // we reach here the mode is legitimately set, so we trust it.
+        // Mirrors Codex's `AskForApproval::Never`.
+        if matches!(self.mode.get(), Mode::Bypass) && !self.inner.is_read_only() {
+            return with_policy_context(
+                self.execute_inner(tool_call_id, effective_input, on_update)
+                    .await,
+                &policy_decision,
+            );
+        }
+
         // AcceptEdits short-circuit: path-edit tools (write / edit /
         // hashline_edit) auto-allow without a modal. bash and any
         // other mutating tools still go through the regular
@@ -2765,5 +2781,58 @@ scope = "session"
 
         assert!(state.is_pre_allowed("bash", "echo hi"));
         assert!(!state.is_pre_allowed("bash", "echo bye"));
+    }
+
+    // ── Mode::Bypass (M4/#5) ─────────────────────────────────────────
+
+    #[test]
+    fn mode_bypass_survives_modeflag_round_trip() {
+        // `ModeFlag` stores the mode as a u8 (via the private as_u8/from_u8)
+        // and is the cloneable handle shared across tools + subagents, so a
+        // round-trip through it is the real "does the u8 encoding keep
+        // Bypass" test the runtime cares about.
+        let flag = ModeFlag::new(Mode::Bypass);
+        assert_eq!(flag.get(), Mode::Bypass);
+        // A cloned flag (as subagents receive) keeps Bypass too.
+        assert_eq!(flag.clone().get(), Mode::Bypass);
+    }
+
+    #[test]
+    fn bypass_auto_allows_mutating_tool_without_consulting_ui() {
+        // A UI that Denies everything and counts calls. Bypass must run
+        // the mutating tool AND never ask the UI — proving the short-
+        // circuit fires before `ui.decide`. Mirrors Codex's
+        // `AskForApproval::Never`.
+        //
+        // We deliberately do NOT pin the process cwd (unlike the journal
+        // test below): `WriteFileTool` writes a relative `path`, so we pass
+        // an ABSOLUTE path instead. That keeps this test cwd-race-free with
+        // `execute_inner_journals_successful_edit_and_skips_failed`, which
+        // owns the process cwd for the duration of its run.
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("out.txt");
+        let target_str = target.to_string_lossy().to_string();
+        let ui_calls = Arc::new(AtomicUsize::new(0));
+        let tool = ApprovalTool::new(
+            Box::new(WriteFileTool),
+            Arc::new(ApprovalState::new()),
+            ModeFlag::new(Mode::Bypass),
+            Arc::new(CountingUi {
+                calls: Arc::clone(&ui_calls),
+            }),
+        )
+        .with_base_dir(Some(temp.path().to_path_buf()));
+
+        let execution = futures::executor::block_on(tool.execute(
+            "call-bypass",
+            serde_json::json!({"path": target_str, "content":"bypassed\n"}),
+            None,
+        ))
+        .unwrap();
+        assert!(matches!(execution, ToolExecution::Done(_)));
+        // The mutating tool actually ran.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "bypassed\n");
+        // The UI was NEVER consulted.
+        assert_eq!(ui_calls.load(Ordering::Relaxed), 0);
     }
 }
