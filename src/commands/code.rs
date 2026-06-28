@@ -449,11 +449,13 @@ async fn run_async(
         let msg = handle
             .prompt(prompt, move |event| {
                 crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
+                crate::commands::code_hooks::run_tool_start_hooks(hook_cfg.as_ref(), &event);
                 render(event);
             })
             .await
             .map_err(anyhow::Error::new)?;
         crate::commands::code_hooks::run_stop_hooks(cfg.as_ref());
+        crate::commands::code_hooks::run_post_tool_batch_hooks(cfg.as_ref());
 
         // Make sure we end on a newline regardless of whether the last
         // event was a TextDelta (which never emits one) or AgentEnd
@@ -481,6 +483,7 @@ async fn run_async(
         handle
             .prompt(prompt, move |event| {
                 crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
+                crate::commands::code_hooks::run_tool_start_hooks(hook_cfg.as_ref(), &event);
                 if let Ok(mut renderer) = renderer.lock() {
                     renderer.on_event(&event);
                 }

@@ -22,7 +22,7 @@ use crate::commands::code_ui::{
     context_percent, expand_status_line_template, status_line_command_text,
 };
 
-/// Draw the spinner line: `⠋ label…  ●tool(detail)`.
+/// Draw the spinner line: `⠋ label…  ●tool(detail)  · mm:ss  · esc to stop`.
 /// Only shown during Streaming phase; blank otherwise.
 pub fn draw_spinner(frame: &mut Frame, area: Rect, app: &App) {
     if app.phase != crate::commands::code_tui::app::Phase::Streaming {
@@ -51,7 +51,27 @@ pub fn draw_spinner(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // Live elapsed since the turn started (finding #18), rendered as mm:ss.
+    if let Some(start) = app.turn_started {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(fmt_elapsed_compact(start.elapsed()), theme::muted()));
+    }
+
+    // Dim esc-to-stop hint during streaming (finding #20).
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled("· esc to stop", theme::dim_muted()));
+
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Format a duration as compact `m:ss` (or `s` under a minute).
+fn fmt_elapsed_compact(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    }
 }
 
 /// Draw a single queued-preview line: `› text`.

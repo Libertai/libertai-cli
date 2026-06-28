@@ -23,7 +23,9 @@ const DESCRIPTION: &str = concat!(
     "start planning multi-step work or when a step's status changes: ",
     "mark items as pending, active (in progress), or completed. The UI ",
     "re-renders the whole list on each call. Keep item text short — ",
-    "one short sentence each."
+    "one short sentence each. Keep exactly one item active (in progress) ",
+    "at a time — set the previous one to completed when you move to the ",
+    "next, so the list always reflects what you're doing right now."
 );
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

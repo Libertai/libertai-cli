@@ -22,8 +22,8 @@ use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
 use crate::commands::code_diff::EditJournal;
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
 use crate::commands::code_hooks::{
-    run_post_tool_hooks, run_stop_hooks, run_user_prompt_submit_hooks, tool_policy_from_config,
-    SessionHookGuard,
+    run_post_tool_batch_hooks, run_post_tool_hooks, run_pre_compact_hooks, run_stop_hooks,
+    run_tool_start_hooks, run_user_prompt_submit_hooks, tool_policy_from_config, SessionHookGuard,
 };
 use crate::commands::code_identity_prompt;
 use crate::commands::code_mode_prompt;
@@ -285,6 +285,11 @@ pub struct App {
     pub turn_started: Option<Instant>,
     /// Output chars seen this turn (for token estimation).
     pub output_chars: u64,
+    /// Whether the pre-compaction warning has fired for the current
+    /// high-context crossing (finding #22). Reset to false when context
+    /// drops back below the threshold so the warning can re-fire on a
+    /// later climb. Prevents spamming the advisory every Usage tick.
+    pub compaction_warned: bool,
     /// Spinner label ("thinking…", "writing…", etc.).
     pub spinner_label: &'static str,
     /// Name of the tool currently executing in the main session, if any.
@@ -1164,6 +1169,10 @@ fn spawn_background(
                                 abort_signal,
                                 move |event: AgentEvent| {
                                     run_post_tool_hooks(hook_cfg.as_ref(), &event);
+                                    run_tool_start_hooks(hook_cfg.as_ref(), &event);
+                                    if let AgentEvent::AutoCompactionStart { reason } = &event {
+                                        run_pre_compact_hooks(hook_cfg.as_ref(), reason);
+                                    }
                                     if let Some(msg) = translate_event(&event) {
                                         let _ = tx.send(msg);
                                     }
@@ -1208,6 +1217,7 @@ fn spawn_background(
                                 let _ =
                                     agent_tx.send(AgentMsg::TurnEnd { elapsed_secs: elapsed });
                                 run_stop_hooks(cfg.as_ref());
+                                run_post_tool_batch_hooks(cfg.as_ref());
                             }
                             Err(e) => {
                                 let _ = agent_tx.send(AgentMsg::Error(format!("{e}")));
@@ -1794,6 +1804,7 @@ pub fn run(
         spinner_idx: 0,
         turn_started: None,
         output_chars: 0,
+        compaction_warned: false,
         spinner_label: "thinking…",
         current_tool: None,
         current_tool_detail: String::new(),
@@ -5780,6 +5791,7 @@ fn handle_approval_key(app: &mut App, key: KeyEvent, shared_abort: &SharedAbort)
     let approval = app.approval.take()?;
     let choice = match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => PromptChoice::Allow,
+        KeyCode::Char('s') | KeyCode::Char('S') => PromptChoice::AllowSession,
         KeyCode::Char('a') | KeyCode::Char('A') => PromptChoice::AlwaysAllow,
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') | KeyCode::Esc => {
             PromptChoice::Deny
@@ -5999,6 +6011,19 @@ fn drain_queued(app: &mut App, cmd_tx: &mpsc::Sender<Cmd>) -> bool {
     true
 }
 
+/// Map a tool name to the spinner verb shown during `ToolStart`
+/// (finding #20). Falls back to "working…" for unknown tools.
+pub(crate) fn spinner_verb_for_tool(tool_name: &str) -> &'static str {
+    match tool_name {
+        "read" => "reading…",
+        "grep" | "find" | "ls" => "searching…",
+        "bash" => "running…",
+        "edit" | "write" | "hashline_edit" => "editing…",
+        "task" => "subagent…",
+        _ => "working…",
+    }
+}
+
 /// Render a pi tool-result `Value` (as packed by `translate_event`'s
 /// `ToolExecutionEnd` arm via `serde_json::to_value(result)`) into a short,
 /// readable string for the transcript `ToolResult` line. Extracts the text
@@ -6130,9 +6155,9 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                 name: tool_name.clone(),
                 detail: detail.clone(),
             });
-            app.current_tool = Some(tool_name);
+            app.current_tool = Some(tool_name.clone());
             app.current_tool_detail = detail;
-            app.spinner_label = "working…";
+            app.spinner_label = spinner_verb_for_tool(&tool_name);
             app.scroll = 0; // auto-scroll to bottom
         }
         AgentMsg::ToolEnd {
@@ -6312,6 +6337,41 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             // turn-end without a preceding Usage (error path) just omits
             // the line rather than rendering stale numbers.
             app.last_usage = Some((stop_reason, input_tokens, output_tokens));
+
+            // Pre-compaction advisory (finding #22). Fire once per
+            // high-context crossing: ≥80% when autocompact is enabled
+            // (compaction is imminent), or 50–79% when it's disabled
+            // (context is filling and nothing will compact it for you).
+            // Reset the latch when context drops back below 50% so a
+            // later climb can re-fire.
+            if context_window > 0 {
+                let pct =
+                    crate::commands::code_ui::context_percent(input_tokens, context_window);
+                if pct < 50 {
+                    app.compaction_warned = false;
+                } else if !app.compaction_warned {
+                    let autocompact = app.cfg.code_auto_compaction_enabled;
+                    let advisory = if autocompact && pct >= 80 {
+                        Some(format!(
+                            "Context is {pct}% full — auto-compaction will trigger soon and \
+                             discard older messages. Run /compact [notes] to control what's kept."
+                        ))
+                    } else if !autocompact && pct >= 50 && pct < 80 {
+                        Some(format!(
+                            "Context is {pct}% full and auto-compaction is disabled — older \
+                             messages will stay until the window fills. Run /compact [notes] to \
+                             compact now, or enable auto-compaction."
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some(text) = advisory {
+                        app.transcript.push(TranscriptEntry::System(text));
+                        app.scroll = 0;
+                        app.compaction_warned = true;
+                    }
+                }
+            }
         }
         AgentMsg::System(text) => {
             app.transcript.push(TranscriptEntry::System(text));
@@ -6640,6 +6700,7 @@ mod tests {
             spinner_idx: 0,
             turn_started: None,
             output_chars: 0,
+            compaction_warned: false,
             spinner_label: "thinking…",
             current_tool: None,
             current_tool_detail: String::new(),
@@ -7513,13 +7574,114 @@ mod tests {
         );
 
         assert_eq!(app.current_tool.as_deref(), Some("bash"));
-        assert_eq!(app.spinner_label, "working…");
+        assert_eq!(app.spinner_label, "running…");
         assert_eq!(app.scroll, 0);
         // A Tool transcript entry was pushed for the started tool.
         assert!(matches!(
             app.transcript.last(),
             Some(TranscriptEntry::Tool { ref name, .. }) if name == "bash"
         ));
+    }
+
+    #[test]
+    fn spinner_verb_maps_known_tools() {
+        // Finding #20: ToolStart maps tool names to verbs.
+        assert_eq!(spinner_verb_for_tool("read"), "reading…");
+        assert_eq!(spinner_verb_for_tool("grep"), "searching…");
+        assert_eq!(spinner_verb_for_tool("bash"), "running…");
+        assert_eq!(spinner_verb_for_tool("edit"), "editing…");
+        assert_eq!(spinner_verb_for_tool("task"), "subagent…");
+        assert_eq!(spinner_verb_for_tool("unknown_tool"), "working…");
+    }
+
+    #[test]
+    fn usage_warns_once_when_context_high_then_resets() {
+        // Finding #22: ≥80% with autocompact on fires a System advisory
+        // once; dropping below 50% re-arms it.
+        let mut app = test_app();
+        let cw = 100_000u32;
+        app.cfg = Arc::new(LibertaiConfig {
+            code_auto_compaction_enabled: true,
+            ..Default::default()
+        });
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        // 85% — fires once.
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::Usage {
+                input_tokens: 85_000,
+                output_tokens: 0,
+                context_window: cw,
+                model_label: "m".into(),
+                cost_total: 0.0,
+                stop_reason: pi::model::StopReason::Stop,
+            },
+            &cmd_tx,
+        );
+        assert!(app.compaction_warned);
+        let warned_len = app.transcript.len();
+        // A second tick at the same level must NOT re-fire.
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::Usage {
+                input_tokens: 85_000,
+                output_tokens: 0,
+                context_window: cw,
+                model_label: "m".into(),
+                cost_total: 0.0,
+                stop_reason: pi::model::StopReason::Stop,
+            },
+            &cmd_tx,
+        );
+        assert_eq!(app.transcript.len(), warned_len, "warning re-fired");
+        // Drop below 50% — re-arms the latch.
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::Usage {
+                input_tokens: 10_000,
+                output_tokens: 0,
+                context_window: cw,
+                model_label: "m".into(),
+                cost_total: 0.0,
+                stop_reason: pi::model::StopReason::Stop,
+            },
+            &cmd_tx,
+        );
+        assert!(!app.compaction_warned);
+    }
+
+    #[test]
+    fn usage_warns_in_disabled_band_when_autocompact_off() {
+        // Finding #22 (verifier correction): with autocompact DISABLED,
+        // the 50–79% band fires a distinct "filling, nothing compacts"
+        // advisory rather than the "compaction imminent" one.
+        let mut app = test_app();
+        app.cfg = Arc::new(LibertaiConfig {
+            code_auto_compaction_enabled: false,
+            ..Default::default()
+        });
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::Usage {
+                input_tokens: 65_000,
+                output_tokens: 0,
+                context_window: 100_000,
+                model_label: "m".into(),
+                cost_total: 0.0,
+                stop_reason: pi::model::StopReason::Stop,
+            },
+            &cmd_tx,
+        );
+        assert!(app.compaction_warned);
+        let last = app
+            .transcript
+            .last()
+            .expect("an advisory was pushed");
+        let TranscriptEntry::System(text) = last else {
+            panic!("expected System entry, got {last:?}");
+        };
+        assert!(text.contains("auto-compaction is disabled"), "got: {text}");
     }
 
     #[test]

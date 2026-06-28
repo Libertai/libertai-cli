@@ -368,10 +368,34 @@ pub struct HooksConfig {
     pub post_tool_use: Vec<HookCommandConfig>,
     #[serde(
         default,
+        rename = "PostToolUseFailure",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub post_tool_use_failure: Vec<HookCommandConfig>,
+    #[serde(
+        default,
+        rename = "PostToolBatch",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub post_tool_batch: Vec<HookCommandConfig>,
+    #[serde(
+        default,
+        rename = "SubagentStart",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub subagent_start: Vec<HookCommandConfig>,
+    #[serde(
+        default,
         rename = "SubagentStop",
         skip_serializing_if = "Vec::is_empty"
     )]
     pub subagent_stop: Vec<HookCommandConfig>,
+    #[serde(
+        default,
+        rename = "PreCompact",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub pre_compact: Vec<HookCommandConfig>,
     #[serde(
         default,
         rename = "SessionStart",
@@ -421,8 +445,16 @@ impl<'de> Deserialize<'de> for HooksConfig {
             pre_tool_use: Vec<serde_json::Value>,
             #[serde(default, rename = "PostToolUse")]
             post_tool_use: Vec<serde_json::Value>,
+            #[serde(default, rename = "PostToolUseFailure")]
+            post_tool_use_failure: Vec<serde_json::Value>,
+            #[serde(default, rename = "PostToolBatch")]
+            post_tool_batch: Vec<serde_json::Value>,
+            #[serde(default, rename = "SubagentStart")]
+            subagent_start: Vec<serde_json::Value>,
             #[serde(default, rename = "SubagentStop")]
             subagent_stop: Vec<serde_json::Value>,
+            #[serde(default, rename = "PreCompact")]
+            pre_compact: Vec<serde_json::Value>,
             #[serde(default, rename = "SessionStart")]
             session_start: Vec<serde_json::Value>,
             #[serde(default, rename = "Stop")]
@@ -447,7 +479,15 @@ impl<'de> Deserialize<'de> for HooksConfig {
                 .map_err(serde::de::Error::custom)?,
             post_tool_use: deserialize_hook_rows(raw.post_tool_use)
                 .map_err(serde::de::Error::custom)?,
+            post_tool_use_failure: deserialize_hook_rows(raw.post_tool_use_failure)
+                .map_err(serde::de::Error::custom)?,
+            post_tool_batch: deserialize_hook_rows(raw.post_tool_batch)
+                .map_err(serde::de::Error::custom)?,
+            subagent_start: deserialize_hook_rows(raw.subagent_start)
+                .map_err(serde::de::Error::custom)?,
             subagent_stop: deserialize_hook_rows(raw.subagent_stop)
+                .map_err(serde::de::Error::custom)?,
+            pre_compact: deserialize_hook_rows(raw.pre_compact)
                 .map_err(serde::de::Error::custom)?,
             session_start: deserialize_hook_rows(raw.session_start)
                 .map_err(serde::de::Error::custom)?,
@@ -471,7 +511,11 @@ impl HooksConfig {
         self.user_prompt_submit.is_empty()
             && self.pre_tool_use.is_empty()
             && self.post_tool_use.is_empty()
+            && self.post_tool_use_failure.is_empty()
+            && self.post_tool_batch.is_empty()
+            && self.subagent_start.is_empty()
             && self.subagent_stop.is_empty()
+            && self.pre_compact.is_empty()
             && self.session_start.is_empty()
             && self.stop.is_empty()
             && self.session_end.is_empty()

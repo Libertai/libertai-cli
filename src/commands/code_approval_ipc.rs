@@ -71,7 +71,7 @@ pub struct IpcApprovalRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcApprovalResponse {
     pub id: String,
-    /// "allow" | "always_allow" | "deny"
+    /// "allow" | "allow_session" | "always_allow" | "deny"
     pub choice: String,
 }
 
@@ -79,6 +79,7 @@ impl IpcApprovalResponse {
     pub fn choice(&self) -> PromptChoice {
         match self.choice.as_str() {
             "allow" => PromptChoice::Allow,
+            "allow_session" => PromptChoice::AllowSession,
             "always_allow" => PromptChoice::AlwaysAllow,
             _ => PromptChoice::Deny,
         }
@@ -159,6 +160,7 @@ impl ApprovalResponder {
     pub fn respond(&self, choice: PromptChoice) {
         let choice_str = match choice {
             PromptChoice::Allow => "allow",
+            PromptChoice::AllowSession => "allow_session",
             PromptChoice::AlwaysAllow => "always_allow",
             PromptChoice::Deny => "deny",
             PromptChoice::Paused { .. } => "deny",
@@ -510,7 +512,7 @@ mod tests {
         assert!(IpcApprovalUi::from_env().is_none());
     }
 
-    /// `IpcApprovalResponse::choice` parses all three choices + defaults Deny.
+    /// `IpcApprovalResponse::choice` parses all four choices + defaults Deny.
     #[test]
     fn response_choice_parses() {
         assert_eq!(
@@ -520,6 +522,14 @@ mod tests {
             }
             .choice(),
             PromptChoice::Allow
+        );
+        assert_eq!(
+            IpcApprovalResponse {
+                id: "x".into(),
+                choice: "allow_session".into()
+            }
+            .choice(),
+            PromptChoice::AllowSession
         );
         assert_eq!(
             IpcApprovalResponse {

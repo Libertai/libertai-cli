@@ -38,6 +38,10 @@ pub enum PromptChoice {
     Allow,
     /// Run this tool call and remember "always allow this tool".
     AlwaysAllow,
+    /// Run this tool call and remember "allow this rule for the rest
+    /// of this session" (cleared by `/forget` or session end). Falls
+    /// between `Allow` (one-shot) and `AlwaysAllow` (persisted to disk).
+    AllowSession,
     /// Reject this tool call. The agent receives a denial output.
     Deny,
     /// The UI cannot get an answer right now (e.g. desktop app closed
@@ -984,6 +988,14 @@ impl Tool for ApprovalTool {
                     &policy_decision,
                 )
             }
+            PromptChoice::AllowSession => {
+                self.state.record_session(subject.suggested_rule);
+                with_policy_context(
+                    self.execute_inner(tool_call_id, effective_input, on_update)
+                        .await,
+                    &policy_decision,
+                )
+            }
             PromptChoice::Deny => Ok(denial_output(None).into()),
             PromptChoice::Paused {
                 request_id,
@@ -1004,11 +1016,15 @@ impl Tool for ApprovalTool {
         let (ui_payload, tool_input) = unwrap_paused_approval(payload);
         match self.ui.resume_decide(request_id, ui_payload).await {
             PromptChoice::Allow => {
-                self.execute_resumed_approval(tool_call_id, tool_input, false)
+                self.execute_resumed_approval(tool_call_id, tool_input, ResumeRecord::None)
                     .await
             }
             PromptChoice::AlwaysAllow => {
-                self.execute_resumed_approval(tool_call_id, tool_input, true)
+                self.execute_resumed_approval(tool_call_id, tool_input, ResumeRecord::Always)
+                    .await
+            }
+            PromptChoice::AllowSession => {
+                self.execute_resumed_approval(tool_call_id, tool_input, ResumeRecord::Session)
                     .await
             }
             PromptChoice::Deny => Ok(denial_output(None).into()),
@@ -1020,12 +1036,21 @@ impl Tool for ApprovalTool {
     }
 }
 
+/// How a resumed (un-paused) approval should record its decision:
+/// nothing, persist-always to disk, or session-only.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResumeRecord {
+    None,
+    Always,
+    Session,
+}
+
 impl ApprovalTool {
     async fn execute_resumed_approval(
         &self,
         tool_call_id: &str,
         tool_input: serde_json::Value,
-        record_always: bool,
+        record: ResumeRecord,
     ) -> PiResult<ToolExecution> {
         let name = self.inner.name();
         let policy_decision = self
@@ -1060,8 +1085,10 @@ impl ApprovalTool {
             }
         }
 
-        if record_always {
+        if matches!(record, ResumeRecord::Always) {
             self.state.record_always(subject.suggested_rule);
+        } else if matches!(record, ResumeRecord::Session) {
+            self.state.record_session(subject.suggested_rule);
         }
 
         with_policy_context(
@@ -2043,7 +2070,7 @@ mod tests {
         let execution = futures::executor::block_on(tool.execute_resumed_approval(
             "call-1",
             serde_json::json!({"command":"cargo test"}),
-            true,
+            ResumeRecord::Always,
         ))
         .unwrap();
 

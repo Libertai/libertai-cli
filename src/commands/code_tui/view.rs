@@ -302,6 +302,7 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("[y] Allow  ", Style::default().fg(theme::SUCCESS)),
+        Span::styled("[s] Session  ", Style::default().fg(theme::WARNING)),
         Span::styled("[a] Always  ", Style::default().fg(theme::ACCENT)),
         Span::styled("[n] Deny", Style::default().fg(theme::ERROR)),
     ]));

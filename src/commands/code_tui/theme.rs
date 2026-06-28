@@ -65,6 +65,11 @@ pub fn dim_accent() -> Style {
     Style::default().fg(ACCENT).add_modifier(Modifier::DIM)
 }
 
+/// Dim muted — faint secondary hints (e.g. the "esc to stop" suffix).
+pub fn dim_muted() -> Style {
+    Style::default().fg(MUTED).add_modifier(Modifier::DIM)
+}
+
 /// Success — completed status.
 pub fn success() -> Style {
     Style::default().fg(SUCCESS)

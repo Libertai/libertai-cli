@@ -172,6 +172,9 @@ fn resolution_line(choice: &PromptChoice, always_rule: &str) -> String {
     match choice {
         PromptChoice::Allow => "✓ allowed once".to_string(),
         PromptChoice::AlwaysAllow => format!("✓ always allowed · saved rule {always_rule}"),
+        PromptChoice::AllowSession => {
+            format!("✓ allowed for this session · rule {always_rule}")
+        }
         PromptChoice::Deny => "✗ denied".to_string(),
         // Terminal UI never returns Paused (it blocks until the user
         // answers); guard the match for completeness.
@@ -234,21 +237,25 @@ fn prompt_width() -> usize {
         .unwrap_or(FALLBACK_PROMPT_WIDTH)
 }
 
-/// The `[a]/[A]/[d]` option row with the saved-rule preview clipped so
-/// the whole row fits `width` columns and never wraps (the eraser
+/// The `[a]/[s]/[A]/[d]` option row with the saved-rule preview clipped
+/// so the whole row fits `width` columns and never wraps (the eraser
 /// assumes one line). Display-only: the full rule is still what gets
-/// persisted on an "always allow" answer.
+/// persisted on an "always allow" answer. The rule appears twice (next
+/// to `session` and `always`), so the clip budget accounts for both
+/// copies.
 fn option_row(always_rule: &str, width: usize) -> String {
     // Plain-text glyphs around the rule preview; must match the format
     // string below with the ANSI stripped.
-    const PREFIX_PLAIN: &str = "  [a] allow once  [A] always allow (";
+    const PREFIX_PLAIN: &str = "  [a] allow once  [s] session (";
+    const MID_PLAIN: &str = ")  [A] always (";
     const SUFFIX_PLAIN: &str = ")  [d] deny ";
-    let budget = width
-        .saturating_sub(PREFIX_PLAIN.chars().count() + SUFFIX_PLAIN.chars().count())
-        .max(8);
+    // The rule is rendered twice (session + always); budget for both.
+    let overhead =
+        PREFIX_PLAIN.chars().count() + MID_PLAIN.chars().count() + SUFFIX_PLAIN.chars().count();
+    let budget = width.saturating_sub(overhead).max(8) / 2;
     let rule = clip_chars(always_rule, budget);
     format!(
-        "  \x1b[2m[a]\x1b[0m allow once  \x1b[2m[A]\x1b[0m always allow ({rule})  \x1b[2m[d]\x1b[0m deny "
+        "  \x1b[2m[a]\x1b[0m allow once  \x1b[2m[s]\x1b[0m session ({rule})  \x1b[2m[A]\x1b[0m always ({rule})  \x1b[2m[d]\x1b[0m deny "
     )
 }
 
@@ -335,6 +342,7 @@ fn prompt(tool_name: &str, preview: &str, always_rule: &str) -> PromptChoice {
 fn parse_cooked_choice(line: &str) -> PromptChoice {
     match line.trim().chars().next().unwrap_or('d') {
         'a' => PromptChoice::Allow,
+        's' => PromptChoice::AllowSession,
         'A' => PromptChoice::AlwaysAllow,
         _ => PromptChoice::Deny,
     }
@@ -345,6 +353,7 @@ fn prompt_choice_for_key(code: KeyCode, modifiers: KeyModifiers) -> Option<Promp
         // `Char('a') + SHIFT` is unreachable on most terminals
         // (Shift uppercases to `A`), but handle it defensively.
         (KeyCode::Char('a'), _) => Some(PromptChoice::Allow),
+        (KeyCode::Char('s'), _) => Some(PromptChoice::AllowSession),
         (KeyCode::Char('A'), _) => Some(PromptChoice::AlwaysAllow),
         (KeyCode::Char('d') | KeyCode::Char('D'), _) => Some(PromptChoice::Deny),
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(PromptChoice::Deny),
@@ -810,16 +819,16 @@ mod tests {
         );
         assert!(visible.contains('…'), "long rule not elided: {visible:?}");
         // The menu chrome survives the clipping.
-        assert!(visible.starts_with("  [a] allow once  [A] always allow ("));
+        assert!(visible.starts_with("  [a] allow once  [s] session ("));
         assert!(visible.ends_with(")  [d] deny "));
     }
 
     #[test]
     fn option_row_keeps_short_rules_verbatim() {
-        let row = option_row("bash(ls -R)", 100);
+        let row = option_row("bash(ls -R)", 120);
         assert_eq!(
             strip_ansi(&row),
-            "  [a] allow once  [A] always allow (bash(ls -R))  [d] deny "
+            "  [a] allow once  [s] session (bash(ls -R))  [A] always (bash(ls -R))  [d] deny "
         );
     }
 

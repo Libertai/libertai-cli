@@ -453,6 +453,18 @@ pub fn run_post_tool_hooks(cfg: &Config, event: &AgentEvent) {
         tool_name,
         &payload_with_event(&base_payload, "PostToolUse"),
     );
+    // PostToolUseFailure: same payload, fired only when the tool errored
+    // (finding #25). Lets users hook failures distinctly from successes
+    // without filtering `is_error` in a PostToolUse hook.
+    if *is_error {
+        run_tool_completion_hooks(
+            "PostToolUseFailure",
+            &cfg.hooks.post_tool_use_failure,
+            &cwd,
+            tool_name,
+            &payload_with_event(&base_payload, "PostToolUseFailure"),
+        );
+    }
     if tool_name == "task" {
         run_tool_completion_hooks(
             "SubagentStop",
@@ -462,6 +474,80 @@ pub fn run_post_tool_hooks(cfg: &Config, event: &AgentEvent) {
             &payload_with_event(&base_payload, "SubagentStop"),
         );
     }
+}
+
+/// Fire `SubagentStart` hooks when a `task` tool begins executing
+/// (finding #25). Mirrors `run_post_tool_hooks`'s `SubagentStop` arm
+/// but on `ToolExecutionStart`. Called from the same per-event callback.
+pub fn run_tool_start_hooks(cfg: &Config, event: &AgentEvent) {
+    let AgentEvent::ToolExecutionStart {
+        tool_call_id,
+        tool_name,
+        ..
+    } = event
+    else {
+        return;
+    };
+    if tool_name != "task" {
+        return;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let payload = json!({
+        "event": "SubagentStart",
+        "cwd": cwd,
+        "toolCallId": tool_call_id,
+        "toolName": tool_name,
+        "tool_call_id": tool_call_id,
+        "tool_name": tool_name,
+    });
+    run_tool_completion_hooks(
+        "SubagentStart",
+        &cfg.hooks.subagent_start,
+        &cwd,
+        tool_name,
+        &payload,
+    );
+}
+
+/// Fire `PreCompact` hooks just before auto-compaction runs (finding #25).
+/// Called from the TUI's `AutoCompactionStart` handler. Payload mirrors
+/// the lifecycle-hook shape so existing hook matchers (tool matchers
+/// are a no-op here; condition matchers apply) keep working.
+pub fn run_pre_compact_hooks(cfg: &Config, reason: &str) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let payload = json!({
+        "event": "PreCompact",
+        "cwd": cwd,
+        "reason": reason,
+    });
+    run_tool_completion_hooks(
+        "PreCompact",
+        &cfg.hooks.pre_compact,
+        &cwd,
+        "compact",
+        &payload,
+    );
+}
+
+/// Fire `PostToolBatch` hooks when a turn's tool batch has settled
+/// (finding #25). The event stream has no explicit "batch boundary", so
+/// this is fired at turn end as the best-available proxy for "the batch
+/// of tool calls this turn has completed". Documented as an
+/// approximation; users who need exact batch semantics should use
+/// PostToolUse per-call.
+pub fn run_post_tool_batch_hooks(cfg: &Config) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let payload = json!({
+        "event": "PostToolBatch",
+        "cwd": cwd,
+    });
+    run_tool_completion_hooks(
+        "PostToolBatch",
+        &cfg.hooks.post_tool_batch,
+        &cwd,
+        "batch",
+        &payload,
+    );
 }
 
 fn run_tool_completion_hooks(
