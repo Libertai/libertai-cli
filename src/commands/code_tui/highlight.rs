@@ -17,18 +17,21 @@
 use once_cell::sync::Lazy;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
-use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Style as SyStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
+// Re-export so callers (diff.rs) can name the line-stateful highlighter type
+// without depending on syntect directly.
+pub(crate) use syntect::easy::HighlightLines;
+
 /// Bundled syntax set (all common languages, newline-aware so multi-line
 /// strings/comments highlight across lines within a block).
-static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(|| SyntaxSet::load_defaults_newlines());
+static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
 
 /// Bundled theme set. We use `base16-ocean.dark` for its muted,
 /// terminal-friendly palette; fall back to the first theme if missing.
 static THEME: Lazy<&'static Theme> = Lazy::new(|| {
-    static THEME_SET: Lazy<ThemeSet> = Lazy::new(|| ThemeSet::load_defaults());
+    static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
     THEME_SET
         .themes
         .get("base16-ocean.dark")

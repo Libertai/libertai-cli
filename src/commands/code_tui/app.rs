@@ -6365,7 +6365,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                             "Context is {pct}% full — auto-compaction will trigger soon and \
                              discard older messages. Run /compact [notes] to control what's kept."
                         ))
-                    } else if !autocompact && pct >= 50 && pct < 80 {
+                    } else if !autocompact && (50..80).contains(&pct) {
                         Some(format!(
                             "Context is {pct}% full and auto-compaction is disabled — older \
                              messages will stay until the window fills. Run /compact [notes] to \
