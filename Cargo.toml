@@ -104,6 +104,15 @@ zeroize = { version = "1", features = ["derive"] }
 #   maps new `LockError::TimedOut` variant to `Session` error)
 pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "f44c800b", default-features = false }
 asupersync = { version = "=0.3.2", default-features = false, features = ["tls-native-roots"] }
+# JavaScript workflow engine (M6 #15) — rquickjs embeds QuickJS as an
+# async-capable sandbox in which user workflow scripts call `agent()`,
+# `parallel()`, `pipeline()`, `phase()`, `log()`. pi already pulls
+# rquickjs 0.11 in transitively with these exact features, so declaring
+# it here is a zero-cost lockfile no-op (no new native compile, no new
+# transitive crates). Same version + features as pi's own dependency so
+# the lockfile stays unified. Use rquickjs (not boa) — boa would add
+# ~50 ICU4X crates.
+rquickjs = { version = "0.11", features = ["futures", "loader"] }
 async-trait = "0.1"
 futures = "0.3"
 # `libertai code` interactive REPL — raw-mode input bar, cursor control,
