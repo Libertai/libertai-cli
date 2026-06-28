@@ -22,6 +22,9 @@ use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
 use crate::commands::code_context_tool;
 use crate::commands::code_cron;
 use crate::commands::code_diff::EditJournal;
+// (M6/#15) Workflow engine — registry threaded through the tool factory +
+// the `/workflows` viewer reads it.
+use crate::commands::code_workflow;
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
 use crate::commands::code_hooks::{
     run_post_compact_hooks, run_post_tool_batch_hooks, run_post_tool_hooks, run_pre_compact_hooks,
@@ -115,6 +118,18 @@ fn parse_outcome(s: &str) -> SubagentOutcome {
         "failed" => SubagentOutcome::Failed,
         "stopped" | "aborted" => SubagentOutcome::Stopped,
         _ => SubagentOutcome::Completed,
+    }
+}
+
+/// (M6/#15) Lowercase verdict label for a workflow outcome, matching the
+/// wording the `SubagentEnd` transcript renderer uses (so a workflow line
+/// reads `workflow "name" failed` / `stopped` / `completed`). Mirrors the
+/// `parse_outcome` inverse.
+fn workflow_outcome_label(outcome: SubagentOutcome) -> &'static str {
+    match outcome {
+        SubagentOutcome::Completed => "completed",
+        SubagentOutcome::Failed => "failed",
+        SubagentOutcome::Stopped => "stopped",
     }
 }
 
@@ -227,6 +242,16 @@ pub enum AgentMsg {
     /// A subagent finished its turn.
     SubagentEnd {
         agent_name: String,
+        outcome: SubagentOutcome,
+    },
+    /// (M6/#15) Workflow finished. Reuses `SubagentOutcome` for the
+    /// verdict label (Completed/Failed/Stopped) — the bell + transcript
+    /// line mirror `SubagentEnd`. `name` is the workflow's human label
+    /// (from the script's `meta.name`, falling back to the passed-in
+    /// `wf_name`).
+    WorkflowEnd {
+        workflow_id: String,
+        name: String,
         outcome: SubagentOutcome,
     },
     /// Error from the background thread.
@@ -383,6 +408,13 @@ pub struct App {
     /// (spawned in `run`) drains to fire due prompts via `Cmd::Prompt`.
     /// Session-scoped (in-memory); durable backing is a follow-up.
     pub cron_store: Arc<code_cron::CronStore>,
+    /// (M6/#15) Shared session workflow registry the `workflow` tool
+    /// registers runs into and the `/workflows` viewer reads. Built
+    /// here (main thread) so the same `Arc` is handed to the bg factory
+    /// (the tool mutates it) AND kept on the `App` (the viewer reads it)
+    /// — mirrors the `cron_store` Arc-sharing pattern. Session-scoped
+    /// (in-memory); durable + resume of in-flight runs is a follow-up.
+    pub workflows: Arc<code_workflow::WorkflowRegistry>,
     /// Status bar info.
     pub bar: BarStatus,
     /// Last reported turn usage (stop reason + ctx-in + out tokens),
@@ -884,6 +916,7 @@ async fn build_session(
     edit_journal: Arc<EditJournal>,
     context_snapshot: Arc<code_context_tool::ContextSnapshot>,
     cron_store: Arc<code_cron::CronStore>,
+    workflows: Arc<code_workflow::WorkflowRegistry>,
 ) -> anyhow::Result<AgentSessionHandle> {
     let initial_mode = mode.get();
     let ui: Arc<dyn ApprovalUi> = Arc::new(RatatuiApprovalUi::new(agent_tx.clone()));
@@ -910,7 +943,11 @@ async fn build_session(
         // (M5/#17) Share the cron store so `cron_create` / `cron_list`
         // / `cron_delete` (bg-thread tools) mutate the same store the
         // main-thread timer drains to fire due prompts via `Cmd::Prompt`.
-        .with_cron_store(cron_store),
+        .with_cron_store(cron_store)
+        // (M6/#15) Share the workflow registry so the `workflow` tool
+        // (bg-thread) registers runs into the same registry the
+        // main-thread `/workflows` viewer reads.
+        .with_workflows(workflows),
     );
     let persistence = match resume_path {
         Some(p) => SessionPersistence::Resume(p),
@@ -1163,6 +1200,32 @@ fn translate_event(event: &AgentEvent) -> Option<AgentMsg> {
                         outcome,
                     })
                 }
+                // (M6/#15) Workflow completion — mirrors `subagent_end`
+                // but reads `details.name` (the workflow's label) +
+                // `details.id` (its registry id) rather than
+                // `details.agent`.
+                "workflow_end" => {
+                    let outcome = details
+                        .get("outcome")
+                        .and_then(|v| v.as_str())
+                        .map(parse_outcome)
+                        .unwrap_or(SubagentOutcome::Completed);
+                    let name = details
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("workflow")
+                        .to_string();
+                    let workflow_id = details
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Some(AgentMsg::WorkflowEnd {
+                        workflow_id,
+                        name,
+                        outcome,
+                    })
+                }
                 _ => None,
             }
         }
@@ -1194,6 +1257,7 @@ fn spawn_background(
     edit_journal: Arc<EditJournal>,
     context_snapshot: Arc<code_context_tool::ContextSnapshot>,
     cron_store: Arc<code_cron::CronStore>,
+    workflows: Arc<code_workflow::WorkflowRegistry>,
     cwd: PathBuf,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
@@ -1229,6 +1293,7 @@ fn spawn_background(
                 Arc::clone(&edit_journal),
                 Arc::clone(&context_snapshot),
                 Arc::clone(&cron_store),
+                Arc::clone(&workflows),
             )
             .await
             {
@@ -1480,6 +1545,7 @@ fn spawn_background(
                             Arc::clone(&edit_journal),
                             Arc::clone(&context_snapshot),
                             Arc::clone(&cron_store),
+                            Arc::clone(&workflows),
                         )
                         .await
                         {
@@ -2059,6 +2125,15 @@ pub fn run(
     let cron_store = Arc::new(code_cron::CronStore::new());
     let cron_store_for_bg = Arc::clone(&cron_store);
 
+    // (M6/#15) Session workflow registry — same Arc-sharing pattern as
+    // `cron_store`: built here (main thread), one clone handed to the bg
+    // factory (the `workflow` tool registers runs into it), the other
+    // kept on the `App` (the `/workflows` viewer reads it). Note
+    // `WorkflowRegistry::new()` already returns `Arc<Self>` (mirrors
+    // `AgentRegistry::new`), so no outer `Arc::new`.
+    let workflows = code_workflow::WorkflowRegistry::new();
+    let workflows_for_bg = Arc::clone(&workflows);
+
     // Spawn the background thread (asupersync runtime + pi session).
     // Clone the wrapper first so the App field can keep a copy for the
     // `!`/`!!` shell escape (which honors `--sandbox=strict` like the
@@ -2083,6 +2158,7 @@ pub fn run(
         edit_journal_for_bg,
         context_snapshot_for_bg,
         cron_store_for_bg,
+        workflows_for_bg,
         session_cwd,
     );
 
@@ -2134,6 +2210,7 @@ pub fn run(
         edit_journal,
         context_snapshot,
         cron_store,
+        workflows,
         bar: BarStatus {
             // Seed the model label + context window at startup (#20) so the
             // ctx% chip is correct from the very first frame. Without this,
@@ -3506,6 +3583,18 @@ fn status_label(status: AgentStatus) -> &'static str {
     }
 }
 
+/// (M6/#15) Render a [`WorkflowStatus`] as a short lowercase label for
+/// `/workflows`. Mirrors [`status_label`].
+fn workflow_status_label(status: code_workflow::WorkflowStatus) -> &'static str {
+    use code_workflow::WorkflowStatus::*;
+    match status {
+        Running => "running",
+        Completed => "completed",
+        Failed => "failed",
+        Stopped => "stopped",
+    }
+}
+
 /// Parse `/team` args into a [`TeamInvocation`] WITHOUT spawning. Pure:
 /// no I/O beyond reading a manifest file (needed to resolve a team name),
 /// no spawn, no registry mutation, no printing.
@@ -4802,6 +4891,7 @@ const WIRED_COMMANDS: &[(&str, &[&str], &str)] = &[
     ("/team", &[], "Spawn a team of teammate agents"),
     ("/agent", &[], "Spawn a background agent"),
     ("/agents", &[], "List live agents"),
+    ("/workflows", &[], "List workflows"),
     // Honest stubs (so these stop silently falling through to "unknown
     // command"): advertised in /help + the palette, with stub arms in
     // handle_slash_command pushing a "not yet supported in TUI" System line.
@@ -6191,6 +6281,47 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             app.transcript.push(TranscriptEntry::Blank);
             None
         }
+        "/workflows" => {
+            // (M6/#15) Render the current workflow-registry snapshot —
+            // mirrors `/agents` but over `app.workflows`. One header line,
+            // then per-workflow name · status, then per-phase title ·
+            // agent-count, then per-agent name · status (read-only
+            // phase agents).
+            let snapshot = app.workflows.snapshot();
+            if snapshot.is_empty() {
+                app.transcript
+                    .push(TranscriptEntry::System("no workflows.".to_string()));
+            } else {
+                app.transcript.push(TranscriptEntry::System(format!(
+                    "workflows ({}):",
+                    snapshot.len()
+                )));
+                for wf in &snapshot {
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "  {} · {}",
+                        wf.name,
+                        workflow_status_label(wf.status())
+                    )));
+                    for phase in wf.phases.lock().unwrap().iter() {
+                        app.transcript.push(TranscriptEntry::System(format!(
+                            "    phase \"{}\" ({} agent{})",
+                            phase.title,
+                            phase.agents.len(),
+                            if phase.agents.len() == 1 { "" } else { "s" }
+                        )));
+                        for h in &phase.agents {
+                            app.transcript.push(TranscriptEntry::System(format!(
+                                "      {} · {}",
+                                h.name,
+                                status_label(h.status())
+                            )));
+                        }
+                    }
+                }
+            }
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
         // Honest stubs (so /image /attach /schedule stop silently falling
         // through to "unknown command"). These need multi-content prompts
         // (Cmd::PromptWithContent) or a due-tick timer the TUI doesn't yet
@@ -7292,6 +7423,27 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.scroll = 0; // auto-scroll to bottom
             overlay_auto_tail(app, &agent_name);
         }
+        AgentMsg::WorkflowEnd {
+            workflow_id: _,
+            name,
+            outcome,
+        } => {
+            // (M6/#15) Workflow completion — mirrors the `SubagentEnd` bell
+            // policy (bell only on non-Completed, gated on cfg) but renders
+            // a dim `System` line rather than an agent-colored transcript
+            // entry: a workflow isn't a single agent, so the colored outcome
+            // line doesn't fit. The bell keeps the same audible signal.
+            let completed = outcome == SubagentOutcome::Completed;
+            if subagent_end_bell_enabled(&app.cfg, completed) {
+                crate::commands::code_term::tui_bell();
+            }
+            let label = workflow_outcome_label(outcome);
+            app.transcript.push(TranscriptEntry::System(format!(
+                "workflow \"{name}\" {label}"
+            )));
+            app.transcript.push(TranscriptEntry::Blank);
+            app.scroll = 0; // auto-scroll to bottom
+        }
         AgentMsg::Error(e) => {
             // (MED-9) Errors render with the error color, not the dim System
             // style, so failures are visible.
@@ -7425,6 +7577,7 @@ mod tests {
                 4_000,
             )),
             cron_store: Arc::new(code_cron::CronStore::new()),
+            workflows: code_workflow::WorkflowRegistry::new(),
             bar: BarStatus {
                 model_label: "openai/gpt-4o".to_string(),
                 ..Default::default()
@@ -13739,7 +13892,7 @@ task = "Do the thing"
          /skills /memory /review /security-review /mention /ide /hotkeys /theme /vim /bug \
          /hooks /mcp /forget /undo /notify /notifications /usage /cost /doctor /compact \
          /changelog /tree /diff /output /commit /pr_comments /pr-comments /copy /status /statusline \
-         /statusline-command /output-style /history /team /agent /agents /image /attach \
+         /statusline-command /output-style /history /team /agent /agents /workflows /image /attach \
          /schedule  !<cmd>  !!  custom templates (e.g. /project/my-command)";
         assert_eq!(help_commands_line(), expected);
 
