@@ -32,15 +32,16 @@ Only available when this session is running as a teammate (`--team`/\
 `--teammate`, or spawned by a team).\n\
 - `fetch`: read a public http(s) URL.\n\
 - `search`: web search via the LibertAI endpoint.\n\
-- `generate_image`: generate an image from a text prompt and save it locally.\n\
+- `generate_image`: generate an image from a text prompt and save it locally \
+(writes to disk — mutating, goes through the approval flow).\n\
 - `notebook_read` / `notebook_edit` / `notebook_execute`: local .ipynb support.\n\
 - `push_notification`: show the user a desktop notification.\n\
 - `mcp_call` plus any configured per-server MCP tools: bridge to external MCP \
 servers declared in config.\n\n\
 Mutating tools (`edit`, `write`, `bash`, `hashline_edit`, `spawn_team`, \
-`notebook_edit`, `notebook_execute`, `mcp_call`) go through the approval \
-flow; read-only tools (`read`, `grep`, `find`, `ls`, `todo`, `fetch`, \
-`search`, `ask_user`, `notebook_read`) are direct.\n";
+`generate_image`, `notebook_edit`, `notebook_execute`, `mcp_call`) go \
+through the approval flow; read-only tools (`read`, `grep`, `find`, `ls`, \
+`todo`, `fetch`, `search`, `ask_user`, `notebook_read`) are direct.\n";
 
 /// Prepend the identity block to the existing `append_system_prompt`.
 /// `None` (no skills/mode content yet) becomes the block alone.

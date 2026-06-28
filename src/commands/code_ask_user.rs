@@ -69,7 +69,13 @@ const DESCRIPTION: &str = concat!(
     "useful. Set multiSelect=true to allow picking several options. ",
     "You receive the answers as the tool result and can continue. If ",
     "the user cancels, the result is { cancelled: true, reason: ",
-    "\"USER_DECLINED\" } and you should stop or adapt accordingly.",
+    "\"USER_DECLINED\" } and you should stop or adapt accordingly. ",
+    "Do NOT reach for this tool for questions you can answer yourself ",
+    "with read-only tools — grep the codebase, read the file, or check ",
+    "the docs first, and ask only when the answer is genuinely outside ",
+    "what you can find. A specific, investigated question (\"I found ",
+    "two config loaders, config.rs and loader.rs — which one?\") beats ",
+    "a vague one (\"where is the config?\").",
 );
 
 pub struct AskUserTool {
