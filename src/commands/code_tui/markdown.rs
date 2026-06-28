@@ -893,17 +893,7 @@ fn render_code_block(code: &[&str], lang: &str, width: usize) -> Vec<Line<'stati
     let label = if lang.is_empty() { "(code)" } else { lang };
     lines.push(Line::from(Span::styled(label.to_string(), theme::muted())));
     lines.push(Line::from(Span::styled(border.clone(), theme::muted())));
-    // Each code line is prefixed with a 2-space indent, so the first
-    // wrapped chunk's budget is width-2 and continuation chunks get the
-    // full width. word_wrap handles the per-line budget; the indent is
-    // prepended to every chunk so wrapped continuation lines align.
-    let style = theme::accent();
-    for code_line in code {
-        let wrapped = wrap::word_wrap(code_line, width, 2);
-        for chunk in wrapped {
-            lines.push(Line::from(Span::styled(format!("  {chunk}"), style)));
-        }
-    }
+    lines.extend(render_code_lines(code, lang, width));
     lines.push(Line::from(Span::styled(border, theme::muted())));
     lines
 }
@@ -917,14 +907,52 @@ fn render_code_block_open(code: &[&str], lang: &str, width: usize) -> Vec<Line<'
     let mut lines = Vec::new();
     let label = if lang.is_empty() { "(code)" } else { lang };
     lines.push(Line::from(Span::styled(label.to_string(), theme::muted())));
-    let style = theme::accent();
+    lines.extend(render_code_lines(code, lang, width));
+    lines
+}
+
+/// Render the body of a code block (the indented code lines, between
+/// the borders). Highlights each line via syntect when the language is
+/// recognized AND the line fits the code budget (finding #6); falls
+/// back to the uniform-accent word-wrapped style when it isn't, when
+/// highlighting fails, or when the line would overflow `width` (long
+/// lines keep the existing soft-wrap so the wrap-off Paragraph renderer
+/// doesn't truncate them).
+fn render_code_lines(code: &[&str], lang: &str, width: usize) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    let mut out = Vec::new();
+    let plain = crate::commands::code_tui::highlight::plain_code_style();
+    let mut highlighter = crate::commands::code_tui::highlight::highlighter_for_lang(lang);
+    // Code body budget: width minus the 2-space indent.
+    let body_budget = width.saturating_sub(2).max(1);
     for code_line in code {
-        let wrapped = wrap::word_wrap(code_line, width, 2);
-        for chunk in wrapped {
-            lines.push(Line::from(Span::styled(format!("  {chunk}"), style)));
+        // Only highlight when the line fits the budget — otherwise emit
+        // the plain word-wrapped form so a long line still wraps (the
+        // wrap-off renderer would otherwise truncate a single over-wide
+        // highlighted Line and the row-count model would drift).
+        let fits = code_line.width() <= body_budget;
+        let highlighted = if fits {
+            highlighter
+                .as_mut()
+                .and_then(|h| crate::commands::code_tui::highlight::highlight_line(h, code_line))
+        } else {
+            None
+        };
+        match highlighted {
+            Some(spans) if !spans.is_empty() => {
+                let mut v = vec![Span::raw("  ")];
+                v.extend(spans);
+                out.push(Line::from(v));
+            }
+            _ => {
+                let wrapped = wrap::word_wrap(code_line, width, 2);
+                for chunk in wrapped {
+                    out.push(Line::from(Span::styled(format!("  {chunk}"), plain)));
+                }
+            }
         }
     }
-    lines
+    out
 }
 
 /// Word-wrap a rendered inline-span line to `width`.
@@ -1175,6 +1203,51 @@ mod tests {
         let lines = render("```python\nprint(1)\n```", 80);
         // header "python" + top border + code + bottom border
         assert_eq!(lines.len(), 4);
+    }
+
+    /// A recognized-language code block renders highlighted spans (at
+    /// least one span with a non-default foreground color) for a line
+    /// that fits the budget (finding #6).
+    #[test]
+    fn code_block_highlights_recognized_language() {
+        // `let x = 1;` is valid rust and fits a wide budget, so the
+        // highlighted branch fires and emits per-token spans with syntect
+        // foreground colors. The plain fallback emits exactly ONE span
+        // (the whole line) in the accent color; highlighting emits MORE
+        // than one span (keyword `let`, identifier, etc.).
+        let src = "```rust\nlet x = 1;\n```";
+        let lines = render(src, 80);
+        // header + border + 1 code line + border.
+        assert_eq!(lines.len(), 4, "got {lines:?}");
+        let code_line = &lines[2];
+        assert!(
+            code_line.spans.len() > 2,
+            "highlighted code line should have >2 spans (indent + tokens), \
+             got {}: {code_line:?}",
+            code_line.spans.len()
+        );
+        // At least one span carries a non-default foreground (the
+        // keyword/identifier colors from the theme).
+        let any_colored = code_line.spans.iter().any(|s| {
+            s.style.fg.is_some() && s.style.fg != Some(ratatui::style::Color::Reset)
+        });
+        assert!(any_colored, "expected at least one colored span");
+    }
+
+    /// An unrecognized language falls back to the plain (single-span)
+    /// render — no highlighting, no panic (finding #6).
+    #[test]
+    fn code_block_unknown_language_falls_back_plain() {
+        let src = "```totally-not-a-language\nsome text\n```";
+        let lines = render(src, 80);
+        let code_line = &lines[2];
+        // Plain fallback: a single span holding "  some text" (indent +
+        // text in the accent color).
+        assert_eq!(
+            code_line.spans.len(),
+            1,
+            "unknown lang should render as one plain span (indent + text)"
+        );
     }
 
     // ---- M4a: pre-wrap, heading/code styling tests ----
