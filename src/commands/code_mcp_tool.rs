@@ -410,6 +410,92 @@ pub fn named_mcp_tools(cfg: Arc<Config>) -> Vec<Box<dyn Tool>> {
     tools
 }
 
+/// (M5/#11) Metadata for one enabled MCP tool, as `tool_search` surfaces
+/// it. Mirrors the fields `NamedMcpTool` would have registered eagerly —
+/// the tool's `mcp__server__tool` name, its server, its raw tool name
+/// (for `mcp_call`), and its description. Built from the same
+/// `NamedMcpTool::new` gate (enabled + non-empty name + sanitizable) so
+/// the search results and the eager registry never disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpToolMetadata {
+    pub server: String,
+    pub tool: String,
+    pub qualified_name: String,
+    pub description: String,
+}
+
+/// (M5/#11) All enabled MCP tools across configured servers, in stable
+/// (server-sorted, then config) order — the catalog `tool_search`
+/// matches against. Reuses [`NamedMcpTool::new`] gating so a tool only
+/// appears here iff it would have been registered eagerly.
+pub fn mcp_tool_metadata(cfg: &Config) -> Vec<McpToolMetadata> {
+    let mut servers = cfg.mcp_servers.keys().cloned().collect::<Vec<_>>();
+    servers.sort();
+    let mut out = Vec::new();
+    for server in servers {
+        let Some(server_cfg) = cfg.mcp_servers.get(&server) else {
+            continue;
+        };
+        for tool in &server_cfg.tools {
+            // Mirror NamedMcpTool::new's gating exactly so the search
+            // catalog and the eager registry agree on which tools exist:
+            // non-empty name + enabled + sanitizable into `mcp__server__tool`.
+            let tool_name = tool.name.trim();
+            if tool_name.is_empty() || !tool.enabled {
+                continue;
+            }
+            let Some(qualified) = named_mcp_tool_name(&server, tool_name) else {
+                continue;
+            };
+            let description = if tool.description.trim().is_empty() {
+                format!("Call MCP tool `{tool_name}` on configured server `{server}`.")
+            } else {
+                tool.description.trim().to_string()
+            };
+            out.push(McpToolMetadata {
+                server: server.clone(),
+                tool: tool_name.to_string(),
+                qualified_name: qualified,
+                description,
+            });
+        }
+    }
+    out
+}
+
+/// (M5/#11) Above this many enabled MCP tools, the factory defers the
+/// eager `mcp__server__tool` wrappers and registers `mcp_call` +
+/// `tool_search` instead — the named wrappers' definitions would bloat
+/// the system prompt more than the model uses them. Overridable via the
+/// env var so tests can pin it.
+pub const DEFAULT_MCP_TOOL_SEARCH_THRESHOLD: usize = 20;
+
+/// (M5/#11) Threshold above which named MCP tools are deferred to
+/// `tool_search`. Reads `LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD`; falls
+/// back to [`DEFAULT_MCP_TOOL_SEARCH_THRESHOLD`]. A value of `0`
+/// means "always defer" (even a single tool); a very large value means
+/// "never defer" (the legacy eager behavior).
+pub fn mcp_tool_search_threshold() -> usize {
+    // Empty/invalid env falls back to the default (so a stray
+    // `LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD=` doesn't silently defer
+    // everything). A valid 0 means "always defer".
+    match std::env::var("LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            raw.trim().parse::<usize>().unwrap_or(DEFAULT_MCP_TOOL_SEARCH_THRESHOLD)
+        }
+        _ => DEFAULT_MCP_TOOL_SEARCH_THRESHOLD,
+    }
+}
+
+/// (M5/#11) True when the eager `named_mcp_tools` wrappers should be
+/// deferred in favor of `tool_search` + `mcp_call` — i.e. when the
+/// enabled-tool count exceeds the threshold. The factory calls this to
+/// decide whether to push the named wrappers or the search tool.
+pub fn should_defer_mcp_tools(cfg: &Config) -> bool {
+    let count = mcp_tool_metadata(cfg).len();
+    count > mcp_tool_search_threshold()
+}
+
 pub fn cached_mcp_context_tools(cfg: Arc<Config>) -> Vec<Box<dyn Tool>> {
     let has_resources = cfg
         .mcp_servers
@@ -474,9 +560,17 @@ fn sanitize_tool_segment(value: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
+/// (M5/#11) Serializes the two threshold-env tests: one sets the env to
+/// various values, the other removes it / sets invalid values — both
+/// mutate the process-global `LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD` env
+/// var, so without this lock they race and the "falls back" test can
+/// observe a value the "respects" test just set.
+#[cfg(test)]
+pub(crate) static MCP_THRESHOLD_TEST_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
+
 fn default_named_tool_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
+    json!({        "type": "object",
         "additionalProperties": true
     })
 }
@@ -716,5 +810,154 @@ mod tests {
             Some("mcp__github_docs__search_docs")
         );
         assert_eq!(named_mcp_tool_name("!!!", "search").as_deref(), None);
+    }
+
+    // ---- (M5/#11) tool_search gating ----
+
+    fn server_with_tools(count: usize) -> crate::config::McpServerConfig {
+        let tools = (0..count)
+            .map(|i| McpToolConfig {
+                name: format!("tool_{i}"),
+                description: format!("Tool number {i}"),
+                ..McpToolConfig::default()
+            })
+            .collect();
+        crate::config::McpServerConfig {
+            tools,
+            ..crate::config::McpServerConfig::default()
+        }
+    }
+
+    #[test]
+    fn mcp_tool_metadata_lists_enabled_tools_in_server_order() {
+        let cfg = Config {
+            mcp_servers: std::collections::HashMap::from([
+                (
+                    "zebra".to_string(),
+                    crate::config::McpServerConfig {
+                        tools: vec![McpToolConfig {
+                            name: "z1".to_string(),
+                            ..McpToolConfig::default()
+                        }],
+                        ..crate::config::McpServerConfig::default()
+                    },
+                ),
+                (
+                    "alpha".to_string(),
+                    crate::config::McpServerConfig {
+                        tools: vec![
+                            McpToolConfig {
+                                name: "a1".to_string(),
+                                ..McpToolConfig::default()
+                            },
+                            McpToolConfig {
+                                name: "disabled".to_string(),
+                                enabled: false,
+                                ..McpToolConfig::default()
+                            },
+                        ],
+                        ..crate::config::McpServerConfig::default()
+                    },
+                ),
+            ]),
+            ..Config::default()
+        };
+        let meta = mcp_tool_metadata(&cfg);
+        // Servers sorted alpha-first; disabled tool excluded.
+        assert_eq!(meta.len(), 2);
+        assert_eq!(meta[0].server, "alpha");
+        assert_eq!(meta[0].tool, "a1");
+        assert_eq!(meta[0].qualified_name, "mcp__alpha__a1");
+        assert_eq!(meta[1].server, "zebra");
+        assert_eq!(meta[1].tool, "z1");
+        // Disabled tool is absent.
+        assert!(meta.iter().all(|m| m.tool != "disabled"));
+    }
+
+    #[test]
+    fn mcp_tool_metadata_synthesizes_description_when_missing() {
+        let cfg = Config {
+            mcp_servers: std::collections::HashMap::from([(
+                "github".to_string(),
+                crate::config::McpServerConfig {
+                    tools: vec![McpToolConfig {
+                        name: "create_issue".to_string(),
+                        description: String::new(),
+                        ..McpToolConfig::default()
+                    }],
+                    ..crate::config::McpServerConfig::default()
+                },
+            )]),
+            ..Config::default()
+        };
+        let meta = mcp_tool_metadata(&cfg);
+        assert_eq!(meta.len(), 1);
+        assert!(meta[0].description.contains("create_issue"));
+        assert!(meta[0].description.contains("github"));
+    }
+
+    #[test]
+    fn should_defer_mcp_tools_respects_threshold_env() {
+        // Process-global env: set it for this test, restore on drop. Use a
+        // unique value so a concurrent sibling setting a different one
+        // still makes this assertion deterministic about THIS config's
+        // count vs. the threshold we just set. Held under the threshold
+        // lock so the parallel `falls_back` test can't flip the env mid-run.
+        let _lock = super::MCP_THRESHOLD_TEST_LOCK
+            .lock()
+            .expect("mcp threshold test lock");
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var("LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD");
+            }
+        }
+        let _guard = EnvGuard;
+
+        // 5 enabled tools.
+        let cfg = Config {
+            mcp_servers: std::collections::HashMap::from([(
+                "srv".to_string(),
+                server_with_tools(5),
+            )]),
+            ..Config::default()
+        };
+
+        // Threshold 10 → 5 tools do NOT defer (legacy eager behavior).
+        std::env::set_var("LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD", "10");
+        assert!(!should_defer_mcp_tools(&cfg), "5 ≤ 10 → no defer");
+
+        // Threshold 0 → always defer (even the 5 tools).
+        std::env::set_var("LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD", "0");
+        assert!(should_defer_mcp_tools(&cfg), "5 > 0 → defer");
+
+        // Threshold 5 → exactly-equal does NOT defer (strict >).
+        std::env::set_var("LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD", "5");
+        assert!(!should_defer_mcp_tools(&cfg), "5 > 5 is false → no defer");
+
+        // Threshold 4 → defer (5 > 4).
+        std::env::set_var("LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD", "4");
+        assert!(should_defer_mcp_tools(&cfg), "5 > 4 → defer");
+    }
+
+    #[test]
+    fn mcp_tool_search_threshold_falls_back_on_invalid_env() {
+        let _lock = super::MCP_THRESHOLD_TEST_LOCK
+            .lock()
+            .expect("mcp threshold test lock");
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var("LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD");
+            }
+        }
+        let _guard = EnvGuard;
+
+        std::env::set_var("LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD", "not-a-number");
+        assert_eq!(mcp_tool_search_threshold(), DEFAULT_MCP_TOOL_SEARCH_THRESHOLD);
+        std::env::set_var("LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD", "");
+        assert_eq!(mcp_tool_search_threshold(), DEFAULT_MCP_TOOL_SEARCH_THRESHOLD);
+        std::env::remove_var("LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD");
+        assert_eq!(mcp_tool_search_threshold(), DEFAULT_MCP_TOOL_SEARCH_THRESHOLD);
     }
 }

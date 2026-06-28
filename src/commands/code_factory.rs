@@ -39,8 +39,10 @@ use crate::commands::code_team::AgentRegistry;
 use crate::commands::code_team_task::TeamTaskTool;
 use crate::commands::code_team_tool::SpawnTeamTool;
 use crate::commands::code_todo::TodoTool;
+use crate::commands::code_mcp_tool::should_defer_mcp_tools;
 use crate::commands::code_skill_tool::SkillTool;
 use crate::commands::code_skills::SkillPillar;
+use crate::commands::code_tool_search::ToolSearchTool;
 use crate::commands::fetch_tool::FetchTool;
 use crate::commands::image_tool::ImageGenTool;
 use crate::commands::notebook_tool::{NotebookEditTool, NotebookExecuteTool, NotebookReadTool};
@@ -583,17 +585,30 @@ impl ToolFactory for LibertaiToolFactory {
                     .with_smart_approval(self.smart_approval.clone())
                     .with_journal(Arc::clone(&self.edit_journal));
                     wrapped.push(Box::new(mcp_call));
-                    for tool in named_mcp_tools(Arc::clone(cfg)) {
-                        let named = ApprovalTool::new(
-                            tool,
-                            Arc::clone(&self.approvals),
-                            self.mode.clone(),
-                            Arc::clone(&self.ui),
-                        )
-                        .with_policy(self.tool_policy.clone())
-                        .with_smart_approval(self.smart_approval.clone())
-                        .with_journal(Arc::clone(&self.edit_journal));
-                        wrapped.push(Box::new(named));
+
+                    // (M5/#11) Above the tool-search threshold, defer the
+                    // eager `mcp__server__tool` wrappers — their
+                    // definitions bloat the prompt more than the model
+                    // uses them. The model discovers tools via
+                    // `tool_search` and invokes them through `mcp_call`
+                    // (same capability). Below the threshold, register
+                    // the named wrappers eagerly (the legacy behavior, no
+                    // regression for small MCP setups).
+                    if should_defer_mcp_tools(cfg) {
+                        wrapped.push(Box::new(ToolSearchTool::new(Arc::clone(cfg))));
+                    } else {
+                        for tool in named_mcp_tools(Arc::clone(cfg)) {
+                            let named = ApprovalTool::new(
+                                tool,
+                                Arc::clone(&self.approvals),
+                                self.mode.clone(),
+                                Arc::clone(&self.ui),
+                            )
+                            .with_policy(self.tool_policy.clone())
+                            .with_smart_approval(self.smart_approval.clone())
+                            .with_journal(Arc::clone(&self.edit_journal));
+                            wrapped.push(Box::new(named));
+                        }
                     }
                     for tool in cached_mcp_context_tools(Arc::clone(cfg)) {
                         wrapped.push(tool);

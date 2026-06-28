@@ -287,6 +287,12 @@ mod tests {
     fn load_skill_by_name_resolves_active_builtin_and_rejects_unknown() {
         // libertai-harness ships with `libertai.pillars: any` so it's
         // active for the Code pillar; an unknown name resolves to None.
+        // Held under the config lock: the parallel `rejects_disabled`
+        // test disables harness mid-run, which would make this `.expect`
+        // panic on None.
+        let _lock = code_skills::SKILLS_CONFIG_TEST_LOCK
+            .lock()
+            .expect("skills config test lock");
         let cwd = std::env::current_dir().ok();
         let harness =
             code_skills::load_skill_by_name(SkillPillar::Code, cwd.as_deref(), "libertai-harness")
@@ -306,7 +312,12 @@ mod tests {
         // Disable a real builtin, confirm load_skill_by_name hides it,
         // then re-enable so other tests aren't polluted. The disabled
         // list lives in the libertai config dir (process-global state),
-        // so we pick a name unlikely to collide with other tests.
+        // so we hold the shared config lock for the whole test body — a
+        // parallel sibling asserting "harness is in the prompt" would
+        // otherwise see harness missing while the DisabledGuard holds.
+        let _lock = code_skills::SKILLS_CONFIG_TEST_LOCK
+            .lock()
+            .expect("skills config test lock");
         let target = "libertai-chat-research";
         // It's only active for the chat pillar, so for Code it's already
         // not loadable — assert that as the baseline, then confirm the

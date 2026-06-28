@@ -508,6 +508,19 @@ fn source_label(source: &SkillSource) -> String {
     }
 }
 
+/// (M5/#7) Serializes tests that read or mutate the process-global
+/// disabled-skills config (`libertai_config_dir()/disabled-skills.toml`).
+/// `active_skills` / `load_skill_by_name` / `prompt_for_pillar` all read
+/// that file, and the `DisabledGuard` in `code_skill_tool::tests` writes
+/// it — without this lock a parallel sibling asserting "harness is in
+/// the prompt" races a test that's temporarily disabled harness. Lock
+/// held by every test that touches the active-skill set. Lives at module
+/// scope (not inside `mod tests`) so `code_skill_tool::tests` can name
+/// it as `code_skills::SKILLS_CONFIG_TEST_LOCK`.
+#[cfg(test)]
+pub(crate) static SKILLS_CONFIG_TEST_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,7 +556,10 @@ mod tests {
     fn selects_builtin_pillar_skills() {
         // libertai-harness ships with `libertai.pillars: any` so it
         // joins every pillar; active_skills sorts the merged set
-        // alphabetically.
+        // alphabetically. Held under the config lock: a parallel sibling
+        // (DisabledGuard in code_skill_tool::tests) can disable a builtin
+        // mid-test, which would drop it from this list.
+        let _guard = super::SKILLS_CONFIG_TEST_LOCK.lock().unwrap();
         let names = active_skill_names(SkillPillar::Code, None).expect("names");
         assert_eq!(names, vec!["libertai-code-workflow", "libertai-harness"]);
     }
@@ -674,6 +690,9 @@ mod tests {
     fn code_prompt_lists_skills_as_latent_registry_without_bodies() {
         // (M5/#7) prompt_for_pillar now surfaces a latent registry
         // (name + description only); bodies load via the `skill` tool.
+        // Held under the config lock so a parallel DisabledGuard can't
+        // drop a builtin mid-assertion.
+        let _guard = super::SKILLS_CONFIG_TEST_LOCK.lock().unwrap();
         let prompt = prompt_for_pillar(SkillPillar::Code, None)
             .expect("prompt")
             .expect("code prompt");
@@ -699,7 +718,10 @@ mod tests {
     fn harness_auto_memory_protocol_is_loadable_by_name() {
         // (M5/#7) The auto-memory protocol that used to live in the
         // system prompt is now reachable via load_skill_by_name — the
-        // `skill` tool hands this body to the model on call.
+        // `skill` tool hands this body to the model on call. Held under
+        // the config lock so a parallel DisabledGuard can't disable
+        // harness mid-load.
+        let _guard = super::SKILLS_CONFIG_TEST_LOCK.lock().unwrap();
         let cwd = std::env::current_dir().ok();
         let harness = load_skill_by_name(SkillPillar::Code, cwd.as_deref(), "libertai-harness")
             .expect("load")
