@@ -59,6 +59,9 @@ pub struct TaskTool {
     parent_depth: u8,
     cwd: PathBuf,
     registry: Arc<AgentRegistry>,
+    /// The parent session's bash command wrapper, inherited by spawned
+    /// subagents (M4/#23). `None` when the parent runs unsandboxed.
+    bash_command_wrapper: Option<Vec<String>>,
 }
 
 /// (R4HUNT-1) RAII guard for an INLINE subagent's registry + abort
@@ -154,6 +157,7 @@ impl TaskTool {
         parent_depth: u8,
         cwd: PathBuf,
         registry: Arc<AgentRegistry>,
+        bash_command_wrapper: Option<Vec<String>>,
     ) -> Self {
         Self {
             mode,
@@ -162,6 +166,7 @@ impl TaskTool {
             parent_depth,
             cwd,
             registry,
+            bash_command_wrapper,
         }
     }
 }
@@ -326,6 +331,10 @@ impl Tool for TaskTool {
             edit_journal: Arc::new(crate::commands::code_diff::EditJournal::new()),
             team: None,
             teammate_name: None,
+            // (M4/#23) Inherit the parent's bash wrapper so a nested
+            // subagent-of-a-subagent stays sandboxed too. `child()` below
+            // propagates this onward.
+            bash_command_wrapper: self.bash_command_wrapper.clone(),
         }
         .child();
 
@@ -399,11 +408,13 @@ impl Tool for TaskTool {
             enabled_tools: Some(filtered),
             append_system_prompt,
             max_tokens,
-            // Subagent bash inherits the parent's sandbox indirectly:
-            // it runs through the same process, so any bwrap wrapping
-            // the outer agent already wraps the nested calls too. No
-            // need to plumb the argv a second time.
-            bash_command_wrapper: None,
+            // (M4/#23) Subagents inherit the parent's bash command wrapper.
+            // pi applies the wrapper PER bash invocation
+            // (`tools.rs Command::new(wrapper[0])`), not process-wide, so
+            // the prior "the outer bwrap already wraps nested calls"
+            // assumption was false — a `--sandbox=strict` parent's
+            // subagents ran UNSANDBOXED. Thread the parent's wrapper here.
+            bash_command_wrapper: self.bash_command_wrapper.clone(),
             auto_compaction_enabled: cfg.code_auto_compaction_enabled,
             compaction_reserve_tokens: cfg.code_compaction_reserve_tokens,
             compaction_keep_recent_tokens: cfg.code_compaction_keep_recent_tokens,

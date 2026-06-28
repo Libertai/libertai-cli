@@ -199,7 +199,10 @@ pub fn run(
             )
             .with_tool_policy(crate::commands::code_hooks::tool_policy_from_config(
                 Arc::clone(&cfg),
-            )),
+            ))
+            // (M4/#23) Thread the parent's bash wrapper so spawned subagents
+            // inherit the sandbox.
+            .with_bash_command_wrapper(bash_command_wrapper.clone()),
         );
 
         runtime.block_on(async move {

@@ -3086,6 +3086,14 @@ async fn run_agent_hook_async(
         ),
         append_system_prompt,
         max_tokens,
+        // (M4/#23) Hook-spawned agents run OUT-OF-BAND — not as children of
+        // a running `--sandbox=strict` code session — so there's no parent
+        // bash wrapper to inherit. The sandbox mode comes from the CLI
+        // `--sandbox` flag (not the persisted `LibertaiConfig`), which the
+        // hook path doesn't carry, so deriving one here would either always
+        // be `Off` (→ None, what we set) or guess a mode the user didn't
+        // choose. Left `None` deliberately; revisit if hooks gain a sandbox
+        // knob.
         bash_command_wrapper: None,
         auto_compaction_enabled: cfg.code_auto_compaction_enabled,
         compaction_reserve_tokens: cfg.code_compaction_reserve_tokens,

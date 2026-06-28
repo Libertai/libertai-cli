@@ -883,7 +883,10 @@ async fn build_session(
         .with_registry(registry)
         // Inject the shared journal so the bg session's ApprovalTool
         // records edits for `/undo` on the main thread.
-        .with_journal(edit_journal),
+        .with_journal(edit_journal)
+        // (M4/#23) Thread the parent's bash wrapper so spawned subagents
+        // inherit the sandbox.
+        .with_bash_command_wrapper(bash_command_wrapper.clone()),
     );
     let persistence = match resume_path {
         Some(p) => SessionPersistence::Resume(p),

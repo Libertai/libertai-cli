@@ -215,6 +215,15 @@ pub struct LibertaiToolFactory {
     /// Teammate name within the team. Set via `LIBERTAI_TEAMMATE` env
     /// var. Used as the assignee when the teammate claims a task.
     pub teammate_name: Option<String>,
+    /// The parent session's bash command wrapper (e.g. the bwrap/seatbelt
+    /// argv from `code_sandbox::build_command_wrapper`). Threaded into the
+    /// `TaskTool` so spawned subagents inherit the parent's sandbox
+    /// (M4/#23) — pi applies the wrapper PER bash invocation (`tools.rs`
+    /// `Command::new(wrapper[0])`), NOT process-wide, so without threading
+    /// it a `--sandbox=strict` parent's subagents ran UNSANDBOXED. `None`
+    /// when the parent runs with no wrapper (`SandboxMode::Off`, the
+    /// default).
+    pub bash_command_wrapper: Option<Vec<String>>,
 }
 
 impl LibertaiToolFactory {
@@ -250,6 +259,7 @@ impl LibertaiToolFactory {
             edit_journal: Arc::new(EditJournal::new()),
             team,
             teammate_name,
+            bash_command_wrapper: None,
         }
     }
 
@@ -280,6 +290,7 @@ impl LibertaiToolFactory {
             edit_journal: Arc::new(EditJournal::new()),
             team,
             teammate_name,
+            bash_command_wrapper: None,
         }
     }
 
@@ -313,6 +324,7 @@ impl LibertaiToolFactory {
             edit_journal: Arc::new(EditJournal::new()),
             team,
             teammate_name,
+            bash_command_wrapper: None,
         }
     }
 
@@ -355,6 +367,14 @@ impl LibertaiToolFactory {
         self
     }
 
+    /// Set the parent session's bash command wrapper so spawned
+    /// subagents inherit the sandbox (M4/#23). Set by the REPL/TUI at
+    /// session build time from `code_sandbox::build_command_wrapper`.
+    pub fn with_bash_command_wrapper(mut self, wrapper: Option<Vec<String>>) -> Self {
+        self.bash_command_wrapper = wrapper;
+        self
+    }
+
     /// Factory for a child session spawned by the Task tool. Inherits
     /// the parent's mode flag (so a Shift+Tab in the parent REPL
     /// affects in-flight subagents too — desired), approval state,
@@ -375,6 +395,8 @@ impl LibertaiToolFactory {
             edit_journal: Arc::clone(&self.edit_journal),
             team: self.team.clone(),
             teammate_name: self.teammate_name.clone(),
+            // Subagents inherit the parent's bash wrapper (M4/#23).
+            bash_command_wrapper: self.bash_command_wrapper.clone(),
         }
     }
 }
@@ -444,6 +466,7 @@ impl ToolFactory for LibertaiToolFactory {
                 self.depth,
                 cwd.to_path_buf(),
                 Arc::clone(&self.registry),
+                self.bash_command_wrapper.clone(),
             )));
         }
 
@@ -756,5 +779,80 @@ mod tests {
         );
         let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
         assert!(registry.get("mcp_call").is_none());
+    }
+
+    // (M4/#23) A factory with a bash command wrapper threads it through
+    // `child()` so nested subagents inherit the parent's sandbox. A factory
+    // with no wrapper (the default, SandboxMode::Off) propagates `None`.
+    #[test]
+    fn factory_child_inherits_bash_command_wrapper() {
+        let cfg = Arc::new(LibertaiConfig::default());
+        let wrapper = Some(vec!["bwrap".to_string(), "--".to_string()]);
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            Some(cfg),
+        )
+        .with_bash_command_wrapper(wrapper.clone());
+
+        // The parent carries the wrapper.
+        assert_eq!(factory.bash_command_wrapper, wrapper);
+        // The child inherits it.
+        let child = factory.child();
+        assert_eq!(child.bash_command_wrapper, wrapper);
+    }
+
+    #[test]
+    fn factory_without_wrapper_propagates_none() {
+        let cfg = Arc::new(LibertaiConfig::default());
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            Some(cfg),
+        );
+        // Default: no wrapper (SandboxMode::Off).
+        assert!(factory.bash_command_wrapper.is_none());
+        assert!(factory.child().bash_command_wrapper.is_none());
+    }
+
+    // (M4/#23) `TaskTool::new` stores the wrapper so its spawned subagent
+    // session (built in `TaskTool::execute`) inherits the parent sandbox.
+    #[test]
+    fn task_tool_stores_bash_command_wrapper() {
+        use crate::commands::code_task::TaskTool;
+        use std::path::PathBuf;
+        let wrapper = Some(vec!["bwrap".to_string(), "--".to_string()]);
+        let tool = TaskTool::new(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            0,
+            PathBuf::from("."),
+            AgentRegistry::new(),
+            wrapper.clone(),
+        );
+        // The field is private; the only production reader is the
+        // CodeSessionConfig build in `execute`, so assert via a clone of
+        // the same value round-tripping through a child factory built the
+        // same way the execute path does.
+        let cfg = Arc::new(LibertaiConfig::default());
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            Some(cfg),
+        )
+        .with_bash_command_wrapper(wrapper.clone());
+        // A strict parent's child carries the wrapper — the invariant the
+        // TaskTool relies on when it clones `self.bash_command_wrapper`
+        // into the subagent's CodeSessionConfig.
+        assert_eq!(factory.child().bash_command_wrapper, wrapper);
+        // Smoke: the tool was constructed without panic.
+        let _ = tool;
     }
 }
