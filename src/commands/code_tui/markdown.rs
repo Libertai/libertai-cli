@@ -102,13 +102,25 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
         if line.trim_start().starts_with("```") {
             let lang = line.trim_start().trim_start_matches('`').trim();
             let mut code_lines = Vec::new();
+            let mut closed = false;
             for code_line in iter.by_ref() {
                 if code_line.trim_start().starts_with("```") {
+                    closed = true;
                     break;
                 }
                 code_lines.push(code_line);
             }
-            lines.extend(render_code_block(&code_lines, lang, width));
+            // Holdback (finding #3): an UNCLOSED fence means the block
+            // is still streaming in. Render its content as plain
+            // preformatted text — no border, no label — so the live
+            // frame doesn't snap between "bordered block" and
+            // "borderless tail" as tokens arrive. Once the closing ```
+            // lands the next frame renders the full bordered block.
+            if closed {
+                lines.extend(render_code_block(&code_lines, lang, width));
+            } else {
+                lines.extend(render_code_block_open(&code_lines, lang, width));
+            }
             continue;
         }
 
@@ -893,6 +905,25 @@ fn render_code_block(code: &[&str], lang: &str, width: usize) -> Vec<Line<'stati
         }
     }
     lines.push(Line::from(Span::styled(border, theme::muted())));
+    lines
+}
+
+/// Render an UNCLOSED code fence — content still streaming in (finding
+/// #3). No borders: just the dim language label and the raw code lines
+/// indented, so the live frame doesn't snap between a bordered block
+/// and a borderless tail as tokens arrive. Once the closing ``` lands,
+/// the next render switches to the full bordered `render_code_block`.
+fn render_code_block_open(code: &[&str], lang: &str, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let label = if lang.is_empty() { "(code)" } else { lang };
+    lines.push(Line::from(Span::styled(label.to_string(), theme::muted())));
+    let style = theme::accent();
+    for code_line in code {
+        let wrapped = wrap::word_wrap(code_line, width, 2);
+        for chunk in wrapped {
+            lines.push(Line::from(Span::styled(format!("  {chunk}"), style)));
+        }
+    }
     lines
 }
 

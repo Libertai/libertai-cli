@@ -64,6 +64,11 @@ owo-colors = "4"
 anyhow = "1"
 base64 = "0.22"
 hex = "0.4"
+# Ordered map for the transcript render cache (finding #3): lets us evict
+# the oldest rendered-markdown entry at the cap (a plain HashMap has no
+# insertion order). Already pulled in transitively; declared directly so
+# the cache can depend on it.
+indexmap = "2"
 k256 = { version = "0.13", features = ["ecdsa"] }
 sha2 = "0.11"
 sha3 = "0.12"

@@ -375,6 +375,13 @@ pub struct App {
     /// later turn-end without a preceding Usage (e.g. an error path)
     /// simply omits the line.
     pub last_usage: Option<(StopReason, u64, u64)>,
+    /// Rendered-markdown cache for completed assistant/subagent text
+    /// entries (finding #3). `markdown::render` is otherwise re-run on
+    /// every transcript entry every frame; this caches the `Vec<Line>`
+    /// keyed on the entry's text, invalidated when the width changes or
+    /// the ring buffer evicts. The still-growing live entry bypasses the
+    /// cache (it re-renders each frame until it settles).
+    pub render_cache: crate::commands::code_tui::scrollback::RenderCache,
     /// Last shell command run via the `!`/`!!` escape, so `!!` can repeat
     /// it. Mirrors the legacy REPL's `last_shell_command`.
     pub last_shell_command: Option<String>,
@@ -1851,6 +1858,7 @@ pub fn run(
             ..Default::default()
         },
         last_usage: None,
+        render_cache: crate::commands::code_tui::scrollback::RenderCache::new(),
         last_shell_command: None,
         pending_shell_contexts: Vec::new(),
         bash_command_wrapper: bash_command_wrapper_for_app,
@@ -2170,6 +2178,7 @@ fn run_loop(
                             }
                             Action::ClearTranscript => {
                                 app.transcript.clear();
+                                app.render_cache.clear();
                                 app.scroll = 0;
                             }
                             Action::OpenEditor => {
@@ -6730,6 +6739,7 @@ mod tests {
                 ..Default::default()
             },
             last_usage: None,
+            render_cache: crate::commands::code_tui::scrollback::RenderCache::new(),
             last_shell_command: None,
             pending_shell_contexts: Vec::new(),
             bash_command_wrapper: None,

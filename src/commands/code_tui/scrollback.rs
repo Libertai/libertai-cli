@@ -9,6 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::commands::code_tui::app::{App, SubagentOutcome, TranscriptEntry};
 use crate::commands::code_tui::{markdown, theme, wrap};
+use crate::commands::code_team::AgentStatus;
 
 /// Marker prefix for a per-tool result line — distinct from the tool-call
 /// `●` so a result reads as a reply rather than another invocation.
@@ -19,6 +20,65 @@ const RESULT_MARKER: &str = "↳ ";
 /// transcript: a tool usually emits a short confirmation; long outputs
 /// (big reads, verbose bash) get a short summary instead of a wall.
 const MAX_RESULT_LINES: usize = 5;
+
+/// Cap on the number of distinct rendered texts held in the cache.
+/// Past this, the oldest entries are evicted (FIFO via insertion order
+/// of `IndexMap`). 256 distinct assistant/subagent blocks is well above a
+/// normal session's settled entries; the live still-growing entry
+/// bypasses the cache, so this only covers completed blocks.
+const RENDER_CACHE_CAP: usize = 256;
+
+/// Cache of rendered-markdown `Vec<Line>` for settled transcript text
+/// (finding #3). Keyed on the entry's text; the value also records the
+/// width it was rendered at so a width change invalidates it.
+///
+/// Uses `IndexMap` so we can evict the oldest entry when the cap is hit
+/// (a plain `HashMap` has no insertion order). The render is pure given
+/// (text, width), so the cache is sound; the only invalidation
+/// triggers are a width change and ring-buffer eviction (the latter
+/// handled by the cap + natural churn as new entries displace old).
+pub struct RenderCache {
+    entries: indexmap::IndexMap<String, (usize, Vec<Line<'static>>)>,
+}
+
+impl RenderCache {
+    pub fn new() -> Self {
+        Self {
+            entries: indexmap::IndexMap::new(),
+        }
+    }
+
+    /// Return the cached `Vec<Line>` for `text` if it was rendered at
+    /// exactly `width`; otherwise render, store, and return it. The live
+    /// still-growing entry should NOT call this — it re-renders each
+    /// frame and only enters the cache once it settles.
+    pub fn get_or_render(&mut self, text: &str, width: usize) -> Vec<Line<'static>> {
+        if let Some((cached_w, lines)) = self.entries.get(text) {
+            if *cached_w == width {
+                return lines.clone();
+            }
+        }
+        let lines = markdown::render(text, width);
+        self.entries.insert(text.to_string(), (width, lines.clone()));
+        // FIFO eviction at the cap so the cache can't grow unboundedly
+        // across a long session with many distinct settled blocks.
+        while self.entries.len() > RENDER_CACHE_CAP {
+            self.entries.shift_remove_index(0);
+        }
+        lines
+    }
+
+    /// Drop everything (e.g. on `/clear`).
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+impl Default for RenderCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Count the visual rows the wrap-off `Paragraph` renderer will produce for
 /// `lines`.
@@ -65,7 +125,25 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     // Build lines from transcript entries.
     let mut lines: Vec<Line> = Vec::new();
 
-    for entry in &app.transcript {
+    // The still-growing assistant entry bypasses the render cache: its
+    // text changes every frame, so caching it would thrash + serve a
+    // stale (shorter) render. Only the LAST Assistant entry can be live
+    // (TextDelta appends to it), and only while we're streaming; once
+    // the turn ends the entry is settled and gets cached on the next
+    // draw. Finding the last Assistant index once is O(n) and cheap
+    // relative to the per-frame re-render it avoids.
+    let live_assistant_idx = if matches!(
+        app.phase,
+        crate::commands::code_tui::app::Phase::Streaming
+    ) {
+        app.transcript
+            .iter()
+            .rposition(|e| matches!(e, TranscriptEntry::Assistant(_)))
+    } else {
+        None
+    };
+
+    for (entry_idx, entry) in app.transcript.iter().enumerate() {
         match entry {
             TranscriptEntry::User(text) => {
                 // Pre-wrap the user prompt to usable_width so a long
@@ -92,7 +170,15 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
                 // The `●` marker goes on the first rendered line.  render
                 // pre-wraps each logical line to usable_width, so each
                 // returned Line is one visual row.
-                let md_lines = markdown::render(text, usable_width);
+                //
+                // Cache the render for SETTLED entries (finding #3) so we
+                // don't re-parse every prior assistant block each frame;
+                // the live still-growing entry bypasses the cache.
+                let md_lines = if live_assistant_idx == Some(entry_idx) {
+                    markdown::render(text, usable_width)
+                } else {
+                    app.render_cache.get_or_render(text, usable_width)
+                };
                 if md_lines.is_empty() {
                     // Empty assistant text — just show the marker.
                     lines.push(Line::from(vec![
@@ -132,12 +218,20 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             }
             TranscriptEntry::SubagentText { agent_name, text } => {
                 // Look up the agent's color from the registry.
-                let color = app
-                    .registry
-                    .find_by_name(agent_name)
+                let handle = app.registry.find_by_name(agent_name);
+                let color = handle
+                    .as_ref()
                     .map(|h| theme::agent_color_for(h.color))
                     .unwrap_or(theme::MUTED);
-                let md_lines = markdown::render(text, usable_width);
+                // Cache settled subagent text (finding #3); bypass while
+                // the agent is still actively streaming (Working/Spawning)
+                // so a growing block doesn't serve a stale shorter render.
+                let md_lines = match handle.as_ref().map(|h| h.status()) {
+                    Some(AgentStatus::Working) | Some(AgentStatus::Spawning) => {
+                        markdown::render(text, usable_width)
+                    }
+                    _ => app.render_cache.get_or_render(text, usable_width),
+                };
                 for (i, md_line) in md_lines.into_iter().enumerate() {
                     if i == 0 {
                         let mut v = vec![
@@ -456,5 +550,61 @@ mod tests {
         // Sanity: this is the case the old ceil-division got wrong.
         let old_count = ((61 + usable_width - 1) / usable_width).max(1);
         assert_eq!(old_count, 4, "old model over-counted to 4, flat count is 1");
+    }
+
+    /// The render cache returns identical `Line`s for the same text at
+    /// the same width, and re-renders when the width changes (finding #3).
+    #[test]
+    fn render_cache_hits_same_width_misses_on_change() {
+        let mut cache = RenderCache::new();
+        let text = "# Hello\nworld";
+        let first = cache.get_or_render(text, 40);
+        let second = cache.get_or_render(text, 40);
+        // Same width → same number of lines (cache hit, no re-render).
+        assert_eq!(first.len(), second.len());
+        // A different width invalidates → may produce a different row count.
+        let _wide = cache.get_or_render(text, 80);
+        // Cache grew by exactly one distinct-text entry.
+        // (Re-render at the new width replaces the same key, not adds.)
+        assert_eq!(cache.entries.len(), 1);
+    }
+
+    /// The render cache evicts the oldest entry past the cap so a long
+    /// session can't grow it unboundedly (finding #3).
+    #[test]
+    fn render_cache_evicts_at_cap() {
+        let mut cache = RenderCache::new();
+        for i in 0..(RENDER_CACHE_CAP + 5) {
+            let _ = cache.get_or_render(&format!("# entry {i}"), 40);
+        }
+        assert_eq!(cache.entries.len(), RENDER_CACHE_CAP);
+        // The first 5 evicted; entry 5 (index 0 now) is the oldest kept.
+        let oldest = cache.entries.keys().next().unwrap();
+        assert!(oldest.contains("entry 5"));
+    }
+
+    /// An unclosed code fence renders WITHOUT borders (holdback),
+    /// while the same content closed renders WITH borders (finding #3).
+    #[test]
+    fn unclosed_code_fence_renders_without_borders() {
+        let w = 40usize;
+        // Closed fence → has border rows (the `─` repeat).
+        let closed = markdown::render("```rs\nlet x = 1;\n```\n", w);
+        let closed_has_border = closed
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains('─')));
+        assert!(closed_has_border, "closed fence should render a border");
+
+        // Unclosed fence → no border rows, just the label + code.
+        let open = markdown::render("```rs\nlet x = 1;\n", w);
+        let open_has_border = open
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains('─')));
+        assert!(!open_has_border, "open fence must NOT render a border");
+        // Still shows the language label.
+        assert!(
+            open.iter().any(|l| l.spans.iter().any(|s| s.content == "rs")),
+            "open fence still shows the lang label"
+        );
     }
 }
