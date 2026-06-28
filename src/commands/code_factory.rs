@@ -35,6 +35,7 @@ use crate::commands::code_notification::PushNotificationTool;
 use crate::commands::code_path_safety::{
     is_path_mutation_tool, safe_root_from_env, PathSafetyTool,
 };
+use crate::commands::code_send_message::SendMessageTool;
 use crate::commands::code_task::TaskTool;
 use crate::commands::code_team::AgentRegistry;
 use crate::commands::code_team_task::TeamTaskTool;
@@ -641,7 +642,7 @@ impl ToolFactory for LibertaiToolFactory {
             //      files to recipient's mailbox dir), so it goes through
             //      the approval wrapper.
             let mailbox = ApprovalTool::new(
-                Box::new(MailboxTool::new(team_dir, teammate.clone())),
+                Box::new(MailboxTool::new(team_dir.clone(), teammate.clone())),
                 Arc::clone(&self.approvals),
                 self.mode.clone(),
                 Arc::clone(&self.ui),
@@ -651,6 +652,24 @@ impl ToolFactory for LibertaiToolFactory {
             .with_smart_approval(self.smart_approval.clone())
             .with_journal(Arc::clone(&self.edit_journal));
             wrapped.push(Box::new(mailbox));
+
+            //    - `send_message`: push-based messaging (M5/#21). Same
+            //      team context + mailbox file backing as `mailbox`, but
+            //      adds `to: "main"` routing to the parent's transcript
+            //      (the parent TUI polls `mailbox/main/` per tick).
+            //      Mutating (writes the mailbox file), so it goes through
+            //      the approval wrapper too.
+            let send_message = ApprovalTool::new(
+                Box::new(SendMessageTool::new(team_dir, teammate.clone())),
+                Arc::clone(&self.approvals),
+                self.mode.clone(),
+                Arc::clone(&self.ui),
+            )
+            .with_base_dir(Some(cwd.to_path_buf()))
+            .with_policy(self.tool_policy.clone())
+            .with_smart_approval(self.smart_approval.clone())
+            .with_journal(Arc::clone(&self.edit_journal));
+            wrapped.push(Box::new(send_message));
         }
 
         //    - `fetch`: local reqwest, no libertai dependency. Registers

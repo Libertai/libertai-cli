@@ -251,14 +251,15 @@ pub fn mark_read(mailbox_dir: &Path, message_id: &str) -> Result<()> {
 // ---- file I/O helpers ----
 
 /// Resolve a teammate's mailbox directory under a team directory:
-/// `team_dir/mailbox/<teammate>`.
-fn mailbox_dir_for(team_dir: &Path, teammate: &str) -> PathBuf {
+/// `team_dir/mailbox/<teammate>`. `pub(crate)` so the `send_message`
+/// tool (M5/#21) reuses the same path convention.
+pub(crate) fn mailbox_dir_for(team_dir: &Path, teammate: &str) -> PathBuf {
     team_dir.join("mailbox").join(teammate)
 }
 
 /// Current epoch time in milliseconds. Mirrors the private helper in
 /// `code_team_spawn`; falls back to 0 if the clock is before epoch.
-fn now_epoch_ms() -> u64 {
+pub(crate) fn now_epoch_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -267,7 +268,7 @@ fn now_epoch_ms() -> u64 {
 
 /// First 8 hex chars of a fresh v4 UUID — short enough for a filename
 /// collision-resistant within a single mailbox's lifetime.
-fn short_uuid() -> String {
+pub(crate) fn short_uuid() -> String {
     Uuid::new_v4().simple().to_string()[..8].to_string()
 }
 
@@ -310,7 +311,8 @@ fn read_mailbox(dir: &Path) -> Vec<MailMessage> {
 /// Serialize a message to JSON and write it into `dir` under its
 /// [`message_file_name`]. Overwrites an existing file with the same
 /// name (used by [`mark_read`] to flip `read` in place).
-fn write_message(dir: &Path, msg: &MailMessage) -> Result<()> {
+/// `pub(crate)` so the `send_message` tool (M5/#21) reuses it.
+pub(crate) fn write_message(dir: &Path, msg: &MailMessage) -> Result<()> {
     let json =
         serde_json::to_string(msg).with_context(|| format!("serialize message {}", msg.id))?;
     let path = dir.join(message_file_name(msg));

@@ -30,6 +30,7 @@ pub mod code_path_safety;
 pub mod code_pr_comments;
 pub mod code_sandbox;
 pub mod code_sandbox_cli;
+pub mod code_send_message;
 pub mod code_session;
 pub mod code_skills;
 pub mod code_skill_tool;

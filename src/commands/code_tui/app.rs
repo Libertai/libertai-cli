@@ -2087,6 +2087,64 @@ fn poll_agent_status(registry: &AgentRegistry) -> (Vec<String>, Vec<String>, boo
     (completed_teams, reaped_agents, reaped)
 }
 
+/// (M5/#21) Push-based `send_message` delivery — poll each spawned
+/// team's `mailbox/main/` inbox for new (unread) messages and return
+/// one `Delivery` per unread message, in send order. The caller pushes
+/// each as a `TranscriptEntry::System` line and the poll marks them
+/// read, so a message surfaces exactly once. Distinct teams are
+/// polled independently; a missing `mailbox/main/` dir (no teammate has
+/// messaged the parent yet) yields nothing.
+///
+/// `handles` drives which teams to poll: every `AgentKind::Teammate`
+/// handle's `cwd` + team name resolves to `.libertai/teams/<team>/`. A
+/// team with no surviving teammates still gets one final poll so a
+/// message sent just before the last teammate exited is delivered
+/// (the dir persists).
+fn poll_main_inbox(
+    handles: &[Arc<crate::commands::code_team::AgentHandle>],
+) -> Vec<(String, crate::commands::code_mailbox::MailMessage)> {
+    use crate::commands::code_mailbox::{list_messages, mailbox_dir_for, mark_read};
+    use std::collections::HashSet;
+
+    // Dedup (team, cwd) pairs — multiple teammates in the same team
+    // share one `mailbox/main/`.
+    let mut seen: HashSet<(String, std::path::PathBuf)> = HashSet::new();
+    let mut teams: Vec<(String, std::path::PathBuf)> = Vec::new();
+    for h in handles {
+        if let crate::commands::code_team::AgentKind::Teammate { team } = &h.kind {
+            let key = (team.clone(), h.cwd.clone());
+            if seen.insert(key.clone()) {
+                teams.push(key);
+            }
+        }
+    }
+
+    // (team, mailbox_dir, message) for every unread message across all
+    // teams, in send order. Sort before marking so a multi-message burst
+    // surfaces oldest-first.
+    let mut pending: Vec<(String, std::path::PathBuf, crate::commands::code_mailbox::MailMessage)> =
+        Vec::new();
+    for (team, cwd) in teams {
+        let team_dir = cwd.join(".libertai").join("teams").join(&team);
+        let main_dir = mailbox_dir_for(&team_dir, "main");
+        for msg in list_messages(&main_dir) {
+            if msg.read {
+                continue;
+            }
+            pending.push((team.clone(), main_dir.clone(), msg));
+        }
+    }
+    pending.sort_by_key(|(_, _, m)| m.sent_at_ms);
+    // Surface then mark read, best-effort (a vanished file between read
+    // and mark shouldn't drop a delivery we promised).
+    let mut out = Vec::new();
+    for (team, dir, msg) in pending {
+        let _ = mark_read(&dir, &msg.id);
+        out.push((team, msg));
+    }
+    out
+}
+
 /// Map each team that currently has ≥1 active teammate to `true`.
 /// Non-teammate agents are ignored. Pure so it can be unit-tested.
 fn active_team_set(
@@ -2400,6 +2458,25 @@ fn run_loop(
         // An exited process changes the live panel even when no team fully
         // completes — mark dirty so the panel redraws after a reap.
         if reaped {
+            app.set_dirty();
+        }
+        // (M5/#21) Push delivery: surface any new `send_message(to:"main")`
+        // mail from spawned teammates as a transcript System line, in send
+        // order. `poll_main_inbox` marks each read so it surfaces exactly
+        // once. Reuses the `TranscriptEntry::System` seam the reaped-agent
+        // + compaction notices use — the parent-side analog of a teammate's
+        // `SubagentText` event.
+        let deliveries = poll_main_inbox(&app.registry.snapshot());
+        if !deliveries.is_empty() {
+            for (team, msg) in deliveries {
+                app.transcript.push(TranscriptEntry::System(format!(
+                    "› message from {from} ({team}): {subject} — {body}",
+                    from = msg.from,
+                    subject = msg.subject,
+                    body = msg.body,
+                )));
+            }
+            app.transcript.push(TranscriptEntry::Blank);
             app.set_dirty();
         }
         // Per-agent exit notifications. Each reaped agent fires a one-shot
@@ -7074,6 +7151,141 @@ mod tests {
         let map = active_team_set(&registry.snapshot());
         assert!(map.contains_key("alpha"));
         assert!(!map.contains_key("beta"));
+    }
+
+    fn reg_teammate_in(team: &str, cwd: PathBuf) -> AgentRegistration {
+        let mut reg = reg_teammate(team);
+        reg.cwd = cwd;
+        reg
+    }
+
+    fn seed_main_mail(
+        cwd: &std::path::Path,
+        team: &str,
+        from: &str,
+        subject: &str,
+        body: &str,
+    ) -> std::path::PathBuf {
+        use crate::commands::code_mailbox::{
+            mailbox_dir_for, now_epoch_ms, short_uuid, write_message, MailMessage,
+        };
+        let team_dir = cwd.join(".libertai").join("teams").join(team);
+        let dir = mailbox_dir_for(&team_dir, "main");
+        std::fs::create_dir_all(&dir).unwrap();
+        let msg = MailMessage {
+            id: format!("msg-{}", short_uuid()),
+            from: from.to_string(),
+            to: "main".to_string(),
+            subject: subject.to_string(),
+            body: body.to_string(),
+            sent_at_ms: now_epoch_ms(),
+            read: false,
+        };
+        write_message(&dir, &msg).unwrap();
+        dir
+    }
+
+    #[test]
+    fn poll_main_inbox_surfaces_unread_main_mail() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = AgentRegistry::new();
+        registry.register(reg_teammate_in("alpha", dir.path().to_path_buf()));
+        seed_main_mail(dir.path(), "alpha", "alice", "found it", "the bug is in parser.rs");
+
+        let deliveries = poll_main_inbox(&registry.snapshot());
+        assert_eq!(deliveries.len(), 1);
+        let (team, msg) = &deliveries[0];
+        assert_eq!(team, "alpha");
+        assert_eq!(msg.from, "alice");
+        assert_eq!(msg.subject, "found it");
+        assert_eq!(msg.body, "the bug is in parser.rs");
+    }
+
+    #[test]
+    fn poll_main_inbox_marks_read_so_it_surfaces_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = AgentRegistry::new();
+        registry.register(reg_teammate_in("alpha", dir.path().to_path_buf()));
+        seed_main_mail(dir.path(), "alpha", "alice", "one", "body");
+
+        let first = poll_main_inbox(&registry.snapshot());
+        assert_eq!(first.len(), 1);
+        // Second poll finds nothing — the first marked the message read.
+        let second = poll_main_inbox(&registry.snapshot());
+        assert!(second.is_empty(), "read message re-surfaced: {second:?}");
+    }
+
+    #[test]
+    fn poll_main_inbox_orders_multi_message_burst_oldest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = AgentRegistry::new();
+        registry.register(reg_teammate_in("alpha", dir.path().to_path_buf()));
+        // Seed two messages with explicit timestamps (oldest first in
+        // file order is not guaranteed across ticks — sort must fix it).
+        use crate::commands::code_mailbox::{
+            mailbox_dir_for, write_message, MailMessage,
+        };
+        let team_dir = dir.path().join(".libertai").join("teams").join("alpha");
+        let inbox = mailbox_dir_for(&team_dir, "main");
+        std::fs::create_dir_all(&inbox).unwrap();
+        for (id, ts, subj) in [("older", 100u64, "first"), ("newer", 200u64, "second")] {
+            write_message(
+                &inbox,
+                &MailMessage {
+                    id: id.to_string(),
+                    from: "alice".to_string(),
+                    to: "main".to_string(),
+                    subject: subj.to_string(),
+                    body: "x".to_string(),
+                    sent_at_ms: ts,
+                    read: false,
+                },
+            )
+            .unwrap();
+        }
+        let deliveries = poll_main_inbox(&registry.snapshot());
+        assert_eq!(deliveries.len(), 2);
+        assert_eq!(deliveries[0].1.subject, "first");
+        assert_eq!(deliveries[1].1.subject, "second");
+    }
+
+    #[test]
+    fn poll_main_inbox_dedups_team_across_multiple_teammates() {
+        // Two teammates in the same team share one `mailbox/main/` —
+        // poll it once, surface each message once.
+        let dir = tempfile::tempdir().unwrap();
+        let registry = AgentRegistry::new();
+        registry.register(reg_teammate_in("alpha", dir.path().to_path_buf()));
+        registry.register(reg_teammate_in("alpha", dir.path().to_path_buf()));
+        seed_main_mail(dir.path(), "alpha", "alice", "one", "body");
+
+        let deliveries = poll_main_inbox(&registry.snapshot());
+        assert_eq!(deliveries.len(), 1, "double-delivered: {deliveries:?}");
+    }
+
+    #[test]
+    fn poll_main_inbox_skips_non_teammate_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = AgentRegistry::new();
+        // A background agent (not a teammate) — must not drive a poll.
+        registry.register(AgentRegistration {
+            name: "bg".to_string(),
+            kind: AgentKind::Background {
+                pid: 1,
+                run_id: String::new(),
+            },
+            color: AgentColor::Dim,
+            capability: AgentCapability::ReadOnly,
+            cwd: dir.path().to_path_buf(),
+            model: String::new(),
+            prompt_preview: String::new(),
+            parent: None,
+            pid: Some(1),
+            log_path: None,
+        });
+        seed_main_mail(dir.path(), "alpha", "alice", "x", "y");
+        let deliveries = poll_main_inbox(&registry.snapshot());
+        assert!(deliveries.is_empty(), "non-teammate drove a poll: {deliveries:?}");
     }
 
     #[test]
