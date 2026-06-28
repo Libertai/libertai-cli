@@ -335,6 +335,17 @@ impl Tool for TaskTool {
             // subagent-of-a-subagent stays sandboxed too. `child()` below
             // propagates this onward.
             bash_command_wrapper: self.bash_command_wrapper.clone(),
+            // (M5/#7) The subagent's skill prompt is built from `self.cwd`
+            // (the parent's working dir — see the prompt_for_pillar call
+            // above), but the subagent RUNS in an isolated git worktree
+            // whose `create_tool_registry(cwd=…)` is the worktree path.
+            // Git worktrees don't copy gitignored `.claude/skills/` etc.,
+            // so the `skill` tool would otherwise advertise a project
+            // skill in the prompt but fail to load it from the worktree.
+            // Point the tool at the parent cwd so it scans the same dir
+            // the prompt was built from. `child()` propagates this to
+            // nested subagents too.
+            skill_cwd: Some(self.cwd.clone()),
         }
         .child();
 

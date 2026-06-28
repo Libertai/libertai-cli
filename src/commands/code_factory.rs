@@ -239,6 +239,17 @@ pub struct LibertaiToolFactory {
     /// when the parent runs with no wrapper (`SandboxMode::Off`, the
     /// default).
     pub bash_command_wrapper: Option<Vec<String>>,
+    /// (M5/#7) Override the cwd the `skill` tool scans for skills. The
+    /// subagent factory sets this to the PARENT's cwd (the dir the
+    /// subagent's skill prompt was built from), because a subagent runs
+    /// in an isolated git worktree whose `create_tool_registry(cwd=…)`
+    /// is the worktree path — and git worktrees don't copy untracked
+    /// (gitignored) `.claude/skills/` / `.libertai/skills/` / `.agents/
+    /// skills/`. Without this override the `skill` tool would advertise
+    /// a project skill in the prompt (built from the parent cwd) but
+    /// fail to load it from the worktree. `None` for the main + REPL
+    /// sessions → `create_tool_registry` falls back to the session cwd.
+    pub skill_cwd: Option<std::path::PathBuf>,
 }
 
 impl LibertaiToolFactory {
@@ -275,6 +286,7 @@ impl LibertaiToolFactory {
             team,
             teammate_name,
             bash_command_wrapper: None,
+            skill_cwd: None,
         }
     }
 
@@ -306,6 +318,7 @@ impl LibertaiToolFactory {
             team,
             teammate_name,
             bash_command_wrapper: None,
+            skill_cwd: None,
         }
     }
 
@@ -340,6 +353,7 @@ impl LibertaiToolFactory {
             team,
             teammate_name,
             bash_command_wrapper: None,
+            skill_cwd: None,
         }
     }
 
@@ -390,6 +404,15 @@ impl LibertaiToolFactory {
         self
     }
 
+    /// (M5/#7) Override the cwd the `skill` tool scans for skills. The
+    /// subagent factory sets this to the parent cwd (the dir its skill
+    /// prompt was built from); the main/REPL sessions leave it `None`
+    /// so `create_tool_registry` falls back to the session cwd.
+    pub fn with_skill_cwd(mut self, skill_cwd: Option<std::path::PathBuf>) -> Self {
+        self.skill_cwd = skill_cwd;
+        self
+    }
+
     /// Factory for a child session spawned by the Task tool. Inherits
     /// the parent's mode flag (so a Shift+Tab in the parent REPL
     /// affects in-flight subagents too — desired), approval state,
@@ -412,6 +435,10 @@ impl LibertaiToolFactory {
             teammate_name: self.teammate_name.clone(),
             // Subagents inherit the parent's bash wrapper (M4/#23).
             bash_command_wrapper: self.bash_command_wrapper.clone(),
+            // Subagents inherit the skill-scan override (the parent cwd)
+            // so their `skill` tool scans the dir their prompt was built
+            // from, not their worktree (M5/#7).
+            skill_cwd: self.skill_cwd.clone(),
         }
     }
 }
@@ -477,11 +504,16 @@ impl ToolFactory for LibertaiToolFactory {
         //      session doesn't ship every body in the prompt every turn.
         //      Read-only (disk reads), registered unwrapped like `todo`.
         //      Code-pillar only — every `prompt_for_pillar` call site
-        //      resolves skills under `SkillPillar::Code`.
-        wrapped.push(Box::new(SkillTool::new(
-            SkillPillar::Code,
-            Some(cwd.to_path_buf()),
-        )));
+        //      resolves skills under `SkillPillar::Code`. `skill_cwd`
+        //      (when set) overrides the session cwd so a subagent's
+        //      tool scans the same dir its prompt was built from — the
+        //      worktree the subagent runs in lacks gitignored project
+        //      skills.
+        let skill_cwd = self
+            .skill_cwd
+            .clone()
+            .unwrap_or_else(|| cwd.to_path_buf());
+        wrapped.push(Box::new(SkillTool::new(SkillPillar::Code, Some(skill_cwd))));
 
         //    - `task` (subagent): only when feature-on AND we still
         //      have depth headroom. Chat pillar opts out so a chat
@@ -895,6 +927,49 @@ mod tests {
         assert_eq!(factory.child().bash_command_wrapper, wrapper);
         // Smoke: the tool was constructed without panic.
         let _ = tool;
+    }
+
+    #[test]
+    fn child_factory_propagates_skill_cwd_override() {
+        // (M5/#7) A subagent factory sets `skill_cwd` to the PARENT cwd
+        // so its `skill` tool scans the dir its prompt was built from
+        // (git worktrees don't copy gitignored `.claude/skills/`). The
+        // `child()` of THAT factory must carry the same override into a
+        // nested subagent — otherwise a nested subagent-of-a-subagent
+        // would drop back to its worktree and lose project skills again.
+        use std::path::PathBuf;
+        let cfg = Arc::new(LibertaiConfig::default());
+        let parent_cwd = PathBuf::from("/parent/working/dir");
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            Some(cfg),
+        )
+        .with_skill_cwd(Some(parent_cwd.clone()));
+        let child = factory.child();
+        assert_eq!(child.skill_cwd.as_deref(), Some(parent_cwd.as_path()));
+        // A grandchild carries it too — the invariant nested subagents
+        // rely on.
+        assert_eq!(child.child().skill_cwd.as_deref(), Some(parent_cwd.as_path()));
+    }
+
+    #[test]
+    fn factory_skill_cwd_defaults_none_for_main_session() {
+        // (M5/#7) The main/REPL session builders leave `skill_cwd`
+        // unset so `create_tool_registry` falls back to the session cwd.
+        // A main session must NOT carry a stale override.
+        let cfg = Arc::new(LibertaiConfig::default());
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            Some(cfg),
+        );
+        assert!(factory.skill_cwd.is_none());
+        assert!(factory.child().skill_cwd.is_none());
     }
 
     #[test]
