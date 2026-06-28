@@ -346,6 +346,12 @@ impl Tool for TaskTool {
             // the prompt was built from. `child()` propagates this to
             // nested subagents too.
             skill_cwd: Some(self.cwd.clone()),
+            // (M5/#16) Subagents don't share the parent TUI's context
+            // snapshot (it's updated by the parent's `Usage` handler,
+            // which the subagent's own session never feeds). So the
+            // `context_status` / `request_compaction` tools aren't
+            // registered on subagents — they're a main-session affordance.
+            context_snapshot: None,
         }
         .child();
 

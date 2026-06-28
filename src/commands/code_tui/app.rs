@@ -19,6 +19,7 @@ use tui_textarea::TextArea;
 use anyhow::Context;
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
+use crate::commands::code_context_tool;
 use crate::commands::code_diff::EditJournal;
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
 use crate::commands::code_hooks::{
@@ -369,6 +370,12 @@ pub struct App {
     /// `run()` before it's moved into the App ctor; the same clone is
     /// handed to the bg factory at spawn. Mirrors the `approvals` threading.
     pub edit_journal: Arc<EditJournal>,
+    /// (M5/#16) Shared context snapshot the `context_status` +
+    /// `request_compaction` tools read. Same `Arc` handed to the bg
+    /// factory. The `Usage` handler updates `last_input_tokens` here;
+    /// the `TurnEnd` handler drains `compaction_requested` and sends
+    /// `BgCommand::Compact` when a tool requested it.
+    pub context_snapshot: Arc<code_context_tool::ContextSnapshot>,
     /// Status bar info.
     pub bar: BarStatus,
     /// Last reported turn usage (stop reason + ctx-in + out tokens),
@@ -868,6 +875,7 @@ async fn build_session(
     agent_tx: &mpsc::Sender<AgentMsg>,
     approvals: Arc<ApprovalState>,
     edit_journal: Arc<EditJournal>,
+    context_snapshot: Arc<code_context_tool::ContextSnapshot>,
 ) -> anyhow::Result<AgentSessionHandle> {
     let initial_mode = mode.get();
     let ui: Arc<dyn ApprovalUi> = Arc::new(RatatuiApprovalUi::new(agent_tx.clone()));
@@ -886,7 +894,11 @@ async fn build_session(
         .with_journal(edit_journal)
         // (M4/#23) Thread the parent's bash wrapper so spawned subagents
         // inherit the sandbox.
-        .with_bash_command_wrapper(bash_command_wrapper.clone()),
+        .with_bash_command_wrapper(bash_command_wrapper.clone())
+        // (M5/#16) Share the context snapshot so `context_status` +
+        // `request_compaction` read the same atomics the main-thread
+        // `Usage` handler writes + `TurnEnd` drains.
+        .with_context_snapshot(context_snapshot),
     );
     let persistence = match resume_path {
         Some(p) => SessionPersistence::Resume(p),
@@ -1117,6 +1129,7 @@ fn spawn_background(
     bash_command_wrapper: Option<Vec<String>>,
     approvals: Arc<ApprovalState>,
     edit_journal: Arc<EditJournal>,
+    context_snapshot: Arc<code_context_tool::ContextSnapshot>,
     cwd: PathBuf,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
@@ -1150,6 +1163,7 @@ fn spawn_background(
                 &agent_tx,
                 Arc::clone(&approvals),
                 Arc::clone(&edit_journal),
+                Arc::clone(&context_snapshot),
             )
             .await
             {
@@ -1324,6 +1338,7 @@ fn spawn_background(
                             &agent_tx,
                             Arc::clone(&approvals),
                             Arc::clone(&edit_journal),
+                            Arc::clone(&context_snapshot),
                         )
                         .await
                         {
@@ -1821,6 +1836,22 @@ pub fn run(
     let edit_journal = Arc::new(EditJournal::new());
     let edit_journal_for_bg = Arc::clone(&edit_journal);
 
+    // (M5/#16) Shared context snapshot the `context_status` +
+    // `request_compaction` tools read. Built here (main thread) so the
+    // same `Arc` is handed to the bg factory (the tools read it) AND
+    // kept on the `App` (the `Usage` handler writes `last_input_tokens`,
+    // the `TurnEnd` handler drains `compaction_requested` →
+    // `BgCommand::Compact`). Mirrors the `edit_journal` / `approvals`
+    // Arc-sharing pattern across the main↔bg boundary.
+    let context_snapshot = Arc::new(code_context_tool::ContextSnapshot::new(
+        &provider,
+        &model,
+        cfg.code_auto_compaction_enabled,
+        cfg.code_compaction_reserve_tokens,
+        cfg.code_compaction_keep_recent_tokens,
+    ));
+    let context_snapshot_for_bg = Arc::clone(&context_snapshot);
+
     // Spawn the background thread (asupersync runtime + pi session).
     // Clone the wrapper first so the App field can keep a copy for the
     // `!`/`!!` shell escape (which honors `--sandbox=strict` like the
@@ -1843,6 +1874,7 @@ pub fn run(
         bash_command_wrapper,
         approvals_for_bg,
         edit_journal_for_bg,
+        context_snapshot_for_bg,
         session_cwd,
     );
 
@@ -1892,6 +1924,7 @@ pub fn run(
         cfg,
         approvals,
         edit_journal,
+        context_snapshot,
         bar: BarStatus {
             // Seed the model label + context window at startup (#20) so the
             // ctx% chip is correct from the very first frame. Without this,
@@ -6422,6 +6455,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             // match the REPL exactly. The stop reason + ctx-in + out are
             // stashed by the Usage handler; `.take()` so a turn-end without
             // a preceding Usage (e.g. an error path) simply omits the line.
+            let mut already_compacted = false;
             if let Some((reason, ctx_in, out)) = app.last_usage.take() {
                 // (M5/#35) Distinguish the two meanings of StopReason::Length:
                 // an output-token cap ("max tokens") vs a context-window cap
@@ -6449,7 +6483,22 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                     let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Compact { notes: None }));
                     app.transcript
                         .push(TranscriptEntry::System("compacting…".to_string()));
+                    already_compacted = true;
                 }
+            }
+
+            // (M5/#16) Honor a `request_compaction` tool call from this
+            // turn. The tool sets a shared flag (it can't compact
+            // mid-turn — the turn holds the session); drain it here and
+            // send the same `BgCommand::Compact` `/compact` uses. Skipped
+            // when the ctx-limit auto-compaction above already fired —
+            // one compaction per turn boundary. Runs even when
+            // auto-compaction is off: the model explicitly asked, so we
+            // honor it (`/compact` force-compacts regardless of the gate).
+            if app.context_snapshot.take_compaction_request() && !already_compacted {
+                let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Compact { notes: None }));
+                app.transcript
+                    .push(TranscriptEntry::System("compacting…".to_string()));
             }
 
             app.phase = Phase::Idle;
@@ -6578,6 +6627,12 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.bar.input_tokens = input_tokens;
             app.bar.context_window = context_window;
             app.bar.model_label = model_label;
+            // (M5/#16) Mirror the latest occupancy into the shared
+            // snapshot so `context_status` reports the same number the
+            // status bar shows. `request_compaction` reads the same
+            // snapshot for its `auto_compaction_enabled`/window fields.
+            app.context_snapshot
+                .record_usage(input_tokens, context_window);
             // Session-cost accumulator: `estimated_cost` was previously
             // declared but never assigned (the core bug this fixes).
             // Each turn's `cost_total` is added to the running session
@@ -6988,6 +7043,13 @@ mod tests {
             cfg: Arc::new(LibertaiConfig::default()),
             approvals: Arc::new(ApprovalState::new()),
             edit_journal: Arc::new(EditJournal::new()),
+            context_snapshot: Arc::new(code_context_tool::ContextSnapshot::new(
+                "openai",
+                "gpt-4o",
+                true,
+                8_000,
+                4_000,
+            )),
             bar: BarStatus {
                 model_label: "openai/gpt-4o".to_string(),
                 ..Default::default()
@@ -7912,6 +7974,96 @@ mod tests {
             &cmd_tx,
         );
         assert!(!app.compaction_warned);
+    }
+
+    #[test]
+    fn turn_end_fires_compaction_when_request_compaction_flag_set() {
+        // M5/#16: a `request_compaction` tool call sets the shared
+        // flag; TurnEnd drains it and sends `BgCommand::Compact`.
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        app.context_snapshot.request_compaction();
+        assert!(app.context_snapshot.take_compaction_request());
+        // Re-arm and drive a TurnEnd (no Usage → no ctx-limit path).
+        app.context_snapshot.request_compaction();
+        handle_agent_msg(&mut app, AgentMsg::TurnEnd { elapsed_secs: 5 }, &cmd_tx);
+        // The flag was drained.
+        assert!(!app.context_snapshot.take_compaction_request());
+        // Exactly one Compact command was sent.
+        let mut compacts = 0;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            if matches!(
+                cmd,
+                Cmd::RunReadOnly(BgCommand::Compact { notes: None })
+            ) {
+                compacts += 1;
+            }
+        }
+        assert_eq!(compacts, 1);
+    }
+
+    #[test]
+    fn turn_end_does_not_double_compact_on_ctx_limit_and_request() {
+        // When the ctx-limit auto-compaction fires AND a
+        // `request_compaction` flag is pending, only ONE compact runs.
+        let mut app = test_app();
+        app.cfg = Arc::new(LibertaiConfig {
+            code_auto_compaction_enabled: true,
+            code_compaction_reserve_tokens: 8_000,
+            ..Default::default()
+        });
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        // Drive a Usage at the ctx-limit line (Length + tokens ≥ window − reserve).
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::Usage {
+                input_tokens: 195_000,
+                output_tokens: 0,
+                context_window: 200_000,
+                model_label: "m".into(),
+                cost_total: 0.0,
+                stop_reason: pi::model::StopReason::Length,
+            },
+            &cmd_tx,
+        );
+        // A tool also requested compaction this turn.
+        app.context_snapshot.request_compaction();
+        handle_agent_msg(&mut app, AgentMsg::TurnEnd { elapsed_secs: 5 }, &cmd_tx);
+        // Flag drained (no bleed into next turn).
+        assert!(!app.context_snapshot.take_compaction_request());
+        let mut compacts = 0;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            if matches!(
+                cmd,
+                Cmd::RunReadOnly(BgCommand::Compact { notes: None })
+            ) {
+                compacts += 1;
+            }
+        }
+        assert_eq!(compacts, 1, "ctx-limit + request_compaction double-fired");
+    }
+
+    #[test]
+    fn usage_updates_context_snapshot_for_status_tool() {
+        // M5/#16: the Usage handler mirrors occupancy into the shared
+        // snapshot so `context_status` reports the same number.
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        assert_eq!(app.context_snapshot.last_input_tokens(), 0);
+        handle_agent_msg(
+            &mut app,
+            AgentMsg::Usage {
+                input_tokens: 42_000,
+                output_tokens: 100,
+                context_window: 200_000,
+                model_label: "m".into(),
+                cost_total: 0.0,
+                stop_reason: pi::model::StopReason::Stop,
+            },
+            &cmd_tx,
+        );
+        assert_eq!(app.context_snapshot.last_input_tokens(), 42_000);
+        assert_eq!(app.context_snapshot.context_window(), 200_000);
     }
 
     #[test]

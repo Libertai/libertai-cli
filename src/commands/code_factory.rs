@@ -26,6 +26,7 @@ use pi::sdk::{default_tool_registry, Config as PiConfig, Tool, ToolFactory, Tool
 use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi, ToolPolicy};
 use crate::commands::code_ask_user::AskUserTool;
 use crate::commands::code_aux::{smart_approval_from_config, SmartApproval};
+use crate::commands::code_context_tool::{ContextSnapshot, ContextStatusTool, RequestCompactionTool};
 use crate::commands::code_diff::EditJournal;
 use crate::commands::code_guardrail::{GuardrailTool, ToolGuardrailState};
 use crate::commands::code_mailbox::MailboxTool;
@@ -251,6 +252,14 @@ pub struct LibertaiToolFactory {
     /// fail to load it from the worktree. `None` for the main + REPL
     /// sessions → `create_tool_registry` falls back to the session cwd.
     pub skill_cwd: Option<std::path::PathBuf>,
+    /// (M5/#16) Shared context snapshot the `context_status` + `request_compaction`
+    /// tools read. The TUI creates one `Arc<ContextSnapshot>` in `run()`
+    /// (where the `App` lives), threads it into the factory here, updates
+    /// `last_input_tokens` from the `Usage` handler, and drains
+    /// `compaction_requested` at `TurnEnd` to fire `BgCommand::Compact`.
+    /// `None` for the desktop chat pillar / REPL-without-TUI — the tools
+    /// then aren't registered (see `create_tool_registry`).
+    pub context_snapshot: Option<Arc<ContextSnapshot>>,
 }
 
 impl LibertaiToolFactory {
@@ -288,6 +297,7 @@ impl LibertaiToolFactory {
             teammate_name,
             bash_command_wrapper: None,
             skill_cwd: None,
+            context_snapshot: None,
         }
     }
 
@@ -320,6 +330,7 @@ impl LibertaiToolFactory {
             teammate_name,
             bash_command_wrapper: None,
             skill_cwd: None,
+            context_snapshot: None,
         }
     }
 
@@ -355,6 +366,7 @@ impl LibertaiToolFactory {
             teammate_name,
             bash_command_wrapper: None,
             skill_cwd: None,
+            context_snapshot: None,
         }
     }
 
@@ -414,6 +426,17 @@ impl LibertaiToolFactory {
         self
     }
 
+    /// (M5/#16) Inject the shared `ContextSnapshot` the
+    /// `context_status` + `request_compaction` tools read. The TUI
+    /// creates the snapshot in `run()` and shares it here so the tools
+    /// (built on the bg thread) read the same atomics the main-thread
+    /// `Usage` handler writes. `None` (the default) → the context
+    /// tools aren't registered.
+    pub fn with_context_snapshot(mut self, snapshot: Arc<ContextSnapshot>) -> Self {
+        self.context_snapshot = Some(snapshot);
+        self
+    }
+
     /// Factory for a child session spawned by the Task tool. Inherits
     /// the parent's mode flag (so a Shift+Tab in the parent REPL
     /// affects in-flight subagents too — desired), approval state,
@@ -440,6 +463,7 @@ impl LibertaiToolFactory {
             // so their `skill` tool scans the dir their prompt was built
             // from, not their worktree (M5/#7).
             skill_cwd: self.skill_cwd.clone(),
+            context_snapshot: self.context_snapshot.clone(),
         }
     }
 }
@@ -524,6 +548,34 @@ impl ToolFactory for LibertaiToolFactory {
         //      LIBERTAI_STRUCTURED_OUTPUT_RETRIES, default 5) stops a
         //      model stuck on an unsatisfiable schema.
         wrapped.push(Box::new(StructuredOutputTool::new()));
+
+        //    - `context_status` (read-only) + `request_compaction`
+        //      (mutating, wrapped below) (M5/#16). Both read a shared
+        //      `ContextSnapshot` the TUI updates from its `Usage`
+        //      handler; `request_compaction` sets a flag the `TurnEnd`
+        //      handler drains into `BgCommand::Compact`. Only
+        //      registered when a snapshot was injected (`with_context_snapshot`),
+        //      i.e. the ratatui TUI; the desktop chat pillar / a
+        //      snapshot-less REPL leave them off. `context_status` is
+        //      read-only so it's pushed unwrapped; `request_compaction`
+        //      goes through `ApprovalTool` like other mutating tools so
+        //      Plan mode denies it and the approval flow records a rule.
+        if let Some(snapshot) = self.context_snapshot.clone() {
+            wrapped.push(Box::new(ContextStatusTool::new(Arc::clone(&snapshot))));
+            let compaction_tool = RequestCompactionTool::new(snapshot);
+            wrapped.push(Box::new(
+                ApprovalTool::new(
+                    Box::new(compaction_tool),
+                    Arc::clone(&self.approvals),
+                    self.mode.clone(),
+                    Arc::clone(&self.ui),
+                )
+                .with_base_dir(Some(cwd.to_path_buf()))
+                .with_policy(self.tool_policy.clone())
+                .with_smart_approval(self.smart_approval.clone())
+                .with_journal(Arc::clone(&self.edit_journal)),
+            ));
+        }
 
         //    - `task` (subagent): only when feature-on AND we still
         //      have depth headroom. Chat pillar opts out so a chat
@@ -847,6 +899,73 @@ mod tests {
         let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
         assert!(registry.get("mcp_read_resource").is_some());
         assert!(registry.get("mcp_get_prompt").is_some());
+    }
+
+    #[test]
+    fn factory_registers_context_tools_when_snapshot_injected() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(LibertaiConfig::default());
+        let snapshot = Arc::new(ContextSnapshot::new(
+            "openai",
+            "gpt-4o",
+            true,
+            8_000,
+            4_000,
+        ));
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            Some(cfg),
+        )
+        .with_context_snapshot(snapshot);
+        let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
+        assert!(registry.get("context_status").is_some());
+        // request_compaction is wrapped in ApprovalTool (the inner tool's
+        // name surfaces through it), so it registers under its own name.
+        assert!(registry.get("request_compaction").is_some());
+    }
+
+    #[test]
+    fn factory_skips_context_tools_without_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(LibertaiConfig::default());
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            Some(cfg),
+        );
+        let registry = factory.create_tool_registry(&[], temp.path(), &PiConfig::default());
+        assert!(registry.get("context_status").is_none());
+        assert!(registry.get("request_compaction").is_none());
+    }
+
+    #[test]
+    fn child_factory_propagates_context_snapshot() {
+        let snapshot = Arc::new(ContextSnapshot::new(
+            "openai",
+            "gpt-4o",
+            true,
+            8_000,
+            4_000,
+        ));
+        let factory = LibertaiToolFactory::new_with_features(
+            ModeFlag::new(Mode::Normal),
+            Arc::new(ApprovalState::new()),
+            Arc::new(AllowingUi),
+            FactoryFeatures::cli_defaults(),
+            None,
+        )
+        .with_context_snapshot(Arc::clone(&snapshot));
+        let child = factory.child();
+        assert!(child.context_snapshot.is_some());
+        assert!(Arc::ptr_eq(
+            child.context_snapshot.as_ref().unwrap(),
+            &snapshot,
+        ));
     }
 
     #[test]
