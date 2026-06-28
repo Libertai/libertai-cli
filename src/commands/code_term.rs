@@ -175,6 +175,18 @@ fn resolution_line(choice: &PromptChoice, always_rule: &str) -> String {
         PromptChoice::AllowSession => {
             format!("✓ allowed for this session · rule {always_rule}")
         }
+        // (M4/#10) Scope variants record a rule at a different tier than
+        // the default; surface the scope in the resolution line so the
+        // scrollback shows which tier the user trusted.
+        PromptChoice::Prefix => {
+            format!("✓ always allowed (prefix) · saved rule {always_rule}")
+        }
+        PromptChoice::GrantRoot => {
+            format!("✓ always allowed (root) · saved rule {always_rule}")
+        }
+        PromptChoice::Domain => {
+            format!("✓ always allowed (domain) · saved rule {always_rule}")
+        }
         PromptChoice::Deny => "✗ denied".to_string(),
         // Terminal UI never returns Paused (it blocks until the user
         // answers); guard the match for completeness.
@@ -344,6 +356,11 @@ fn parse_cooked_choice(line: &str) -> PromptChoice {
         'a' => PromptChoice::Allow,
         's' => PromptChoice::AllowSession,
         'A' => PromptChoice::AlwaysAllow,
+        // (M4/#10) Per-call scope variants — lowercase mnemonics match the
+        // raw-mode keys below: p=prefix, r=root, o=domain (d is already deny).
+        'p' => PromptChoice::Prefix,
+        'r' => PromptChoice::GrantRoot,
+        'o' => PromptChoice::Domain,
         _ => PromptChoice::Deny,
     }
 }
@@ -355,6 +372,14 @@ fn prompt_choice_for_key(code: KeyCode, modifiers: KeyModifiers) -> Option<Promp
         (KeyCode::Char('a'), _) => Some(PromptChoice::Allow),
         (KeyCode::Char('s'), _) => Some(PromptChoice::AllowSession),
         (KeyCode::Char('A'), _) => Some(PromptChoice::AlwaysAllow),
+        // (M4/#10) Per-call scope choices. p=Prefix (`<bin> <arg> *` or
+        // `<dir> *`), r=GrantRoot (`<bin> *`), o=Domain (`<dir> *`). `d`
+        // stays deny. When the call has no candidate for the chosen scope,
+        // the server falls back to the default `suggested_rule`, so these
+        // keys are always safe to offer.
+        (KeyCode::Char('p'), _) => Some(PromptChoice::Prefix),
+        (KeyCode::Char('r'), _) => Some(PromptChoice::GrantRoot),
+        (KeyCode::Char('o'), _) => Some(PromptChoice::Domain),
         (KeyCode::Char('d') | KeyCode::Char('D'), _) => Some(PromptChoice::Deny),
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(PromptChoice::Deny),
         (KeyCode::Esc, _) => Some(PromptChoice::Deny),

@@ -5970,6 +5970,13 @@ fn handle_approval_key(app: &mut App, key: KeyEvent, shared_abort: &SharedAbort)
         KeyCode::Char('y') | KeyCode::Char('Y') => PromptChoice::Allow,
         KeyCode::Char('s') | KeyCode::Char('S') => PromptChoice::AllowSession,
         KeyCode::Char('a') | KeyCode::Char('A') => PromptChoice::AlwaysAllow,
+        // (M4/#10) Per-call scope choices: p=Prefix, r=GrantRoot, o=Domain.
+        // When the call has no candidate for the chosen scope the server
+        // falls back to the default suggested_rule, so these are always
+        // safe to offer.
+        KeyCode::Char('p') | KeyCode::Char('P') => PromptChoice::Prefix,
+        KeyCode::Char('r') | KeyCode::Char('R') => PromptChoice::GrantRoot,
+        KeyCode::Char('o') | KeyCode::Char('O') => PromptChoice::Domain,
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') | KeyCode::Esc => {
             PromptChoice::Deny
         }

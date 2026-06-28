@@ -44,6 +44,27 @@ pub enum PromptChoice {
     AllowSession,
     /// Reject this tool call. The agent receives a denial output.
     Deny,
+    /// (M4/#10) Run this tool call and persist an "always allow" rule
+    /// at the PREFIX scope — the broadest-but-still-scoped variant. For
+    /// bash that's `<bin> <first-arg> *` (e.g. `npm run *` for
+    /// `npm run build`), tighter than `GrantRoot`'s `<bin> *`. For path
+    /// tools this is the directory-trust rule `<dir> *`. Only offered
+    /// when [`ApprovalSubject::prefix_rule`] is `Some`; falls back to
+    /// `AlwaysAllow`'s default rule otherwise.
+    Prefix,
+    /// (M4/#10) Run this tool call and persist an "always allow" rule
+    /// at the ROOT scope — the binary/whole-tool tier. For bash that's
+    /// `<bin> *` (e.g. `npm *` covers `npm install`, `npm run build`,
+    /// …). Only offered when [`ApprovalSubject::root_rule`] is `Some`;
+    /// falls back to `AlwaysAllow`'s default rule otherwise.
+    GrantRoot,
+    /// (M4/#10) Run this tool call and persist an "always allow" rule
+    /// at the DOMAIN scope — for path tools, trust every path under a
+    /// common ancestor directory (`<dir> *`). For bash it's currently
+    /// the same as `GrantRoot` (bash has no directory concept). Only
+    /// offered when [`ApprovalSubject::domain_rule`] is `Some`; falls
+    /// back to `AlwaysAllow`'s default rule otherwise.
+    Domain,
     /// The UI cannot get an answer right now (e.g. desktop app closed
     /// while the modal was open). The tool wrapper translates this
     /// into [`ToolExecution::Paused`] so the agent loop suspends and
@@ -176,6 +197,19 @@ pub struct ApprovalSubject {
     pub suggested_rule: AllowRule,
     /// Human-readable label shown in the UI, e.g. `"bash(npm run build)"`.
     pub suggested_label: String,
+    /// (M4/#10) Optional PREFIX-scope rule — `<bin> <first-arg> *` for
+    /// bash, `<dir> *` for path tools. When `Some`, the UI offers a
+    /// `Prefix` choice that records this instead of `suggested_rule`.
+    /// `None` when the call doesn't have a meaningful prefix tier (e.g.
+    /// bare `npm` with no args, or a path tool whose file has no dir).
+    pub prefix_rule: Option<AllowRule>,
+    /// (M4/#10) Optional ROOT-scope rule — `<bin> *` for bash. `None`
+    /// when there's no broader root tier beyond `suggested_rule` (e.g.
+    /// `suggested_rule` already IS the binary-only form).
+    pub root_rule: Option<AllowRule>,
+    /// (M4/#10) Optional DOMAIN-scope rule — `<dir> *` for path tools.
+    /// `None` for non-path tools (bash has no directory concept).
+    pub domain_rule: Option<AllowRule>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -244,7 +278,7 @@ pub fn approval_subject_with_base(
     base: Option<&Path>,
 ) -> ApprovalSubject {
     let abs = |p: &str| absolutize_for_match(p, base);
-    let (value, rule, label) = match tool {
+    let (value, rule, label, prefix_rule, root_rule, domain_rule) = match tool {
         "bash" => {
             let cmd = input
                 .get("command")
@@ -287,7 +321,7 @@ pub fn approval_subject_with_base(
             // `AllowRule::tool_all`, but this fallback arm must not reach it.)
             let no_real_binary =
                 cmd.trim().is_empty() || first_token.is_empty() || first_token == "<missing";
-            let (rule, label) = if no_real_binary {
+            let (rule, label, prefix_rule, root_rule) = if no_real_binary {
                 let rule_pattern = if s.is_empty() {
                     "<no command>".to_string()
                 } else {
@@ -296,19 +330,44 @@ pub fn approval_subject_with_base(
                 (
                     AllowRule::exact(tool, rule_pattern.clone()),
                     format!("bash({rule_pattern})"),
+                    None,
+                    None,
                 )
             } else if cmd_trimmed_has_args(cmd) {
-                (
-                    AllowRule::wildcard(tool, format!("{first_token} *")),
-                    format!("bash({first_token} *)"),
-                )
+                // (M4/#10) Default "always allow" now records the PREFIX
+                // scope — `<bin> <first-arg> *` (e.g. `npm run *` for
+                // `npm run build`) — which is what users almost always
+                // mean by "always allow npm run build" (trust `npm run`,
+                // not bare `npm install`). The broader ROOT tier (`npm *`,
+                // i.e. trust the whole binary) is offered as `GrantRoot`.
+                // The matched VALUE stays the full command so a too-broad
+                // rule can't widen what the user already approved mid-prompt.
+                let root_pat = format!("{first_token} *");
+                let root = AllowRule::wildcard(tool, root_pat.clone());
+                let first_two = first_two_tokens(cmd);
+                let prefix = match first_two {
+                    Some(second) if second != first_token => {
+                        let prefix_pat = format!("{first_token} {second} *");
+                        Some(AllowRule::wildcard(tool, prefix_pat.clone()))
+                    }
+                    _ => None,
+                };
+                // The suggested (default) rule is the prefix when available
+                // (e.g. `npm run *`), else the root (`npm *`).
+                let (suggested, slabel) = match &prefix {
+                    Some(p) => (p.clone(), format!("bash({})", p.pattern)),
+                    None => (root.clone(), format!("bash({root_pat})")),
+                };
+                (suggested, slabel, prefix, Some(root))
             } else {
                 (
                     AllowRule::exact(tool, first_token.clone()),
                     format!("bash({first_token})"),
+                    None,
+                    None,
                 )
             };
-            (s, rule, label)
+            (s, rule, label, prefix_rule, root_rule, None)
         }
         "bash_output" => {
             let path = field(input, "logPath")
@@ -322,6 +381,9 @@ pub fn approval_subject_with_base(
                 s.clone(),
                 AllowRule::exact(tool, s.clone()),
                 format!("bash_output({s})"),
+                None,
+                None,
+                None,
             )
         }
         "kill_bash" => {
@@ -332,6 +394,9 @@ pub fn approval_subject_with_base(
                 s.clone(),
                 AllowRule::exact(tool, s.clone()),
                 format!("kill_bash({s})"),
+                None,
+                None,
+                None,
             )
         }
         "write" | "edit" | "hashline_edit" | "notebook_edit" | "notebook_execute" => {
@@ -355,6 +420,12 @@ pub fn approval_subject_with_base(
             // real (possibly empty) path `s` — only the recorded rule narrows
             // to the sentinel. This closes the false-allow the round-9 audit
             // found left open for the path-edit sibling arms.
+            //
+            // (M4/#10) When the resolved path has a parent directory, offer
+            // a DOMAIN-scope rule — `<dir> *` (e.g. `/proj/src *`) — so the
+            // user can trust the whole directory at once. The exact-file rule
+            // stays the default (tightest); DOMAIN is opt-in. We only derive
+            // it for non-sentinel, real paths.
             let path = input
                 .get("path")
                 .and_then(|v| v.as_str())
@@ -369,7 +440,13 @@ pub fn approval_subject_with_base(
             } else {
                 (AllowRule::exact(tool, s.clone()), format!("{tool}({s})"))
             };
-            (s, rule, label)
+            // Derive `<dir> *` from the parent. Skip when there's no parent
+            // (a bare filename) or the path is a sentinel — a directory-trust
+            // rule on `<` is meaningless.
+            let domain_rule = parent_dir_wildcard(&s).map(|dir_pat| {
+                AllowRule::wildcard(tool, dir_pat.clone())
+            });
+            (s, rule, label, None, None, domain_rule)
         }
         // Unknown/future wrapped tools fall back to exact raw-JSON matching
         // instead of whole-tool approval.
@@ -379,6 +456,9 @@ pub fn approval_subject_with_base(
                 s.clone(),
                 AllowRule::exact(other, s.clone()),
                 format!("{other}({s})"),
+                None,
+                None,
+                None,
             )
         }
     };
@@ -386,6 +466,9 @@ pub fn approval_subject_with_base(
         value,
         suggested_rule: rule,
         suggested_label: label,
+        prefix_rule,
+        root_rule,
+        domain_rule,
     }
 }
 
@@ -433,6 +516,34 @@ fn first_bash_token(cmd: &str) -> String {
         .next()
         .unwrap_or("")
         .to_string()
+}
+
+/// (M4/#10) The first two whitespace-separated tokens of `cmd` after
+/// trimming, returning `None` when there's no second token. Used to build
+/// the PREFIX-scope bash rule (`<bin> <first-arg> *`, e.g. `npm run *`).
+/// Returns the second token only; the binary is already `first_bash_token`.
+fn first_two_tokens(cmd: &str) -> Option<String> {
+    let mut parts = cmd.split_whitespace();
+    let _first = parts.next()?;
+    let second = parts.next()?;
+    Some(second.to_string())
+}
+
+/// (M4/#10) Derive a `<dir> *` directory-trust pattern from a resolved
+/// path, for the path tools' DOMAIN scope. Returns the parent directory
+/// (with a trailing ` *`) when the path has a real parent, else `None`
+/// (bare filename, root path, or a `<`-prefixed sentinel). The wildcard
+/// matches everything under the directory via `wildcard_match`.
+fn parent_dir_wildcard(resolved: &str) -> Option<String> {
+    if resolved.is_empty() || resolved.starts_with('<') {
+        return None;
+    }
+    let parent = Path::new(resolved).parent()?;
+    let parent_str = parent.to_str()?;
+    if parent_str.is_empty() {
+        return None;
+    }
+    Some(format!("{parent_str} *"))
 }
 
 /// (Issue-2) True when the trimmed command has at least one whitespace-separated
@@ -996,16 +1107,23 @@ impl Tool for ApprovalTool {
                     .await,
                 &policy_decision,
             ),
-            PromptChoice::AlwaysAllow => {
-                self.state.record_always(subject.suggested_rule);
-                with_policy_context(
-                    self.execute_inner(tool_call_id, effective_input, on_update)
-                        .await,
-                    &policy_decision,
-                )
-            }
-            PromptChoice::AllowSession => {
-                self.state.record_session(subject.suggested_rule);
+            choice @ (PromptChoice::AlwaysAllow
+            | PromptChoice::AllowSession
+            | PromptChoice::Prefix
+            | PromptChoice::GrantRoot
+            | PromptChoice::Domain) => {
+                // (M4/#10) All allow-family choices that record a rule go
+                // through here: the scope variants (`Prefix`/`GrantRoot`/
+                // `Domain`) pick their candidate rule off the subject,
+                // falling back to `suggested_rule` when the candidate is
+                // absent. `AlwaysAllow`/`AllowSession` use `suggested_rule`.
+                let rule = rule_for_choice(&choice, &subject).cloned();
+                let is_session = matches!(choice, PromptChoice::AllowSession);
+                match rule {
+                    Some(r) if is_session => self.state.record_session(r),
+                    Some(r) => self.state.record_always(r),
+                    None => {}
+                }
                 with_policy_context(
                     self.execute_inner(tool_call_id, effective_input, on_update)
                         .await,
@@ -1035,13 +1153,17 @@ impl Tool for ApprovalTool {
                 self.execute_resumed_approval(tool_call_id, tool_input, ResumeRecord::None)
                     .await
             }
-            PromptChoice::AlwaysAllow => {
-                self.execute_resumed_approval(tool_call_id, tool_input, ResumeRecord::Always)
-                    .await
-            }
-            PromptChoice::AllowSession => {
-                self.execute_resumed_approval(tool_call_id, tool_input, ResumeRecord::Session)
-                    .await
+            choice @ (PromptChoice::AlwaysAllow
+            | PromptChoice::AllowSession
+            | PromptChoice::Prefix
+            | PromptChoice::GrantRoot
+            | PromptChoice::Domain) => {
+                self.execute_resumed_approval(
+                    tool_call_id,
+                    tool_input,
+                    ResumeRecord::Record { choice },
+                )
+                .await
             }
             PromptChoice::Deny => Ok(denial_output(None).into()),
             PromptChoice::Paused {
@@ -1052,13 +1174,39 @@ impl Tool for ApprovalTool {
     }
 }
 
-/// How a resumed (un-paused) approval should record its decision:
-/// nothing, persist-always to disk, or session-only.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// How a resumed (un-paused) approval should record its decision.
+/// Carries the user's `PromptChoice` so the M4/#10 scope variants
+/// (`Prefix`/`GrantRoot`/`Domain`) survive the pause/resume boundary —
+/// the rule is resolved against the subject at resume time, after the
+/// model re-supplies `tool_input`.
+#[derive(Clone)]
 enum ResumeRecord {
     None,
-    Always,
-    Session,
+    Record {
+        choice: PromptChoice,
+    },
+}
+
+/// (M4/#10) Resolve which `AllowRule` a `PromptChoice` records, for the
+/// always/session tiers. The scope variants (`Prefix`/`GrantRoot`/`Domain`)
+/// pick their candidate rule off the subject when present, falling back to
+/// the default `suggested_rule` when the candidate is `None` (so a UI that
+/// offers, say, `Prefix` for a bare command without a prefix tier still
+/// records a sensible rule instead of silently allowing nothing).
+///
+/// Returns `None` for choices that don't record a rule at all (`Allow`,
+/// `Deny`, `Paused`).
+fn rule_for_choice<'a>(
+    choice: &PromptChoice,
+    subject: &'a ApprovalSubject,
+) -> Option<&'a AllowRule> {
+    match choice {
+        PromptChoice::Allow | PromptChoice::Deny | PromptChoice::Paused { .. } => None,
+        PromptChoice::AlwaysAllow | PromptChoice::AllowSession => Some(&subject.suggested_rule),
+        PromptChoice::Prefix => subject.prefix_rule.as_ref().or(Some(&subject.suggested_rule)),
+        PromptChoice::GrantRoot => subject.root_rule.as_ref().or(Some(&subject.suggested_rule)),
+        PromptChoice::Domain => subject.domain_rule.as_ref().or(Some(&subject.suggested_rule)),
+    }
 }
 
 impl ApprovalTool {
@@ -1101,10 +1249,17 @@ impl ApprovalTool {
             }
         }
 
-        if matches!(record, ResumeRecord::Always) {
-            self.state.record_always(subject.suggested_rule);
-        } else if matches!(record, ResumeRecord::Session) {
-            self.state.record_session(subject.suggested_rule);
+        if let ResumeRecord::Record { choice } = &record {
+            // (M4/#10) Resolve the scope rule against the freshly-rebuilt
+            // subject (the user picked a scope at pause time; the rule
+            // pattern must reflect the resumed tool_input).
+            if let Some(r) = rule_for_choice(choice, &subject).cloned() {
+                if matches!(choice, PromptChoice::AllowSession) {
+                    self.state.record_session(r);
+                } else {
+                    self.state.record_always(r);
+                }
+            }
         }
 
         with_policy_context(
@@ -2086,7 +2241,9 @@ mod tests {
         let execution = futures::executor::block_on(tool.execute_resumed_approval(
             "call-1",
             serde_json::json!({"command":"cargo test"}),
-            ResumeRecord::Always,
+            ResumeRecord::Record {
+                choice: PromptChoice::AlwaysAllow,
+            },
         ))
         .unwrap();
 
@@ -2314,19 +2471,33 @@ mod tests {
     fn subject_bash_extracts_command() {
         let input = serde_json::json!({"command": "npm run build"});
         let subj = approval_subject("bash", &input);
-        // (Issue-2) The matched value is the FULL command, but the suggested
-        // "always allow" rule keys on the binary (first token) as a wildcard,
-        // so one rule covers `npm run build`, `npm run test`, etc.
+        // (M4/#10) The matched value is the FULL command, but the suggested
+        // "always allow" rule now keys on the PREFIX (`<bin> <first-arg> *`)
+        // — `npm run *` — so one rule covers `npm run build`, `npm run test`,
+        // etc. The broader ROOT tier (`npm *`, the whole binary) is offered
+        // as `root_rule` (GrantRoot).
         assert_eq!(subj.value, "npm run build");
         assert_eq!(subj.suggested_rule.tool, "bash");
         assert!(subj.suggested_rule.wildcard, "bash rule is a wildcard");
-        assert_eq!(subj.suggested_rule.pattern, "npm *");
-        assert_eq!(subj.suggested_label, "bash(npm *)");
+        assert_eq!(subj.suggested_rule.pattern, "npm run *");
+        assert_eq!(subj.suggested_label, "bash(npm run *)");
+        // ROOT candidate is the binary-only tier.
+        let root = subj.root_rule.expect("root_rule present for bash with args");
+        assert!(root.wildcard);
+        assert_eq!(root.pattern, "npm *");
+        // PREFIX candidate equals the suggested rule (the default IS prefix).
+        let prefix = subj
+            .prefix_rule
+            .expect("prefix_rule present for bash with args");
+        assert_eq!(prefix.pattern, "npm run *");
+        // No domain tier for bash.
+        assert!(subj.domain_rule.is_none());
     }
 
     #[test]
     fn subject_bash_single_token_is_exact() {
-        // A bare binary with no args records an exact rule (no wildcard).
+        // A bare binary with no args records an exact rule (no wildcard),
+        // and offers no broader tiers.
         let input = serde_json::json!({"command": "git"});
         let subj = approval_subject("bash", &input);
         assert_eq!(subj.value, "git");
@@ -2337,6 +2508,9 @@ mod tests {
         );
         assert_eq!(subj.suggested_rule.pattern, "git");
         assert_eq!(subj.suggested_label, "bash(git)");
+        assert!(subj.prefix_rule.is_none());
+        assert!(subj.root_rule.is_none());
+        assert!(subj.domain_rule.is_none());
     }
 
     #[test]
@@ -2344,40 +2518,231 @@ mod tests {
         let input = serde_json::json!({"command": "   npm   run build  "});
         let subj = approval_subject("bash", &input);
         assert_eq!(subj.value, "   npm   run build  ");
-        assert_eq!(subj.suggested_rule.pattern, "npm *");
-        assert_eq!(subj.suggested_label, "bash(npm *)");
+        assert_eq!(subj.suggested_rule.pattern, "npm run *");
+        assert_eq!(subj.suggested_label, "bash(npm run *)");
     }
 
     #[test]
-    fn bash_always_allow_on_binary_covers_varied_subcommands() {
-        // (Issue-2) The user-reported bug: "always allow" on `npm run build`
-        // never re-matched `npm run test`, so the user was re-prompted every
-        // call. With the binary-keyed wildcard rule, one allow covers all npm
-        // subcommands.
+    fn bash_always_allow_on_prefix_covers_varied_subcommands() {
+        // (Issue-2 + M4/#10) The user-reported bug: "always allow" on
+        // `npm run build` never re-matched `npm run test`, so the user was
+        // re-prompted every call. With the PREFIX-keyed wildcard rule
+        // (`npm run *`, the new default), one allow covers all `npm run …`
+        // subcommands. A bare `npm install` is NOT covered (that needs the
+        // ROOT tier `npm *` via GrantRoot).
         let state = ApprovalState::new();
         let input = serde_json::json!({"command": "npm run build"});
         let subj = approval_subject("bash", &input);
         state.record_always(subj.suggested_rule);
-        // The same binary with different args is pre-allowed.
+        // The same prefix with different args is pre-allowed.
         assert!(
             state.is_pre_allowed("bash", "npm run test"),
-            "npm run test covered by the npm * rule"
+            "npm run test covered by the npm run * rule"
         );
         assert!(
             state.is_pre_allowed("bash", "npm run build --watch"),
-            "npm run build --watch covered by the npm * rule"
+            "npm run build --watch covered by the npm run * rule"
         );
         // A different binary is NOT pre-allowed (the rule doesn't over-match
         // to other tools).
         assert!(
             !state.is_pre_allowed("bash", "cargo test"),
-            "cargo test NOT covered by the npm * rule"
+            "cargo test NOT covered by the npm run * rule"
         );
-        // A bare `npm` (no args) is NOT matched by `npm *` (the wildcard
-        // requires a trailing arg) — a deliberate precision choice.
+        // A bare `npm` (no args) is NOT matched by `npm run *` (the wildcard
+        // requires the `npm run ` prefix) — a deliberate precision choice.
         assert!(
             !state.is_pre_allowed("bash", "npm"),
-            "bare npm not covered by 'npm *' (requires an arg)"
+            "bare npm not covered by 'npm run *' (requires the prefix)"
+        );
+        // `npm install` is NOT covered by the prefix rule — that needs the
+        // ROOT tier (`npm *` via GrantRoot). Confirms the prefix default is
+        // tighter than the old binary-only behavior.
+        assert!(
+            !state.is_pre_allowed("bash", "npm install"),
+            "npm install NOT covered by 'npm run *' — use GrantRoot (npm *) for that"
+        );
+    }
+
+    // ── M4/#10 per-call scope choices ─────────────────────────────────
+
+    #[test]
+    fn rule_for_choice_resolves_scope_variants() {
+        // bash `npm run build`: suggested=prefix `npm run *`, root=`npm *`.
+        let input = serde_json::json!({"command": "npm run build"});
+        let subj = approval_subject("bash", &input);
+        assert_eq!(
+            rule_for_choice(&PromptChoice::AlwaysAllow, &subj).unwrap().pattern,
+            "npm run *"
+        );
+        assert_eq!(
+            rule_for_choice(&PromptChoice::Prefix, &subj).unwrap().pattern,
+            "npm run *"
+        );
+        assert_eq!(
+            rule_for_choice(&PromptChoice::GrantRoot, &subj).unwrap().pattern,
+            "npm *"
+        );
+        // Domain falls back to suggested (no domain tier for bash).
+        assert_eq!(
+            rule_for_choice(&PromptChoice::Domain, &subj).unwrap().pattern,
+            "npm run *"
+        );
+        // Allow/Deny record nothing.
+        assert!(rule_for_choice(&PromptChoice::Allow, &subj).is_none());
+        assert!(rule_for_choice(&PromptChoice::Deny, &subj).is_none());
+    }
+
+    #[test]
+    fn rule_for_choice_falls_back_when_no_candidate() {
+        // A bare `git` (no args) has no prefix/root/domain tiers; the scope
+        // choices fall back to the suggested (exact) rule rather than None.
+        let input = serde_json::json!({"command": "git"});
+        let subj = approval_subject("bash", &input);
+        assert_eq!(
+            rule_for_choice(&PromptChoice::Prefix, &subj).unwrap().pattern,
+            "git"
+        );
+        assert_eq!(
+            rule_for_choice(&PromptChoice::GrantRoot, &subj).unwrap().pattern,
+            "git"
+        );
+        assert_eq!(
+            rule_for_choice(&PromptChoice::Domain, &subj).unwrap().pattern,
+            "git"
+        );
+    }
+
+    #[test]
+    fn path_tool_subject_offers_domain_scope() {
+        // write to `src/main.rs` (no base) → value=src/main.rs, domain=`src *`.
+        let input = serde_json::json!({"path": "src/main.rs", "content": "x"});
+        let subj = approval_subject("write", &input);
+        assert_eq!(subj.suggested_rule.pattern, "src/main.rs");
+        assert!(!subj.suggested_rule.wildcard, "default path rule is exact");
+        let domain = subj
+            .domain_rule
+            .expect("domain_rule present for a path with a parent dir");
+        assert!(domain.wildcard);
+        assert_eq!(domain.pattern, "src *");
+        // No prefix/root tiers for path tools.
+        assert!(subj.prefix_rule.is_none());
+        assert!(subj.root_rule.is_none());
+    }
+
+    #[test]
+    fn path_tool_bare_filename_has_no_domain_scope() {
+        // A bare filename (no parent dir) offers no domain tier.
+        let input = serde_json::json!({"path": "README.md", "content": "x"});
+        let subj = approval_subject("write", &input);
+        assert_eq!(subj.suggested_rule.pattern, "README.md");
+        assert!(subj.domain_rule.is_none(), "bare filename has no parent");
+    }
+
+    #[test]
+    fn approval_tool_records_root_rule_on_grant_root_choice() {
+        // Choosing GrantRoot on `npm run build` records `npm *` (the binary
+        // tier), NOT the default `npm run *` prefix. This exercises the same
+        // `rule_for_choice` + `record_always` glue the live `execute` arm runs
+        // (the arm is trivial glue; the rule resolution is the logic under
+        // test).
+        let state = Arc::new(ApprovalState::new());
+        let bash_input = serde_json::json!({"command": "npm run build"});
+        let subj = approval_subject("bash", &bash_input);
+        let root_rule = rule_for_choice(&PromptChoice::GrantRoot, &subj)
+            .unwrap()
+            .clone();
+        state.record_always(root_rule);
+        // `npm install` IS now covered by the root rule (the whole binary).
+        assert!(
+            state.is_pre_allowed("bash", "npm install"),
+            "GrantRoot's npm * covers npm install"
+        );
+        assert!(
+            state.is_pre_allowed("bash", "npm run build"),
+            "GrantRoot's npm * covers npm run build"
+        );
+    }
+
+    #[test]
+    fn approval_tool_records_prefix_rule_on_prefix_choice() {
+        // Choosing Prefix records the prefix tier; bare `npm install` is NOT
+        // covered (that's the tighter-than-root point of the prefix scope).
+        let state = Arc::new(ApprovalState::new());
+        let bash_input = serde_json::json!({"command": "npm run build"});
+        let subj = approval_subject("bash", &bash_input);
+        let prefix_rule = rule_for_choice(&PromptChoice::Prefix, &subj).unwrap().clone();
+        state.record_always(prefix_rule);
+        assert!(
+            state.is_pre_allowed("bash", "npm run build"),
+            "Prefix covers npm run build"
+        );
+        assert!(
+            !state.is_pre_allowed("bash", "npm install"),
+            "Prefix does NOT cover npm install (use GrantRoot)"
+        );
+    }
+
+    #[test]
+    fn approval_tool_execute_grant_root_records_root_rule_end_to_end() {
+        // End-to-end through ApprovalTool::execute: a UI that returns
+        // GrantRoot must record a rule, proven by a SECOND call with the
+        // same tool being pre-allowed WITHOUT consulting the UI. The
+        // second call uses a CountingUi (Deny) — if the rule was recorded,
+        // the second call short-circuits at is_pre_allowed and the UI is
+        // never asked.
+        //
+        // GrantRoot on a write tool has no root candidate → falls back to
+        // the suggested (exact-path) rule, so the second call to the SAME
+        // absolute path is pre-allowed. Uses absolute paths so we don't pin
+        // the process cwd (avoids racing the cwd-pinning journal test).
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("a.txt");
+        let target_str = target.to_string_lossy().to_string();
+
+        struct GrantRootUi;
+        #[async_trait]
+        impl ApprovalUi for GrantRootUi {
+            async fn decide(&self, _: &str, _: &str, _: &str) -> PromptChoice {
+                PromptChoice::GrantRoot
+            }
+        }
+        let ui_calls = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(ApprovalState::new());
+        // First tool uses GrantRootUi → records a rule (exact path fallback).
+        let tool = ApprovalTool::new(
+            Box::new(WriteFileTool),
+            Arc::clone(&state),
+            ModeFlag::new(Mode::Normal),
+            Arc::new(GrantRootUi),
+        )
+        .with_base_dir(Some(temp.path().to_path_buf()));
+        let _ = futures::executor::block_on(tool.execute(
+            "call-1",
+            serde_json::json!({"path": target_str, "content": "x"}),
+            None,
+        ));
+
+        // Second tool uses a Deny-counting UI; the same path is now
+        // pre-allowed, so the UI is NOT consulted.
+        let tool2 = ApprovalTool::new(
+            Box::new(WriteFileTool),
+            Arc::clone(&state),
+            ModeFlag::new(Mode::Normal),
+            Arc::new(CountingUi {
+                calls: Arc::clone(&ui_calls),
+            }),
+        )
+        .with_base_dir(Some(temp.path().to_path_buf()));
+        let _ = futures::executor::block_on(tool2.execute(
+            "call-2",
+            serde_json::json!({"path": target_str, "content": "y"}),
+            None,
+        ));
+        assert_eq!(
+            ui_calls.load(Ordering::Relaxed),
+            0,
+            "second call pre-allowed by the recorded rule; UI not consulted"
         );
     }
 

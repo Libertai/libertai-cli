@@ -71,7 +71,8 @@ pub struct IpcApprovalRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcApprovalResponse {
     pub id: String,
-    /// "allow" | "allow_session" | "always_allow" | "deny"
+    /// "allow" | "allow_session" | "always_allow" | "deny" |
+    /// "prefix" | "grant_root" | "domain" (M4/#10 scope variants)
     pub choice: String,
 }
 
@@ -81,6 +82,11 @@ impl IpcApprovalResponse {
             "allow" => PromptChoice::Allow,
             "allow_session" => PromptChoice::AllowSession,
             "always_allow" => PromptChoice::AlwaysAllow,
+            // (M4/#10) Per-call scope variants forwarded over the IPC
+            // channel from a teammate's parent TUI.
+            "prefix" => PromptChoice::Prefix,
+            "grant_root" => PromptChoice::GrantRoot,
+            "domain" => PromptChoice::Domain,
             _ => PromptChoice::Deny,
         }
     }
@@ -162,6 +168,10 @@ impl ApprovalResponder {
             PromptChoice::Allow => "allow",
             PromptChoice::AllowSession => "allow_session",
             PromptChoice::AlwaysAllow => "always_allow",
+            // (M4/#10) Per-call scope variants.
+            PromptChoice::Prefix => "prefix",
+            PromptChoice::GrantRoot => "grant_root",
+            PromptChoice::Domain => "domain",
             PromptChoice::Deny => "deny",
             PromptChoice::Paused { .. } => "deny",
         };

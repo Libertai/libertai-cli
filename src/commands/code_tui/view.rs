@@ -309,6 +309,14 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("[y] Allow  ", Style::default().fg(theme::SUCCESS)),
         Span::styled("[s] Session  ", Style::default().fg(theme::WARNING)),
         Span::styled("[a] Always  ", Style::default().fg(theme::ACCENT)),
+        // (M4/#10) Per-call scope choices: p=Prefix, r=GrantRoot, o=Domain.
+        // Shown dim so the primary y/s/a/n flow stays visually dominant;
+        // the keys record an always-rule at the chosen scope (falling back
+        // to the default rule when the call has no candidate for it).
+        Span::styled(
+            "[p] Prefix  [r] Root  [o] Domain  ",
+            Style::default().fg(Color::DarkGray),
+        ),
         Span::styled("[n] Deny", Style::default().fg(theme::ERROR)),
     ]));
 
