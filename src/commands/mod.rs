@@ -12,6 +12,7 @@ pub mod code_ask_user;
 pub mod code_aux;
 pub mod code_diff;
 pub mod code_context_tool;
+pub mod code_cron;
 pub mod code_env_prompt;
 pub mod code_factory;
 pub mod code_guardrail;

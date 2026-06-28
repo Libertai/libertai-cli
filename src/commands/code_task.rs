@@ -352,6 +352,10 @@ impl Tool for TaskTool {
             // `context_status` / `request_compaction` tools aren't
             // registered on subagents — they're a main-session affordance.
             context_snapshot: None,
+            // (M5/#17) Subagents don't host a cron timer (only the
+            // parent TUI does); leave the store unset so the cron tools
+            // aren't registered on subagents.
+            cron_store: None,
         }
         .child();
 

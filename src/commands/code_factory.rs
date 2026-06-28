@@ -27,6 +27,7 @@ use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi, T
 use crate::commands::code_ask_user::AskUserTool;
 use crate::commands::code_aux::{smart_approval_from_config, SmartApproval};
 use crate::commands::code_context_tool::{ContextSnapshot, ContextStatusTool, RequestCompactionTool};
+use crate::commands::code_cron::{CronCreateTool, CronDeleteTool, CronListTool, CronStore};
 use crate::commands::code_diff::EditJournal;
 use crate::commands::code_guardrail::{GuardrailTool, ToolGuardrailState};
 use crate::commands::code_mailbox::MailboxTool;
@@ -261,6 +262,16 @@ pub struct LibertaiToolFactory {
     /// `None` for the desktop chat pillar / REPL-without-TUI — the tools
     /// then aren't registered (see `create_tool_registry`).
     pub context_snapshot: Option<Arc<ContextSnapshot>>,
+    /// (M5/#17) Shared session cron store the `cron_create` /
+    /// `cron_list` / `cron_delete` tools read/write. The TUI creates one
+    /// `Arc<CronStore>` in `run()`, threads it into the factory here, and
+    /// a timer thread (also spawned in `run()`) drains due jobs and
+    /// injects their prompts via `Cmd::Prompt`. `None` when there's no
+    /// TUI to host the timer (desktop chat pillar / snapshot-less REPL)
+    /// — the tools then aren't registered. Session-scoped (in-memory);
+    /// the durable `.libertai/scheduled_tasks.json` backing is a
+    /// follow-up.
+    pub cron_store: Option<Arc<CronStore>>,
 }
 
 impl LibertaiToolFactory {
@@ -299,6 +310,7 @@ impl LibertaiToolFactory {
             bash_command_wrapper: None,
             skill_cwd: None,
             context_snapshot: None,
+            cron_store: None,
         }
     }
 
@@ -332,6 +344,7 @@ impl LibertaiToolFactory {
             bash_command_wrapper: None,
             skill_cwd: None,
             context_snapshot: None,
+            cron_store: None,
         }
     }
 
@@ -368,6 +381,7 @@ impl LibertaiToolFactory {
             bash_command_wrapper: None,
             skill_cwd: None,
             context_snapshot: None,
+            cron_store: None,
         }
     }
 
@@ -438,6 +452,18 @@ impl LibertaiToolFactory {
         self
     }
 
+    /// (M5/#17) Inject the shared session `CronStore` the
+    /// `cron_create` / `cron_list` / `cron_delete` tools read/write.
+    /// The TUI creates the store in `run()`, shares it here so the tools
+    /// (built on the bg thread) mutate the same store the main-thread
+    /// timer drains, and spawns that timer thread to fire due prompts
+    /// via `Cmd::Prompt`. `None` (the default) → the cron tools aren't
+    /// registered (no TUI to host the timer).
+    pub fn with_cron_store(mut self, store: Arc<CronStore>) -> Self {
+        self.cron_store = Some(store);
+        self
+    }
+
     /// Factory for a child session spawned by the Task tool. Inherits
     /// the parent's mode flag (so a Shift+Tab in the parent REPL
     /// affects in-flight subagents too — desired), approval state,
@@ -465,6 +491,12 @@ impl LibertaiToolFactory {
             // from, not their worktree (M5/#7).
             skill_cwd: self.skill_cwd.clone(),
             context_snapshot: self.context_snapshot.clone(),
+            // Subagents don't share the parent's cron store: only the
+            // parent TUI runs the timer thread that fires due prompts,
+            // and a subagent's `Cmd::Prompt` would target its own
+            // (subprocess) loop, not the parent's. Leave `None` so the
+            // cron tools aren't registered in subagents (M5/#17).
+            cron_store: None,
         }
     }
 }
@@ -576,6 +608,42 @@ impl ToolFactory for LibertaiToolFactory {
                 .with_smart_approval(self.smart_approval.clone())
                 .with_journal(Arc::clone(&self.edit_journal)),
             ));
+        }
+
+        //    - `cron_create` (mutating) / `cron_list` (read-only) /
+        //      `cron_delete` (mutating) (M5/#17). All read/write a
+        //      shared `CronStore` the TUI's timer thread drains to fire
+        //      due prompts via `Cmd::Prompt`. Only registered when a
+        //      store was injected (`with_cron_store`), i.e. the ratatui
+        //      TUI (which also spawns the timer); the desktop chat
+        //      pillar / snapshot-less REPL leave them off. `cron_list`
+        //      is read-only (unwrapped); `cron_create` + `cron_delete`
+        //      go through `ApprovalTool` so Plan mode denies them and
+        //      the approval flow records a rule.
+        if let Some(store) = self.cron_store.clone() {
+            wrapped.push(Box::new(CronListTool::new(Arc::clone(&store))));
+            let create = ApprovalTool::new(
+                Box::new(CronCreateTool::new(Arc::clone(&store))),
+                Arc::clone(&self.approvals),
+                self.mode.clone(),
+                Arc::clone(&self.ui),
+            )
+            .with_base_dir(Some(cwd.to_path_buf()))
+            .with_policy(self.tool_policy.clone())
+            .with_smart_approval(self.smart_approval.clone())
+            .with_journal(Arc::clone(&self.edit_journal));
+            wrapped.push(Box::new(create));
+            let delete = ApprovalTool::new(
+                Box::new(CronDeleteTool::new(store)),
+                Arc::clone(&self.approvals),
+                self.mode.clone(),
+                Arc::clone(&self.ui),
+            )
+            .with_base_dir(Some(cwd.to_path_buf()))
+            .with_policy(self.tool_policy.clone())
+            .with_smart_approval(self.smart_approval.clone())
+            .with_journal(Arc::clone(&self.edit_journal));
+            wrapped.push(Box::new(delete));
         }
 
         //    - `task` (subagent): only when feature-on AND we still

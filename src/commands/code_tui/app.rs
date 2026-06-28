@@ -20,6 +20,7 @@ use anyhow::Context;
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
 use crate::commands::code_context_tool;
+use crate::commands::code_cron;
 use crate::commands::code_diff::EditJournal;
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
 use crate::commands::code_hooks::{
@@ -376,6 +377,11 @@ pub struct App {
     /// the `TurnEnd` handler drains `compaction_requested` and sends
     /// `BgCommand::Compact` when a tool requested it.
     pub context_snapshot: Arc<code_context_tool::ContextSnapshot>,
+    /// (M5/#17) Shared session cron store the `cron_create` /
+    /// `cron_list` / `cron_delete` tools mutate and the timer thread
+    /// (spawned in `run`) drains to fire due prompts via `Cmd::Prompt`.
+    /// Session-scoped (in-memory); durable backing is a follow-up.
+    pub cron_store: Arc<code_cron::CronStore>,
     /// Status bar info.
     pub bar: BarStatus,
     /// Last reported turn usage (stop reason + ctx-in + out tokens),
@@ -876,6 +882,7 @@ async fn build_session(
     approvals: Arc<ApprovalState>,
     edit_journal: Arc<EditJournal>,
     context_snapshot: Arc<code_context_tool::ContextSnapshot>,
+    cron_store: Arc<code_cron::CronStore>,
 ) -> anyhow::Result<AgentSessionHandle> {
     let initial_mode = mode.get();
     let ui: Arc<dyn ApprovalUi> = Arc::new(RatatuiApprovalUi::new(agent_tx.clone()));
@@ -898,7 +905,11 @@ async fn build_session(
         // (M5/#16) Share the context snapshot so `context_status` +
         // `request_compaction` read the same atomics the main-thread
         // `Usage` handler writes + `TurnEnd` drains.
-        .with_context_snapshot(context_snapshot),
+        .with_context_snapshot(context_snapshot)
+        // (M5/#17) Share the cron store so `cron_create` / `cron_list`
+        // / `cron_delete` (bg-thread tools) mutate the same store the
+        // main-thread timer drains to fire due prompts via `Cmd::Prompt`.
+        .with_cron_store(cron_store),
     );
     let persistence = match resume_path {
         Some(p) => SessionPersistence::Resume(p),
@@ -1130,6 +1141,7 @@ fn spawn_background(
     approvals: Arc<ApprovalState>,
     edit_journal: Arc<EditJournal>,
     context_snapshot: Arc<code_context_tool::ContextSnapshot>,
+    cron_store: Arc<code_cron::CronStore>,
     cwd: PathBuf,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
@@ -1164,6 +1176,7 @@ fn spawn_background(
                 Arc::clone(&approvals),
                 Arc::clone(&edit_journal),
                 Arc::clone(&context_snapshot),
+                Arc::clone(&cron_store),
             )
             .await
             {
@@ -1339,6 +1352,7 @@ fn spawn_background(
                             Arc::clone(&approvals),
                             Arc::clone(&edit_journal),
                             Arc::clone(&context_snapshot),
+                            Arc::clone(&cron_store),
                         )
                         .await
                         {
@@ -1852,6 +1866,17 @@ pub fn run(
     ));
     let context_snapshot_for_bg = Arc::clone(&context_snapshot);
 
+    // (M5/#17) Shared session cron store the `cron_create` /
+    // `cron_list` / `cron_delete` tools read/write (bg thread) and the
+    // main-thread timer drains to fire due prompts via `Cmd::Prompt`.
+    // Session-scoped (in-memory) for now; the durable
+    // `.libertai/scheduled_tasks.json` backing is a follow-up. Built
+    // here (main thread) so the same `Arc` is handed to the bg factory
+    // (the tools mutate it) AND kept on the `App` (the timer thread
+    // reads it) — mirrors the `context_snapshot` Arc-sharing pattern.
+    let cron_store = Arc::new(code_cron::CronStore::new());
+    let cron_store_for_bg = Arc::clone(&cron_store);
+
     // Spawn the background thread (asupersync runtime + pi session).
     // Clone the wrapper first so the App field can keep a copy for the
     // `!`/`!!` shell escape (which honors `--sandbox=strict` like the
@@ -1875,6 +1900,7 @@ pub fn run(
         approvals_for_bg,
         edit_journal_for_bg,
         context_snapshot_for_bg,
+        cron_store_for_bg,
         session_cwd,
     );
 
@@ -1925,6 +1951,7 @@ pub fn run(
         approvals,
         edit_journal,
         context_snapshot,
+        cron_store,
         bar: BarStatus {
             // Seed the model label + context window at startup (#20) so the
             // ctx% chip is correct from the very first frame. Without this,
@@ -1976,6 +2003,43 @@ pub fn run(
     if let Some(ref srv) = approval_server {
         app.approval_socket_path = Some(srv.path().clone());
     }
+
+    // (M5/#17) Cron timer thread: a long-lived sleeper that wakes ~every
+    // 10s, drains due jobs from the shared `CronStore`, and injects each
+    // due prompt as a turn via `Cmd::Prompt` — the exact path a manual
+    // submit takes. The thread exits when the `cmd_tx` it holds is the
+    // last sender and the receiver is dropped at teardown (i.e. when
+    // `run_loop` returns and `cmd_rx` is consumed): the next `send`
+    // fails, breaking the loop. We clone `cmd_tx` here so the timer's
+    // clone keeps the channel alive only until the main `cmd_tx` (the
+    // one handed to `run_loop`) plus this clone are both gone — the
+    // receiver is owned by the bg thread, so the channel outlives
+    // `run_loop`; the thread therefore also wakes on a short tick so a
+    // shutdown isn't blocked on the sleep.
+    let cron_cmd_tx = cmd_tx.clone();
+    let cron_timer_store = Arc::clone(&app.cron_store);
+    let _cron_timer = std::thread::Builder::new()
+        .name("libertai-cron".to_string())
+        .spawn(move || {
+            // Tick every 10s; the bg `cmd_rx` lives until `run_loop`
+            // returns, so the loop ends when `send` errors then.
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                let now = code_cron::now_ms();
+                let due = cron_timer_store.drain_due(now);
+                for (_id, prompt) in due {
+                    let _ = cron_cmd_tx.send(Cmd::Prompt {
+                        text: prompt,
+                        // No `/output-style` override for a fired cron
+                        // job — it uses the session's current style as
+                        // of the next `Cmd::Prompt` the loop applies. The
+                        // bg thread re-reads `app.bar.output_style` only on
+                        // a manual submit; a fired job is style-neutral.
+                        output_style: None,
+                    });
+                }
+            }
+        });
 
     // Run the event loop.
     let result = run_loop(
@@ -4572,7 +4636,7 @@ const WIRED_COMMANDS: &[(&str, &[&str], &str)] = &[
     (
         "/schedule",
         &[],
-        "Schedule a prompt (TUI stub — not yet supported)",
+        "Schedule a prompt via cron: /schedule <min> <hour> <dom> <month> <dow> [once|recurring] <prompt>",
     ),
 ];
 
@@ -5968,9 +6032,60 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             None
         }
         "/schedule" => {
-            app.transcript.push(TranscriptEntry::System(
-                "schedule not yet supported in TUI (auto-fire needs a due-tick timer)".to_string(),
-            ));
+            // (M5/#17) Real session cron: `/schedule <cron> [once|recurring]
+            // <prompt>`. Creates a job in the shared `CronStore`; the timer
+            // thread (spawned in `run`) fires due prompts via `Cmd::Prompt`.
+            // With no args, lists the current schedule (mirrors `cron_list`).
+            // Example: `/schedule */15 * * * * recurring check the build`.
+            if rest.is_empty() {
+                let jobs = app.cron_store.list();
+                if jobs.is_empty() {
+                    app.transcript
+                        .push(TranscriptEntry::System("No scheduled prompts.".to_string()));
+                } else {
+                    let mut lines = String::from("Scheduled prompts:");
+                    for j in jobs {
+                        lines.push_str(&format!(
+                            "\n  {} `{}` {} next={} : {}",
+                            j.id, j.cron, if j.recurring { "recurring" } else { "once" }, j.next_fire_ms, j.prompt,
+                        ));
+                    }
+                    app.transcript.push(TranscriptEntry::System(lines));
+                }
+                app.transcript.push(TranscriptEntry::Blank);
+                return None;
+            }
+            // Parse `<cron-expr> [once|recurring] <prompt>`. The cron
+            // expr is the first 5 whitespace-separated tokens; then an
+            // optional `once`/`recurring` flag; then the prompt tail.
+            let tokens: Vec<&str> = rest.split_whitespace().collect();
+            if tokens.len() < 6 {
+                app.transcript.push(TranscriptEntry::System(
+                    "usage: /schedule <min> <hour> <dom> <month> <dow> [once|recurring] <prompt>".to_string(),
+                ));
+                app.transcript.push(TranscriptEntry::Blank);
+                return None;
+            }
+            let cron: String = tokens[..5].join(" ");
+            let (recurring, prompt_start): (bool, usize) = match tokens[5] {
+                "once" => (false, 6),
+                "recurring" => (true, 6),
+                _ => (true, 5), // default recurring, treat token[5] as prompt start
+            };
+            let prompt = tokens[prompt_start..].join(" ");
+            match app.cron_store.create(&cron, &prompt, recurring) {
+                Ok(job) => {
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "scheduled{} {} `{}` — next fire at epoch-ms {}",
+                        if recurring { " (recurring)" } else { "" },
+                        job.id, job.cron, job.next_fire_ms,
+                    )));
+                }
+                Err(e) => {
+                    app.transcript
+                        .push(TranscriptEntry::System(format!("schedule error: {e}")));
+                }
+            }
             app.transcript.push(TranscriptEntry::Blank);
             None
         }
@@ -7127,6 +7242,7 @@ mod tests {
                 8_000,
                 4_000,
             )),
+            cron_store: Arc::new(code_cron::CronStore::new()),
             bar: BarStatus {
                 model_label: "openai/gpt-4o".to_string(),
                 ..Default::default()
@@ -8473,15 +8589,17 @@ mod tests {
         ));
     }
 
-    // (stubs) /image /attach /schedule are honest stubs: instead of silently
-    // falling through to "unknown command", they push a "not yet supported in
-    // TUI" System line explaining the gap. Each returns None (no action).
+    // (stubs) /image /attach are honest stubs: instead of silently falling
+    // through to "unknown command", they push a "not yet supported in TUI"
+    // System line explaining the gap. Each returns None (no action).
+    // (M5/#17) `/schedule` is no longer a stub — it's a real command
+    // (creates a job in the session `CronStore`); see
+    // `slash_schedule_creates_and_lists`.
     #[test]
-    fn slash_image_attach_schedule_are_honest_stubs() {
+    fn slash_image_attach_are_honest_stubs() {
         for (cmd, needle) in [
             ("/image", "image not yet supported in TUI"),
             ("/attach", "attach not yet supported in TUI"),
-            ("/schedule", "schedule not yet supported in TUI"),
         ] {
             let mut app = test_app();
             let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
@@ -8500,6 +8618,8 @@ mod tests {
 
     // (stubs) The stub commands are NOT "unknown": they must NOT push the
     // "unknown command" System line (the stub message wins instead).
+    // `/schedule` (now real) lists the schedule with no args — also not
+    // "unknown".
     #[test]
     fn slash_image_attach_schedule_do_not_report_unknown() {
         for cmd in ["/image", "/attach", "/schedule"] {
@@ -8511,10 +8631,84 @@ mod tests {
                     e,
                     TranscriptEntry::System(ref s) if s.contains("unknown command")
                 )),
-                "{cmd} must not report 'unknown command' — it's a stub, got {:?}",
+                "{cmd} must not report 'unknown command' — it's a stub/real-list, got {:?}",
                 app.transcript
             );
         }
+    }
+
+    // (M5/#17) `/schedule` is a real session-cron command. With no args it
+    // lists the (empty) schedule; with a full cron expr + prompt it creates
+    // a job in the shared `CronStore`.
+    #[test]
+    fn slash_schedule_creates_and_lists() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        // No args → empty schedule listing.
+        let action = handle_slash_command(&mut app, "/schedule", &cmd_tx);
+        assert!(action.is_none());
+        assert!(
+            app.transcript.iter().any(|e| matches!(
+                e,
+                TranscriptEntry::System(ref s) if s.contains("No scheduled prompts")
+            )),
+            "empty /schedule should list no prompts, got {:?}",
+            app.transcript
+        );
+
+        // Create a recurring job: `/schedule */5 * * * * recurring check CI`.
+        let action = handle_slash_command(
+            &mut app,
+            "/schedule */5 * * * * recurring check CI",
+            &cmd_tx,
+        );
+        assert!(action.is_none());
+        assert!(
+            app.transcript.iter().any(|e| matches!(
+                e,
+                TranscriptEntry::System(ref s) if s.contains("scheduled (recurring)")
+            )),
+            "created schedule should confirm a recurring job, got {:?}",
+            app.transcript
+        );
+        // The store now has exactly one job, carrying the prompt.
+        let jobs = app.cron_store.list();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].prompt, "check CI");
+        assert!(jobs[0].recurring);
+
+        // List reflects it.
+        let action = handle_slash_command(&mut app, "/schedule", &cmd_tx);
+        assert!(action.is_none());
+        assert!(
+            app.transcript
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::System(ref s) if s.contains("*/5 * * * *") && s.contains("recurring"))),
+            "listing should show the cron expr + recurring flag, got {:?}",
+            app.transcript
+        );
+    }
+
+    // (M5/#17) `/schedule` with a bad cron expr surfaces the parse error
+    // (so the user knows the job wasn't created).
+    #[test]
+    fn slash_schedule_bad_expr_is_error() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        // Five cron fields that fail to parse ("garbage" isn't a number),
+        // then a recurring flag + prompt.
+        let action =
+            handle_slash_command(&mut app, "/schedule garbage * * * * recurring x", &cmd_tx);
+        assert!(action.is_none());
+        assert!(
+            app.transcript.iter().any(|e| matches!(
+                e,
+                TranscriptEntry::System(ref s) if s.contains("schedule error")
+            )),
+            "bad cron expr should surface a schedule error, got {:?}",
+            app.transcript
+        );
+        assert!(app.cron_store.list().is_empty());
     }
 
     #[test]
