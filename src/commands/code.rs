@@ -541,6 +541,7 @@ async fn run_async(
         auto_compaction_enabled: cfg.code_auto_compaction_enabled,
         compaction_reserve_tokens: cfg.code_compaction_reserve_tokens,
         compaction_keep_recent_tokens: cfg.code_compaction_keep_recent_tokens,
+        compaction_token_budget_compact: Some(cfg.code_compaction_token_budget_compact),
     });
 
     // anyhow::Error::new preserves the underlying pi::sdk::Error so

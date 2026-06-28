@@ -82,6 +82,13 @@ pub struct CodeSessionConfig {
     pub compaction_reserve_tokens: u32,
     /// Recent context retained after compaction.
     pub compaction_keep_recent_tokens: u32,
+    /// (pi P2) Token-budget compaction fast path: when set, pi skips the
+    /// LLM summarisation round-trip and keeps a budget-bounded verbatim
+    /// transcript of the most-recent messages (compaction::budget_summary),
+    /// mirroring Codex's `compact_token_budget.rs`. `None` lets pi fall
+    /// through to its config default (off) — same posture as the other
+    /// compaction knobs, which always pass a concrete value below.
+    pub compaction_token_budget_compact: Option<bool>,
 }
 
 /// Sensible per-prompt token cap for code-style agents. 32k is enough
@@ -131,6 +138,7 @@ pub fn build_session_options(cfg: CodeSessionConfig) -> SessionOptions {
         compaction_enabled: Some(cfg.auto_compaction_enabled),
         compaction_reserve_tokens: Some(cfg.compaction_reserve_tokens),
         compaction_keep_recent_tokens: Some(cfg.compaction_keep_recent_tokens),
+        compaction_token_budget_compact: cfg.compaction_token_budget_compact,
         ..SessionOptions::default()
     }
 }
@@ -191,5 +199,64 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, "ok");
+    }
+
+    // (pi P2) build_session_options threads compaction_token_budget_compact
+    // through to SessionOptions so `libertai config set
+    // code_compaction_token_budget_compact true` actually flips the fast
+    // path on for `libertai code` sessions. `None` (the default) leaves pi
+    // on its config default (off).
+    //
+    // The factory is never invoked by build_session_options (it's only
+    // moved into SessionOptions), so a no-op stub suffices — building a
+    // real LibertaiToolFactory would pull in the full approval/UI plumbing.
+    struct StubToolFactory;
+    impl ToolFactory for StubToolFactory {
+        fn create_tool_registry(
+            &self,
+            _enabled: &[&str],
+            _cwd: &Path,
+            _config: &pi::sdk::Config,
+        ) -> pi::sdk::ToolRegistry {
+            // Empty registry — never called by these tests.
+            pi::sdk::ToolRegistry::new(&[], std::path::Path::new("/"), None)
+        }
+    }
+
+    fn baseline_config() -> CodeSessionConfig {
+        CodeSessionConfig {
+            provider: "openai-compat".into(),
+            model: "m".into(),
+            working_directory: None,
+            include_cwd_in_prompt: false,
+            max_tool_iterations: 32,
+            tool_factory: std::sync::Arc::new(StubToolFactory),
+            persistence: SessionPersistence::Ephemeral,
+            enabled_tools: None,
+            append_system_prompt: None,
+            max_tokens: None,
+            bash_command_wrapper: None,
+            auto_compaction_enabled: true,
+            compaction_reserve_tokens: 16_384,
+            compaction_keep_recent_tokens: 20_000,
+            compaction_token_budget_compact: None,
+        }
+    }
+
+    #[test]
+    fn build_session_options_default_leaves_token_budget_compact_unset() {
+        let opts = build_session_options(baseline_config());
+        assert_eq!(opts.compaction_token_budget_compact, None);
+        // The sibling knobs always pass a concrete value (non-Option in cfg).
+        assert_eq!(opts.compaction_keep_recent_tokens, Some(20_000));
+        assert_eq!(opts.compaction_enabled, Some(true));
+    }
+
+    #[test]
+    fn build_session_options_propagates_token_budget_compact_when_set() {
+        let mut cfg = baseline_config();
+        cfg.compaction_token_budget_compact = Some(true);
+        let opts = build_session_options(cfg);
+        assert_eq!(opts.compaction_token_budget_compact, Some(true));
     }
 }

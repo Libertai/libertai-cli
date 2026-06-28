@@ -45,6 +45,12 @@ pub const DEFAULT_SMART_APPROVAL_MODEL: &str = DEFAULT_FAST_MODEL;
 pub const DEFAULT_CODE_AUTO_COMPACTION_ENABLED: bool = true;
 pub const DEFAULT_CODE_COMPACTION_RESERVE_TOKENS: u32 = 16_384;
 pub const DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS: u32 = 20_000;
+/// (pi P2) Token-budget compaction fast path is OFF by default — pi's
+/// LLM-summarised compaction is the richer path (the summary preserves
+/// semantic intent the verbatim tail drops). The knob exists for users
+/// who'd rather skip the summarisation round-trip (latency / cost) and
+/// keep a budget-bounded verbatim transcript of the most-recent messages.
+pub const DEFAULT_CODE_COMPACTION_TOKEN_BUDGET_COMPACT: bool = false;
 pub const DEFAULT_CODE_TURN_NOTIFICATIONS: bool = false;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +127,15 @@ pub struct Config {
         skip_serializing_if = "is_default_code_compaction_keep_recent_tokens"
     )]
     pub code_compaction_keep_recent_tokens: u32,
+    /// (pi P2) Mirror of `Config::compaction_token_budget_compact` — when
+    /// set, `libertai code` sessions skip the LLM summarisation round-trip
+    /// and keep a budget-bounded verbatim transcript. Off by default (see
+    /// `DEFAULT_CODE_COMPACTION_TOKEN_BUDGET_COMPACT`).
+    #[serde(
+        default = "default_code_compaction_token_budget_compact",
+        skip_serializing_if = "is_default_code_compaction_token_budget_compact"
+    )]
+    pub code_compaction_token_budget_compact: bool,
     #[serde(
         default = "default_code_turn_notifications",
         skip_serializing_if = "is_default_code_turn_notifications"
@@ -219,6 +234,9 @@ fn is_default_code_compaction_reserve_tokens(v: &u32) -> bool {
 }
 fn is_default_code_compaction_keep_recent_tokens(v: &u32) -> bool {
     *v == DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS
+}
+fn is_default_code_compaction_token_budget_compact(v: &bool) -> bool {
+    *v == DEFAULT_CODE_COMPACTION_TOKEN_BUDGET_COMPACT
 }
 fn is_default_code_turn_notifications(v: &bool) -> bool {
     *v == DEFAULT_CODE_TURN_NOTIFICATIONS
@@ -1128,6 +1146,9 @@ fn default_code_compaction_reserve_tokens() -> u32 {
 fn default_code_compaction_keep_recent_tokens() -> u32 {
     DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS
 }
+fn default_code_compaction_token_budget_compact() -> bool {
+    DEFAULT_CODE_COMPACTION_TOKEN_BUDGET_COMPACT
+}
 fn default_code_turn_notifications() -> bool {
     DEFAULT_CODE_TURN_NOTIFICATIONS
 }
@@ -1150,6 +1171,7 @@ impl Default for Config {
             code_auto_compaction_enabled: DEFAULT_CODE_AUTO_COMPACTION_ENABLED,
             code_compaction_reserve_tokens: DEFAULT_CODE_COMPACTION_RESERVE_TOKENS,
             code_compaction_keep_recent_tokens: DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS,
+            code_compaction_token_budget_compact: DEFAULT_CODE_COMPACTION_TOKEN_BUDGET_COMPACT,
             code_turn_notifications: DEFAULT_CODE_TURN_NOTIFICATIONS,
             status_line_template: String::new(),
             status_line_command: String::new(),
@@ -1390,5 +1412,30 @@ mod tests {
         assert!(encoded.contains("[[mcpServers.docs.resources]]"));
         assert!(encoded.contains("[[mcpServers.docs.prompts]]"));
         assert!(encoded.contains("inputSchema"));
+    }
+
+    // (pi P2) The new compaction-token-budget-compact knob defaults to OFF
+    // (the LLM-summarised path is the richer default), round-trips through
+    // TOML under its snake_case field name (matching the sibling knobs), and
+    // is omitted from the serialized form when at its default (so existing
+    // configs don't gain a new line on save).
+    #[test]
+    fn compaction_token_budget_compact_defaults_off_and_roundtrips() {
+        let cfg = Config::default();
+        assert!(!cfg.code_compaction_token_budget_compact);
+
+        // At default it's skipped on serialize (no churn for existing configs).
+        let encoded = toml::to_string(&cfg).unwrap();
+        assert!(
+            !encoded.contains("compaction_token_budget_compact"),
+            "default should be omitted on serialize, got: {encoded}"
+        );
+
+        // Explicit `true` survives a TOML round-trip under the snake_case key.
+        let raw = "code_compaction_token_budget_compact = true\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(cfg.code_compaction_token_budget_compact);
+        let re_encoded = toml::to_string(&cfg).unwrap();
+        assert!(re_encoded.contains("code_compaction_token_budget_compact = true"));
     }
 }

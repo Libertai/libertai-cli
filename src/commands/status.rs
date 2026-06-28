@@ -83,7 +83,7 @@ fn print_human(cfg: &Config) {
         }
     );
     println!(
-        "  {:<22} {} (reserve={}, keep_recent={})",
+        "  {:<22} {} (reserve={}, keep_recent={}, budget={})",
         st.dimmed("Auto compaction:"),
         if cfg.code_auto_compaction_enabled {
             st.green("enabled")
@@ -91,7 +91,12 @@ fn print_human(cfg: &Config) {
             st.dimmed("disabled")
         },
         cfg.code_compaction_reserve_tokens,
-        cfg.code_compaction_keep_recent_tokens
+        cfg.code_compaction_keep_recent_tokens,
+        if cfg.code_compaction_token_budget_compact {
+            st.yellow("on")
+        } else {
+            st.dimmed("off")
+        }
     );
     println!(
         "  {:<22} {}",

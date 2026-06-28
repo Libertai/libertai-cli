@@ -445,6 +445,7 @@ impl Tool for TaskTool {
             auto_compaction_enabled: cfg.code_auto_compaction_enabled,
             compaction_reserve_tokens: cfg.code_compaction_reserve_tokens,
             compaction_keep_recent_tokens: cfg.code_compaction_keep_recent_tokens,
+            compaction_token_budget_compact: Some(cfg.code_compaction_token_budget_compact),
         });
 
         if let Some(agent) = agent.as_ref() {

@@ -4,8 +4,9 @@ use crate::cli::ConfigAction;
 use crate::config::{
     self, config_path, mask_key, DEFAULT_API_BASE, DEFAULT_CHAT_MODEL, DEFAULT_CHECK_FOR_UPDATES,
     DEFAULT_CODE_AUTO_COMPACTION_ENABLED, DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS,
-    DEFAULT_CODE_COMPACTION_RESERVE_TOKENS, DEFAULT_CODE_MODEL, DEFAULT_CODE_PROVIDER,
-    DEFAULT_CODE_TURN_NOTIFICATIONS, DEFAULT_FAST_MODEL, DEFAULT_HTTP_TIMEOUT_SECS,
+    DEFAULT_CODE_COMPACTION_RESERVE_TOKENS, DEFAULT_CODE_COMPACTION_TOKEN_BUDGET_COMPACT,
+    DEFAULT_CODE_MODEL, DEFAULT_CODE_PROVIDER, DEFAULT_CODE_TURN_NOTIFICATIONS,
+    DEFAULT_FAST_MODEL, DEFAULT_HTTP_TIMEOUT_SECS,
     DEFAULT_IMAGE_MODEL, DEFAULT_OPUS_MODEL, DEFAULT_SMART_APPROVAL_ENABLED,
     DEFAULT_SMART_APPROVAL_MODEL,
 };
@@ -88,6 +89,13 @@ fn set(key: &str, value: &str) -> Result<()> {
             cfg.code_compaction_keep_recent_tokens =
                 parse_positive_u32("code_compaction_keep_recent_tokens", value)?;
         }
+        "code_compaction_token_budget_compact" => {
+            cfg.code_compaction_token_budget_compact = value.parse::<bool>().with_context(|| {
+                format!(
+                    "code_compaction_token_budget_compact must be true or false, got {value}"
+                )
+            })?;
+        }
         "code_turn_notifications" => {
             cfg.code_turn_notifications = value.parse::<bool>().with_context(|| {
                 format!("code_turn_notifications must be true or false, got {value}")
@@ -124,6 +132,8 @@ fn unset(key: &str) -> Result<()> {
             cfg.code_auto_compaction_enabled = DEFAULT_CODE_AUTO_COMPACTION_ENABLED;
             cfg.code_compaction_reserve_tokens = DEFAULT_CODE_COMPACTION_RESERVE_TOKENS;
             cfg.code_compaction_keep_recent_tokens = DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS;
+            cfg.code_compaction_token_budget_compact =
+                DEFAULT_CODE_COMPACTION_TOKEN_BUDGET_COMPACT;
             cfg.code_turn_notifications = DEFAULT_CODE_TURN_NOTIFICATIONS;
             cfg.hooks = Default::default();
         }
@@ -159,6 +169,9 @@ fn unset(key: &str) -> Result<()> {
         }
         "code_compaction_keep_recent_tokens" => {
             cfg.code_compaction_keep_recent_tokens = DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS
+        }
+        "code_compaction_token_budget_compact" => {
+            cfg.code_compaction_token_budget_compact = DEFAULT_CODE_COMPACTION_TOKEN_BUDGET_COMPACT
         }
         "code_turn_notifications" => cfg.code_turn_notifications = DEFAULT_CODE_TURN_NOTIFICATIONS,
         "hooks" => cfg.hooks = Default::default(),

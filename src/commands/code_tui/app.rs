@@ -973,6 +973,7 @@ async fn build_session(
         auto_compaction_enabled: cfg.code_auto_compaction_enabled,
         compaction_reserve_tokens: cfg.code_compaction_reserve_tokens,
         compaction_keep_recent_tokens: cfg.code_compaction_keep_recent_tokens,
+        compaction_token_budget_compact: Some(cfg.code_compaction_token_budget_compact),
     });
     let mut handle = create_agent_session(options)
         .await
@@ -982,14 +983,16 @@ async fn build_session(
 }
 
 /// (M6 #31) Build the compaction `System` line with the metrics the TUI
-/// can measure. `result` is the pi `AutoCompactionEnd` opaque blob (kept
-/// for a future P3-driven extraction of `tokensAfter`); `tokens_before`
-/// is the pre-compaction context occupancy the closure stashed at
-/// `AutoCompactionStart`; `duration_ms` is measured TUI-side via
-/// `Instant::elapsed()` between Start and End (no pi source). Until pi
-/// P3 lands, `tokensAfter` is unavailable, so the line reads
-/// `"compaction complete · was 142k · 2.1s"` — the `→ 31k` post-figure
-/// is a future enhancement, not a prerequisite for shipping #31.
+/// `result` is the pi `AutoCompactionEnd` payload. After the pi P3 rev bump
+/// it carries `tokensAfter` (the post-compaction context occupancy, measured
+/// by pi after appending the compaction summary — `None` on the background-
+/// worker path), `durationMs` (pi's wall-clock of the compaction work), and
+/// `trigger` ("threshold" auto, or "manual" user `/compact`). `tokens_before`
+/// is the pre-compaction occupancy stashed at `AutoCompactionStart`;
+/// `duration_ms` is the TUI-side Start→End timer (used when pi's `durationMs`
+/// is absent, e.g. the background-worker path which sets it to 0). The line
+/// reads `"compaction complete · was 142k → 31k (−111k) · 2.1s · auto"` — the
+/// `→ 31k` post-figure + the `−111k` delta come from P3's `tokensAfter`.
 fn format_compaction_summary(
     result: Option<&serde_json::Value>,
     aborted: bool,
@@ -1001,33 +1004,73 @@ fn format_compaction_summary(
         return append_compaction_metrics(
             "compaction aborted".to_string(),
             tokens_before,
+            None,
             duration_ms,
+            None,
         );
     }
     if let Some(err) = error_message {
         return format!("compaction error: {err}");
     }
-    // `result` is reserved for a P3-driven `tokensAfter` extraction;
-    // unused now (the post-figure waits on pi P3).
-    let _ = result;
+    // (P3) Extract the real post-compaction figures from the pi payload.
+    let tokens_after = result
+        .and_then(|r| r.get("tokensAfter"))
+        .and_then(|v| v.as_u64());
+    let trigger = result
+        .and_then(|r| r.get("trigger"))
+        .and_then(|v| v.as_str());
+    // Prefer pi's wall-clock durationMs when present; fall back to the
+    // TUI-side Start→End timer (the background-worker path sets durationMs=0
+    // since the LLM summarisation ran off-thread).
+    let pi_duration_ms = result
+        .and_then(|r| r.get("durationMs"))
+        .and_then(|v| v.as_u64())
+        .filter(|&d| d > 0);
+    let duration_ms = pi_duration_ms.unwrap_or(duration_ms);
     append_compaction_metrics(
         "compaction complete".to_string(),
         tokens_before,
+        tokens_after,
         duration_ms,
+        trigger,
     )
 }
 
-/// Append the "· was Xk · Ys" metrics tail to a compaction status line.
-/// Sub-kebab so the line reads cleanly in the dim `System` transcript.
-fn append_compaction_metrics(base: String, tokens_before: Option<u64>, duration_ms: u64) -> String {
+/// Append the "· was Xk → Yk (−Zk) · Ws · trigger" metrics tail to a compaction
+/// status line. Sub-kebab so the line reads cleanly in the dim `System`
+/// transcript. `tokens_after` is `None` when pi couldn't measure it
+/// (background-worker path); the `→ Yk (−Zk)` post-figure is omitted then.
+fn append_compaction_metrics(
+    base: String,
+    tokens_before: Option<u64>,
+    tokens_after: Option<u64>,
+    duration_ms: u64,
+    trigger: Option<&str>,
+) -> String {
     let mut s = base;
     if let Some(tb) = tokens_before {
-        s.push_str(&format!(" · was {}", human_tokens(tb)));
+        match tokens_after {
+            Some(ta) => {
+                s.push_str(&format!(" · was {} → {}", human_tokens(tb), human_tokens(ta)));
+                // Show the delta only when it's a real reduction (compaction
+                // can be a no-op or even grow slightly on tiny histories).
+                let delta = tb.saturating_sub(ta);
+                if delta > 0 {
+                    s.push_str(&format!(" (−{})", human_tokens(delta)));
+                }
+            }
+            None => {
+                s.push_str(&format!(" · was {}", human_tokens(tb)));
+            }
+        }
     }
     if duration_ms >= 1000 {
         s.push_str(&format!(" · {:.1}s", duration_ms as f64 / 1000.0));
     } else if duration_ms > 0 {
         s.push_str(&format!(" · {duration_ms}ms"));
+    }
+    if let Some(trigger) = trigger {
+        s.push_str(&format!(" · {trigger}"));
     }
     s
 }
@@ -1400,18 +1443,33 @@ fn spawn_background(
                                             result,
                                             ..
                                         } => {
-                                            // Measure duration TUI-side (no pi
-                                            // source). `tokens_before` is the
-                                            // pre-compaction occupancy; pi's
-                                            // `result` blob carries it as
-                                            // `tokensBefore` (camelCase). `tokensAfter`
-                                            // is null until pi P3.
-                                            let duration_ms = compact_start
+                                            // `tokens_before` is the pre-compaction
+                                            // occupancy; pi's `result` blob carries it
+                                            // as `tokensBefore` (camelCase). After the
+                                            // pi P3 rev bump it also carries
+                                            // `tokensAfter` (post-compaction occupancy,
+                                            // measured after appending the summary) +
+                                            // `durationMs` (pi's wall-clock) + `trigger`
+                                            // ("threshold"/"manual"). The TUI-side
+                                            // Start→End timer is the fallback for the
+                                            // background-worker path (durationMs=0).
+                                            let tui_duration_ms = compact_start
                                                 .lock()
                                                 .unwrap()
                                                 .take()
                                                 .map(|s| s.elapsed().as_millis() as u64)
                                                 .unwrap_or(0);
+                                            let tokens_after = result
+                                                .as_ref()
+                                                .and_then(|r| r.get("tokensAfter"))
+                                                .and_then(|v| v.as_u64());
+                                            let pi_duration_ms = result
+                                                .as_ref()
+                                                .and_then(|r| r.get("durationMs"))
+                                                .and_then(|v| v.as_u64())
+                                                .filter(|&d| d > 0);
+                                            let duration_ms =
+                                                pi_duration_ms.unwrap_or(tui_duration_ms);
                                             let reason = {
                                                 let r = compact_reason.lock().unwrap();
                                                 if r.is_empty() {
@@ -1428,7 +1486,7 @@ fn spawn_background(
                                                 hook_cfg.as_ref(),
                                                 &reason,
                                                 tokens_before,
-                                                None, // tokens_after: None until pi P3
+                                                tokens_after,
                                                 duration_ms,
                                                 *aborted,
                                             );
@@ -1641,12 +1699,26 @@ fn spawn_background(
                                                 result,
                                                 ..
                                             } => {
-                                                let duration_ms = compact_start
+                                                let tui_duration_ms = compact_start
                                                     .lock()
                                                     .unwrap()
                                                     .take()
                                                     .map(|s| s.elapsed().as_millis() as u64)
                                                     .unwrap_or(0);
+                                                // (P3) Prefer pi's wall-clock `durationMs`
+                                                // when present; extract `tokensAfter` for
+                                                // the post-figure + hook payload.
+                                                let pi_duration_ms = result
+                                                    .as_ref()
+                                                    .and_then(|r| r.get("durationMs"))
+                                                    .and_then(|v| v.as_u64())
+                                                    .filter(|&d| d > 0);
+                                                let duration_ms =
+                                                    pi_duration_ms.unwrap_or(tui_duration_ms);
+                                                let tokens_after = result
+                                                    .as_ref()
+                                                    .and_then(|r| r.get("tokensAfter"))
+                                                    .and_then(|v| v.as_u64());
                                                 let reason = compact_reason.lock().unwrap().clone();
                                                 let tokens_before = result
                                                     .as_ref()
@@ -1656,7 +1728,7 @@ fn spawn_background(
                                                     hook_cfg.as_ref(),
                                                     &reason,
                                                     tokens_before,
-                                                    None,
+                                                    tokens_after,
                                                     duration_ms,
                                                     *aborted,
                                                 );
@@ -10362,9 +10434,12 @@ task = "Do the thing"
         }
     }
 
-    // (M6 #31) format_compaction_summary: pure-string, the dim System line
-    // the AutoCompactionEnd closure emits. tokens_after is null until pi
-    // P3, so the complete line is "compaction complete · was 142k · 2.1s".
+    // (M6 #31 / pi P3) format_compaction_summary: pure-string, the dim System
+    // line the AutoCompactionEnd closure emits. Without a P3 payload it reads
+    // "compaction complete · was 142k · 2.1s"; with P3's tokensAfter/durationMs/
+    // trigger it reads "compaction complete · was 142k → 31k (−111k) · 3.0s ·
+    // threshold" — the post-figure + delta come from tokensAfter, the duration
+    // from pi's durationMs (overriding the TUI timer), the tail from trigger.
     #[test]
     fn format_compaction_summary_complete_with_metrics() {
         assert_eq!(
@@ -10376,6 +10451,88 @@ task = "Do the thing"
                 2_100
             ),
             "compaction complete · was 142.0k · 2.1s"
+        );
+    }
+
+    // (pi P3) tokensAfter in the payload → the "→ Yk (−Zk)" post-figure +
+    // delta. pi's durationMs overrides the TUI-side timer; trigger tail.
+    #[test]
+    fn format_compaction_summary_p3_post_figure_and_delta() {
+        assert_eq!(
+            format_compaction_summary(
+                Some(&serde_json::json!({
+                    "tokensBefore": 142_000,
+                    "tokensAfter": 31_000,
+                    "durationMs": 3_000,
+                    "trigger": "threshold"
+                })),
+                false,
+                None,
+                Some(142_000),
+                2_100, // TUI timer — overridden by pi's 3_000
+            ),
+            "compaction complete · was 142.0k → 31.0k (−111.0k) · 3.0s · threshold"
+        );
+    }
+
+    // (pi P3) manual trigger (user `/compact`) surfaces as the "manual"
+    // tail instead of "threshold".
+    #[test]
+    fn format_compaction_summary_p3_manual_trigger() {
+        assert_eq!(
+            format_compaction_summary(
+                Some(&serde_json::json!({
+                    "tokensBefore": 50_000,
+                    "tokensAfter": 12_000,
+                    "durationMs": 1_500,
+                    "trigger": "manual"
+                })),
+                false,
+                None,
+                Some(50_000),
+                0
+            ),
+            "compaction complete · was 50.0k → 12.0k (−38.0k) · 1.5s · manual"
+        );
+    }
+
+    // (pi P3) tokensAfter present but no reduction (tiny history / no-op
+    // compaction) → omit the "(−Zk)" delta, no misleading "−0k".
+    #[test]
+    fn format_compaction_summary_p3_no_delta_when_not_reduced() {
+        assert_eq!(
+            format_compaction_summary(
+                Some(&serde_json::json!({
+                    "tokensBefore": 10_000,
+                    "tokensAfter": 10_000,
+                    "durationMs": 400
+                })),
+                false,
+                None,
+                Some(10_000),
+                0
+            ),
+            "compaction complete · was 10.0k → 10.0k · 400ms"
+        );
+    }
+
+    // (pi P3) background-worker path: durationMs=0 → fall back to the TUI
+    // timer; tokensAfter present → still show the post-figure.
+    #[test]
+    fn format_compaction_summary_p3_zero_pi_duration_falls_back_to_tui_timer() {
+        assert_eq!(
+            format_compaction_summary(
+                Some(&serde_json::json!({
+                    "tokensBefore": 80_000,
+                    "tokensAfter": 20_000,
+                    "durationMs": 0
+                })),
+                false,
+                None,
+                Some(80_000),
+                2_200
+            ),
+            "compaction complete · was 80.0k → 20.0k (−60.0k) · 2.2s"
         );
     }
 

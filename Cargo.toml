@@ -102,7 +102,15 @@ zeroize = { version = "1", features = ["derive"] }
 # - asupersync 0.3.1 -> 0.3.2 bump (fixes franken-decision Result API break;
 #   0.3.2 is the latest stable-compatible release — 0.3.3+ require nightly;
 #   maps new `LockError::TimedOut` variant to `Session` error)
-pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "f44c800b", default-features = false }
+# - compaction P3: AutoCompactionEnd payload carries tokensAfter (measured
+#   post-compaction via the new estimate_context_tokens_for_entries) +
+#   durationMs (wall-clock) + trigger ("threshold"/"manual"), so the
+#   PostCompact hook (#31) surfaces real numbers instead of a proxy.
+# - compaction P2: SessionOptions.compaction_token_budget_compact + config
+#   knob — a fast path that skips the LLM summarisation round-trip and keeps
+#   a budget-bounded verbatim transcript of the most-recent messages
+#   (compaction::budget_summary). Mirrors Codex's compact_token_budget.rs.
+pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "5bfa4a07", default-features = false }
 asupersync = { version = "=0.3.2", default-features = false, features = ["tls-native-roots"] }
 # JavaScript workflow engine (M6 #15) — rquickjs embeds QuickJS as an
 # async-capable sandbox in which user workflow scripts call `agent()`,

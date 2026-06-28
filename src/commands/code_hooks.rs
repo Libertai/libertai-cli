@@ -3135,6 +3135,7 @@ async fn run_agent_hook_async(
         auto_compaction_enabled: cfg.code_auto_compaction_enabled,
         compaction_reserve_tokens: cfg.code_compaction_reserve_tokens,
         compaction_keep_recent_tokens: cfg.code_compaction_keep_recent_tokens,
+        compaction_token_budget_compact: Some(cfg.code_compaction_token_budget_compact),
     });
     let mut handle = match create_agent_session(options).await {
         Ok(handle) => handle,
