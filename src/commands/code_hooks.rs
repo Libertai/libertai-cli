@@ -529,6 +529,43 @@ pub fn run_pre_compact_hooks(cfg: &Config, reason: &str) {
     );
 }
 
+/// Fire `PostCompact` hooks just after auto-compaction settles (M6 #31).
+/// Called from the TUI's `AutoCompactionEnd` handler (the per-event
+/// closure, since `translate_event` is a free fn with no `&Config`).
+/// `tokens_after` is `None` now: pi's `auto_compaction_result_payload`
+/// (agent.rs:6603) emits `tokensBefore` only — the post-figure waits on
+/// pi P3. `Option<u64>` serializes to `null` when `None`, so hook
+/// scripts can read `payload.tokensAfter ?? null` today and get a real
+/// value the moment pi P3 adds `tokensAfter` to the payload. `duration_ms`
+/// is measured TUI-side (no pi source). `aborted` mirrors the event's
+/// `aborted` flag.
+pub fn run_post_compact_hooks(
+    cfg: &Config,
+    reason: &str,
+    tokens_before: Option<u64>,
+    tokens_after: Option<u64>,
+    duration_ms: u64,
+    aborted: bool,
+) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let payload = json!({
+        "event": "PostCompact",
+        "cwd": cwd,
+        "reason": reason,
+        "tokensBefore": tokens_before,
+        "tokensAfter": tokens_after,
+        "durationMs": duration_ms,
+        "aborted": aborted,
+    });
+    run_tool_completion_hooks(
+        "PostCompact",
+        &cfg.hooks.post_compact,
+        &cwd,
+        "compact",
+        &payload,
+    );
+}
+
 /// Fire `PostToolBatch` hooks when a turn's tool batch has settled
 /// (finding #25). The event stream has no explicit "batch boundary", so
 /// this is fired at turn end as the best-available proxy for "the batch
@@ -5223,6 +5260,50 @@ mod tests {
         assert!(prompt.starts_with("review this"));
         assert!(prompt.contains("Additional context from UserPromptSubmit hook"));
         assert!(prompt.contains("repo policy"));
+    }
+
+    #[test]
+    fn post_compact_hook_receives_payload_and_event_env() {
+        // PostCompact (M6 #31) fires after auto-compaction settles, with
+        // a payload carrying the event name, reason, tokens-before/after,
+        // duration, and aborted flag. tokens_after is null until pi P3.
+        let cwd = tempfile::tempdir().unwrap();
+        let out = cwd.path().join("out.json");
+        let cfg = Config {
+            hooks: HooksConfig {
+                post_compact: vec![HookCommandConfig {
+                    command: format!(
+                        "printf '%s|' \"$LIBERTAI_HOOK_EVENT\" > {}; cat >> {}",
+                        out.display(),
+                        out.display()
+                    ),
+                    ..HookCommandConfig::default()
+                }],
+                ..HooksConfig::default()
+            },
+            ..Config::default()
+        };
+
+        run_post_compact_hooks(&cfg, "auto", Some(142_000), None, 2_100, false);
+
+        let written = std::fs::read_to_string(&out).unwrap();
+        assert!(written.starts_with("PostCompact|"), "{written}");
+        let json_part = &written["PostCompact|".len()..];
+        let v: serde_json::Value = serde_json::from_str(json_part).unwrap();
+        assert_eq!(v["event"], "PostCompact");
+        assert_eq!(v["reason"], "auto");
+        assert_eq!(v["tokensBefore"], 142_000);
+        assert!(v["tokensAfter"].is_null(), "tokensAfter is null until pi P3");
+        assert_eq!(v["durationMs"], 2_100);
+        assert_eq!(v["aborted"], false);
+    }
+
+    #[test]
+    fn post_compact_hook_skips_when_none_configured() {
+        // No PostCompact hooks → no fire (and no panic).
+        let cfg = Config::default();
+        run_post_compact_hooks(&cfg, "auto", Some(1_000), None, 100, true);
+        // Nothing to assert beyond "didn't panic" — no hooks ran.
     }
 
     #[test]

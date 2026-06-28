@@ -22,6 +22,8 @@ fn empty_toml_parses_as_defaults() {
     assert!(cfg.hooks.user_prompt_submit.is_empty());
     assert!(cfg.hooks.pre_tool_use.is_empty());
     assert!(cfg.hooks.post_tool_use.is_empty());
+    assert!(cfg.hooks.pre_compact.is_empty());
+    assert!(cfg.hooks.post_compact.is_empty());
     assert!(cfg.hooks.subagent_stop.is_empty());
     assert!(cfg.hooks.session_start.is_empty());
     assert!(cfg.hooks.stop.is_empty());
@@ -294,6 +296,29 @@ command = "scripts/pre-tool-use.sh"
     );
     let rendered = toml::to_string_pretty(&cfg).unwrap();
     assert!(rendered.contains(r#"matcher = "bash|write|mcp__github__*""#));
+}
+
+#[test]
+fn post_compact_hook_roundtrips() {
+    // PostCompact hooks (M6 #31) parse from TOML and round-trip through
+    // serialize, mirroring PreCompact.
+    let cfg: Config = toml::from_str(
+        r#"
+[[hooks.PostCompact]]
+command = "echo done"
+"#,
+    )
+    .unwrap();
+    assert_eq!(cfg.hooks.post_compact.len(), 1);
+    assert_eq!(cfg.hooks.post_compact[0].command, "echo done");
+    // Round-trip: serialize → parse → same shape.
+    let rendered = toml::to_string_pretty(&cfg).unwrap();
+    assert!(rendered.contains("[[hooks.PostCompact]]"));
+    let round: Config = toml::from_str(&rendered).unwrap();
+    assert_eq!(round.hooks.post_compact.len(), 1);
+    assert_eq!(round.hooks.post_compact[0].command, "echo done");
+    // PreCompact is untouched by a PostCompact-only config.
+    assert!(round.hooks.pre_compact.is_empty());
 }
 
 #[test]

@@ -24,8 +24,9 @@ use crate::commands::code_cron;
 use crate::commands::code_diff::EditJournal;
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
 use crate::commands::code_hooks::{
-    run_post_tool_batch_hooks, run_post_tool_hooks, run_pre_compact_hooks, run_stop_hooks,
-    run_tool_start_hooks, run_user_prompt_submit_hooks, tool_policy_from_config, SessionHookGuard,
+    run_post_compact_hooks, run_post_tool_batch_hooks, run_post_tool_hooks, run_pre_compact_hooks,
+    run_stop_hooks, run_tool_start_hooks, run_user_prompt_submit_hooks, tool_policy_from_config,
+    SessionHookGuard,
 };
 use crate::commands::code_identity_prompt;
 use crate::commands::code_mode_prompt;
@@ -943,6 +944,57 @@ async fn build_session(
     Ok(handle)
 }
 
+/// (M6 #31) Build the compaction `System` line with the metrics the TUI
+/// can measure. `result` is the pi `AutoCompactionEnd` opaque blob (kept
+/// for a future P3-driven extraction of `tokensAfter`); `tokens_before`
+/// is the pre-compaction context occupancy the closure stashed at
+/// `AutoCompactionStart`; `duration_ms` is measured TUI-side via
+/// `Instant::elapsed()` between Start and End (no pi source). Until pi
+/// P3 lands, `tokensAfter` is unavailable, so the line reads
+/// `"compaction complete · was 142k · 2.1s"` — the `→ 31k` post-figure
+/// is a future enhancement, not a prerequisite for shipping #31.
+fn format_compaction_summary(
+    result: Option<&serde_json::Value>,
+    aborted: bool,
+    error_message: Option<&str>,
+    tokens_before: Option<u64>,
+    duration_ms: u64,
+) -> String {
+    if aborted {
+        return append_compaction_metrics(
+            "compaction aborted".to_string(),
+            tokens_before,
+            duration_ms,
+        );
+    }
+    if let Some(err) = error_message {
+        return format!("compaction error: {err}");
+    }
+    // `result` is reserved for a P3-driven `tokensAfter` extraction;
+    // unused now (the post-figure waits on pi P3).
+    let _ = result;
+    append_compaction_metrics(
+        "compaction complete".to_string(),
+        tokens_before,
+        duration_ms,
+    )
+}
+
+/// Append the "· was Xk · Ys" metrics tail to a compaction status line.
+/// Sub-kebab so the line reads cleanly in the dim `System` transcript.
+fn append_compaction_metrics(base: String, tokens_before: Option<u64>, duration_ms: u64) -> String {
+    let mut s = base;
+    if let Some(tb) = tokens_before {
+        s.push_str(&format!(" · was {}", human_tokens(tb)));
+    }
+    if duration_ms >= 1000 {
+        s.push_str(&format!(" · {:.1}s", duration_ms as f64 / 1000.0));
+    } else if duration_ms > 0 {
+        s.push_str(&format!(" · {duration_ms}ms"));
+    }
+    s
+}
+
 /// Translate a pi `AgentEvent` into an `AgentMsg` for the main thread.
 ///
 /// Most variants are swallowed (lifecycle noise the TUI doesn't need).
@@ -1245,6 +1297,19 @@ fn spawn_background(
                         let tx = agent_tx.clone();
                         let hook_cfg = Arc::clone(&hook_cfg);
                         let start = Instant::now();
+                        // (M6 #31) Compaction metrics are measured TUI-side
+                        // across the `AutoCompactionStart`/`End` pair. Both
+                        // events fire on this bg thread inside the SAME
+                        // closure, so the stash is closure-local (NOT on
+                        // `App` — that's main-thread). The event callback is a
+                        // `Fn + Send + Sync` (pi's signature), so it can't
+                        // mutate a plain `let mut` capture — the stash is
+                        // interior-mutable via a `Mutex`. `compact_start` is
+                        // `Option<Instant>` (None until Start); `compact_reason`
+                        // is the reason string captured at Start (defaults to
+                        // "auto" if End arrives without a Start — defensive).
+                        let compact_start = std::sync::Mutex::new(None::<Instant>);
+                        let compact_reason = std::sync::Mutex::new(String::new());
                         let result = handle
                             .prompt_with_abort(
                                 prompt,
@@ -1252,8 +1317,70 @@ fn spawn_background(
                                 move |event: AgentEvent| {
                                     run_post_tool_hooks(hook_cfg.as_ref(), &event);
                                     run_tool_start_hooks(hook_cfg.as_ref(), &event);
-                                    if let AgentEvent::AutoCompactionStart { reason } = &event {
-                                        run_pre_compact_hooks(hook_cfg.as_ref(), reason);
+                                    match &event {
+                                        AgentEvent::AutoCompactionStart { reason } => {
+                                            *compact_start.lock().unwrap() = Some(Instant::now());
+                                            *compact_reason.lock().unwrap() = reason.clone();
+                                            run_pre_compact_hooks(hook_cfg.as_ref(), reason);
+                                            // Fall through to translate_event so the
+                                            // advisory "compacting: {reason}" line
+                                            // still surfaces (it reads Start).
+                                            if let Some(msg) = translate_event(&event) {
+                                                let _ = tx.send(msg);
+                                            }
+                                        }
+                                        AgentEvent::AutoCompactionEnd {
+                                            aborted,
+                                            error_message,
+                                            result,
+                                            ..
+                                        } => {
+                                            // Measure duration TUI-side (no pi
+                                            // source). `tokens_before` is the
+                                            // pre-compaction occupancy; pi's
+                                            // `result` blob carries it as
+                                            // `tokensBefore` (camelCase). `tokensAfter`
+                                            // is null until pi P3.
+                                            let duration_ms = compact_start
+                                                .lock()
+                                                .unwrap()
+                                                .take()
+                                                .map(|s| s.elapsed().as_millis() as u64)
+                                                .unwrap_or(0);
+                                            let reason = {
+                                                let r = compact_reason.lock().unwrap();
+                                                if r.is_empty() {
+                                                    "auto".to_string()
+                                                } else {
+                                                    r.clone()
+                                                }
+                                            };
+                                            let tokens_before = result
+                                                .as_ref()
+                                                .and_then(|r| r.get("tokensBefore"))
+                                                .and_then(|v| v.as_u64());
+                                            run_post_compact_hooks(
+                                                hook_cfg.as_ref(),
+                                                &reason,
+                                                tokens_before,
+                                                None, // tokens_after: None until pi P3
+                                                duration_ms,
+                                                *aborted,
+                                            );
+                                            let summary = format_compaction_summary(
+                                                result.as_ref(),
+                                                *aborted,
+                                                error_message.as_deref(),
+                                                tokens_before,
+                                                duration_ms,
+                                            );
+                                            let _ = tx.send(AgentMsg::System(summary));
+                                            // Early-return: the summary line replaces
+                                            // translate_event's bare "compaction
+                                            // complete" arm for this path.
+                                            return;
+                                        }
+                                        _ => {}
                                     }
                                     if let Some(msg) = translate_event(&event) {
                                         let _ = tx.send(msg);
@@ -1418,12 +1545,67 @@ fn spawn_background(
                             // `CommandResult` system line.
                             BgCommand::Compact { notes } => {
                                 let tx = agent_tx.clone();
+                                let hook_cfg = Arc::clone(&hook_cfg);
                                 let instructions = notes
                                     .as_deref()
                                     .map(str::trim)
                                     .filter(|s| !s.is_empty());
+                                // (M6 #31) Same compaction-metric + PostCompact
+                                // plumbing as the prompt_with_abort closure
+                                // above. The stash is closure-local (this bg
+                                // thread); `compact_reason` defaults to
+                                // "manual" since a `/compact` has no `reason`
+                                // field (it's user-initiated).
+                                let compact_start = std::sync::Mutex::new(None::<Instant>);
+                                let compact_reason = std::sync::Mutex::new("manual".to_string());
                                 let ok = handle
                                     .compact_force_with_instructions(instructions, move |ev| {
+                                        match &ev {
+                                            AgentEvent::AutoCompactionStart { reason } => {
+                                                *compact_start.lock().unwrap() = Some(Instant::now());
+                                                *compact_reason.lock().unwrap() = reason.clone();
+                                                run_pre_compact_hooks(hook_cfg.as_ref(), reason);
+                                                if let Some(msg) = translate_event(&ev) {
+                                                    let _ = tx.send(msg);
+                                                }
+                                            }
+                                            AgentEvent::AutoCompactionEnd {
+                                                aborted,
+                                                error_message,
+                                                result,
+                                                ..
+                                            } => {
+                                                let duration_ms = compact_start
+                                                    .lock()
+                                                    .unwrap()
+                                                    .take()
+                                                    .map(|s| s.elapsed().as_millis() as u64)
+                                                    .unwrap_or(0);
+                                                let reason = compact_reason.lock().unwrap().clone();
+                                                let tokens_before = result
+                                                    .as_ref()
+                                                    .and_then(|r| r.get("tokensBefore"))
+                                                    .and_then(|v| v.as_u64());
+                                                run_post_compact_hooks(
+                                                    hook_cfg.as_ref(),
+                                                    &reason,
+                                                    tokens_before,
+                                                    None,
+                                                    duration_ms,
+                                                    *aborted,
+                                                );
+                                                let summary = format_compaction_summary(
+                                                    result.as_ref(),
+                                                    *aborted,
+                                                    error_message.as_deref(),
+                                                    tokens_before,
+                                                    duration_ms,
+                                                );
+                                                let _ = tx.send(AgentMsg::System(summary));
+                                                return;
+                                            }
+                                            _ => {}
+                                        }
                                         if let Some(msg) = translate_event(&ev) {
                                             let _ = tx.send(msg);
                                         }
@@ -10025,6 +10207,58 @@ task = "Do the thing"
                 is_error: false,
             },
         }
+    }
+
+    // (M6 #31) format_compaction_summary: pure-string, the dim System line
+    // the AutoCompactionEnd closure emits. tokens_after is null until pi
+    // P3, so the complete line is "compaction complete · was 142k · 2.1s".
+    #[test]
+    fn format_compaction_summary_complete_with_metrics() {
+        assert_eq!(
+            format_compaction_summary(
+                Some(&serde_json::json!({"tokensBefore": 142_000})),
+                false,
+                None,
+                Some(142_000),
+                2_100
+            ),
+            "compaction complete · was 142.0k · 2.1s"
+        );
+    }
+
+    #[test]
+    fn format_compaction_summary_aborted_with_metrics() {
+        assert_eq!(
+            format_compaction_summary(None, true, None, Some(142_000), 1_500),
+            "compaction aborted · was 142.0k · 1.5s"
+        );
+    }
+
+    #[test]
+    fn format_compaction_summary_error_short_circuits() {
+        // An error message short-circuits before the metrics tail.
+        assert_eq!(
+            format_compaction_summary(None, false, Some("boom"), Some(999), 5_000),
+            "compaction error: boom"
+        );
+    }
+
+    #[test]
+    fn format_compaction_summary_ms_when_under_a_second() {
+        // No tokens_before + sub-second duration → just the ms tail.
+        assert_eq!(
+            format_compaction_summary(None, true, None, None, 350),
+            "compaction aborted · 350ms"
+        );
+    }
+
+    #[test]
+    fn format_compaction_summary_zero_duration_omits_tail() {
+        // duration_ms == 0 omits the time segment entirely.
+        assert_eq!(
+            format_compaction_summary(None, false, None, Some(500), 0),
+            "compaction complete · was 500"
+        );
     }
 
     // (1a) subagent_tool_start → AgentMsg::SubagentToolStart carrying args.

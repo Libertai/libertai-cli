@@ -398,6 +398,12 @@ pub struct HooksConfig {
     pub pre_compact: Vec<HookCommandConfig>,
     #[serde(
         default,
+        rename = "PostCompact",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub post_compact: Vec<HookCommandConfig>,
+    #[serde(
+        default,
         rename = "SessionStart",
         skip_serializing_if = "Vec::is_empty"
     )]
@@ -455,6 +461,8 @@ impl<'de> Deserialize<'de> for HooksConfig {
             subagent_stop: Vec<serde_json::Value>,
             #[serde(default, rename = "PreCompact")]
             pre_compact: Vec<serde_json::Value>,
+            #[serde(default, rename = "PostCompact")]
+            post_compact: Vec<serde_json::Value>,
             #[serde(default, rename = "SessionStart")]
             session_start: Vec<serde_json::Value>,
             #[serde(default, rename = "Stop")]
@@ -489,6 +497,8 @@ impl<'de> Deserialize<'de> for HooksConfig {
                 .map_err(serde::de::Error::custom)?,
             pre_compact: deserialize_hook_rows(raw.pre_compact)
                 .map_err(serde::de::Error::custom)?,
+            post_compact: deserialize_hook_rows(raw.post_compact)
+                .map_err(serde::de::Error::custom)?,
             session_start: deserialize_hook_rows(raw.session_start)
                 .map_err(serde::de::Error::custom)?,
             stop: deserialize_hook_rows(raw.stop).map_err(serde::de::Error::custom)?,
@@ -516,6 +526,7 @@ impl HooksConfig {
             && self.subagent_start.is_empty()
             && self.subagent_stop.is_empty()
             && self.pre_compact.is_empty()
+            && self.post_compact.is_empty()
             && self.session_start.is_empty()
             && self.stop.is_empty()
             && self.session_end.is_empty()
