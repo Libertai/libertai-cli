@@ -33,6 +33,7 @@ pub mod code_session;
 pub mod code_skills;
 pub mod code_skill_tool;
 pub mod code_slash_registry;
+pub mod code_structured_output;
 pub mod code_tool_search;
 pub mod code_slash_router;
 pub mod code_task;

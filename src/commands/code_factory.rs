@@ -42,6 +42,7 @@ use crate::commands::code_todo::TodoTool;
 use crate::commands::code_mcp_tool::should_defer_mcp_tools;
 use crate::commands::code_skill_tool::SkillTool;
 use crate::commands::code_skills::SkillPillar;
+use crate::commands::code_structured_output::StructuredOutputTool;
 use crate::commands::code_tool_search::ToolSearchTool;
 use crate::commands::fetch_tool::FetchTool;
 use crate::commands::image_tool::ImageGenTool;
@@ -514,6 +515,15 @@ impl ToolFactory for LibertaiToolFactory {
             .clone()
             .unwrap_or_else(|| cwd.to_path_buf());
         wrapped.push(Box::new(SkillTool::new(SkillPillar::Code, Some(skill_cwd))));
+
+        //    - `structured_output`: validate model output against a JSON
+        //      Schema (M5/#14). Read-only (pure validation), registered
+        //      unwrapped, always-on for the orchestrator + subagent
+        //      children — any session may need to return validated,
+        //      machine-readable data. A per-session retry cap (env
+        //      LIBERTAI_STRUCTURED_OUTPUT_RETRIES, default 5) stops a
+        //      model stuck on an unsatisfiable schema.
+        wrapped.push(Box::new(StructuredOutputTool::new()));
 
         //    - `task` (subagent): only when feature-on AND we still
         //      have depth headroom. Chat pillar opts out so a chat

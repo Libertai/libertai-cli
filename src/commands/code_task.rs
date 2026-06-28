@@ -637,6 +637,11 @@ Apply the role instructions below as your primary scope. Keep the task narrow, \
 use only the tools exposed to you, and return concise findings for the parent \
 agent to relay or act on. Do not invent follow-up work outside the delegated \
 task.\n\n\
+When the parent asks for structured, machine-readable output (a findings list, \
+a record, a config object), call the `structured_output` tool with a JSON \
+`schema` describing the expected shape and your `data`; the tool validates the \
+shape and echoes it back, or reports the violated path(s) to fix and retry. \
+Prefer this over asserting the shape in prose.\n\n\
 ### Role instructions\n\n{body}",
         name = agent.name,
         body = agent.system_prompt.trim()
@@ -1266,6 +1271,10 @@ mod tests {
         assert!(prompt.contains("Do not invent follow-up work"));
         assert!(prompt.contains("### Role instructions"));
         assert!(prompt.contains("Focus on correctness."));
+        // (M5/#14) The prompt tells the subagent about the structured_output
+        // tool for schema-validated results.
+        assert!(prompt.contains("structured_output"));
+        assert!(prompt.contains("JSON `schema`"));
     }
 
     #[test]
