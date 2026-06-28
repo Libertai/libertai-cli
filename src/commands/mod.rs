@@ -49,6 +49,7 @@ pub mod code_todo;
 pub mod code_tool_preview;
 pub mod code_tui;
 pub mod code_ui;
+pub mod code_workflow;
 pub mod completions;
 pub mod config_cmd;
 pub mod fetch;
