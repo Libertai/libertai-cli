@@ -4126,22 +4126,84 @@ fn stop_reason_verb(reason: &StopReason) -> &'static str {
     }
 }
 
+/// (M5/#35) The verb for a `StopReason::Length` turn, distinguishing the
+/// two meanings of "length": an output-token cap (the model talked until
+/// it hit `max_tokens`) vs a context-window cap (the prompt filled the
+/// window so pi stopped before completing). When `is_ctx_limit` is true
+/// the verb is `ctx limit` (distinct from the output-cap `max tokens`);
+/// otherwise — and for every other stop reason — it falls back to
+/// [`stop_reason_verb`]. Callers decide `is_ctx_limit` from
+/// `context_tokens >= context_window - reserve` (and autocompact on).
+fn stop_reason_verb_ctx(reason: &StopReason, is_ctx_limit: bool) -> &'static str {
+    if is_ctx_limit && matches!(reason, StopReason::Length) {
+        "ctx limit"
+    } else {
+        stop_reason_verb(reason)
+    }
+}
+
 /// Dim end-of-turn line: `● done · 18.3k in · 272 out · 41s`. The "in"
 /// figure is the same context-occupancy count the status bar shows
 /// ([`context_tokens`]), so the two never disagree.
+///
+/// (M5/#35) The non-test call sites now use [`stop_line_text_ctx`] so they
+/// can flag a `StopReason::Length` turn as a context-window cap. This
+/// default-verb form is kept for the stop-line unit tests.
+#[cfg(test)]
 pub(crate) fn stop_line_text(
     reason: &StopReason,
     ctx_in: u64,
     out: u64,
     elapsed_secs: u64,
 ) -> String {
+    // `is_ctx_limit=false` → `StopReason::Length` renders as `max tokens`
+    // (the output-cap verb), the same behaviour this fn had before M5/#35
+    // split the two Length meanings. Kept for tests that assert the default
+    // verb; non-test call sites use [`stop_line_text_ctx`].
+    stop_line_text_ctx(reason, false, ctx_in, out, elapsed_secs)
+}
+
+/// (M5/#35) Like [`stop_line_text`] but lets the caller flag a
+/// `StopReason::Length` turn as a context-window limit (verb `ctx limit`)
+/// rather than the default output-cap verb (`max tokens`). Used by the
+/// REPL and TUI TurnEnd handlers, which know the context window + reserve
+/// + autocompact flag and so can tell the two Length meanings apart.
+pub(crate) fn stop_line_text_ctx(
+    reason: &StopReason,
+    is_ctx_limit: bool,
+    ctx_in: u64,
+    out: u64,
+    elapsed_secs: u64,
+) -> String {
     format!(
         "● {} · {} in · {} out · {}",
-        stop_reason_verb(reason),
+        stop_reason_verb_ctx(reason, is_ctx_limit),
         human_tokens(ctx_in),
         human_tokens(out),
         human_elapsed(elapsed_secs),
     )
+}
+
+/// (M5/#35) True when a `StopReason::Length` turn is a context-window
+/// limit (not an output-token cap): the turn's context occupancy is at or
+/// above the compaction reserve line, i.e. the prompt filled the window.
+/// `reserve_tokens` is the [`Config::code_compaction_reserve_tokens`]
+/// headroom below the window; within that headroom the stop is an output
+/// cap, at/above it the stop is a context cap. Callers gate on
+/// `auto_compaction_enabled` too — without autocompact the distinction
+/// is moot (nothing will compact anyway), so we return false and the verb
+/// stays `max tokens`.
+pub(crate) fn is_ctx_limit_stop(
+    reason: &StopReason,
+    context_tokens: u64,
+    context_window: u64,
+    reserve_tokens: u64,
+    auto_compaction_enabled: bool,
+) -> bool {
+    auto_compaction_enabled
+        && matches!(reason, StopReason::Length)
+        && context_window > 0
+        && context_tokens >= context_window.saturating_sub(reserve_tokens)
 }
 
 // ---------------------------------------------------------------------------
@@ -4605,6 +4667,79 @@ mod tests {
         );
         assert_eq!(stop_reason_verb(&StopReason::Error), "error");
         assert_eq!(stop_reason_verb(&StopReason::ToolUse), "tool-use");
+    }
+
+    #[test]
+    fn stop_line_text_ctx_distinguishes_length_meanings() {
+        // is_ctx_limit=false → output-cap verb ("max tokens").
+        assert_eq!(
+            stop_line_text_ctx(&StopReason::Length, false, 900, 1_200, 128),
+            "● max tokens · 900 in · 1.2k out · 2m08s"
+        );
+        // is_ctx_limit=true → context-window verb ("ctx limit").
+        assert_eq!(
+            stop_line_text_ctx(&StopReason::Length, true, 199_500, 1_200, 5),
+            "● ctx limit · 199.5k in · 1.2k out · 5s"
+        );
+        // Non-Length reasons ignore is_ctx_limit entirely.
+        assert_eq!(
+            stop_line_text_ctx(&StopReason::Stop, true, 18_324, 272, 41),
+            "● done · 18.3k in · 272 out · 41s"
+        );
+    }
+
+    #[test]
+    fn is_ctx_limit_stop_classifies_length_turns() {
+        use super::is_ctx_limit_stop;
+        // Autocompact off → never a ctx limit (the distinction is moot).
+        assert!(!is_ctx_limit_stop(
+            &StopReason::Length,
+            199_500,
+            200_000,
+            10_000,
+            false
+        ));
+        // At/above the reserve line (200_000 - 10_000 = 190_000) with
+        // autocompact on → ctx limit.
+        assert!(is_ctx_limit_stop(
+            &StopReason::Length,
+            190_000,
+            200_000,
+            10_000,
+            true
+        ));
+        // Below the reserve line → output cap, not ctx limit.
+        assert!(!is_ctx_limit_stop(
+            &StopReason::Length,
+            150_000,
+            200_000,
+            10_000,
+            true
+        ));
+        // Non-Length reason → never a ctx limit even if tokens are huge.
+        assert!(!is_ctx_limit_stop(
+            &StopReason::Stop,
+            199_500,
+            200_000,
+            10_000,
+            true
+        ));
+        // Zero context window (unknown model) → can't classify, not ctx limit.
+        assert!(!is_ctx_limit_stop(
+            &StopReason::Length,
+            199_500,
+            0,
+            10_000,
+            true
+        ));
+        // Saturation: reserve larger than window must not underflow.
+        assert!(is_ctx_limit_stop(
+            &StopReason::Length,
+            1,
+            100,
+            1_000,
+            true
+        ));
     }
 
     #[test]

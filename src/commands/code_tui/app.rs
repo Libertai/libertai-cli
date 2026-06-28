@@ -46,7 +46,7 @@ use crate::commands::code_tui::view;
 use crate::commands::code_ui::{
     self, apply_pending_shell_context, context_percent, context_tokens, context_window_for,
     read_log_tail, shell_escape_command, stage_pr_comment_draft, start_background_agent,
-    stop_line_text, truncate_chars, usage_summary, BackgroundAgentLaunch, PrCommentDraft,
+    truncate_chars, usage_summary, BackgroundAgentLaunch, PrCommentDraft,
     ShellEscapeAction, UsageRecord,
 };
 use crate::config::{allow_rules_path, Config as LibertaiConfig};
@@ -6423,12 +6423,33 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             // stashed by the Usage handler; `.take()` so a turn-end without
             // a preceding Usage (e.g. an error path) simply omits the line.
             if let Some((reason, ctx_in, out)) = app.last_usage.take() {
-                app.transcript.push(TranscriptEntry::System(stop_line_text(
+                // (M5/#35) Distinguish the two meanings of StopReason::Length:
+                // an output-token cap ("max tokens") vs a context-window cap
+                // ("ctx limit"). When context occupancy is at/above the
+                // compaction reserve line AND autocompact is on, label it
+                // `ctx limit` and auto-trigger compaction (pi already
+                // auto-compacts on the token threshold; this adds the honest
+                // label + an explicit follow-up so the user sees compaction
+                // was driven by the context, not the output cap).
+                let ctx_limit = code_ui::is_ctx_limit_stop(
                     &reason,
                     ctx_in,
-                    out,
-                    elapsed_secs,
-                )));
+                    u64::from(app.bar.context_window),
+                    u64::from(app.cfg.code_compaction_reserve_tokens),
+                    app.cfg.code_auto_compaction_enabled,
+                );
+                app.transcript.push(TranscriptEntry::System(
+                    code_ui::stop_line_text_ctx(&reason, ctx_limit, ctx_in, out, elapsed_secs),
+                ));
+                if ctx_limit {
+                    // Auto-trigger compaction with no extra notes. The
+                    // compaction runs on the bg thread via the same path
+                    // `/compact` uses; the transcript already says
+                    // "ctx limit" so the follow-up is self-explanatory.
+                    let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Compact { notes: None }));
+                    app.transcript
+                        .push(TranscriptEntry::System("compacting…".to_string()));
+                }
             }
 
             app.phase = Phase::Idle;
@@ -8407,12 +8428,13 @@ mod tests {
         assert!(expand_status_line_template("", &legacy, Mode::Normal).is_none());
     }
 
-    // (4) stop_line_text formatting: the rendered stop line contains the
-    // expected verb + the humanized in/out token strings + the elapsed
-    // figure. Reuses the pub(crate) helper (imported at the top of app.rs).
+    // (4) stop_line_text_ctx formatting: the rendered stop line contains
+    // the expected verb + the humanized in/out token strings + the elapsed
+    // figure. Uses the M5/#35-aware helper (is_ctx_limit=false → default
+    // verbs; the ctx-limit branch is covered in code_ui's own tests).
     #[test]
     fn stop_line_text_contains_verb_tokens_and_elapsed() {
-        let line = stop_line_text(&StopReason::Stop, 18_324, 272, 41);
+        let line = code_ui::stop_line_text_ctx(&StopReason::Stop, false, 18_324, 272, 41);
         // Verb.
         assert!(line.contains("● done"), "verb: {line:?}");
         // In tokens humanized (>=1k → "18.3k").
@@ -8425,7 +8447,7 @@ mod tests {
 
     #[test]
     fn stop_line_text_handles_minutes_and_length_reason() {
-        let line = stop_line_text(&StopReason::Length, 900, 1_200, 128);
+        let line = code_ui::stop_line_text_ctx(&StopReason::Length, false, 900, 1_200, 128);
         assert!(line.contains("● max tokens"), "verb: {line:?}");
         // Sub-1k in stays plain; >=1k out humanizes.
         assert!(line.contains("900 in"), "in tokens: {line:?}");

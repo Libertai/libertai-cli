@@ -613,14 +613,25 @@ async fn run_async(
     crate::commands::code_hooks::run_stop_hooks(cfg.as_ref());
 
     let (dim, reset) = crate::commands::output::stderr_dim_pair();
+    // (M5/#35) Distinguish a context-window cap ("ctx limit") from an
+    // output-token cap ("max tokens") for a StopReason::Length turn, the
+    // same way the TUI does. The REPL is headless, so unlike the TUI we do
+    // NOT auto-trigger compaction here (a one-shot --print run exits after
+    // this turn); we just render the honest verb.
+    let ctx_in = code_ui::context_tokens(&msg.usage);
+    // `provider`/`model` were moved into `CodeSessionConfig` above; the turn
+    // message echoes the resolved provider/model, so use it here.
+    let context_window = code_ui::context_window_for(&msg.provider, &msg.model);
+    let ctx_limit = code_ui::is_ctx_limit_stop(
+        &msg.stop_reason,
+        ctx_in,
+        u64::from(context_window),
+        u64::from(cfg.code_compaction_reserve_tokens),
+        cfg.code_auto_compaction_enabled,
+    );
     eprintln!(
         "{dim}{}{reset}",
-        code_ui::stop_line_text(
-            &msg.stop_reason,
-            code_ui::context_tokens(&msg.usage),
-            msg.usage.output,
-            elapsed_secs,
-        )
+        code_ui::stop_line_text_ctx(&msg.stop_reason, ctx_limit, ctx_in, msg.usage.output, elapsed_secs)
     );
 
     Ok(())
