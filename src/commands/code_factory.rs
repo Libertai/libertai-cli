@@ -28,6 +28,7 @@ use crate::commands::code_ask_user::AskUserTool;
 use crate::commands::code_aux::{smart_approval_from_config, SmartApproval};
 use crate::commands::code_context_tool::{ContextSnapshot, ContextStatusTool, RequestCompactionTool};
 use crate::commands::code_cron::{CronCreateTool, CronDeleteTool, CronListTool, CronStore};
+use crate::commands::code_workflow::WorkflowTool;
 use crate::commands::code_diff::EditJournal;
 use crate::commands::code_guardrail::{GuardrailTool, ToolGuardrailState};
 use crate::commands::code_mailbox::MailboxTool;
@@ -272,6 +273,14 @@ pub struct LibertaiToolFactory {
     /// the durable `.libertai/scheduled_tasks.json` backing is a
     /// follow-up.
     pub cron_store: Option<Arc<CronStore>>,
+    /// (M6/#15) Shared workflow registry the `workflow` tool registers
+    /// runs into and the TUI's `/workflows` viewer snapshots. The TUI
+    /// creates one `Arc<WorkflowRegistry>` in `run()` and threads it into
+    /// the factory here. `None` when there's no TUI (desktop chat pillar
+    /// / REPL-without-TUI) — the tool then isn't registered. Subagents
+    /// don't host the viewer, so `child()` sets `None` (a phase agent
+    /// spawning its own workflow would just be a nested `task`).
+    pub workflows: Option<Arc<crate::commands::code_workflow::WorkflowRegistry>>,
 }
 
 impl LibertaiToolFactory {
@@ -311,6 +320,7 @@ impl LibertaiToolFactory {
             skill_cwd: None,
             context_snapshot: None,
             cron_store: None,
+            workflows: None,
         }
     }
 
@@ -345,6 +355,7 @@ impl LibertaiToolFactory {
             skill_cwd: None,
             context_snapshot: None,
             cron_store: None,
+            workflows: None,
         }
     }
 
@@ -382,6 +393,7 @@ impl LibertaiToolFactory {
             skill_cwd: None,
             context_snapshot: None,
             cron_store: None,
+            workflows: None,
         }
     }
 
@@ -464,6 +476,20 @@ impl LibertaiToolFactory {
         self
     }
 
+    /// (M6/#15) Inject the shared `WorkflowRegistry` the `workflow` tool
+    /// registers runs into and the TUI's `/workflows` viewer snapshots.
+    /// The TUI creates the registry in `run()` and shares it here so the
+    /// tool (built on the bg thread) mutates the same registry the
+    /// main-thread viewer reads. `None` (the default) → the `workflow` tool
+    /// isn't registered (no TUI to host the viewer).
+    pub fn with_workflows(
+        mut self,
+        workflows: Arc<crate::commands::code_workflow::WorkflowRegistry>,
+    ) -> Self {
+        self.workflows = Some(workflows);
+        self
+    }
+
     /// Factory for a child session spawned by the Task tool. Inherits
     /// the parent's mode flag (so a Shift+Tab in the parent REPL
     /// affects in-flight subagents too — desired), approval state,
@@ -497,6 +523,7 @@ impl LibertaiToolFactory {
             // (subprocess) loop, not the parent's. Leave `None` so the
             // cron tools aren't registered in subagents (M5/#17).
             cron_store: None,
+            workflows: None,
         }
     }
 }
@@ -683,6 +710,43 @@ impl ToolFactory for LibertaiToolFactory {
             .with_smart_approval(self.smart_approval.clone())
             .with_journal(Arc::clone(&self.edit_journal));
             wrapped.push(Box::new(spawn_team));
+        }
+
+        //    - `workflow`: the JS orchestrator (M6/#15). Runs a user script
+        //      inside a QuickJS sandbox that calls agent()/parallel()/
+        //      pipeline()/phase()/log() to spawn phase agents. Same depth
+        //      cap + team-scoping as `task`/`spawn_team` (phase agents run
+        //      at parent_depth+1, refusing at the cap). Mutating (spawns
+        //      subagents that may run tools), so it goes through the
+        //      approval wrapper. Only registered when the TUI injected a
+        //      `WorkflowRegistry` (the viewer is a TUI affordance).
+        if self.features.task
+            && self.depth < MAX_TASK_DEPTH
+            && self.team.is_none()
+            && self.workflows.is_some()
+        {
+            let workflows = self.workflows.clone().expect("checked is_some above");
+            let workflow = ApprovalTool::new(
+                Box::new(WorkflowTool::new(
+                    self.mode.clone(),
+                    Arc::clone(&self.approvals),
+                    Arc::clone(&self.ui),
+                    self.depth,
+                    cwd.to_path_buf(),
+                    Arc::clone(&self.registry),
+                    workflows,
+                    self.bash_command_wrapper.clone(),
+                    self.libertai_cfg.clone(),
+                )),
+                Arc::clone(&self.approvals),
+                self.mode.clone(),
+                Arc::clone(&self.ui),
+            )
+            .with_base_dir(Some(cwd.to_path_buf()))
+            .with_policy(self.tool_policy.clone())
+            .with_smart_approval(self.smart_approval.clone())
+            .with_journal(Arc::clone(&self.edit_journal));
+            wrapped.push(Box::new(workflow));
         }
 
         //    - `team_task`: shared team task list. Only registered when

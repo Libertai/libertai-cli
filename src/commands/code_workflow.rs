@@ -1195,6 +1195,11 @@ async fn run_phase_agent(
         skill_cwd: Some(cwd.clone()),
         context_snapshot: None,
         cron_store: None,
+        // (M6/#15) Phase agents spawned by a workflow are themselves
+        // read-only subagents; they don't host a workflow registry (a
+        // workflow nesting inside a workflow would blow past
+        // MAX_TASK_DEPTH). Leave unset.
+        workflows: None,
     }
     .child();
 

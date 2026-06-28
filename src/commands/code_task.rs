@@ -356,6 +356,12 @@ impl Tool for TaskTool {
             // parent TUI does); leave the store unset so the cron tools
             // aren't registered on subagents.
             cron_store: None,
+            // (M6/#15) Subagents don't host a workflow registry (only the
+            // parent TUI does); leave unset so the WorkflowTool isn't
+            // registered on subagents. Workflows spawn their own phase
+            // agents; nesting a workflow inside a subagent would blow
+            // past MAX_TASK_DEPTH.
+            workflows: None,
         }
         .child();
 
