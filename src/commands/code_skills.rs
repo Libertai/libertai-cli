@@ -124,11 +124,19 @@ pub fn prompt_for_pillar(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Opti
         return Ok(None);
     }
 
-    let mut out = String::from("## Active Agent Skills\n\n");
+    // (M5/#7) Latent registry: surface each active skill's name +
+    // description only. The bodies are deliberately NOT in the system
+    // prompt — they bloat it and most are irrelevant to a given turn. The
+    // model loads a skill's full body on demand via the `skill` tool
+    // (see `code_skill_tool.rs`), mirroring Claude Code's Skill-tool model.
+    let mut out = String::from("## Available Agent Skills\n\n");
     out.push_str(
-        "The following Agent Skills are active for this session. Apply them when relevant.\n",
+        "The following Agent Skills are available for this session. Their full bodies are \
+         NOT shown here to keep this prompt short — call the `skill` tool with a skill's \
+         `name` to load its complete instructions when a task seems to match. Read each \
+         description to decide which skill applies.\n",
     );
-    for skill in skills {
+    for skill in &skills {
         out.push_str("\n### ");
         out.push_str(&skill.name);
         out.push('\n');
@@ -140,13 +148,32 @@ pub fn prompt_for_pillar(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Opti
             out.push_str(allowed);
             out.push('\n');
         }
-        out.push_str("Source: ");
-        out.push_str(&source_label(&skill.source));
-        out.push_str("\n\n");
-        out.push_str(skill.body.trim());
-        out.push('\n');
     }
     Ok(Some(out))
+}
+
+/// (M5/#7) Load a single active skill's full body by name. Returns `None`
+/// when no active (pillar-matching, non-disabled) skill has that name, so
+/// the `skill` tool can report "unknown skill" and list the available
+/// names to drive a retry. Reuses [`active_skills`] so pillar gating and
+/// the disabled-skills list are honored — a disabled or wrong-pillar
+/// skill is not loadable by name.
+pub fn load_skill_by_name(
+    pillar: SkillPillar,
+    cwd: Option<&Path>,
+    name: &str,
+) -> Result<Option<AgentSkill>> {
+    let name = name.trim();
+    Ok(active_skills(pillar, cwd)?
+        .into_iter()
+        .find(|skill| skill.name == name))
+}
+
+/// (M5/#7) Active skill names only — the list the `skill` tool returns
+/// when the model asks for an unknown name (drives a retry with the
+/// correct spelling).
+pub fn active_skill_name_list(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Vec<String>> {
+    active_skill_names(pillar, cwd)
 }
 
 pub fn active_skill_names(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Vec<String>> {
@@ -351,7 +378,11 @@ fn load_skill_dir(
     Ok(())
 }
 
-fn parse_skill_md(text: &str, dir_name: Option<&str>, source: SkillSource) -> Result<AgentSkill> {
+pub(crate) fn parse_skill_md(
+    text: &str,
+    dir_name: Option<&str>,
+    source: SkillSource,
+) -> Result<AgentSkill> {
     let (frontmatter, body) = split_frontmatter(text)?;
     let mut name = None;
     let mut description = None;
@@ -640,14 +671,44 @@ mod tests {
     }
 
     #[test]
-    fn code_prompt_includes_auto_memory_protocol() {
+    fn code_prompt_lists_skills_as_latent_registry_without_bodies() {
+        // (M5/#7) prompt_for_pillar now surfaces a latent registry
+        // (name + description only); bodies load via the `skill` tool.
         let prompt = prompt_for_pillar(SkillPillar::Code, None)
             .expect("prompt")
             .expect("code prompt");
-        assert!(prompt.contains("## Auto memory"));
-        assert!(prompt.contains("stable user preferences"));
-        assert!(prompt.contains("durable repository facts"));
-        assert!(prompt.contains("Do not save transient facts"));
-        assert!(prompt.contains("/remember <kind>: <short fact>"));
+        // Registry header + the instruction to use the `skill` tool.
+        assert!(prompt.contains("## Available Agent Skills"), "header: {prompt:?}");
+        assert!(prompt.contains("call the `skill` tool"), "tool hint: {prompt:?}");
+        // The harness + code-workflow skills are active for Code; their
+        // names + descriptions appear…
+        assert!(prompt.contains("### libertai-harness"), "harness name: {prompt:?}");
+        assert!(prompt.contains("### libertai-code-workflow"), "workflow name: {prompt:?}");
+        // …but their bodies do NOT — the whole point of the refactor.
+        assert!(
+            !prompt.contains("## Auto memory"),
+            "harness body leaked into prompt: {prompt:?}"
+        );
+        assert!(
+            !prompt.contains("/remember <kind>: <short fact>"),
+            "harness body leaked into prompt: {prompt:?}"
+        );
+    }
+
+    #[test]
+    fn harness_auto_memory_protocol_is_loadable_by_name() {
+        // (M5/#7) The auto-memory protocol that used to live in the
+        // system prompt is now reachable via load_skill_by_name — the
+        // `skill` tool hands this body to the model on call.
+        let cwd = std::env::current_dir().ok();
+        let harness = load_skill_by_name(SkillPillar::Code, cwd.as_deref(), "libertai-harness")
+            .expect("load")
+            .expect("harness active for code");
+        assert_eq!(harness.name, "libertai-harness");
+        assert!(harness.body.contains("## Auto memory"));
+        assert!(harness.body.contains("stable user preferences"));
+        assert!(harness.body.contains("durable repository facts"));
+        assert!(harness.body.contains("Do not save transient facts"));
+        assert!(harness.body.contains("/remember <kind>: <short fact>"));
     }
 }

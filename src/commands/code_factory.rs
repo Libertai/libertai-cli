@@ -39,6 +39,8 @@ use crate::commands::code_team::AgentRegistry;
 use crate::commands::code_team_task::TeamTaskTool;
 use crate::commands::code_team_tool::SpawnTeamTool;
 use crate::commands::code_todo::TodoTool;
+use crate::commands::code_skill_tool::SkillTool;
+use crate::commands::code_skills::SkillPillar;
 use crate::commands::fetch_tool::FetchTool;
 use crate::commands::image_tool::ImageGenTool;
 use crate::commands::notebook_tool::{NotebookEditTool, NotebookExecuteTool, NotebookReadTool};
@@ -465,6 +467,19 @@ impl ToolFactory for LibertaiToolFactory {
         //      don't surface this, so the LLM degrades gracefully on
         //      the terminal CLI.
         wrapped.push(Box::new(AskUserTool::new(Arc::clone(&self.ui))));
+
+        //    - `skill`: lazy Agent-Skill body loader (M5/#7). Skills are
+        //      listed in the system prompt as a latent registry (name +
+        //      description only); the model calls `skill(name)` to load a
+        //      matching skill's full body on demand, so a many-skill
+        //      session doesn't ship every body in the prompt every turn.
+        //      Read-only (disk reads), registered unwrapped like `todo`.
+        //      Code-pillar only — every `prompt_for_pillar` call site
+        //      resolves skills under `SkillPillar::Code`.
+        wrapped.push(Box::new(SkillTool::new(
+            SkillPillar::Code,
+            Some(cwd.to_path_buf()),
+        )));
 
         //    - `task` (subagent): only when feature-on AND we still
         //      have depth headroom. Chat pillar opts out so a chat
