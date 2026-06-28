@@ -17,6 +17,19 @@
 //!   - `list`   — read all tasks and return them as text.
 //!   - `update` — change a task's status and/or append notes by id.
 //!   - `claim`  — set yourself as the assignee and mark the task active.
+//!   - `link`   — add `blocks`/`blockedBy` edges between tasks (M5/#19),
+//!     so parallel teammates can coordinate non-overlapping ready work
+//!     without a coordination prompt.
+//!
+//! ## Task graph (M5/#19)
+//!
+//! Each task carries optional `blocks` (ids this task blocks from
+//! starting) and `blocked_by` (ids that must complete before this task
+//! is ready). A task is **ready** (unblocked) when every id in
+//! `blocked_by` refers to a `Completed` task (or `blocked_by` is empty).
+//! `render_task_line` shows a `ready`/`blocked` marker so a teammate
+//! scanning the list can claim non-overlapping ready work. The flat
+//! `todo` tool is untouched — this is the team-only dependency layer.
 //!
 //! Writes go through a temp file + rename so a crashed teammate never
 //! leaves a half-written list (atomic on Unix).
@@ -34,9 +47,12 @@ const NAME: &str = "team_task";
 const LABEL: &str = "TeamTask";
 const DESCRIPTION: &str = concat!(
     "Read and update the shared team task list. Use `list` to see all ",
-    "tasks with their assignees and statuses. Use `update` to change a ",
-    "task's status (pending/active/completed/blocked) or add notes. Use ",
-    "`claim` to assign a task to yourself and mark it active. The task ",
+    "tasks with their assignees, statuses, and ready/blocked markers. ",
+    "Use `update` to change a task's status (pending/active/completed/",
+    "blocked), set its owner, or add notes. Use `claim` to assign a ",
+    "task to yourself and mark it active. Use `link` to add `blocks`/",
+    "`blockedBy` edges so teammates pick non-overlapping ready work. A ",
+    "task is ready when every task in its `blockedBy` is completed. The ",
     "list is shared across all teammates, so check it frequently to avoid ",
     "duplicate work."
 );
@@ -55,7 +71,11 @@ pub enum TeamTaskStatus {
 
 /// One entry in the shared team task list. Stored as a single JSON line
 /// inside `<team_dir>/tasks.jsonl`; `id` is the stable key teammates
-/// reference from `update`/`claim`.
+/// reference from `update`/`claim`/`link`.
+///
+/// `blocks` / `blocked_by` / `owner` (M5/#19) are `#[serde(default)]`
+/// so JSONL lines written before the fields existed still deserialize
+/// (an old list loaded, re-saved, then re-loaded round-trips).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamTask {
     pub id: String,
@@ -63,17 +83,43 @@ pub struct TeamTask {
     pub assignee: Option<String>,
     pub status: TeamTaskStatus,
     pub notes: Vec<String>,
+    /// Ids of tasks this task blocks from starting. A teammate should
+    /// not claim a task whose id appears in another task's `blocked_by`
+    /// until this one is `Completed`.
+    #[serde(default)]
+    pub blocks: Vec<String>,
+    /// Ids that must be `Completed` before this task is ready. Empty (or
+    /// all-completed) → ready. Stale ids (no matching task) count as
+    /// satisfied — a typo shouldn't pin a task forever.
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
+    /// Optional owner distinct from the current `assignee` — the
+    /// teammate the task is destined for, set at planning time. `claim`
+    /// sets `assignee` (who's working it now); `owner` is the intended
+    /// recipient. Mirrors Claude Code's `TaskUpdate::owner`.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 /// Parsed payload of a `team_task` call. `action` selects the
 /// operation; the remaining fields are conditionally required
-/// (`task_id` for `update`/`claim`, `status`/`notes` for `update`).
+/// (`task_id` for `update`/`claim`/`link`, `status`/`notes`/`owner` for
+/// `update`, `blocks`/`blocked_by` for `link`).
 #[derive(Debug, Deserialize)]
 struct TeamTaskInput {
     action: String,
     task_id: Option<String>,
     status: Option<String>,
     notes: Option<String>,
+    owner: Option<String>,
+    /// `link` adds these ids to the task's `blocks` (this task blocks
+    /// them). Deduped against the existing list.
+    #[serde(default)]
+    blocks: Vec<String>,
+    /// `link` adds these ids to the task's `blocked_by` (they block this
+    /// task). Deduped against the existing list.
+    #[serde(default)]
+    blocked_by: Vec<String>,
 }
 
 /// The `team_task` tool. Bound to one teammate (by name) and one team
@@ -169,12 +215,12 @@ impl Tool for TeamTaskTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list", "update", "claim"],
+                    "enum": ["list", "update", "claim", "link"],
                     "description": "Operation to perform."
                 },
                 "task_id": {
                     "type": "string",
-                    "description": "The task id (for update/claim)."
+                    "description": "The task id (for update/claim/link)."
                 },
                 "status": {
                     "type": "string",
@@ -184,6 +230,20 @@ impl Tool for TeamTaskTool {
                 "notes": {
                     "type": "string",
                     "description": "Additional notes to append to the task (for update)."
+                },
+                "owner": {
+                    "type": "string",
+                    "description": "Set the task's owner (the teammate the task is destined for). For update."
+                },
+                "blocks": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Task ids this task blocks from starting (for link). Added (deduped) to the task's `blocks`."
+                },
+                "blocked_by": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Task ids that must complete before this task is ready (for link). Added (deduped) to the task's `blocked_by`."
                 }
             },
             "required": ["action"]
@@ -229,12 +289,17 @@ impl Tool for TeamTaskTool {
                     Ok(t) => t,
                     Err(e) => return Ok(err_output(&format!("read tasks: {e}"))),
                 };
-                let task = match tasks.iter_mut().find(|t| t.id == task_id) {
-                    Some(t) => t,
+                let idx = match tasks.iter().position(|t| t.id == task_id) {
+                    Some(i) => i,
                     None => return Ok(err_output(&format!("task not found: {task_id}"))),
                 };
-                update_task(task, new_status, parsed.notes.as_deref());
-                let summary = render_task(task);
+                update_task(
+                    &mut tasks[idx],
+                    new_status,
+                    parsed.notes.as_deref(),
+                    parsed.owner.as_deref(),
+                );
+                let summary = render_task(&tasks[idx], &tasks);
                 if let Err(e) = self.write_tasks(&tasks) {
                     return Ok(err_output(&format!("write tasks: {e}")));
                 }
@@ -249,16 +314,72 @@ impl Tool for TeamTaskTool {
                     Ok(t) => t,
                     Err(e) => return Ok(err_output(&format!("read tasks: {e}"))),
                 };
-                let task = match tasks.iter_mut().find(|t| t.id == task_id) {
-                    Some(t) => t,
+                let idx = match tasks.iter().position(|t| t.id == task_id) {
+                    Some(i) => i,
                     None => return Ok(err_output(&format!("task not found: {task_id}"))),
                 };
-                claim_task(task, &self.teammate_name);
-                let summary = render_task(task);
+                claim_task(&mut tasks[idx], &self.teammate_name);
+                let summary = render_task(&tasks[idx], &tasks);
                 if let Err(e) = self.write_tasks(&tasks) {
                     return Ok(err_output(&format!("write tasks: {e}")));
                 }
                 Ok(text_output(&format!("Claimed task {task_id}:\n{summary}")))
+            }
+            "link" => {
+                // (M5/#19) Add `blocks`/`blocked_by` edges to a task. The
+                // ids are validated against the existing list (a typo
+                // returns an error rather than silently recording a
+                // dangling edge). Edges are deduped; self-edges are
+                // dropped (a task blocking itself can never become
+                // ready). The reciprocal `blocks`/`blocked_by` entry is
+                // NOT auto-added — the graph is directed and the caller
+                // owns both ends, matching Claude Code's explicit
+                // `addBlocks`/`addBlockedBy` model.
+                let task_id = match parsed.task_id {
+                    Some(id) => id,
+                    None => return Ok(err_output("`link` requires `task_id`")),
+                };
+                if parsed.blocks.is_empty() && parsed.blocked_by.is_empty() {
+                    return Ok(err_output(
+                        "`link` requires at least one of `blocks`/`blocked_by`",
+                    ));
+                }
+                let mut tasks = match self.read_tasks() {
+                    Ok(t) => t,
+                    Err(e) => return Ok(err_output(&format!("read tasks: {e}"))),
+                };
+                let known: std::collections::HashSet<&String> =
+                    tasks.iter().map(|t| &t.id).collect();
+                let validate_ids = |ids: &[String], field: &str| -> Result<(), String> {
+                    for id in ids {
+                        if id == &task_id {
+                            // self-edge: silently dropped below, not an error
+                            continue;
+                        }
+                        if !known.contains(id) {
+                            return Err(format!(
+                                "`{field}` references unknown task id: {id}"
+                            ));
+                        }
+                    }
+                    Ok(())
+                };
+                if let Err(msg) = validate_ids(&parsed.blocks, "blocks") {
+                    return Ok(err_output(&msg));
+                }
+                if let Err(msg) = validate_ids(&parsed.blocked_by, "blocked_by") {
+                    return Ok(err_output(&msg));
+                }
+                let idx = match tasks.iter().position(|t| t.id == task_id) {
+                    Some(i) => i,
+                    None => return Ok(err_output(&format!("task not found: {task_id}"))),
+                };
+                link_task(&mut tasks[idx], &parsed.blocks, &parsed.blocked_by);
+                let summary = render_task(&tasks[idx], &tasks);
+                if let Err(e) = self.write_tasks(&tasks) {
+                    return Ok(err_output(&format!("write tasks: {e}")));
+                }
+                Ok(text_output(&format!("Linked task {task_id}:\n{summary}")))
             }
             other => Ok(err_output(&format!("unknown `action`: {other}"))),
         }
@@ -313,33 +434,52 @@ fn render_task_list(tasks: &[TeamTask]) -> String {
     let mut out = header;
     for task in tasks {
         out.push('\n');
-        out.push_str(&render_task_line(task));
+        out.push_str(&render_task_line(task, tasks));
     }
     out
 }
 
 /// One indented line per task, e.g.
-/// `  [completed] t1: Refactor parser — assigned to alice`.
+/// `  [completed] t1: Refactor parser — assigned to alice · ready`.
 /// The bracketed status is left-aligned to the width of the longest
-/// label (`[completed]` = 11 chars) so the id columns line up.
-fn render_task_line(task: &TeamTask) -> String {
+/// label (`[completed]` = 11 chars) so the id columns line up. The
+/// trailing `· ready`/`· blocked` marker (M5/#19) is shown only when
+/// the task has dependency edges — a flat task omits it (no graph
+/// noise for the common case).
+fn render_task_line(task: &TeamTask, all: &[TeamTask]) -> String {
     let label = format!("[{}]", status_label(task.status));
     let assignee = match &task.assignee {
         Some(name) => format!("assigned to {name}"),
         None => "unassigned".to_string(),
     };
-    format!("  {:<11} {}: {} — {}", label, task.id, task.title, assignee)
+    let mut line = format!("  {:<11} {}: {} — {}", label, task.id, task.title, assignee);
+    if let Some(owner) = &task.owner {
+        if task.assignee.as_deref() != Some(owner) {
+            line.push_str(&format!(" · owner {owner}"));
+        }
+    }
+    if has_edges(task) {
+        let marker = if is_ready(task, all) { "ready" } else { "blocked" };
+        line.push_str(&format!(" · {marker}"));
+    }
+    line
 }
 
-/// Render a single task with its accumulated notes, for the
-/// `update`/`claim` result messages.
-fn render_task(task: &TeamTask) -> String {
-    let mut out = render_task_line(task);
+/// Render a single task with its accumulated notes (+edges), for the
+/// `update`/`claim`/`link` result messages.
+fn render_task(task: &TeamTask, all: &[TeamTask]) -> String {
+    let mut out = render_task_line(task, all);
     if !task.notes.is_empty() {
         out.push_str("\n  Notes:");
         for note in &task.notes {
             out.push_str(&format!("\n    - {note}"));
         }
+    }
+    if !task.blocks.is_empty() {
+        out.push_str(&format!("\n  Blocks: {}", task.blocks.join(", ")));
+    }
+    if !task.blocked_by.is_empty() {
+        out.push_str(&format!("\n  Blocked by: {}", task.blocked_by.join(", ")));
     }
     out
 }
@@ -371,10 +511,21 @@ fn parse_status(s: &str) -> Option<TeamTaskStatus> {
 }
 
 /// Apply an `update` to a task in place: set the status if provided,
-/// and append a (trimmed, non-empty) note if provided.
-fn update_task(task: &mut TeamTask, new_status: Option<TeamTaskStatus>, notes: Option<&str>) {
+/// set the owner if provided, and append a (trimmed, non-empty) note if
+/// provided. `owner = Some("")` clears the owner (so the caller can
+/// unset it); `owner = None` leaves it untouched.
+fn update_task(
+    task: &mut TeamTask,
+    new_status: Option<TeamTaskStatus>,
+    notes: Option<&str>,
+    owner: Option<&str>,
+) {
     if let Some(status) = new_status {
         task.status = status;
+    }
+    if let Some(owner) = owner {
+        let owner = owner.trim();
+        task.owner = if owner.is_empty() { None } else { Some(owner.to_string()) };
     }
     if let Some(note) = notes {
         let note = note.trim();
@@ -382,6 +533,48 @@ fn update_task(task: &mut TeamTask, new_status: Option<TeamTaskStatus>, notes: O
             task.notes.push(note.to_string());
         }
     }
+}
+
+/// Add `blocks`/`blocked_by` edges to a task, deduping against the
+/// existing lists and dropping self-edges (a task blocking itself can
+/// never become ready). The reciprocal entry on the other task is NOT
+/// added — the graph is directed and the caller owns both ends.
+fn link_task(task: &mut TeamTask, blocks: &[String], blocked_by: &[String]) {
+    fn add_unique(dst: &mut Vec<String>, src: &[String], self_id: &str) {
+        for id in src {
+            let id = id.trim();
+            if id.is_empty() || id == self_id {
+                continue;
+            }
+            if !dst.iter().any(|e| e == id) {
+                dst.push(id.to_string());
+            }
+        }
+    }
+    add_unique(&mut task.blocks, blocks, &task.id);
+    add_unique(&mut task.blocked_by, blocked_by, &task.id);
+}
+
+/// True if the task has any dependency edges (either direction). Used
+/// to decide whether to show the `· ready`/`· blocked` marker — flat
+/// tasks (no edges) omit it, keeping the common case free of graph
+/// noise.
+fn has_edges(task: &TeamTask) -> bool {
+    !task.blocks.is_empty() || !task.blocked_by.is_empty()
+}
+
+/// A task is **ready** when every id in `blocked_by` refers to a
+/// `Completed` task. Stale ids (no matching task) count as satisfied
+/// — a typo or a deleted dependency shouldn't pin a task forever.
+/// A task with no `blocked_by` is always ready.
+fn is_ready(task: &TeamTask, all: &[TeamTask]) -> bool {
+    task.blocked_by.iter().all(|dep| {
+        match all.iter().find(|t| &t.id == dep) {
+            Some(t) => t.status == TeamTaskStatus::Completed,
+            // Stale id → treat as satisfied.
+            None => true,
+        }
+    })
 }
 
 /// Claim a task: set yourself as the assignee and mark it active.
@@ -414,6 +607,10 @@ fn err_output(msg: &str) -> ToolExecution {
 mod tests {
     use super::*;
 
+    fn tool(dir: &std::path::Path) -> TeamTaskTool {
+        TeamTaskTool::new(dir.to_path_buf(), "alice".to_string())
+    }
+
     fn task(
         id: &str,
         title: &str,
@@ -427,6 +624,29 @@ mod tests {
             assignee: assignee.map(|s| s.to_string()),
             status,
             notes: notes.iter().map(|s| s.to_string()).collect(),
+            blocks: Vec::new(),
+            blocked_by: Vec::new(),
+            owner: None,
+        }
+    }
+
+    /// Build a task with edges for the graph tests.
+    fn task_with_edges(
+        id: &str,
+        title: &str,
+        status: TeamTaskStatus,
+        blocks: Vec<&str>,
+        blocked_by: Vec<&str>,
+    ) -> TeamTask {
+        TeamTask {
+            id: id.to_string(),
+            title: title.to_string(),
+            assignee: None,
+            status,
+            notes: Vec::new(),
+            blocks: blocks.iter().map(|s| s.to_string()).collect(),
+            blocked_by: blocked_by.iter().map(|s| s.to_string()).collect(),
+            owner: None,
         }
     }
 
@@ -543,7 +763,7 @@ mod tests {
     #[test]
     fn update_task_changes_status() {
         let mut t = task("t1", "X", None, TeamTaskStatus::Pending, vec![]);
-        update_task(&mut t, Some(TeamTaskStatus::Completed), None);
+        update_task(&mut t, Some(TeamTaskStatus::Completed), None, None);
         assert_eq!(t.status, TeamTaskStatus::Completed);
         assert!(t.notes.is_empty(), "no notes should be appended");
     }
@@ -551,7 +771,7 @@ mod tests {
     #[test]
     fn update_task_appends_note() {
         let mut t = task("t1", "X", None, TeamTaskStatus::Pending, vec!["prior"]);
-        update_task(&mut t, None, Some("hit a snag"));
+        update_task(&mut t, None, Some("hit a snag"), None);
         assert_eq!(t.status, TeamTaskStatus::Pending, "status unchanged");
         assert_eq!(t.notes, vec!["prior".to_string(), "hit a snag".to_string()]);
     }
@@ -563,6 +783,7 @@ mod tests {
             &mut t,
             Some(TeamTaskStatus::Blocked),
             Some("waiting on API"),
+            None,
         );
         assert_eq!(t.status, TeamTaskStatus::Blocked);
         assert_eq!(t.notes, vec!["waiting on API".to_string()]);
@@ -571,8 +792,30 @@ mod tests {
     #[test]
     fn update_task_ignores_empty_note() {
         let mut t = task("t1", "X", None, TeamTaskStatus::Pending, vec![]);
-        update_task(&mut t, None, Some("   "));
+        update_task(&mut t, None, Some("   "), None);
         assert!(t.notes.is_empty(), "whitespace-only note was appended");
+    }
+
+    #[test]
+    fn update_task_sets_owner() {
+        let mut t = task("t1", "X", None, TeamTaskStatus::Pending, vec![]);
+        update_task(&mut t, None, None, Some("alice"));
+        assert_eq!(t.owner.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn update_task_clears_owner_with_empty_string() {
+        let mut t = task("t1", "X", None, TeamTaskStatus::Pending, vec![]);
+        update_task(&mut t, None, None, Some("alice"));
+        update_task(&mut t, None, None, Some(""));
+        assert!(t.owner.is_none(), "empty owner string should clear owner");
+    }
+
+    #[test]
+    fn update_task_ignores_whitespace_owner() {
+        let mut t = task("t1", "X", None, TeamTaskStatus::Pending, vec![]);
+        update_task(&mut t, None, None, Some("   "));
+        assert!(t.owner.is_none(), "whitespace-only owner should clear");
     }
 
     // ---- claim_task ----
@@ -604,7 +847,7 @@ mod tests {
             TeamTaskStatus::Active,
             vec!["one", "two"],
         );
-        let out = render_task(&t);
+        let out = render_task(&t, std::slice::from_ref(&t));
         assert!(
             out.contains("  [active]    t1: X — assigned to alice"),
             "line: {out}"
@@ -612,5 +855,282 @@ mod tests {
         assert!(out.contains("  Notes:"), "notes header missing: {out}");
         assert!(out.contains("    - one"), "note one missing: {out}");
         assert!(out.contains("    - two"), "note two missing: {out}");
+    }
+
+    // ---- link_task / is_ready / render markers (M5/#19) ----
+
+    #[test]
+    fn link_task_adds_blocks_and_blocked_by_dedup() {
+        let mut t = task_with_edges("t1", "X", TeamTaskStatus::Pending, vec![], vec![]);
+        link_task(&mut t, &["t2".to_string(), "t3".to_string()], &["t4".to_string()]);
+        assert_eq!(t.blocks, vec!["t2".to_string(), "t3".to_string()]);
+        assert_eq!(t.blocked_by, vec!["t4".to_string()]);
+        // Dedup: re-adding an existing edge is a no-op.
+        link_task(&mut t, &["t2".to_string()], &[]);
+        assert_eq!(t.blocks, vec!["t2".to_string(), "t3".to_string()]);
+    }
+
+    #[test]
+    fn link_task_drops_self_edge() {
+        let mut t = task_with_edges("t1", "X", TeamTaskStatus::Pending, vec![], vec![]);
+        // A task blocking itself can never become ready — drop it.
+        link_task(&mut t, &["t1".to_string()], &["t1".to_string()]);
+        assert!(t.blocks.is_empty(), "self-edge added to blocks");
+        assert!(t.blocked_by.is_empty(), "self-edge added to blocked_by");
+    }
+
+    #[test]
+    fn link_task_trims_and_ignores_empty_ids() {
+        let mut t = task_with_edges("t1", "X", TeamTaskStatus::Pending, vec![], vec![]);
+        link_task(&mut t, &["  t2 ".to_string(), "".to_string()], &[]);
+        assert_eq!(t.blocks, vec!["t2".to_string()]);
+    }
+
+    #[test]
+    fn is_ready_when_no_deps() {
+        let t = task_with_edges("t1", "X", TeamTaskStatus::Pending, vec![], vec![]);
+        assert!(is_ready(&t, &[]));
+    }
+
+    #[test]
+    fn is_ready_when_all_deps_completed() {
+        let tasks = vec![
+            task_with_edges("t1", "A", TeamTaskStatus::Pending, vec![], vec!["t2", "t3"]),
+            task("t2", "B", None, TeamTaskStatus::Completed, vec![]),
+            task("t3", "C", None, TeamTaskStatus::Completed, vec![]),
+        ];
+        assert!(is_ready(&tasks[0], &tasks));
+    }
+
+    #[test]
+    fn is_blocked_when_a_dep_is_not_completed() {
+        let tasks = vec![
+            task_with_edges("t1", "A", TeamTaskStatus::Pending, vec![], vec!["t2"]),
+            task("t2", "B", None, TeamTaskStatus::Active, vec![]),
+        ];
+        assert!(!is_ready(&tasks[0], &tasks));
+    }
+
+    #[test]
+    fn is_ready_treats_stale_dep_as_satisfied() {
+        // A typo or deleted dependency shouldn't pin a task forever.
+        let t = task_with_edges("t1", "A", TeamTaskStatus::Pending, vec![], vec!["ghost"]);
+        assert!(is_ready(&t, std::slice::from_ref(&t)));
+    }
+
+    #[test]
+    fn render_task_line_shows_ready_for_unblocked_edged_task() {
+        let tasks = vec![
+            task_with_edges("t1", "A", TeamTaskStatus::Pending, vec!["t2"], vec![]),
+            task_with_edges("t2", "B", TeamTaskStatus::Completed, vec![], vec![]),
+        ];
+        // t2 completed → t1 (blocked_by none) is ready. t1 has edges so
+        // the marker shows.
+        let line = render_task_line(&tasks[0], &tasks);
+        assert!(line.contains("· ready"), "ready marker missing: {line}");
+    }
+
+    #[test]
+    fn render_task_line_shows_blocked_when_dep_pending() {
+        let tasks = vec![
+            task_with_edges("t1", "A", TeamTaskStatus::Pending, vec![], vec!["t2"]),
+            task("t2", "B", None, TeamTaskStatus::Pending, vec![]),
+        ];
+        let line = render_task_line(&tasks[0], &tasks);
+        assert!(line.contains("· blocked"), "blocked marker missing: {line}");
+    }
+
+    #[test]
+    fn render_task_line_omits_marker_for_flat_task() {
+        // No edges → no marker (no graph noise for the common case).
+        let t = task("t1", "A", Some("alice"), TeamTaskStatus::Active, vec![]);
+        let line = render_task_line(&t, std::slice::from_ref(&t));
+        assert!(!line.contains("· ready"), "flat task showed ready: {line}");
+        assert!(!line.contains("· blocked"), "flat task showed blocked: {line}");
+    }
+
+    #[test]
+    fn render_task_line_shows_owner_when_distinct_from_assignee() {
+        let mut t = task("t1", "A", Some("alice"), TeamTaskStatus::Active, vec![]);
+        t.owner = Some("bob".to_string());
+        let line = render_task_line(&t, std::slice::from_ref(&t));
+        assert!(line.contains("· owner bob"), "owner marker missing: {line}");
+    }
+
+    #[test]
+    fn render_task_line_omits_owner_when_assignee_matches() {
+        let mut t = task("t1", "A", Some("alice"), TeamTaskStatus::Active, vec![]);
+        t.owner = Some("alice".to_string());
+        let line = render_task_line(&t, std::slice::from_ref(&t));
+        assert!(!line.contains("· owner"), "redundant owner shown: {line}");
+    }
+
+    #[test]
+    fn render_task_lists_edges_in_detail() {
+        let t = task_with_edges("t1", "A", TeamTaskStatus::Pending, vec!["t2"], vec!["t3"]);
+        let out = render_task(&t, std::slice::from_ref(&t));
+        assert!(out.contains("Blocks: t2"), "blocks line missing: {out}");
+        assert!(out.contains("Blocked by: t3"), "blocked_by line missing: {out}");
+    }
+
+    #[test]
+    fn team_task_round_trips_through_jsonl_with_edges() {
+        // Old JSONL (pre-#19) must still deserialize; new fields default.
+        let old_line = r#"{"id":"t1","title":"X","assignee":"a","status":"pending","notes":[]}"#;
+        let t: TeamTask = serde_json::from_str(old_line).unwrap();
+        assert!(t.blocks.is_empty());
+        assert!(t.blocked_by.is_empty());
+        assert!(t.owner.is_none());
+        // Round-trip with edges set.
+        let mut t = t;
+        t.blocks = vec!["t2".to_string()];
+        t.blocked_by = vec!["t3".to_string()];
+        t.owner = Some("bob".to_string());
+        let s = serde_json::to_string(&t).unwrap();
+        let back: TeamTask = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.blocks, vec!["t2".to_string()]);
+        assert_eq!(back.blocked_by, vec!["t3".to_string()]);
+        assert_eq!(back.owner.as_deref(), Some("bob"));
+    }
+
+    // ---- tool-level (link action via execute) ----
+
+    fn run<F, Fut>(f: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        asupersync::test_utils::run_test(f);
+    }
+
+    fn seed(dir: &std::path::Path, tasks: &[TeamTask]) {
+        let path = dir.join("tasks.jsonl");
+        let mut out = String::new();
+        for t in tasks {
+            out.push_str(&serde_json::to_string(t).unwrap());
+            out.push('\n');
+        }
+        std::fs::write(&path, out).unwrap();
+    }
+
+    fn done_text(exec: ToolExecution) -> String {
+        match exec {
+            ToolExecution::Done(out) => {
+                assert!(!out.is_error, "unexpected error output");
+                match out.content.first() {
+                    Some(ContentBlock::Text(t)) => t.text.clone(),
+                    _ => panic!("no text content"),
+                }
+            }
+            _ => panic!("expected Done"),
+        }
+    }
+
+    fn err_text(exec: ToolExecution) -> String {
+        match exec {
+            ToolExecution::Done(out) => {
+                assert!(out.is_error, "expected error output");
+                match out.content.first() {
+                    Some(ContentBlock::Text(t)) => t.text.clone(),
+                    _ => panic!("no text content"),
+                }
+            }
+            _ => panic!("expected Done"),
+        }
+    }
+
+    #[test]
+    fn link_action_adds_blocked_by_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(
+            dir.path(),
+            &[
+                task("t1", "A", None, TeamTaskStatus::Pending, vec![]),
+                task("t2", "B", None, TeamTaskStatus::Pending, vec![]),
+            ],
+        );
+        run(|| async {
+            let t = tool(dir.path());
+            let exec = t
+                .execute(
+                    "c1",
+                    serde_json::json!({
+                        "action": "link",
+                        "task_id": "t1",
+                        "blocked_by": ["t2"],
+                    }),
+                    None,
+                )
+                .await
+                .unwrap();
+            let text = done_text(exec);
+            assert!(text.contains("Blocked by: t2"), "edges missing: {text}");
+            // Persisted to disk.
+            let on_disk = std::fs::read_to_string(dir.path().join("tasks.jsonl")).unwrap();
+            assert!(on_disk.contains(r#""blocked_by":["t2"]"#), "not persisted: {on_disk}");
+        });
+    }
+
+    #[test]
+    fn link_action_rejects_unknown_task_id() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path(), &[task("t1", "A", None, TeamTaskStatus::Pending, vec![])]);
+        run(|| async {
+            let t = tool(dir.path());
+            let exec = t
+                .execute(
+                    "c1",
+                    serde_json::json!({
+                        "action": "link",
+                        "task_id": "t1",
+                        "blocked_by": ["ghost"],
+                    }),
+                    None,
+                )
+                .await
+                .unwrap();
+            let text = err_text(exec);
+            assert!(text.contains("unknown task id"), "wrong error: {text}");
+        });
+    }
+
+    #[test]
+    fn link_action_requires_at_least_one_edge() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path(), &[task("t1", "A", None, TeamTaskStatus::Pending, vec![])]);
+        run(|| async {
+            let t = tool(dir.path());
+            let exec = t
+                .execute(
+                    "c1",
+                    serde_json::json!({ "action": "link", "task_id": "t1" }),
+                    None,
+                )
+                .await
+                .unwrap();
+            let text = err_text(exec);
+            assert!(text.contains("at least one"), "wrong error: {text}");
+        });
+    }
+
+    #[test]
+    fn list_action_shows_ready_marker_for_unblocked_task() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(
+            dir.path(),
+            &[
+                task_with_edges("t1", "A", TeamTaskStatus::Pending, vec![], vec!["t2"]),
+                task("t2", "B", None, TeamTaskStatus::Completed, vec![]),
+            ],
+        );
+        run(|| async {
+            let t = tool(dir.path());
+            let exec = t
+                .execute("c1", serde_json::json!({ "action": "list" }), None)
+                .await
+                .unwrap();
+            let text = done_text(exec);
+            assert!(text.contains("· ready"), "ready marker missing: {text}");
+        });
     }
 }

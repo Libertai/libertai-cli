@@ -321,6 +321,11 @@ pub fn init_team_tasks(team_name: &str, manifest: &TeamManifest, cwd: &Path) -> 
             assignee: Some(t.name.clone()),
             status: TeamTaskStatus::Pending,
             notes: Vec::new(),
+            // (M5/#19) no dependency edges at team-init time; teammates
+            // add them later via `team_task` `link`.
+            blocks: Vec::new(),
+            blocked_by: Vec::new(),
+            owner: None,
         };
         let line = serde_json::to_string(&task)
             .with_context(|| format!("serializing task for `{}`", t.name))?;
