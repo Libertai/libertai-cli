@@ -5,7 +5,11 @@
 use anyhow::Result;
 use chrono::{DateTime, Local, Utc};
 
-use crate::client::{get_subscription, refresh_session, Subscription};
+use std::io::IsTerminal;
+
+use crate::client::{
+    get_subscription, refresh_session, ClassifiedError, ErrorClass, Subscription, TokenPair,
+};
 use crate::commands::login::{browser_sso_access_token, open_url};
 use crate::commands::output::Styler;
 use crate::config::{self, Config};
@@ -42,6 +46,14 @@ fn acquire_access_token(cfg: &mut Config) -> Result<String> {
         }
     }
 
+    // Fix 2: fail fast in non-interactive/CI contexts instead of hanging up to 5min.
+    if !std::io::stderr().is_terminal() {
+        return Err(ClassifiedError::classified(
+            ErrorClass::Auth,
+            "not logged in (no active session) — run `libertai login` to sign in",
+        ));
+    }
+
     let st = Styler::stderr();
     eprintln!(
         "{} Checking usage needs a quick sign-in confirmation in your browser.",
@@ -52,9 +64,14 @@ fn acquire_access_token(cfg: &mut Config) -> Result<String> {
         eprintln!("If it doesn't open, visit:\n  {url}");
         let _ = open_url(url);
     })?;
-    cfg.auth.refresh_token = Some(pair.refresh_token.clone());
+    // Fix 5: destructure instead of clone.
+    let TokenPair {
+        access_token,
+        refresh_token,
+    } = pair;
+    cfg.auth.refresh_token = Some(refresh_token);
     config::save(cfg)?;
-    Ok(pair.access_token)
+    Ok(access_token)
 }
 
 fn percent(used: Option<f64>, limit: Option<f64>) -> u32 {
@@ -64,11 +81,15 @@ fn percent(used: Option<f64>, limit: Option<f64>) -> u32 {
     }
 }
 
-/// 12-cell bar colored by usage: >=90% red, >=75% amber(yellow), else green.
+/// 16-cell bar colored by usage: >=90% red, >=75% amber(yellow), else green.
 fn bar(pct: u32, st: &Styler) -> String {
     const WIDTH: u32 = 16;
     let filled = (pct * WIDTH / 100).min(WIDTH);
-    let s = format!("{}{}", "█".repeat(filled as usize), "░".repeat((WIDTH - filled) as usize));
+    let s = format!(
+        "{}{}",
+        "█".repeat(filled as usize),
+        "░".repeat((WIDTH - filled) as usize)
+    );
     if pct >= 90 {
         st.red(&s)
     } else if pct >= 75 {
@@ -78,9 +99,34 @@ fn bar(pct: u32, st: &Styler) -> String {
     }
 }
 
+/// Format an integer with comma grouping, e.g. 1040 → "1,040", 999 → "999".
+fn group_thousands(n: i64) -> String {
+    let digits = n.abs().to_string();
+    let grouped: String = digits
+        .chars()
+        .rev()
+        .enumerate()
+        .flat_map(|(i, c)| {
+            if i > 0 && i % 3 == 0 {
+                Some(',').into_iter().chain(Some(c))
+            } else {
+                None.into_iter().chain(Some(c))
+            }
+        })
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if n < 0 {
+        format!("-{grouped}")
+    } else {
+        grouped
+    }
+}
+
 fn amount(v: Option<f64>) -> String {
-    // Allowance units are whole-ish; show no decimals, thousands unseparated.
-    format!("{}", v.unwrap_or(0.0).round() as i64)
+    // Allowance units are whole-ish; show no decimals, with thousands separators.
+    group_thousands(v.unwrap_or(0.0).round() as i64)
 }
 
 fn money(v: Option<f64>) -> String {
@@ -89,26 +135,39 @@ fn money(v: Option<f64>) -> String {
 
 /// Relative reset for the short window, e.g. "Resets in 1h 2m" / "Resets in 5m".
 fn reset_in_label(resets_at: Option<&str>, now: DateTime<Utc>) -> String {
-    let Some(ts) = resets_at else { return String::new() };
-    let Ok(reset) = DateTime::parse_from_rfc3339(ts) else { return String::new() };
+    let Some(ts) = resets_at else {
+        return String::new();
+    };
+    let Ok(reset) = DateTime::parse_from_rfc3339(ts) else {
+        return String::new();
+    };
     let diff = reset.with_timezone(&Utc) - now;
-    let mins = diff.num_minutes();
-    if mins <= 0 {
+    if diff.num_seconds() <= 0 {
         return "Resets now".to_string();
     }
+    let mins = diff.num_minutes();
     let (h, m) = (mins / 60, mins % 60);
     if h >= 1 {
         format!("Resets in {h}h {m}m")
     } else {
+        // Sub-hour: show at least 1m so "45s away" reads "Resets in 1m" not "0m".
+        let m = mins.max(1);
         format!("Resets in {m}m")
     }
 }
 
 /// Absolute reset for the weekly window, e.g. "Resets Sun 4:59 PM" (local).
 fn reset_at_label(resets_at: Option<&str>) -> String {
-    let Some(ts) = resets_at else { return String::new() };
-    let Ok(reset) = DateTime::parse_from_rfc3339(ts) else { return String::new() };
-    format!("Resets {}", reset.with_timezone(&Local).format("%a %-I:%M %p"))
+    let Some(ts) = resets_at else {
+        return String::new();
+    };
+    let Ok(reset) = DateTime::parse_from_rfc3339(ts) else {
+        return String::new();
+    };
+    format!(
+        "Resets {}",
+        reset.with_timezone(&Local).format("%a %-I:%M %p")
+    )
 }
 
 fn print_human(sub: &Subscription, now: DateTime<Utc>) {
@@ -156,7 +215,7 @@ mod tests {
     fn percent_clamps_and_handles_zero_limit() {
         assert_eq!(percent(Some(50.0), Some(200.0)), 25);
         assert_eq!(percent(Some(300.0), Some(200.0)), 100); // clamp
-        assert_eq!(percent(Some(10.0), Some(0.0)), 0);       // no limit
+        assert_eq!(percent(Some(10.0), Some(0.0)), 0); // no limit
         assert_eq!(percent(None, Some(200.0)), 0);
     }
 
@@ -170,6 +229,27 @@ mod tests {
         let past = "2026-06-29T11:00:00Z";
         assert_eq!(reset_in_label(Some(past), now), "Resets now");
         assert_eq!(reset_in_label(None, now), "");
+    }
+
+    #[test]
+    fn reset_in_label_sub_minute_shows_1m() {
+        // 45 seconds ahead: num_minutes() floors to 0, but we clamp to 1.
+        let now = Utc.with_ymd_and_hms(2026, 6, 29, 12, 0, 0).unwrap();
+        let in_45s = "2026-06-29T12:00:45Z";
+        assert_eq!(reset_in_label(Some(in_45s), now), "Resets in 1m");
+        // Exactly now (0 seconds) → "Resets now".
+        let exact = "2026-06-29T12:00:00Z";
+        assert_eq!(reset_in_label(Some(exact), now), "Resets now");
+    }
+
+    #[test]
+    fn amount_formats_with_commas() {
+        assert_eq!(amount(Some(1040.0)), "1,040");
+        assert_eq!(amount(Some(2000.0)), "2,000");
+        assert_eq!(amount(Some(999.0)), "999");
+        assert_eq!(amount(Some(0.0)), "0");
+        assert_eq!(amount(None), "0");
+        assert_eq!(amount(Some(1_000_000.0)), "1,000,000");
     }
 
     #[test]
