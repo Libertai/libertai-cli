@@ -12,6 +12,17 @@ pub fn run(json: bool) -> Result<()> {
     Ok(())
 }
 
+fn auth_json(cfg: &Config) -> serde_json::Value {
+    serde_json::json!({
+        "logged_in": cfg.auth.api_key.is_some(),
+        "has_session": cfg.auth.refresh_token.is_some(),
+        "api_key_masked": cfg.auth.api_key.as_deref().map(mask_key),
+        "expires_at": cfg.auth.expires_at,
+        "wallet_address": cfg.auth.wallet_address,
+        "chain": cfg.auth.chain,
+    })
+}
+
 /// Machine-readable status: auth state, base URLs, defaults. Goes to
 /// stdout with nothing else; field names are part of the CLI contract.
 fn print_json(cfg: &Config) -> Result<()> {
@@ -30,13 +41,7 @@ fn print_json(cfg: &Config) -> Result<()> {
                 "haiku": cfg.launcher_defaults.haiku_model,
             },
         },
-        "auth": {
-            "logged_in": cfg.auth.api_key.is_some(),
-            "api_key_masked": cfg.auth.api_key.as_deref().map(mask_key),
-            "expires_at": cfg.auth.expires_at,
-            "wallet_address": cfg.auth.wallet_address,
-            "chain": cfg.auth.chain,
-        },
+        "auth": auth_json(cfg),
     });
     println!(
         "{}",
@@ -160,6 +165,15 @@ fn print_human(cfg: &Config) {
         Some(k) => println!("  {:<22} {}", st.dimmed("Auth:"), st.green(&mask_key(k))),
         None => println!("  {:<22} {}", st.dimmed("Auth:"), st.red("not logged in")),
     }
+    println!(
+        "  {:<22} {}",
+        st.dimmed("Session:"),
+        if cfg.auth.refresh_token.is_some() {
+            st.green("active")
+        } else {
+            st.dimmed("none (browser sign-in needed for usage)")
+        }
+    );
 
     if let Some(exp) = cfg.auth.expires_at.as_deref() {
         let date = exp.split('T').next().unwrap_or(exp);
@@ -200,6 +214,17 @@ fn runnable_hook_count(hooks: &[crate::config::HookCommandConfig]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_reports_session_presence() {
+        let mut cfg = crate::config::Config::default();
+        cfg.auth.refresh_token = Some("rtok".into());
+        let v = super::auth_json(&cfg);
+        assert_eq!(v["has_session"], true);
+        cfg.auth.refresh_token = None;
+        let v = super::auth_json(&cfg);
+        assert_eq!(v["has_session"], false);
+    }
 
     #[test]
     fn runnable_hook_count_includes_native_handler_types() {
