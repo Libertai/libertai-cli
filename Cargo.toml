@@ -46,7 +46,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # `libertai completions <shell>` + hidden `libertai man` — both generated
 # from the same `Cli` derive and printed to stdout for packaging to capture.
 clap_complete = "4"
-clap_mangen = "0.2"
+clap_mangen = "0.3"
 # Hostname for the per-device API key label minted at login. The libc
 # gethostname(2) wrapper works on minimal containers and Windows, unlike
 # shelling out to a `hostname` binary.
