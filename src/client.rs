@@ -415,7 +415,8 @@ pub fn exchange_code(cfg: &Config, code: &str, verifier: &str) -> Result<TokenPa
         .send()
         .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
     let resp = check_status(resp, &url)?;
-    resp.json::<TokenPair>().context("parsing /auth/exchange response")
+    resp.json::<TokenPair>()
+        .context("parsing /auth/exchange response")
 }
 
 /// Mint (or rotate) this device's CLI API key, authenticating with the session token.
@@ -528,7 +529,8 @@ pub fn refresh_session(cfg: &Config, refresh_token: &str) -> Result<TokenPair> {
         .send()
         .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
     let resp = check_status(resp, &url)?;
-    resp.json::<TokenPair>().context("parsing /auth/refresh response")
+    resp.json::<TokenPair>()
+        .context("parsing /auth/refresh response")
 }
 
 /// Best-effort server-side session revocation (used by logout).
@@ -572,14 +574,18 @@ pub struct Subscription {
 /// Fetch the caller's subscription + allowance snapshot. Needs a session JWT
 /// (the `LTAI_` inference key cannot authenticate this endpoint).
 pub fn get_subscription(cfg: &Config, access_token: &str) -> Result<Subscription> {
-    let url = format!("{}/payments/subscription", cfg.account_base.trim_end_matches('/'));
+    let url = format!(
+        "{}/payments/subscription",
+        cfg.account_base.trim_end_matches('/')
+    );
     let resp = http(cfg)?
         .get(&url)
         .bearer_auth(access_token)
         .send()
         .map_err(|e| annotate_send_err(e, format!("GET {url}"), Some(cfg.http_timeout_secs)))?;
     let resp = check_status(resp, &url)?;
-    resp.json::<Subscription>().context("parsing /payments/subscription response")
+    resp.json::<Subscription>()
+        .context("parsing /payments/subscription response")
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
