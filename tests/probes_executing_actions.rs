@@ -1,23 +1,30 @@
-//! S1-C probe — verifies the expanded "Executing actions with care"
-//! block in `libertai-harness` reaches the assembled system prompt.
-//! Asserts presence of distinguishing phrases from parity-doc section B.
+//! S1-C probe — verifies the `libertai-harness` skill (which carries the
+//! "Executing actions with care" guardrails) is advertised in the assembled
+//! system prompt.
+//!
+//! Since `feat(M5/#7): Skill tool + latent skill registry`, skill *bodies* no
+//! longer live in the base prompt — the prompt surfaces a latent registry
+//! (name + description) and the model loads a body on demand via the `skill`
+//! tool. So this probe asserts the harness is present in that registry, not
+//! that its body text is inlined.
 
 use assert_cmd::Command;
 
 mod common;
 
 const REQUIRED_PHRASES: &[&str] = &[
-    "Executing actions with care",
-    "blast radius",
-    "reversibility",
-    "hard-to-reverse",
-    "third-party uploads",
-    "scope of authorization",
-    "investigate before deleting",
+    // The latent-registry header…
+    "## Available Agent Skills",
+    // …lists the harness skill by name…
+    "### libertai-harness",
+    // …with its description (mentions the execution-caution posture)…
+    "execution caution",
+    // …and tells the model to pull a body via the skill tool.
+    "skill` tool",
 ];
 
 #[test]
-fn executing_actions_block_reaches_assembled_prompt() {
+fn harness_skill_is_advertised_in_latent_registry() {
     let config_home = common::fake_config_home();
     let assert = Command::cargo_bin("libertai")
         .expect("libertai binary built")
