@@ -155,7 +155,10 @@ impl Tool for SendMessageTool {
         };
         let dir = mailbox_dir_for(&self.team_dir, to);
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            return Ok(err_output(&format!("create mailbox dir {}: {e}", dir.display())));
+            return Ok(err_output(&format!(
+                "create mailbox dir {}: {e}",
+                dir.display()
+            )));
         }
         if let Err(e) = write_message(&dir, &msg) {
             return Ok(err_output(&format!("write message: {e}")));

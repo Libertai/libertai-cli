@@ -284,7 +284,11 @@ fn ymd_from_days(days: i64) -> (u8, u8) {
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
     let mp = (5 * doy + 2) / 153; // [0, 11]
     let d = (doy - (153 * mp + 2) / 5 + 1) as u8; // [1, 31]
-    let m = if mp < 10 { (mp + 3) as u8 } else { (mp - 9) as u8 }; // [1, 12]
+    let m = if mp < 10 {
+        (mp + 3) as u8
+    } else {
+        (mp - 9) as u8
+    }; // [1, 12]
     (m, d)
 }
 
@@ -323,16 +327,21 @@ impl CronStore {
     /// Add a job. Validates the cron expression + computes the first
     /// `next_fire_ms` at/after now. Returns the stored job on success,
     /// or an error string (model-facing) on a bad expression / prompt.
-    pub(crate) fn create(&self, cron: &str, prompt: &str, recurring: bool) -> Result<CronJob, String> {
+    pub(crate) fn create(
+        &self,
+        cron: &str,
+        prompt: &str,
+        recurring: bool,
+    ) -> Result<CronJob, String> {
         let prompt = prompt.trim();
         if prompt.is_empty() {
             return Err("`cron_create` requires a non-empty `prompt`".to_string());
         }
         let expr = CronExpr::parse(cron)?;
         let now = now_epoch_ms();
-        let next = expr.next_fire_ms(now).ok_or_else(|| {
-            format!("cron expression `{cron}` never fires within the next year")
-        })?;
+        let next = expr
+            .next_fire_ms(now)
+            .ok_or_else(|| format!("cron expression `{cron}` never fires within the next year"))?;
         let job = CronJob {
             id: format!("cron-{}", short_uuid()),
             cron: cron.trim().to_string(),
@@ -341,7 +350,10 @@ impl CronStore {
             next_fire_ms: next,
             created_ms: now,
         };
-        self.jobs.lock().expect("cron store poisoned").push(job.clone());
+        self.jobs
+            .lock()
+            .expect("cron store poisoned")
+            .push(job.clone());
         Ok(job)
     }
 
@@ -489,7 +501,10 @@ impl Tool for CronCreateTool {
             Ok(v) => v,
             Err(e) => return Ok(err(&format!("invalid `cron_create` payload: {e}"))),
         };
-        match self.store.create(&parsed.cron, &parsed.prompt, parsed.recurring) {
+        match self
+            .store
+            .create(&parsed.cron, &parsed.prompt, parsed.recurring)
+        {
             Ok(job) => Ok(text(&format!(
                 "Scheduled{}: {} — next fire at epoch-ms {}",
                 if parsed.recurring { " (recurring)" } else { "" },
@@ -558,7 +573,12 @@ impl Tool for CronListTool {
         for j in jobs {
             out.push_str(&format!(
                 "- {} `{}` {} next={} created={} : {}\n",
-                j.id, j.cron, if j.recurring { "recurring" } else { "one-shot" }, j.next_fire_ms, j.created_ms, j.prompt,
+                j.id,
+                j.cron,
+                if j.recurring { "recurring" } else { "one-shot" },
+                j.next_fire_ms,
+                j.created_ms,
+                j.prompt,
             ));
         }
         Ok(text(out.trim_end()))
@@ -630,7 +650,10 @@ impl Tool for CronDeleteTool {
         if self.store.delete(&parsed.id) {
             Ok(text(&format!("Cancelled {}", parsed.id.trim())))
         } else {
-            Ok(err(&format!("no scheduled prompt with id `{}`", parsed.id.trim())))
+            Ok(err(&format!(
+                "no scheduled prompt with id `{}`",
+                parsed.id.trim()
+            )))
         }
     }
     fn is_read_only(&self) -> bool {
@@ -904,9 +927,12 @@ mod tests {
         let list = || CronListTool::new(Arc::clone(&store));
         let delete = || CronDeleteTool::new(Arc::clone(&store));
 
-        let (err, txt) = exec(create(), serde_json::json!({
-            "cron": "*/5 * * * *", "prompt": "check CI"
-        }));
+        let (err, txt) = exec(
+            create(),
+            serde_json::json!({
+                "cron": "*/5 * * * *", "prompt": "check CI"
+            }),
+        );
         assert!(!err, "{txt}");
         assert!(txt.contains("Scheduled"), "{txt}");
         // Grab the id from the list.
@@ -937,9 +963,12 @@ mod tests {
     fn cron_create_tool_rejects_bad_expr() {
         let store = Arc::new(CronStore::new());
         let create = CronCreateTool::new(store);
-        let (err, _txt) = exec(create, serde_json::json!({
-            "cron": "garbage", "prompt": "x"
-        }));
+        let (err, _txt) = exec(
+            create,
+            serde_json::json!({
+                "cron": "garbage", "prompt": "x"
+            }),
+        );
         assert!(err);
     }
 

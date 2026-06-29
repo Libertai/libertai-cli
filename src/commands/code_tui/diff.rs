@@ -108,9 +108,14 @@ pub fn parse_diff(diff: &str) -> Vec<Line<'static>> {
             continue;
         }
         // `index 111..222 100644` — git metadata line, dim.
-        if raw.starts_with("index ") || raw.starts_with("similarity ") || raw.starts_with("rename ")
-            || raw.starts_with("copy ") || raw.starts_with("new file ") || raw.starts_with("deleted file ")
-            || raw.starts_with("old mode ") || raw.starts_with("new mode ")
+        if raw.starts_with("index ")
+            || raw.starts_with("similarity ")
+            || raw.starts_with("rename ")
+            || raw.starts_with("copy ")
+            || raw.starts_with("new file ")
+            || raw.starts_with("deleted file ")
+            || raw.starts_with("old mode ")
+            || raw.starts_with("new mode ")
         {
             lines.push(Line::from(Span::styled(raw.to_string(), muted)));
             continue;
@@ -214,7 +219,11 @@ fn format_gutter_num(n: Option<u64>) -> String {
 
 /// Format the `+N/-N` file-summary line.
 fn format_counts(added: u64, removed: u64) -> String {
-    format!("{added} insertion{pl_a} / {removed} deletion{pl_r}", pl_a = if added == 1 { "" } else { "s" }, pl_r = if removed == 1 { "" } else { "s" })
+    format!(
+        "{added} insertion{pl_a} / {removed} deletion{pl_r}",
+        pl_a = if added == 1 { "" } else { "s" },
+        pl_r = if removed == 1 { "" } else { "s" }
+    )
 }
 
 /// Extract the language hint from a `+++ b/<path>` line, returning the path

@@ -94,9 +94,10 @@ impl Tool for SkillTool {
         let parsed: SkillInput = match serde_json::from_value(input) {
             Ok(v) => v,
             Err(e) => {
-                return Ok(unknown_skill_output(&format!(
-                    "invalid `skill` payload: {e}"
-                ), &[]));
+                return Ok(unknown_skill_output(
+                    &format!("invalid `skill` payload: {e}"),
+                    &[],
+                ));
             }
         };
 
@@ -107,11 +108,8 @@ impl Tool for SkillTool {
                 // Unknown / disabled / wrong-pillar skill — list the
                 // available names so the model can retry with the right
                 // spelling instead of guessing.
-                let names = code_skills::active_skill_name_list(
-                    self.pillar,
-                    self.cwd.as_deref(),
-                )
-                .unwrap_or_default();
+                let names = code_skills::active_skill_name_list(self.pillar, self.cwd.as_deref())
+                    .unwrap_or_default();
                 Ok(unknown_skill_output(
                     &format!("No active skill named `{name}`."),
                     &names,
@@ -216,8 +214,14 @@ mod tests {
                 _ => String::new(),
             })
             .collect::<String>();
-        assert!(text.contains("# Skill: demo-skill"), "name header: {text:?}");
-        assert!(text.contains("Allowed tools: read fetch"), "allowed: {text:?}");
+        assert!(
+            text.contains("# Skill: demo-skill"),
+            "name header: {text:?}"
+        );
+        assert!(
+            text.contains("Allowed tools: read fetch"),
+            "allowed: {text:?}"
+        );
         assert!(text.contains("Args: the-thing"), "args forwarded: {text:?}");
         assert!(text.contains("Do the thing"), "body present: {text:?}");
     }
@@ -244,10 +248,13 @@ mod tests {
 
     #[test]
     fn unknown_skill_output_is_error_and_lists_names() {
-        let out = unknown_skill_output("No active skill named `bogus`.", &[
-            "libertai-harness".to_string(),
-            "libertai-code-workflow".to_string(),
-        ]);
+        let out = unknown_skill_output(
+            "No active skill named `bogus`.",
+            &[
+                "libertai-harness".to_string(),
+                "libertai-code-workflow".to_string(),
+            ],
+        );
         let ToolExecution::Done(tool_output) = out else {
             panic!("expected Done");
         };
@@ -299,7 +306,10 @@ mod tests {
                 .expect("load")
                 .expect("harness is active for code");
         assert_eq!(harness.name, "libertai-harness");
-        assert!(harness.body.contains("## Auto memory"), "harness body: missing auto-memory section");
+        assert!(
+            harness.body.contains("## Auto memory"),
+            "harness body: missing auto-memory section"
+        );
 
         let none =
             code_skills::load_skill_by_name(SkillPillar::Code, cwd.as_deref(), "no-such-skill")

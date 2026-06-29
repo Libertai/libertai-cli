@@ -82,11 +82,9 @@ use pi::sdk::{
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi};
 use crate::commands::code_factory::{LibertaiToolFactory, ModeFlag, MAX_TASK_DEPTH};
 use crate::commands::code_session::{
-    build_session_options, CodeSessionConfig, DEFAULT_MAX_TOKENS, SessionPersistence,
+    build_session_options, CodeSessionConfig, SessionPersistence, DEFAULT_MAX_TOKENS,
 };
-use crate::commands::code_team::{
-    AgentColor, AgentHandle, AgentKind, AgentRegistry, AgentStatus,
-};
+use crate::commands::code_team::{AgentColor, AgentHandle, AgentKind, AgentRegistry, AgentStatus};
 
 const NAME: &str = "workflow";
 const LABEL: &str = "Workflow";
@@ -200,10 +198,7 @@ impl WorkflowRegistry {
     }
 
     pub fn remove(&self, id: &str) {
-        self.workflows
-            .lock()
-            .unwrap()
-            .retain(|w| w.id != id);
+        self.workflows.lock().unwrap().retain(|w| w.id != id);
     }
 
     pub fn snapshot(&self) -> Vec<Arc<WorkflowState>> {
@@ -363,21 +358,23 @@ fn dispatch_phase_agent(
         .unwrap_or_else(|| format!("phase:{}", phase_title));
     let prompt_preview: String = prompt.chars().take(80).collect();
 
-    let handle = ctx.registry.register(crate::commands::code_team::AgentRegistration {
-        name: display_name.clone(),
-        kind: AgentKind::Subagent {
-            depth: ctx.parent_depth + 1,
+    let handle = ctx
+        .registry
+        .register(crate::commands::code_team::AgentRegistration {
+            name: display_name.clone(),
+            kind: AgentKind::Subagent {
+                depth: ctx.parent_depth + 1,
+                parent: None,
+            },
+            color: AgentColor::color_for_name(&display_name),
+            capability: crate::commands::code_team::AgentCapability::ReadOnly,
+            cwd: ctx.cwd.clone(),
+            model: ctx.cfg.default_code_model.clone(),
+            prompt_preview,
             parent: None,
-        },
-        color: AgentColor::color_for_name(&display_name),
-        capability: crate::commands::code_team::AgentCapability::ReadOnly,
-        cwd: ctx.cwd.clone(),
-        model: ctx.cfg.default_code_model.clone(),
-        prompt_preview,
-        parent: None,
-        pid: None,
-        log_path: None,
-    });
+            pid: None,
+            log_path: None,
+        });
     handle.set_status(AgentStatus::Working);
 
     // Track under the current phase (or a synthetic "default" phase if
@@ -482,7 +479,10 @@ async fn spawn_phase_agent_task(
     ctx.bridge.completions.lock().unwrap().push(if ok {
         PendingCompletion::Resolve { id, json }
     } else {
-        PendingCompletion::Reject { id, message: payload }
+        PendingCompletion::Reject {
+            id,
+            message: payload,
+        }
     });
     ctx.bridge.in_flight.fetch_sub(1, Ordering::Relaxed);
 }
@@ -606,9 +606,7 @@ fn run_workflow_inner(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
         }
     };
 
-    let result = runtime.block_on(async move {
-        run_workflow_async(ctx).await
-    });
+    let result = runtime.block_on(async move { run_workflow_async(ctx).await });
     result
 }
 
@@ -674,9 +672,15 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
             };
             globals.set(
                 "__wf_native_agent",
-                Func::from(move |_c: Ctx, prompt: String, label: Option<String>, tools_json: Option<String>| -> rquickjs::Result<String> {
-                    Ok(dispatch_phase_agent(&agent_ctx, prompt, label, tools_json))
-                }),
+                Func::from(
+                    move |_c: Ctx,
+                          prompt: String,
+                          label: Option<String>,
+                          tools_json: Option<String>|
+                          -> rquickjs::Result<String> {
+                        Ok(dispatch_phase_agent(&agent_ctx, prompt, label, tools_json))
+                    },
+                ),
             )?;
 
             let bridge_log = Arc::clone(&bridge);
@@ -692,11 +696,10 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
             globals.set(
                 "__wf_native_phase",
                 Func::from(move |_c: Ctx, title: String| -> rquickjs::Result<()> {
-                    state_phase
-                        .phases
-                        .lock()
-                        .unwrap()
-                        .push(PhaseProgress { title, agents: vec![] });
+                    state_phase.phases.lock().unwrap().push(PhaseProgress {
+                        title,
+                        agents: vec![],
+                    });
                     Ok(())
                 }),
             )?;
@@ -1041,7 +1044,11 @@ impl Tool for WorkflowTool {
 
         let script = match input.get("script").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
-            None => return Ok(err_output("workflow tool requires a `script` string argument")),
+            None => {
+                return Ok(err_output(
+                    "workflow tool requires a `script` string argument",
+                ))
+            }
         };
         let wf_name = input
             .get("name")
@@ -1284,7 +1291,10 @@ mod tests {
             agents: vec![
                 reg.register(crate::commands::code_team::AgentRegistration {
                     name: "a1".into(),
-                    kind: AgentKind::Subagent { depth: 1, parent: None },
+                    kind: AgentKind::Subagent {
+                        depth: 1,
+                        parent: None,
+                    },
                     color: AgentColor::Red,
                     capability: crate::commands::code_team::AgentCapability::ReadOnly,
                     cwd: PathBuf::from("."),
@@ -1296,7 +1306,10 @@ mod tests {
                 }),
                 reg.register(crate::commands::code_team::AgentRegistration {
                     name: "a2".into(),
-                    kind: AgentKind::Subagent { depth: 1, parent: None },
+                    kind: AgentKind::Subagent {
+                        depth: 1,
+                        parent: None,
+                    },
                     color: AgentColor::Blue,
                     capability: crate::commands::code_team::AgentCapability::ReadOnly,
                     cwd: PathBuf::from("."),
@@ -1312,7 +1325,10 @@ mod tests {
             title: "verify".into(),
             agents: vec![reg.register(crate::commands::code_team::AgentRegistration {
                 name: "a3".into(),
-                kind: AgentKind::Subagent { depth: 1, parent: None },
+                kind: AgentKind::Subagent {
+                    depth: 1,
+                    parent: None,
+                },
                 color: AgentColor::Green,
                 capability: crate::commands::code_team::AgentCapability::ReadOnly,
                 cwd: PathBuf::from("."),
@@ -1336,7 +1352,10 @@ mod tests {
         let reg = AgentRegistry::new();
         let handle = reg.register(crate::commands::code_team::AgentRegistration {
             name: "g".into(),
-            kind: AgentKind::Subagent { depth: 1, parent: None },
+            kind: AgentKind::Subagent {
+                depth: 1,
+                parent: None,
+            },
             color: AgentColor::Red,
             capability: crate::commands::code_team::AgentCapability::ReadOnly,
             cwd: PathBuf::from("."),
@@ -1360,7 +1379,10 @@ mod tests {
         let reg = AgentRegistry::new();
         let handle = reg.register(crate::commands::code_team::AgentRegistration {
             name: "g2".into(),
-            kind: AgentKind::Subagent { depth: 1, parent: None },
+            kind: AgentKind::Subagent {
+                depth: 1,
+                parent: None,
+            },
             color: AgentColor::Red,
             capability: crate::commands::code_team::AgentCapability::ReadOnly,
             cwd: PathBuf::from("."),

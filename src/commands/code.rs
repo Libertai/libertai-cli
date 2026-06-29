@@ -632,7 +632,13 @@ async fn run_async(
     );
     eprintln!(
         "{dim}{}{reset}",
-        code_ui::stop_line_text_ctx(&msg.stop_reason, ctx_limit, ctx_in, msg.usage.output, elapsed_secs)
+        code_ui::stop_line_text_ctx(
+            &msg.stop_reason,
+            ctx_limit,
+            ctx_in,
+            msg.usage.output,
+            elapsed_secs
+        )
     );
 
     Ok(())

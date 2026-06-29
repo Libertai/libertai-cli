@@ -1228,9 +1228,10 @@ mod tests {
         );
         // At least one span carries a non-default foreground (the
         // keyword/identifier colors from the theme).
-        let any_colored = code_line.spans.iter().any(|s| {
-            s.style.fg.is_some() && s.style.fg != Some(ratatui::style::Color::Reset)
-        });
+        let any_colored = code_line
+            .spans
+            .iter()
+            .any(|s| s.style.fg.is_some() && s.style.fg != Some(ratatui::style::Color::Reset));
         assert!(any_colored, "expected at least one colored span");
     }
 

@@ -26,28 +26,30 @@ use pi::sdk::{default_tool_registry, Config as PiConfig, Tool, ToolFactory, Tool
 use crate::commands::code_approvals::{ApprovalState, ApprovalTool, ApprovalUi, ToolPolicy};
 use crate::commands::code_ask_user::AskUserTool;
 use crate::commands::code_aux::{smart_approval_from_config, SmartApproval};
-use crate::commands::code_context_tool::{ContextSnapshot, ContextStatusTool, RequestCompactionTool};
+use crate::commands::code_context_tool::{
+    ContextSnapshot, ContextStatusTool, RequestCompactionTool,
+};
 use crate::commands::code_cron::{CronCreateTool, CronDeleteTool, CronListTool, CronStore};
-use crate::commands::code_workflow::WorkflowTool;
 use crate::commands::code_diff::EditJournal;
 use crate::commands::code_guardrail::{GuardrailTool, ToolGuardrailState};
 use crate::commands::code_mailbox::MailboxTool;
+use crate::commands::code_mcp_tool::should_defer_mcp_tools;
 use crate::commands::code_mcp_tool::{cached_mcp_context_tools, named_mcp_tools, McpCallTool};
 use crate::commands::code_notification::PushNotificationTool;
 use crate::commands::code_path_safety::{
     is_path_mutation_tool, safe_root_from_env, PathSafetyTool,
 };
 use crate::commands::code_send_message::SendMessageTool;
+use crate::commands::code_skill_tool::SkillTool;
+use crate::commands::code_skills::SkillPillar;
+use crate::commands::code_structured_output::StructuredOutputTool;
 use crate::commands::code_task::TaskTool;
 use crate::commands::code_team::AgentRegistry;
 use crate::commands::code_team_task::TeamTaskTool;
 use crate::commands::code_team_tool::SpawnTeamTool;
 use crate::commands::code_todo::TodoTool;
-use crate::commands::code_mcp_tool::should_defer_mcp_tools;
-use crate::commands::code_skill_tool::SkillTool;
-use crate::commands::code_skills::SkillPillar;
-use crate::commands::code_structured_output::StructuredOutputTool;
 use crate::commands::code_tool_search::ToolSearchTool;
+use crate::commands::code_workflow::WorkflowTool;
 use crate::commands::fetch_tool::FetchTool;
 use crate::commands::image_tool::ImageGenTool;
 use crate::commands::notebook_tool::{NotebookEditTool, NotebookExecuteTool, NotebookReadTool};
@@ -594,10 +596,7 @@ impl ToolFactory for LibertaiToolFactory {
         //      tool scans the same dir its prompt was built from — the
         //      worktree the subagent runs in lacks gitignored project
         //      skills.
-        let skill_cwd = self
-            .skill_cwd
-            .clone()
-            .unwrap_or_else(|| cwd.to_path_buf());
+        let skill_cwd = self.skill_cwd.clone().unwrap_or_else(|| cwd.to_path_buf());
         wrapped.push(Box::new(SkillTool::new(SkillPillar::Code, Some(skill_cwd))));
 
         //    - `structured_output`: validate model output against a JSON
@@ -1056,13 +1055,7 @@ mod tests {
     fn factory_registers_context_tools_when_snapshot_injected() {
         let temp = tempfile::tempdir().unwrap();
         let cfg = Arc::new(LibertaiConfig::default());
-        let snapshot = Arc::new(ContextSnapshot::new(
-            "openai",
-            "gpt-4o",
-            true,
-            8_000,
-            4_000,
-        ));
+        let snapshot = Arc::new(ContextSnapshot::new("openai", "gpt-4o", true, 8_000, 4_000));
         let factory = LibertaiToolFactory::new_with_features(
             ModeFlag::new(Mode::Normal),
             Arc::new(ApprovalState::new()),
@@ -1096,13 +1089,7 @@ mod tests {
 
     #[test]
     fn child_factory_propagates_context_snapshot() {
-        let snapshot = Arc::new(ContextSnapshot::new(
-            "openai",
-            "gpt-4o",
-            true,
-            8_000,
-            4_000,
-        ));
+        let snapshot = Arc::new(ContextSnapshot::new("openai", "gpt-4o", true, 8_000, 4_000));
         let factory = LibertaiToolFactory::new_with_features(
             ModeFlag::new(Mode::Normal),
             Arc::new(ApprovalState::new()),
@@ -1232,7 +1219,10 @@ mod tests {
         assert_eq!(child.skill_cwd.as_deref(), Some(parent_cwd.as_path()));
         // A grandchild carries it too — the invariant nested subagents
         // rely on.
-        assert_eq!(child.child().skill_cwd.as_deref(), Some(parent_cwd.as_path()));
+        assert_eq!(
+            child.child().skill_cwd.as_deref(),
+            Some(parent_cwd.as_path())
+        );
     }
 
     #[test]

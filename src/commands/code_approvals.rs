@@ -443,9 +443,8 @@ pub fn approval_subject_with_base(
             // Derive `<dir> *` from the parent. Skip when there's no parent
             // (a bare filename) or the path is a sentinel — a directory-trust
             // rule on `<` is meaningless.
-            let domain_rule = parent_dir_wildcard(&s).map(|dir_pat| {
-                AllowRule::wildcard(tool, dir_pat.clone())
-            });
+            let domain_rule =
+                parent_dir_wildcard(&s).map(|dir_pat| AllowRule::wildcard(tool, dir_pat.clone()));
             (s, rule, label, None, None, domain_rule)
         }
         // Unknown/future wrapped tools fall back to exact raw-JSON matching
@@ -1182,9 +1181,7 @@ impl Tool for ApprovalTool {
 #[derive(Clone)]
 enum ResumeRecord {
     None,
-    Record {
-        choice: PromptChoice,
-    },
+    Record { choice: PromptChoice },
 }
 
 /// (M4/#10) Resolve which `AllowRule` a `PromptChoice` records, for the
@@ -1203,9 +1200,15 @@ fn rule_for_choice<'a>(
     match choice {
         PromptChoice::Allow | PromptChoice::Deny | PromptChoice::Paused { .. } => None,
         PromptChoice::AlwaysAllow | PromptChoice::AllowSession => Some(&subject.suggested_rule),
-        PromptChoice::Prefix => subject.prefix_rule.as_ref().or(Some(&subject.suggested_rule)),
+        PromptChoice::Prefix => subject
+            .prefix_rule
+            .as_ref()
+            .or(Some(&subject.suggested_rule)),
         PromptChoice::GrantRoot => subject.root_rule.as_ref().or(Some(&subject.suggested_rule)),
-        PromptChoice::Domain => subject.domain_rule.as_ref().or(Some(&subject.suggested_rule)),
+        PromptChoice::Domain => subject
+            .domain_rule
+            .as_ref()
+            .or(Some(&subject.suggested_rule)),
     }
 }
 
@@ -2482,7 +2485,9 @@ mod tests {
         assert_eq!(subj.suggested_rule.pattern, "npm run *");
         assert_eq!(subj.suggested_label, "bash(npm run *)");
         // ROOT candidate is the binary-only tier.
-        let root = subj.root_rule.expect("root_rule present for bash with args");
+        let root = subj
+            .root_rule
+            .expect("root_rule present for bash with args");
         assert!(root.wildcard);
         assert_eq!(root.pattern, "npm *");
         // PREFIX candidate equals the suggested rule (the default IS prefix).
@@ -2572,20 +2577,28 @@ mod tests {
         let input = serde_json::json!({"command": "npm run build"});
         let subj = approval_subject("bash", &input);
         assert_eq!(
-            rule_for_choice(&PromptChoice::AlwaysAllow, &subj).unwrap().pattern,
+            rule_for_choice(&PromptChoice::AlwaysAllow, &subj)
+                .unwrap()
+                .pattern,
             "npm run *"
         );
         assert_eq!(
-            rule_for_choice(&PromptChoice::Prefix, &subj).unwrap().pattern,
+            rule_for_choice(&PromptChoice::Prefix, &subj)
+                .unwrap()
+                .pattern,
             "npm run *"
         );
         assert_eq!(
-            rule_for_choice(&PromptChoice::GrantRoot, &subj).unwrap().pattern,
+            rule_for_choice(&PromptChoice::GrantRoot, &subj)
+                .unwrap()
+                .pattern,
             "npm *"
         );
         // Domain falls back to suggested (no domain tier for bash).
         assert_eq!(
-            rule_for_choice(&PromptChoice::Domain, &subj).unwrap().pattern,
+            rule_for_choice(&PromptChoice::Domain, &subj)
+                .unwrap()
+                .pattern,
             "npm run *"
         );
         // Allow/Deny record nothing.
@@ -2600,15 +2613,21 @@ mod tests {
         let input = serde_json::json!({"command": "git"});
         let subj = approval_subject("bash", &input);
         assert_eq!(
-            rule_for_choice(&PromptChoice::Prefix, &subj).unwrap().pattern,
+            rule_for_choice(&PromptChoice::Prefix, &subj)
+                .unwrap()
+                .pattern,
             "git"
         );
         assert_eq!(
-            rule_for_choice(&PromptChoice::GrantRoot, &subj).unwrap().pattern,
+            rule_for_choice(&PromptChoice::GrantRoot, &subj)
+                .unwrap()
+                .pattern,
             "git"
         );
         assert_eq!(
-            rule_for_choice(&PromptChoice::Domain, &subj).unwrap().pattern,
+            rule_for_choice(&PromptChoice::Domain, &subj)
+                .unwrap()
+                .pattern,
             "git"
         );
     }
@@ -2671,7 +2690,9 @@ mod tests {
         let state = Arc::new(ApprovalState::new());
         let bash_input = serde_json::json!({"command": "npm run build"});
         let subj = approval_subject("bash", &bash_input);
-        let prefix_rule = rule_for_choice(&PromptChoice::Prefix, &subj).unwrap().clone();
+        let prefix_rule = rule_for_choice(&PromptChoice::Prefix, &subj)
+            .unwrap()
+            .clone();
         state.record_always(prefix_rule);
         assert!(
             state.is_pre_allowed("bash", "npm run build"),

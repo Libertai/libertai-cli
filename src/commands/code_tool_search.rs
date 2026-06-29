@@ -102,10 +102,7 @@ impl Tool for ToolSearchTool {
         if query.is_empty() {
             return Ok(err_output("`tool_search` requires a non-empty `query`"));
         }
-        let limit = parsed
-            .limit
-            .unwrap_or(DEFAULT_LIMIT)
-            .clamp(1, HARD_LIMIT);
+        let limit = parsed.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, HARD_LIMIT);
         let metadata = mcp_tool_metadata(self.cfg.as_ref());
         let matches = search_mcp_tools(&metadata, query, limit);
         Ok(render_matches(query, &matches, &metadata))
@@ -241,7 +238,11 @@ mod tests {
         vec![
             md("github", "create_issue", "Open a new GitHub issue."),
             md("github", "list_issues", "List issues in a repo."),
-            md("slack", "post_message", "Post a message to a Slack channel."),
+            md(
+                "slack",
+                "post_message",
+                "Post a message to a Slack channel.",
+            ),
             md("slack", "search_messages", "Search Slack message history."),
             md("linear", "create_issue", "Create a Linear issue."),
         ]
@@ -279,7 +280,8 @@ mod tests {
         assert!(!hits.is_empty());
         // Every returned hit has "issue" in either name or description.
         for m in &hits {
-            let hay = format!("{} {} {}", m.server, m.qualified_name, m.description).to_ascii_lowercase();
+            let hay =
+                format!("{} {} {}", m.server, m.qualified_name, m.description).to_ascii_lowercase();
             assert!(hay.contains("issue"), "irrelevant hit: {:?}", m);
         }
     }

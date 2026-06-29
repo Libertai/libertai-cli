@@ -237,7 +237,8 @@ pub enum Command {
         /// interactive session (a consent sentinel is written then).
         /// Also honours the `LIBERTAI_DANGEROUSLY_SKIP_PERMISSIONS` env var.
         #[arg(long, env = "LIBERTAI_DANGEROUSLY_SKIP_PERMISSIONS")]
-        dangerously_skip_permissions: bool,        /// Print mode (like `claude -p`): run a single agent turn
+        dangerously_skip_permissions: bool,
+        /// Print mode (like `claude -p`): run a single agent turn
         /// headlessly and exit — no TUI, no interactive prompts. The
         /// assistant's text streams to stdout; turn/tool noise goes to
         /// stderr. Tool calls not already covered by an allow rule are

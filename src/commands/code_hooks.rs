@@ -5294,7 +5294,10 @@ mod tests {
         assert_eq!(v["event"], "PostCompact");
         assert_eq!(v["reason"], "auto");
         assert_eq!(v["tokensBefore"], 142_000);
-        assert!(v["tokensAfter"].is_null(), "tokensAfter is null until pi P3");
+        assert!(
+            v["tokensAfter"].is_null(),
+            "tokensAfter is null until pi P3"
+        );
         assert_eq!(v["durationMs"], 2_100);
         assert_eq!(v["aborted"], false);
     }

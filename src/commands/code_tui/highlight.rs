@@ -70,7 +70,8 @@ fn syntax_for_lang(lang: &str) -> Option<&'static syntect::parsing::SyntaxRefere
     if lang.is_empty() {
         return None;
     }
-    SYNTAX_SET.find_syntax_by_token(lang)
+    SYNTAX_SET
+        .find_syntax_by_token(lang)
         .or_else(|| SYNTAX_SET.find_syntax_by_extension(lang))
 }
 
@@ -97,9 +98,7 @@ pub(crate) fn highlight_line(
 
 /// Build a line-stateful highlighter for a language. Returns `None` if
 /// the language isn't recognized (caller renders plain).
-pub(crate) fn highlighter_for_lang(
-    lang: &str,
-) -> Option<HighlightLines<'static>> {
+pub(crate) fn highlighter_for_lang(lang: &str) -> Option<HighlightLines<'static>> {
     let syntax = syntax_for_lang(lang)?;
     Some(HighlightLines::new(syntax, &THEME))
 }
