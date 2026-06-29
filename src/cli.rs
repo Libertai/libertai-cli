@@ -27,6 +27,13 @@ pub enum Command {
         json: bool,
     },
 
+    /// Show plan tier, allowance windows (5h + weekly), and prepaid credits.
+    Usage {
+        /// Emit the raw subscription JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Manage API keys.
     Keys {
         #[command(subcommand)]
@@ -513,6 +520,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Login => crate::commands::login::run(),
         Command::Logout => crate::commands::logout::run(),
         Command::Status { json } => crate::commands::status::run(json),
+        Command::Usage { json } => crate::commands::usage::run(json),
         Command::Keys { action } => crate::commands::keys::run(action),
         Command::Models { refresh, json } => crate::commands::models::run(refresh, json),
         Command::Ask { prompt, model } => crate::commands::ask::run(prompt.join(" "), model),
@@ -606,6 +614,7 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::Login => "login",
         Command::Logout => "logout",
         Command::Status { .. } => "status",
+        Command::Usage { .. } => "usage",
         Command::Keys { .. } => "keys",
         Command::Models { .. } => "models",
         Command::Ask { .. } => "ask",
