@@ -24,9 +24,23 @@ use crate::config::{config_path, libertai_config_dir, set_file_mode_600, write_f
 /// `[auth]` fields that must not survive logout. `device_id` is deliberately
 /// absent: it is a non-secret per-install identifier whose whole point is to
 /// persist across login cycles (see `config::Auth`).
-const SECRET_AUTH_FIELDS: &[&str] = &["api_key", "expires_at", "wallet_address", "chain"];
+const SECRET_AUTH_FIELDS: &[&str] = &[
+    "api_key",
+    "expires_at",
+    "wallet_address",
+    "chain",
+    "refresh_token",
+];
 
 pub fn run() -> Result<()> {
+    // Best-effort: revoke the session server-side before we wipe the token
+    // locally. Network/credential failures must not block local logout.
+    if let Ok(cfg) = crate::config::load() {
+        if let Some(rtok) = cfg.auth.refresh_token.as_deref() {
+            let _ = crate::client::revoke_session(&cfg, rtok);
+        }
+    }
+
     let path = config_path()?;
     let mut cleaned_anything = false;
 
@@ -160,6 +174,16 @@ fn purge_stale_backups(dir: &Path) -> Result<bool> {
         cleaned = true;
     }
     Ok(cleaned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_fields_include_refresh_token() {
+        assert!(SECRET_AUTH_FIELDS.contains(&"refresh_token"));
+    }
 }
 
 /// Replace a literal libertai `apiKey` in pi's models.json with the `env:`
