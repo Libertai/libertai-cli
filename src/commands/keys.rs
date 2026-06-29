@@ -13,11 +13,11 @@ use crate::commands::output::Styler;
 use crate::config::{load, Config};
 
 pub fn run(action: KeysAction) -> Result<()> {
-    let cfg = load()?;
+    let mut cfg = load()?;
     match action {
-        KeysAction::List { json } => list(&cfg, json),
-        KeysAction::Create { name, limit } => create(&cfg, name, limit),
-        KeysAction::Delete { id } => delete(&cfg, id),
+        KeysAction::List { json } => list(&mut cfg, json),
+        KeysAction::Create { name, limit } => create(&mut cfg, name, limit),
+        KeysAction::Delete { id } => delete(&mut cfg, id),
     }
 }
 
@@ -25,17 +25,18 @@ pub fn run(action: KeysAction) -> Result<()> {
 /// inference key cannot authenticate it. Legacy wallet logins sign for a JWT
 /// locally; everyone else (browser-SSO and pasted-key logins) confirms in the
 /// browser via the same loopback flow `libertai login` uses.
-fn acquire_jwt(cfg: &Config) -> Result<String> {
-    match (
-        cfg.auth.wallet_address.as_deref(),
-        cfg.auth.chain.as_deref(),
-    ) {
-        (Some(address), Some(chain)) => acquire_jwt_wallet(cfg, address, chain),
+fn acquire_jwt(cfg: &mut Config) -> Result<String> {
+    // Clone out the wallet creds first so the match scrutinee doesn't hold a
+    // borrow of `cfg` across the `&mut` browser path.
+    let wallet = cfg.auth.wallet_address.clone();
+    let chain = cfg.auth.chain.clone();
+    match (wallet, chain) {
+        (Some(address), Some(chain)) => acquire_jwt_wallet(cfg, &address, &chain),
         _ => acquire_jwt_browser(cfg),
     }
 }
 
-fn acquire_jwt_browser(cfg: &Config) -> Result<String> {
+fn acquire_jwt_browser(cfg: &mut Config) -> Result<String> {
     let st = Styler::stderr();
     eprintln!(
         "{} Managing keys needs a quick sign-in confirmation in your browser.",
@@ -46,6 +47,11 @@ fn acquire_jwt_browser(cfg: &Config) -> Result<String> {
         eprintln!("If it doesn't open, visit:\n  {url}");
         let _ = open_url(url);
     })?;
+    // Persist the rotated refresh token so a later `libertai usage` reuses this
+    // session instead of triggering its own browser sign-in. Best-effort: a
+    // save failure must not abort the key operation the user asked for.
+    cfg.auth.refresh_token = Some(pair.refresh_token);
+    let _ = crate::config::save(cfg);
     Ok(pair.access_token)
 }
 
@@ -75,7 +81,7 @@ fn acquire_jwt_wallet(cfg: &Config, address: &str, chain: &str) -> Result<String
     Ok(jwt)
 }
 
-fn list(cfg: &Config, json: bool) -> Result<()> {
+fn list(cfg: &mut Config, json: bool) -> Result<()> {
     let jwt = acquire_jwt(cfg)?;
     let rows = list_api_keys(cfg, &jwt)?;
 
@@ -140,7 +146,7 @@ fn list(cfg: &Config, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn create(cfg: &Config, name: String, limit: Option<f64>) -> Result<()> {
+fn create(cfg: &mut Config, name: String, limit: Option<f64>) -> Result<()> {
     if let Some(v) = limit {
         validate_limit(v)?;
     }
@@ -166,7 +172,7 @@ fn create(cfg: &Config, name: String, limit: Option<f64>) -> Result<()> {
     Ok(())
 }
 
-fn delete(cfg: &Config, id: String) -> Result<()> {
+fn delete(cfg: &mut Config, id: String) -> Result<()> {
     let confirmed = Confirm::new()
         .with_prompt(format!("Delete key {id}?"))
         .default(false)
