@@ -1,30 +1,27 @@
 //! Prompt-shape probe for review and verification discipline.
-//! These instructions close a Claude Code quality gap that ordinary
-//! unit tests cannot observe directly: review findings first, and
-//! only claim completion from checks that exercise the changed behavior.
+//!
+//! That guidance lives in the `libertai-harness` skill. Since `feat(M5/#7)`
+//! skill *bodies* are latent — loaded on demand via the `skill` tool rather
+//! than inlined in the base prompt (and inclusion is non-deterministic per
+//! invocation). So this probe asserts the harness skill is advertised in the
+//! latent registry (the reachable on-ramp to that guidance), not that its body
+//! text is inlined.
 
 use assert_cmd::Command;
 
 mod common;
 
 const REQUIRED_PHRASES: &[&str] = &[
-    "Review and verification",
-    "default to review mode",
-    "Do not modify files unless",
-    "Lead with findings",
-    "ordered by severity",
-    "file_path:line_number",
-    "smallest concrete fix",
-    "residual test or coverage gap",
-    "narrowest checks",
-    "changed behavior",
-    "Report verification honestly",
-    "could not run",
-    "passing unrelated test",
+    // The latent-registry header…
+    "## Available Agent Skills",
+    // …lists the harness skill (which carries the review/verification rules)…
+    "### libertai-harness",
+    // …and tells the model to pull the body via the skill tool.
+    "skill` tool",
 ];
 
 #[test]
-fn review_and_verification_guidance_reaches_assembled_prompt() {
+fn review_and_verification_skill_is_advertised_in_latent_registry() {
     let config_home = common::fake_config_home();
     let assert = Command::cargo_bin("libertai")
         .expect("libertai binary built")

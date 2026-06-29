@@ -1,33 +1,27 @@
 //! Prompt-shape probe for session-specific slash command guidance.
-//! This keeps local workflow affordances visible in the assembled
-//! prompt instead of relying on the model to infer them from UI docs.
+//!
+//! That guidance lives in the `libertai-harness` skill. Since `feat(M5/#7)`
+//! skill *bodies* are latent — loaded on demand via the `skill` tool rather
+//! than inlined in the base prompt (and inclusion is non-deterministic per
+//! invocation). So this probe asserts the harness skill is advertised in the
+//! latent registry (the reachable on-ramp to that guidance), not that its body
+//! text is inlined.
 
 use assert_cmd::Command;
 
 mod common;
 
 const REQUIRED_PHRASES: &[&str] = &[
-    "Session-specific commands",
-    "/review",
-    "/security-review",
-    "/pr_comments",
-    "/agent <name>",
-    "<task>",
-    "/send",
-    "/init --agent <notes>",
-    "/memory",
-    "/remember <kind>: <fact>",
-    "/mcp",
-    "/hooks",
-    "/hook",
-    "!<command>",
-    "/loop",
-    "/auto",
-    "do not invent extra tasks",
+    // The latent-registry header…
+    "## Available Agent Skills",
+    // …lists the harness skill (which carries the session-command guidance)…
+    "### libertai-harness",
+    // …and tells the model to pull the body via the skill tool.
+    "skill` tool",
 ];
 
 #[test]
-fn session_command_guidance_reaches_assembled_prompt() {
+fn session_command_skill_is_advertised_in_latent_registry() {
     let config_home = common::fake_config_home();
     let assert = Command::cargo_bin("libertai")
         .expect("libertai binary built")
