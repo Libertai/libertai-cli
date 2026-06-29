@@ -46,6 +46,7 @@ fn save_then_load_preserves_fields() {
             chain: Some("base".into()),
             expires_at: Some("2026-09-03T12:00:00Z".into()),
             device_id: Some("test-device-id".into()),
+            refresh_token: None,
         },
         launcher_defaults: LauncherDefaults {
             opus_model: "opus-x".into(),

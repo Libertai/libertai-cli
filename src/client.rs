@@ -394,8 +394,9 @@ pub struct ExchangeRequest<'a> {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ExchangeResponse {
+pub struct TokenPair {
     pub access_token: String,
+    pub refresh_token: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -403,8 +404,10 @@ pub struct CliApiKeyCreate<'a> {
     pub host: &'a str,
 }
 
-/// Exchange a one-time code (+ PKCE verifier) for a session access token.
-pub fn exchange_code(cfg: &Config, code: &str, verifier: &str) -> Result<String> {
+/// Exchange a one-time code (+ PKCE verifier) for the session token pair.
+/// The refresh token is the persistent (30-day, revocable) credential; the
+/// access token is short-lived. Callers persist the refresh token.
+pub fn exchange_code(cfg: &Config, code: &str, verifier: &str) -> Result<TokenPair> {
     let url = format!("{}/auth/exchange", cfg.account_base.trim_end_matches('/'));
     let resp = http(cfg)?
         .post(&url)
@@ -412,7 +415,7 @@ pub fn exchange_code(cfg: &Config, code: &str, verifier: &str) -> Result<String>
         .send()
         .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
     let resp = check_status(resp, &url)?;
-    Ok(resp.json::<ExchangeResponse>()?.access_token)
+    resp.json::<TokenPair>().context("parsing /auth/exchange response")
 }
 
 /// Mint (or rotate) this device's CLI API key, authenticating with the session token.
@@ -508,6 +511,77 @@ pub fn delete_api_key(cfg: &Config, jwt: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
+// ── Session refresh / revoke + account usage ────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct RefreshRequest<'a> {
+    refresh_token: &'a str,
+}
+
+/// Rotate the refresh token (one-time use) for a fresh access/refresh pair.
+/// The returned refresh token MUST be persisted — the old one is now invalid.
+pub fn refresh_session(cfg: &Config, refresh_token: &str) -> Result<TokenPair> {
+    let url = format!("{}/auth/refresh", cfg.account_base.trim_end_matches('/'));
+    let resp = http(cfg)?
+        .post(&url)
+        .json(&RefreshRequest { refresh_token })
+        .send()
+        .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
+    let resp = check_status(resp, &url)?;
+    resp.json::<TokenPair>().context("parsing /auth/refresh response")
+}
+
+/// Best-effort server-side session revocation (used by logout).
+pub fn revoke_session(cfg: &Config, refresh_token: &str) -> Result<()> {
+    let url = format!("{}/auth/logout", cfg.account_base.trim_end_matches('/'));
+    let resp = http(cfg)?
+        .post(&url)
+        .json(&RefreshRequest { refresh_token })
+        .send()
+        .map_err(|e| annotate_send_err(e, format!("POST {url}"), Some(cfg.http_timeout_secs)))?;
+    let _ = check_status(resp, &url)?;
+    Ok(())
+}
+
+/// Mirrors the backend `SubscriptionResponse`. Every window/credit field is
+/// optional there, so all are `Option` here. Serialized verbatim by
+/// `libertai usage --json`, so field names are a stable contract.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Subscription {
+    pub tier: String,
+    #[serde(default)]
+    pub has_subscription: bool,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub window_5h_used: Option<f64>,
+    #[serde(default)]
+    pub window_5h_limit: Option<f64>,
+    #[serde(default)]
+    pub window_5h_resets_at: Option<String>,
+    #[serde(default)]
+    pub weekly_used: Option<f64>,
+    #[serde(default)]
+    pub weekly_limit: Option<f64>,
+    #[serde(default)]
+    pub weekly_resets_at: Option<String>,
+    #[serde(default)]
+    pub prepaid_balance: Option<f64>,
+}
+
+/// Fetch the caller's subscription + allowance snapshot. Needs a session JWT
+/// (the `LTAI_` inference key cannot authenticate this endpoint).
+pub fn get_subscription(cfg: &Config, access_token: &str) -> Result<Subscription> {
+    let url = format!("{}/payments/subscription", cfg.account_base.trim_end_matches('/'));
+    let resp = http(cfg)?
+        .get(&url)
+        .bearer_auth(access_token)
+        .send()
+        .map_err(|e| annotate_send_err(e, format!("GET {url}"), Some(cfg.http_timeout_secs)))?;
+    let resp = check_status(resp, &url)?;
+    resp.json::<Subscription>().context("parsing /payments/subscription response")
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
 /// Consumes `resp`. On success, returns it unchanged so the caller can
@@ -574,5 +648,29 @@ mod tests {
         assert!(rendered.contains("GET http://x"), "got: {rendered}");
         assert!(rendered.contains("refused"), "got: {rendered}");
         assert_eq!(error_class(&err), Some(ErrorClass::Network));
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    #[test]
+    fn subscription_parses_with_missing_optional_fields() {
+        // Backend marks every window/credit field optional; absent ones default.
+        let json = r#"{"tier":"go","has_subscription":true}"#;
+        let sub: Subscription = serde_json::from_str(json).unwrap();
+        assert_eq!(sub.tier, "go");
+        assert!(sub.has_subscription);
+        assert_eq!(sub.window_5h_used, None);
+        assert_eq!(sub.prepaid_balance, None);
+    }
+
+    #[test]
+    fn token_pair_parses_exchange_shape() {
+        let json = r#"{"access_token":"a","refresh_token":"r"}"#;
+        let pair: TokenPair = serde_json::from_str(json).unwrap();
+        assert_eq!(pair.access_token, "a");
+        assert_eq!(pair.refresh_token, "r");
     }
 }

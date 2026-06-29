@@ -76,7 +76,7 @@ fn login_with_browser(cfg: &mut Config) -> Result<()> {
 ///
 /// On success, `cfg.auth` is updated with the minted key (the caller persists `cfg`).
 pub fn browser_sso_login(cfg: &mut Config, client: &str, open: impl FnOnce(&str)) -> Result<()> {
-    let access_token = browser_sso_access_token(cfg, client, open)?;
+    let pair = browser_sso_access_token(cfg, client, open)?;
 
     // Per-device key: a stable random id (persisted in config) keeps this device's key
     // name unique, so logging in elsewhere mints a separate key instead of rotating —
@@ -84,10 +84,12 @@ pub fn browser_sso_login(cfg: &mut Config, client: &str, open: impl FnOnce(&str)
     let device_id = cfg.auth.device_id.clone().unwrap_or_else(new_device_id);
     cfg.auth.device_id = Some(device_id.clone());
     let host = format!("{}-{}", device_hostname(), device_id);
-    let created = create_cli_api_key(cfg, &access_token, &host).context("creating CLI API key")?;
+    let created =
+        create_cli_api_key(cfg, &pair.access_token, &host).context("creating CLI API key")?;
 
     cfg.auth.expires_at = created.expires_at;
     cfg.auth.api_key = Some(created.full_key);
+    cfg.auth.refresh_token = Some(pair.refresh_token);
     cfg.auth.wallet_address = None;
     cfg.auth.chain = None;
     Ok(())
@@ -103,7 +105,7 @@ pub fn browser_sso_access_token(
     cfg: &Config,
     client: &str,
     open: impl FnOnce(&str),
-) -> Result<String> {
+) -> Result<crate::client::TokenPair> {
     // PKCE: keep `verifier` secret; send only its SHA256 (the challenge).
     let mut vbytes = [0u8; 32];
     rand::rng().fill_bytes(&mut vbytes);
