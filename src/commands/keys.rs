@@ -41,11 +41,12 @@ fn acquire_jwt_browser(cfg: &Config) -> Result<String> {
         "{} Managing keys needs a quick sign-in confirmation in your browser.",
         st.yellow("!")
     );
-    browser_sso_access_token(cfg, "LibertAI CLI (key management)", |url| {
+    let pair = browser_sso_access_token(cfg, "LibertAI CLI (key management)", |url| {
         eprintln!("Opening your browser to sign in…");
         eprintln!("If it doesn't open, visit:\n  {url}");
         let _ = open_url(url);
-    })
+    })?;
+    Ok(pair.access_token)
 }
 
 fn acquire_jwt_wallet(cfg: &Config, address: &str, chain: &str) -> Result<String> {

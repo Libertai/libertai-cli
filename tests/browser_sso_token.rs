@@ -80,8 +80,10 @@ fn happy_path_returns_session_token_and_pkce_verifier_matches_challenge() {
             .parse::<tiny_http::Header>()
             .unwrap();
         req.respond(
-            tiny_http::Response::from_string(r#"{"access_token":"session-token-123"}"#)
-                .with_header(header),
+            tiny_http::Response::from_string(
+                r#"{"access_token":"session-token-123","refresh_token":"refresh-token-456"}"#,
+            )
+            .with_header(header),
         )
         .expect("exchange response");
     });
@@ -97,7 +99,8 @@ fn happy_path_returns_session_token_and_pkce_verifier_matches_challenge() {
     })
     .expect("browser SSO flow succeeds");
 
-    assert_eq!(token, "session-token-123");
+    assert_eq!(token.access_token, "session-token-123");
+    assert_eq!(token.refresh_token, "refresh-token-456");
     exchange.join().expect("exchange thread");
 }
 
