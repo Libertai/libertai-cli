@@ -14,9 +14,12 @@ mod common;
 const BEGIN_SENTINEL: &str = "===BEGIN SYSTEM PROMPT===";
 const END_SENTINEL: &str = "===END SYSTEM PROMPT===";
 
-/// The libertai-harness skill is always loaded; its "## Tone and style"
-/// heading proves the skill content reached the assembled prompt.
-const HARNESS_MARKER: &str = "## Tone and style";
+/// The libertai-harness skill is always loaded. Since `feat(M5/#7)` skill
+/// bodies are latent (loaded on demand via the `skill` tool), the prompt
+/// advertises the skill in the registry instead of inlining its body — the
+/// "### libertai-harness" registry entry proves the skill reached the
+/// assembled prompt.
+const HARNESS_MARKER: &str = "### libertai-harness";
 
 #[test]
 fn dump_env_var_prints_assembled_prompt_and_exits() {
