@@ -1093,6 +1093,11 @@ pub struct Auth {
     /// rotating (and invalidating) this one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
+    /// Persistent session refresh token (30-day, server-revocable) captured at
+    /// browser-SSO login. Lets account/billing reads (`usage`) refresh a
+    /// short-lived JWT without a browser popup. Cleared on logout. Secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
 }
 
 fn default_api_base() -> String {
@@ -1437,5 +1442,20 @@ mod tests {
         assert!(cfg.code_compaction_token_budget_compact);
         let re_encoded = toml::to_string(&cfg).unwrap();
         assert!(re_encoded.contains("code_compaction_token_budget_compact = true"));
+    }
+
+    #[test]
+    fn refresh_token_round_trips_and_is_omitted_when_absent() {
+        let mut cfg = Config::default();
+        // Absent by default → not serialized.
+        let toml_out = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!toml_out.contains("refresh_token"));
+
+        // Present → serializes and parses back.
+        cfg.auth.refresh_token = Some("rtok_abc".to_string());
+        let toml_out = toml::to_string_pretty(&cfg).unwrap();
+        assert!(toml_out.contains("refresh_token"));
+        let parsed: Config = toml::from_str(&toml_out).unwrap();
+        assert_eq!(parsed.auth.refresh_token.as_deref(), Some("rtok_abc"));
     }
 }
