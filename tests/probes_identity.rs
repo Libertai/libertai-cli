@@ -15,9 +15,10 @@ const END_SENTINEL: &str = "===END SYSTEM PROMPT===";
 /// The identity block's lead sentence (from `code_identity_prompt.rs`).
 const IDENTITY_LEAD: &str = "You are **LibertAI Code**";
 
-/// A marker that only appears inside the appended skills content
-/// (libertai-harness skill), used to assert ordering.
-const HARNESS_MARKER: &str = "## Tone and style";
+/// A marker from the appended skills registry (the libertai-harness entry),
+/// used to assert ordering. Skill bodies are latent since `feat(M5/#7)`, so
+/// this is the registry entry rather than a body heading.
+const HARNESS_MARKER: &str = "### libertai-harness";
 
 #[test]
 fn dumped_prompt_leads_with_libertai_identity() {
@@ -46,7 +47,9 @@ fn dumped_prompt_leads_with_libertai_identity() {
     let id = stderr
         .find(IDENTITY_LEAD)
         .expect("identity lead present (checked above)");
-    let harness = stderr.find(HARNESS_MARKER).unwrap_or(usize::MAX);
+    let harness = stderr
+        .find(HARNESS_MARKER)
+        .expect("harness registry entry present");
     assert!(
         id < harness,
         "identity block should precede the harness skill marker"
