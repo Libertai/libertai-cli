@@ -254,6 +254,13 @@ pub enum AgentMsg {
         name: String,
         outcome: SubagentOutcome,
     },
+    /// (todo-fix) The `todo` tool published a fresh task list. Carries
+    /// the already-deduped items (see `code_todo::display_items`). The
+    /// main thread stashes this on `App::todo` and the pinned overlay
+    /// renders it in place above the footer — NO raw stderr writes
+    /// (those corrupt the alternate screen; see the `TodoTool` doc). An
+    /// empty vec clears the overlay.
+    Todo(Vec<crate::commands::code_todo::TodoItem>),
     /// Error from the background thread.
     Error(String),
 }
@@ -325,6 +332,13 @@ pub struct App {
     pub current_tool: Option<String>,
     /// Detail string for the current tool (e.g. "bash(npm run build)").
     pub current_tool_detail: String,
+    /// (todo-fix) The current task list, published by the `todo` tool
+    /// via `AgentMsg::Todo`. `None` = no list shown (no `todo` call yet,
+    /// or the last call cleared it with an empty `items` array). The
+    /// pinned overlay reads this each frame and renders the list in
+    /// place above the footer — replacing the old raw-stderr `eprintln!`
+    /// that corrupted the alternate screen.
+    pub todo: Option<Vec<crate::commands::code_todo::TodoItem>>,
     /// Messages queued for the next turn.
     pub queued: Vec<String>,
     /// Multi-line input editor (tui-textarea widget).
@@ -1268,6 +1282,22 @@ fn translate_event(event: &AgentEvent) -> Option<AgentMsg> {
                         name,
                         outcome,
                     })
+                }
+                // (todo-fix) `todo` tool published a fresh task list. The
+                // items are serialized into `details.items` (each `TodoItem`
+                // derives Serialize/Deserialize). Round-trip back to the
+                // typed vec; on any parse failure, drop the update rather
+                // than panicking the render loop. An empty vec clears the
+                // overlay (handled in `handle_agent_msg`).
+                "todo" => {
+                    let items = details
+                        .get("items")
+                        .and_then(|v| serde_json::from_value::<
+                            Vec<crate::commands::code_todo::TodoItem>,
+                        >(v.clone())
+                        .ok())
+                        .unwrap_or_default();
+                    Some(AgentMsg::Todo(items))
                 }
                 _ => None,
             }
@@ -2251,6 +2281,7 @@ pub fn run(
         spinner_label: "thinking…",
         current_tool: None,
         current_tool_detail: String::new(),
+        todo: None,
         queued: Vec::new(),
         textarea: {
             let mut ta = TextArea::default();
@@ -7272,6 +7303,20 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.transcript.push(TranscriptEntry::Blank);
             app.scroll = 0; // auto-scroll to bottom
         }
+        // (todo-fix) Stash the latest task list for the pinned overlay.
+        // No transcript entry — the list renders in place above the
+        // footer, so repeated `todo` calls update the same block instead
+        // of scrolling. An empty vec clears the overlay. Mark dirty so
+        // the next frame redraws (the overlay height changes, which
+        // would otherwise leave a stale region).
+        AgentMsg::Todo(items) => {
+            if items.is_empty() {
+                app.todo = None;
+            } else {
+                app.todo = Some(items);
+            }
+            app.dirty = true;
+        }
         AgentMsg::Osc52(seq) => {
             // Write the OSC52 clipboard sequence RAW to stdout, out-of-band
             // from the transcript. Terminals read OSC52 from stdout between
@@ -7619,6 +7664,7 @@ mod tests {
             spinner_label: "thinking…",
             current_tool: None,
             current_tool_detail: String::new(),
+            todo: None,
             queued: Vec::new(),
             textarea: TextArea::default(),
             history: VecDeque::new(),

@@ -84,6 +84,49 @@ pub fn draw_queued(frame: &mut Frame, area: Rect, text: &str) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
+/// Draw the pinned task-list overlay published by the `todo` tool via
+/// `AgentMsg::Todo` (stored on `App::todo`). Renders in place at the top
+/// of the footer — repeated `todo` calls UPDATE this block instead of
+/// scrolling, matching Claude Code. Replaces the old raw-stderr
+/// `eprintln!` render that corrupted the alternate screen.
+///
+/// Shape:
+/// ```text
+///   ⎯ task list ⎯
+///   ☑  rebuild the parser
+///   ■  wire the new event
+///   ☐  bench the fallback
+/// ```
+/// `area` is the full block allocated by `draw_footer` (1 header row +
+/// 1 row per item). Truncation is the scrollback's job — the footer
+/// height is capped by `compute_footer_height` so this never overflows
+/// the terminal.
+pub fn draw_todo(frame: &mut Frame, area: Rect, items: &[crate::commands::code_todo::TodoItem]) {
+    use crate::commands::code_todo::TodoStatus;
+
+    let mut lines: Vec<Line> = Vec::with_capacity(items.len() + 1);
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("⎯ task list ⎯", theme::dim_muted()),
+    ]));
+
+    for item in items {
+        let (glyph, glyph_style, text_style) = match item.status {
+            TodoStatus::Completed => (theme::glyph::CHECKED, theme::success(), theme::dim_muted()),
+            TodoStatus::Active => (theme::glyph::ACTIVE, theme::warning(), theme::bold()),
+            TodoStatus::Pending => (theme::glyph::UNCHECKED, theme::muted(), theme::muted()),
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(glyph, glyph_style),
+            Span::raw(" "),
+            Span::styled(item.text.clone(), text_style),
+        ]));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 /// Draw the rule line (status bar): `─ model ─ tokens ─ mode ─ cost ─`.
 ///
 /// When a `/statusline` template is configured (`app.bar.status_line_template`

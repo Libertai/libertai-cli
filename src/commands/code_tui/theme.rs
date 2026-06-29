@@ -143,6 +143,10 @@ pub mod glyph {
     pub const COMPLETED: &str = "✓";
     /// Unchecked task-list box (M4b markdown `- [ ]` items).
     pub const UNCHECKED: &str = "☐";
+    /// Checked task-list box (M4b markdown `- [x]` items).
+    pub const CHECKED: &str = "☑";
+    /// Filled box — the in-progress item in the `todo` tool's pinned overlay.
+    pub const ACTIVE: &str = "■";
     pub const FAILED: &str = "✗";
     pub const STOPPED: &str = "⊘";
 

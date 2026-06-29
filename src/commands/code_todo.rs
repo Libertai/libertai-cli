@@ -96,7 +96,7 @@ impl Tool for TodoTool {
         &self,
         _tool_call_id: &str,
         input: serde_json::Value,
-        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+        on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> PiResult<ToolExecution> {
         let parsed: TodoInput = match serde_json::from_value(input) {
             Ok(v) => v,
@@ -109,7 +109,31 @@ impl Tool for TodoTool {
         // (e.g. two quick consecutive updates merged into one), which
         // used to draw the same line twice inside a single task list.
         let items = display_items(&parsed.items);
-        render_todo_list(&items);
+
+        // Route the task list to the TUI via the tool-update channel so
+        // ratatui's main thread renders the pinned overlay in place —
+        // NEVER raw stderr. The TUI owns the alternate screen on stdout;
+        // an `eprintln!` from this background-thread tool writes raw ANSI
+        // escapes to the live terminal mid-`terminal.draw`, corrupting the
+        // frame (the "todo breaks the UI" symptom). `on_update` is `Some`
+        // whenever the session has an event sink (the TUI); the dispatcher
+        // in `app.rs` turns `details.kind == "todo"` into `AgentMsg::Todo`.
+        if let Some(on_update) = &on_update {
+            on_update(ToolUpdate {
+                content: Vec::new(),
+                details: Some(serde_json::json!({
+                    "kind": "todo",
+                    // `TodoItem` derives Serialize — round-trips back to
+                    // `Vec<TodoItem>` in the TUI dispatcher.
+                    "items": items,
+                })),
+            });
+        } else {
+            // Headless (`--print` / one-shot / no event sink): stderr is a
+            // legit output stream here, so the legacy dim render is safe
+            // and preserves the existing print-mode behavior.
+            render_todo_list(&items);
+        }
 
         // Give the model a cheap confirmation it can see in the tool
         // result message (models sometimes spin if a tool returns an

@@ -37,8 +37,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // (tui-bugs #11).
     let agent_rows = agent_rows(&agents, area.height);
 
+    // (todo-fix) Pinned task-list overlay height: a header row + one row
+    // per item, capped to half the terminal so a huge list never eats the
+    // whole screen. `None` (no `todo` call yet, or cleared) → 0 rows.
+    let todo_rows = app
+        .todo
+        .as_ref()
+        .map(|items| 1 + items.len() as u16)
+        .unwrap_or(0)
+        .min(area.height / 2);
+
     // Compute footer height from the frame area, not a separate syscall.
-    let footer_height = compute_footer_height(agent_rows, &app.queued, area.height);
+    let footer_height = compute_footer_height(agent_rows, &app.queued, todo_rows, area.height);
 
     // Split: scrollback (variable) + footer (fixed).
     let chunks = Layout::default()
@@ -56,7 +66,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     scrollback::draw(frame, scrollback_area, app);
 
     // Draw footer (agents + spinner + queued + rule + input).
-    draw_footer(frame, footer_area, app, &agents, agent_rows);
+    draw_footer(frame, footer_area, app, &agents, agent_rows, todo_rows);
 
     // Draw approval modal overlay if active.
     if app.phase == Phase::Approval {
@@ -112,12 +122,21 @@ fn agent_rows(agents: &[Arc<AgentHandle>], term_height: u16) -> u16 {
 /// `term_height` is the frame's area height — not a separate syscall.
 /// `agent_rows` is computed once by the caller via [`agent_rows`] and
 /// passed in so the height and the layout use the same value.
-fn compute_footer_height(agent_rows: u16, queued: &[String], term_height: u16) -> u16 {
+///
+/// `todo_rows` is the `todo` overlay height — `None` when no task list is
+/// pinned (`app.todo == None`), else `1 + items.len()` (a header row plus
+/// one row per item). The overlay sits at the TOP of the footer.
+fn compute_footer_height(
+    agent_rows: u16,
+    queued: &[String],
+    todo_rows: u16,
+    term_height: u16,
+) -> u16 {
     let agent_header = if agent_rows > 0 { 1 } else { 0 };
     let queued_rows = queued.len().min(3) as u16;
     // spinner + queued + rule + input
     let base = 1 + queued_rows + 1 + 1;
-    let total = agent_header + agent_rows + base;
+    let total = todo_rows + agent_header + agent_rows + base;
     total.min(term_height.saturating_sub(1))
 }
 
@@ -127,12 +146,16 @@ fn compute_footer_height(agent_rows: u16, queued: &[String], term_height: u16) -
 /// sized off the terminal height — not `area.height`, which is the
 /// already-clamped footer area and would disagree with the height
 /// computation (tui-bugs #11).
+///
+/// `todo_rows` is the `todo` overlay height (see [`compute_footer_height`]);
+/// `0` means no overlay. The overlay renders FIRST (top of the footer).
 fn draw_footer(
     frame: &mut Frame,
     area: Rect,
     app: &mut App,
     agents: &[Arc<AgentHandle>],
     agent_rows: u16,
+    todo_rows: u16,
 ) {
     let agent_header = if agent_rows > 0 { 1 } else { 0 };
     let queued_rows = app.queued.len().min(3) as u16;
@@ -145,6 +168,9 @@ fn draw_footer(
         .direction(Direction::Vertical)
         .constraints({
             let mut c = Vec::new();
+            if todo_rows > 0 {
+                c.push(Constraint::Length(todo_rows));
+            }
             if agent_header > 0 {
                 c.push(Constraint::Length(agent_header));
             }
@@ -162,6 +188,14 @@ fn draw_footer(
         .split(area);
 
     let mut chunk_idx = 0;
+
+    // (todo-fix) Pinned task-list overlay at the top of the footer.
+    if todo_rows > 0 {
+        if let Some(items) = &app.todo {
+            footer::draw_todo(frame, chunks[chunk_idx], items);
+        }
+        chunk_idx += 1;
+    }
 
     // Agent header + agent rows.
     if agent_header > 0 {
