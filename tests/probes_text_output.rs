@@ -1,21 +1,27 @@
-//! Prompt-shape probe for the harness text-output guidance. This keeps
-//! Claude-style output constraints in the assembled prompt, where they
-//! affect every native code session.
+//! Prompt-shape probe for the harness text-output guidance.
+//!
+//! That guidance lives in the `libertai-harness` skill. Since `feat(M5/#7)`
+//! skill *bodies* are latent — loaded on demand via the `skill` tool rather
+//! than inlined in the base prompt (and inclusion is non-deterministic per
+//! invocation). So this probe asserts the harness skill is advertised in the
+//! latent registry (the reachable on-ramp to that guidance), not that its body
+//! text is inlined.
 
 use assert_cmd::Command;
 
 mod common;
 
 const REQUIRED_PHRASES: &[&str] = &[
-    "cannot see raw tool calls",
-    "decisive lines",
-    "do not create planning documents",
-    "keep plans in the conversation or todo tool",
-    "docstrings or module comments",
+    // The latent-registry header…
+    "## Available Agent Skills",
+    // …lists the harness skill (which carries the text-output discipline)…
+    "### libertai-harness",
+    // …and tells the model to pull the body via the skill tool.
+    "skill` tool",
 ];
 
 #[test]
-fn text_output_guidance_reaches_assembled_prompt() {
+fn text_output_skill_is_advertised_in_latent_registry() {
     let config_home = common::fake_config_home();
     let assert = Command::cargo_bin("libertai")
         .expect("libertai binary built")
