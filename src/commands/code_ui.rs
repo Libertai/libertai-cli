@@ -4733,13 +4733,7 @@ mod tests {
             true
         ));
         // Saturation: reserve larger than window must not underflow.
-        assert!(is_ctx_limit_stop(
-            &StopReason::Length,
-            1,
-            100,
-            1_000,
-            true
-        ));
+        assert!(is_ctx_limit_stop(&StopReason::Length, 1, 100, 1_000, true));
     }
 
     #[test]

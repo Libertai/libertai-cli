@@ -408,17 +408,9 @@ pub struct HooksConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub subagent_stop: Vec<HookCommandConfig>,
-    #[serde(
-        default,
-        rename = "PreCompact",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    #[serde(default, rename = "PreCompact", skip_serializing_if = "Vec::is_empty")]
     pub pre_compact: Vec<HookCommandConfig>,
-    #[serde(
-        default,
-        rename = "PostCompact",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    #[serde(default, rename = "PostCompact", skip_serializing_if = "Vec::is_empty")]
     pub post_compact: Vec<HookCommandConfig>,
     #[serde(
         default,

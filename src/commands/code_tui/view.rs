@@ -754,7 +754,10 @@ fn draw_tool_output_view(frame: &mut Frame, area: Rect, app: &mut App) {
     };
     // Resolve the currently-selected entry BEFORE mutably borrowing app to
     // pin max_scroll below (mirrors draw_diff_view's borrow split).
-    let entry = view.indices.get(view.pos).and_then(|i| app.transcript.get(*i));
+    let entry = view
+        .indices
+        .get(view.pos)
+        .and_then(|i| app.transcript.get(*i));
     let (name, full_output, is_error) = match entry {
         Some(TranscriptEntry::ToolResult {
             name,

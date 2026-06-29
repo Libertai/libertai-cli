@@ -88,9 +88,7 @@ impl Default for StructuredOutputTool {
 /// `LIBERTAI_STRUCTURED_OUTPUT_RETRIES=` doesn't silently disable the cap).
 pub fn structured_output_retry_cap() -> u64 {
     match std::env::var("LIBERTAI_STRUCTURED_OUTPUT_RETRIES") {
-        Ok(raw) if !raw.trim().is_empty() => {
-            raw.trim().parse::<u64>().unwrap_or(DEFAULT_RETRIES)
-        }
+        Ok(raw) if !raw.trim().is_empty() => raw.trim().parse::<u64>().unwrap_or(DEFAULT_RETRIES),
         _ => DEFAULT_RETRIES,
     }
 }
@@ -150,7 +148,8 @@ impl Tool for StructuredOutputTool {
                 "structured_output retry cap reached ({}/{cap}). The schema has \
                  failed validation {cap} times this session; stop retrying and \
                  report the mismatch to the parent in prose instead.",
-                prior, cap = self.retry_cap,
+                prior,
+                cap = self.retry_cap,
             )));
         }
 
@@ -495,7 +494,9 @@ fn type_matches(data: &serde_json::Value, ty: &str) -> bool {
         // has no integer type; 1.0 is a valid integer per the spec.
         "integer" => data
             .as_number()
-            .map(|n| n.is_i64() || n.is_u64() || n.as_f64().map(|f| f.fract() == 0.0).unwrap_or(false))
+            .map(|n| {
+                n.is_i64() || n.is_u64() || n.as_f64().map(|f| f.fract() == 0.0).unwrap_or(false)
+            })
             .unwrap_or(false),
         _ => true, // unknown type keyword — don't reject (lenient).
     }
@@ -527,7 +528,9 @@ mod tests {
         assert!(validate(&ok, &s).is_ok());
         let missing = serde_json::json!({"name":"Ada"});
         let errs = validate(&missing, &s).unwrap_err();
-        assert!(errs.iter().any(|e| e.path == "age" && e.message.contains("missing required")));
+        assert!(errs
+            .iter()
+            .any(|e| e.path == "age" && e.message.contains("missing required")));
     }
 
     #[test]
@@ -535,7 +538,9 @@ mod tests {
         let s = schema(r#"{"type":"object","properties":{"n":{"type":"number"}}}"#);
         let bad = serde_json::json!({"n":"x"});
         let errs = validate(&bad, &s).unwrap_err();
-        assert!(errs.iter().any(|e| e.path == "n" && e.message.contains("expected type")));
+        assert!(errs
+            .iter()
+            .any(|e| e.path == "n" && e.message.contains("expected type")));
     }
 
     #[test]
@@ -546,18 +551,20 @@ mod tests {
         );
         assert!(validate(&serde_json::json!({"a":"x"}), &s).is_ok());
         let errs = validate(&serde_json::json!({"a":"x","b":1}), &s).unwrap_err();
-        assert!(errs.iter().any(|e| e.path == "b" && e.message.contains("additional property")));
+        assert!(errs
+            .iter()
+            .any(|e| e.path == "b" && e.message.contains("additional property")));
     }
 
     #[test]
     fn validates_array_items_and_bounds() {
-        let s = schema(
-            r#"{"type":"array","items":{"type":"integer"},"minItems":1,"maxItems":3}"#,
-        );
-        assert!(validate(&serde_json::json!([1,2,3]), &s).is_ok());
-        let errs = validate(&serde_json::json!([1,"x"]), &s).unwrap_err();
-        assert!(errs.iter().any(|e| e.path == "1" && e.message.contains("expected type")));
-        let errs = validate(&serde_json::json!([1,2,3,4]), &s).unwrap_err();
+        let s = schema(r#"{"type":"array","items":{"type":"integer"},"minItems":1,"maxItems":3}"#);
+        assert!(validate(&serde_json::json!([1, 2, 3]), &s).is_ok());
+        let errs = validate(&serde_json::json!([1, "x"]), &s).unwrap_err();
+        assert!(errs
+            .iter()
+            .any(|e| e.path == "1" && e.message.contains("expected type")));
+        let errs = validate(&serde_json::json!([1, 2, 3, 4]), &s).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("maxItems")));
         let errs = validate(&serde_json::json!([]), &s).unwrap_err();
         assert!(errs.iter().any(|e| e.message.contains("minItems")));
@@ -595,9 +602,7 @@ mod tests {
         assert!(validate(&serde_json::json!(1), &one).is_ok());
         // A value matching neither → 0 passes → error.
         assert!(validate(&serde_json::json!(true), &one).is_err());
-        let all = schema(
-            r#"{"allOf":[{"type":"integer"},{"minimum":0}]}"#,
-        );
+        let all = schema(r#"{"allOf":[{"type":"integer"},{"minimum":0}]}"#);
         assert!(validate(&serde_json::json!(3), &all).is_ok());
         assert!(validate(&serde_json::json!(-1), &all).is_err());
     }
@@ -619,7 +624,9 @@ mod tests {
         let errs = validate(&bad, &s).unwrap_err();
         // a wrong type + b missing — both reported, one retry can fix both.
         assert!(errs.iter().any(|e| e.path == "a"));
-        assert!(errs.iter().any(|e| e.path == "b" && e.message.contains("missing required")));
+        assert!(errs
+            .iter()
+            .any(|e| e.path == "b" && e.message.contains("missing required")));
         assert!(!errs.iter().any(|e| e.path == "c")); // additionalProperties not set → c allowed
     }
 

@@ -54,7 +54,10 @@ pub fn draw_spinner(frame: &mut Frame, area: Rect, app: &App) {
     // Live elapsed since the turn started (finding #18), rendered as mm:ss.
     if let Some(start) = app.turn_started {
         spans.push(Span::raw("  "));
-        spans.push(Span::styled(fmt_elapsed_compact(start.elapsed()), theme::muted()));
+        spans.push(Span::styled(
+            fmt_elapsed_compact(start.elapsed()),
+            theme::muted(),
+        ));
     }
 
     // Dim esc-to-stop hint during streaming (finding #20).

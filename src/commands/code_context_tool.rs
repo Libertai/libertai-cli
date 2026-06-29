@@ -109,8 +109,7 @@ impl ContextSnapshot {
         self.last_input_tokens
             .store(input_tokens, Ordering::Relaxed);
         if context_window > 0 {
-            self.context_window
-                .store(context_window, Ordering::Relaxed);
+            self.context_window.store(context_window, Ordering::Relaxed);
         }
     }
 
@@ -140,8 +139,7 @@ impl ContextSnapshot {
     /// (true if a request was already pending — the model calling
     /// `request_compaction` twice in one turn is harmless).
     pub fn request_compaction(&self) -> bool {
-        self.compaction_requested
-            .swap(true, Ordering::Relaxed)
+        self.compaction_requested.swap(true, Ordering::Relaxed)
     }
 
     /// Drain the compaction signal. Called by the `TurnEnd` handler;
@@ -318,7 +316,13 @@ mod tests {
     use asupersync::test_utils::run_test;
 
     fn snap() -> Arc<ContextSnapshot> {
-        Arc::new(ContextSnapshot::new("anthropic", "claude-3-5-sonnet", true, 8_000, 4_000))
+        Arc::new(ContextSnapshot::new(
+            "anthropic",
+            "claude-3-5-sonnet",
+            true,
+            8_000,
+            4_000,
+        ))
     }
 
     #[test]
@@ -446,7 +450,9 @@ mod tests {
         run_test(|| async {
             let s = snap();
             let tool = RequestCompactionTool::new(Arc::clone(&s));
-            tool.execute("c1", serde_json::json!({}), None).await.unwrap();
+            tool.execute("c1", serde_json::json!({}), None)
+                .await
+                .unwrap();
             let exec = tool
                 .execute("c2", serde_json::json!({}), None)
                 .await

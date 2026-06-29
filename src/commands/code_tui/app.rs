@@ -24,7 +24,6 @@ use crate::commands::code_cron;
 use crate::commands::code_diff::EditJournal;
 // (M6/#15) Workflow engine — registry threaded through the tool factory +
 // the `/workflows` viewer reads it.
-use crate::commands::code_workflow;
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
 use crate::commands::code_hooks::{
     run_post_compact_hooks, run_post_tool_batch_hooks, run_post_tool_hooks, run_pre_compact_hooks,
@@ -52,9 +51,10 @@ use crate::commands::code_tui::view;
 use crate::commands::code_ui::{
     self, apply_pending_shell_context, context_percent, context_tokens, context_window_for,
     read_log_tail, shell_escape_command, stage_pr_comment_draft, start_background_agent,
-    truncate_chars, usage_summary, BackgroundAgentLaunch, PrCommentDraft,
-    ShellEscapeAction, UsageRecord,
+    truncate_chars, usage_summary, BackgroundAgentLaunch, PrCommentDraft, ShellEscapeAction,
+    UsageRecord,
 };
+use crate::commands::code_workflow;
 use crate::config::{allow_rules_path, Config as LibertaiConfig};
 
 /// Maximum entries in the input history. Matches the legacy REPL.
@@ -1065,7 +1065,11 @@ fn append_compaction_metrics(
     if let Some(tb) = tokens_before {
         match tokens_after {
             Some(ta) => {
-                s.push_str(&format!(" · was {} → {}", human_tokens(tb), human_tokens(ta)));
+                s.push_str(&format!(
+                    " · was {} → {}",
+                    human_tokens(tb),
+                    human_tokens(ta)
+                ));
                 // Show the delta only when it's a real reduction (compaction
                 // can be a no-op or even grow slightly on tiny histories).
                 let delta = tb.saturating_sub(ta);
@@ -1292,10 +1296,12 @@ fn translate_event(event: &AgentEvent) -> Option<AgentMsg> {
                 "todo" => {
                     let items = details
                         .get("items")
-                        .and_then(|v| serde_json::from_value::<
-                            Vec<crate::commands::code_todo::TodoItem>,
-                        >(v.clone())
-                        .ok())
+                        .and_then(|v| {
+                            serde_json::from_value::<Vec<crate::commands::code_todo::TodoItem>>(
+                                v.clone(),
+                            )
+                            .ok()
+                        })
                         .unwrap_or_default();
                     Some(AgentMsg::Todo(items))
                 }
@@ -2548,8 +2554,11 @@ fn poll_main_inbox(
     // (team, mailbox_dir, message) for every unread message across all
     // teams, in send order. Sort before marking so a multi-message burst
     // surfaces oldest-first.
-    let mut pending: Vec<(String, std::path::PathBuf, crate::commands::code_mailbox::MailMessage)> =
-        Vec::new();
+    let mut pending: Vec<(
+        String,
+        std::path::PathBuf,
+        crate::commands::code_mailbox::MailMessage,
+    )> = Vec::new();
     for (team, cwd) in teams {
         let team_dir = cwd.join(".libertai").join("teams").join(&team);
         let main_dir = mailbox_dir_for(&team_dir, "main");
@@ -5808,9 +5817,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                 .transcript
                 .iter()
                 .enumerate()
-                .filter_map(|(i, e)| {
-                    matches!(e, TranscriptEntry::ToolResult { .. }).then_some(i)
-                })
+                .filter_map(|(i, e)| matches!(e, TranscriptEntry::ToolResult { .. }).then_some(i))
                 .collect();
             if indices.is_empty() {
                 app.transcript
@@ -6463,7 +6470,11 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     for j in jobs {
                         lines.push_str(&format!(
                             "\n  {} `{}` {} next={} : {}",
-                            j.id, j.cron, if j.recurring { "recurring" } else { "once" }, j.next_fire_ms, j.prompt,
+                            j.id,
+                            j.cron,
+                            if j.recurring { "recurring" } else { "once" },
+                            j.next_fire_ms,
+                            j.prompt,
                         ));
                     }
                     app.transcript.push(TranscriptEntry::System(lines));
@@ -6477,7 +6488,8 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             let tokens: Vec<&str> = rest.split_whitespace().collect();
             if tokens.len() < 6 {
                 app.transcript.push(TranscriptEntry::System(
-                    "usage: /schedule <min> <hour> <dom> <month> <dow> [once|recurring] <prompt>".to_string(),
+                    "usage: /schedule <min> <hour> <dom> <month> <dow> [once|recurring] <prompt>"
+                        .to_string(),
                 ));
                 app.transcript.push(TranscriptEntry::Blank);
                 return None;
@@ -6494,7 +6506,9 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     app.transcript.push(TranscriptEntry::System(format!(
                         "scheduled{} {} `{}` — next fire at epoch-ms {}",
                         if recurring { " (recurring)" } else { "" },
-                        job.id, job.cron, job.next_fire_ms,
+                        job.id,
+                        job.cron,
+                        job.next_fire_ms,
                     )));
                 }
                 Err(e) => {
@@ -7080,9 +7094,14 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                     u64::from(app.cfg.code_compaction_reserve_tokens),
                     app.cfg.code_auto_compaction_enabled,
                 );
-                app.transcript.push(TranscriptEntry::System(
-                    code_ui::stop_line_text_ctx(&reason, ctx_limit, ctx_in, out, elapsed_secs),
-                ));
+                app.transcript
+                    .push(TranscriptEntry::System(code_ui::stop_line_text_ctx(
+                        &reason,
+                        ctx_limit,
+                        ctx_in,
+                        out,
+                        elapsed_secs,
+                    )));
                 if ctx_limit {
                     // Auto-trigger compaction with no extra notes. The
                     // compaction runs on the bg thread via the same path
@@ -7266,8 +7285,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             // Reset the latch when context drops back below 50% so a
             // later climb can re-fire.
             if context_window > 0 {
-                let pct =
-                    crate::commands::code_ui::context_percent(input_tokens, context_window);
+                let pct = crate::commands::code_ui::context_percent(input_tokens, context_window);
                 if pct < 50 {
                     app.compaction_warned = false;
                 } else if !app.compaction_warned {
@@ -7688,11 +7706,7 @@ mod tests {
             approvals: Arc::new(ApprovalState::new()),
             edit_journal: Arc::new(EditJournal::new()),
             context_snapshot: Arc::new(code_context_tool::ContextSnapshot::new(
-                "openai",
-                "gpt-4o",
-                true,
-                8_000,
-                4_000,
+                "openai", "gpt-4o", true, 8_000, 4_000,
             )),
             cron_store: Arc::new(code_cron::CronStore::new()),
             workflows: code_workflow::WorkflowRegistry::new(),
@@ -7759,7 +7773,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = AgentRegistry::new();
         registry.register(reg_teammate_in("alpha", dir.path().to_path_buf()));
-        seed_main_mail(dir.path(), "alpha", "alice", "found it", "the bug is in parser.rs");
+        seed_main_mail(
+            dir.path(),
+            "alpha",
+            "alice",
+            "found it",
+            "the bug is in parser.rs",
+        );
 
         let deliveries = poll_main_inbox(&registry.snapshot());
         assert_eq!(deliveries.len(), 1);
@@ -7791,9 +7811,7 @@ mod tests {
         registry.register(reg_teammate_in("alpha", dir.path().to_path_buf()));
         // Seed two messages with explicit timestamps (oldest first in
         // file order is not guaranteed across ticks — sort must fix it).
-        use crate::commands::code_mailbox::{
-            mailbox_dir_for, write_message, MailMessage,
-        };
+        use crate::commands::code_mailbox::{mailbox_dir_for, write_message, MailMessage};
         let team_dir = dir.path().join(".libertai").join("teams").join("alpha");
         let inbox = mailbox_dir_for(&team_dir, "main");
         std::fs::create_dir_all(&inbox).unwrap();
@@ -7854,7 +7872,10 @@ mod tests {
         });
         seed_main_mail(dir.path(), "alpha", "alice", "x", "y");
         let deliveries = poll_main_inbox(&registry.snapshot());
-        assert!(deliveries.is_empty(), "non-teammate drove a poll: {deliveries:?}");
+        assert!(
+            deliveries.is_empty(),
+            "non-teammate drove a poll: {deliveries:?}"
+        );
     }
 
     #[test]
@@ -8773,10 +8794,7 @@ mod tests {
         // Exactly one Compact command was sent.
         let mut compacts = 0;
         while let Ok(cmd) = cmd_rx.try_recv() {
-            if matches!(
-                cmd,
-                Cmd::RunReadOnly(BgCommand::Compact { notes: None })
-            ) {
+            if matches!(cmd, Cmd::RunReadOnly(BgCommand::Compact { notes: None })) {
                 compacts += 1;
             }
         }
@@ -8814,10 +8832,7 @@ mod tests {
         assert!(!app.context_snapshot.take_compaction_request());
         let mut compacts = 0;
         while let Ok(cmd) = cmd_rx.try_recv() {
-            if matches!(
-                cmd,
-                Cmd::RunReadOnly(BgCommand::Compact { notes: None })
-            ) {
+            if matches!(cmd, Cmd::RunReadOnly(BgCommand::Compact { notes: None })) {
                 compacts += 1;
             }
         }
@@ -8871,10 +8886,7 @@ mod tests {
             &cmd_tx,
         );
         assert!(app.compaction_warned);
-        let last = app
-            .transcript
-            .last()
-            .expect("an advisory was pushed");
+        let last = app.transcript.last().expect("an advisory was pushed");
         let TranscriptEntry::System(text) = last else {
             panic!("expected System entry, got {last:?}");
         };
@@ -13838,7 +13850,11 @@ task = "Do the thing"
             KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
             &cmd_tx,
         );
-        assert_eq!(app.tool_output_view.as_ref().unwrap().pos, 0, "pos 0 is the floor");
+        assert_eq!(
+            app.tool_output_view.as_ref().unwrap().pos,
+            0,
+            "pos 0 is the floor"
+        );
 
         // Esc closes the overlay.
         handle_tool_output_view_key(
@@ -13886,7 +13902,11 @@ task = "Do the thing"
         });
         let full = full_tool_output(&val);
         assert_eq!(full, "line one\nline two\nline three", "newlines preserved");
-        assert_ne!(full, render_tool_output(&val), "full ≠ compact (no collapse)");
+        assert_ne!(
+            full,
+            render_tool_output(&val),
+            "full ≠ compact (no collapse)"
+        );
 
         // A huge body caps at FULL_OUTPUT_CAP with a truncation notice.
         let big = "x".repeat(FULL_OUTPUT_CAP * 2);

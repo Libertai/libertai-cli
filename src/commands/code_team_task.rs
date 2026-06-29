@@ -357,9 +357,7 @@ impl Tool for TeamTaskTool {
                             continue;
                         }
                         if !known.contains(id) {
-                            return Err(format!(
-                                "`{field}` references unknown task id: {id}"
-                            ));
+                            return Err(format!("`{field}` references unknown task id: {id}"));
                         }
                     }
                     Ok(())
@@ -459,7 +457,11 @@ fn render_task_line(task: &TeamTask, all: &[TeamTask]) -> String {
         }
     }
     if has_edges(task) {
-        let marker = if is_ready(task, all) { "ready" } else { "blocked" };
+        let marker = if is_ready(task, all) {
+            "ready"
+        } else {
+            "blocked"
+        };
         line.push_str(&format!(" · {marker}"));
     }
     line
@@ -525,7 +527,11 @@ fn update_task(
     }
     if let Some(owner) = owner {
         let owner = owner.trim();
-        task.owner = if owner.is_empty() { None } else { Some(owner.to_string()) };
+        task.owner = if owner.is_empty() {
+            None
+        } else {
+            Some(owner.to_string())
+        };
     }
     if let Some(note) = notes {
         let note = note.trim();
@@ -862,7 +868,11 @@ mod tests {
     #[test]
     fn link_task_adds_blocks_and_blocked_by_dedup() {
         let mut t = task_with_edges("t1", "X", TeamTaskStatus::Pending, vec![], vec![]);
-        link_task(&mut t, &["t2".to_string(), "t3".to_string()], &["t4".to_string()]);
+        link_task(
+            &mut t,
+            &["t2".to_string(), "t3".to_string()],
+            &["t4".to_string()],
+        );
         assert_eq!(t.blocks, vec!["t2".to_string(), "t3".to_string()]);
         assert_eq!(t.blocked_by, vec!["t4".to_string()]);
         // Dedup: re-adding an existing edge is a no-op.
@@ -946,7 +956,10 @@ mod tests {
         let t = task("t1", "A", Some("alice"), TeamTaskStatus::Active, vec![]);
         let line = render_task_line(&t, std::slice::from_ref(&t));
         assert!(!line.contains("· ready"), "flat task showed ready: {line}");
-        assert!(!line.contains("· blocked"), "flat task showed blocked: {line}");
+        assert!(
+            !line.contains("· blocked"),
+            "flat task showed blocked: {line}"
+        );
     }
 
     #[test]
@@ -970,7 +983,10 @@ mod tests {
         let t = task_with_edges("t1", "A", TeamTaskStatus::Pending, vec!["t2"], vec!["t3"]);
         let out = render_task(&t, std::slice::from_ref(&t));
         assert!(out.contains("Blocks: t2"), "blocks line missing: {out}");
-        assert!(out.contains("Blocked by: t3"), "blocked_by line missing: {out}");
+        assert!(
+            out.contains("Blocked by: t3"),
+            "blocked_by line missing: {out}"
+        );
     }
 
     #[test]
@@ -1067,14 +1083,20 @@ mod tests {
             assert!(text.contains("Blocked by: t2"), "edges missing: {text}");
             // Persisted to disk.
             let on_disk = std::fs::read_to_string(dir.path().join("tasks.jsonl")).unwrap();
-            assert!(on_disk.contains(r#""blocked_by":["t2"]"#), "not persisted: {on_disk}");
+            assert!(
+                on_disk.contains(r#""blocked_by":["t2"]"#),
+                "not persisted: {on_disk}"
+            );
         });
     }
 
     #[test]
     fn link_action_rejects_unknown_task_id() {
         let dir = tempfile::tempdir().unwrap();
-        seed(dir.path(), &[task("t1", "A", None, TeamTaskStatus::Pending, vec![])]);
+        seed(
+            dir.path(),
+            &[task("t1", "A", None, TeamTaskStatus::Pending, vec![])],
+        );
         run(|| async {
             let t = tool(dir.path());
             let exec = t
@@ -1097,7 +1119,10 @@ mod tests {
     #[test]
     fn link_action_requires_at_least_one_edge() {
         let dir = tempfile::tempdir().unwrap();
-        seed(dir.path(), &[task("t1", "A", None, TeamTaskStatus::Pending, vec![])]);
+        seed(
+            dir.path(),
+            &[task("t1", "A", None, TeamTaskStatus::Pending, vec![])],
+        );
         run(|| async {
             let t = tool(dir.path());
             let exec = t

@@ -697,12 +697,24 @@ mod tests {
             .expect("prompt")
             .expect("code prompt");
         // Registry header + the instruction to use the `skill` tool.
-        assert!(prompt.contains("## Available Agent Skills"), "header: {prompt:?}");
-        assert!(prompt.contains("call the `skill` tool"), "tool hint: {prompt:?}");
+        assert!(
+            prompt.contains("## Available Agent Skills"),
+            "header: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("call the `skill` tool"),
+            "tool hint: {prompt:?}"
+        );
         // The harness + code-workflow skills are active for Code; their
         // names + descriptions appear…
-        assert!(prompt.contains("### libertai-harness"), "harness name: {prompt:?}");
-        assert!(prompt.contains("### libertai-code-workflow"), "workflow name: {prompt:?}");
+        assert!(
+            prompt.contains("### libertai-harness"),
+            "harness name: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("### libertai-code-workflow"),
+            "workflow name: {prompt:?}"
+        );
         // …but their bodies do NOT — the whole point of the refactor.
         assert!(
             !prompt.contains("## Auto memory"),

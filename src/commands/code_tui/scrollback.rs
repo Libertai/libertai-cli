@@ -7,9 +7,9 @@ use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarStat
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
+use crate::commands::code_team::AgentStatus;
 use crate::commands::code_tui::app::{App, SubagentOutcome, TranscriptEntry};
 use crate::commands::code_tui::{markdown, theme, wrap};
-use crate::commands::code_team::AgentStatus;
 
 /// Marker prefix for a per-tool result line — distinct from the tool-call
 /// `●` so a result reads as a reply rather than another invocation.
@@ -59,7 +59,8 @@ impl RenderCache {
             }
         }
         let lines = markdown::render(text, width);
-        self.entries.insert(text.to_string(), (width, lines.clone()));
+        self.entries
+            .insert(text.to_string(), (width, lines.clone()));
         // FIFO eviction at the cap so the cache can't grow unboundedly
         // across a long session with many distinct settled blocks.
         while self.entries.len() > RENDER_CACHE_CAP {
@@ -132,16 +133,14 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     // the turn ends the entry is settled and gets cached on the next
     // draw. Finding the last Assistant index once is O(n) and cheap
     // relative to the per-frame re-render it avoids.
-    let live_assistant_idx = if matches!(
-        app.phase,
-        crate::commands::code_tui::app::Phase::Streaming
-    ) {
-        app.transcript
-            .iter()
-            .rposition(|e| matches!(e, TranscriptEntry::Assistant(_)))
-    } else {
-        None
-    };
+    let live_assistant_idx =
+        if matches!(app.phase, crate::commands::code_tui::app::Phase::Streaming) {
+            app.transcript
+                .iter()
+                .rposition(|e| matches!(e, TranscriptEntry::Assistant(_)))
+        } else {
+            None
+        };
 
     for (entry_idx, entry) in app.transcript.iter().enumerate() {
         match entry {
@@ -610,7 +609,8 @@ mod tests {
         assert!(!open_has_border, "open fence must NOT render a border");
         // Still shows the language label.
         assert!(
-            open.iter().any(|l| l.spans.iter().any(|s| s.content == "rs")),
+            open.iter()
+                .any(|l| l.spans.iter().any(|s| s.content == "rs")),
             "open fence still shows the lang label"
         );
     }

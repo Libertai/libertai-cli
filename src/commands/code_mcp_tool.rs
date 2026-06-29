@@ -480,9 +480,10 @@ pub fn mcp_tool_search_threshold() -> usize {
     // `LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD=` doesn't silently defer
     // everything). A valid 0 means "always defer".
     match std::env::var("LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD") {
-        Ok(raw) if !raw.trim().is_empty() => {
-            raw.trim().parse::<usize>().unwrap_or(DEFAULT_MCP_TOOL_SEARCH_THRESHOLD)
-        }
+        Ok(raw) if !raw.trim().is_empty() => raw
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(DEFAULT_MCP_TOOL_SEARCH_THRESHOLD),
         _ => DEFAULT_MCP_TOOL_SEARCH_THRESHOLD,
     }
 }
@@ -954,10 +955,19 @@ mod tests {
         let _guard = EnvGuard;
 
         std::env::set_var("LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD", "not-a-number");
-        assert_eq!(mcp_tool_search_threshold(), DEFAULT_MCP_TOOL_SEARCH_THRESHOLD);
+        assert_eq!(
+            mcp_tool_search_threshold(),
+            DEFAULT_MCP_TOOL_SEARCH_THRESHOLD
+        );
         std::env::set_var("LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD", "");
-        assert_eq!(mcp_tool_search_threshold(), DEFAULT_MCP_TOOL_SEARCH_THRESHOLD);
+        assert_eq!(
+            mcp_tool_search_threshold(),
+            DEFAULT_MCP_TOOL_SEARCH_THRESHOLD
+        );
         std::env::remove_var("LIBERTAI_MCP_TOOL_SEARCH_THRESHOLD");
-        assert_eq!(mcp_tool_search_threshold(), DEFAULT_MCP_TOOL_SEARCH_THRESHOLD);
+        assert_eq!(
+            mcp_tool_search_threshold(),
+            DEFAULT_MCP_TOOL_SEARCH_THRESHOLD
+        );
     }
 }
