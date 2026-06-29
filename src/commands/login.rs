@@ -276,6 +276,7 @@ fn login_with_api_key(cfg: &mut Config, term: &Term) -> Result<()> {
 
     cfg.auth.api_key = Some(key);
     cfg.auth.expires_at = None; // pasted keys carry no CLI expiry
+    cfg.auth.refresh_token = None; // clear any stale session from a different account
     Ok(())
 }
 
