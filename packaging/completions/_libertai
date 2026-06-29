@@ -53,6 +53,15 @@ _arguments "${_arguments_options[@]}" : \
 '--version[Print version]' \
 && ret=0
 ;;
+(usage)
+_arguments "${_arguments_options[@]}" : \
+'--json[Emit the raw subscription JSON instead of the human summary]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
 (keys)
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
@@ -751,6 +760,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(usage)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (keys)
 _arguments "${_arguments_options[@]}" : \
 ":: :_libertai__subcmd__help__subcmd__keys_commands" \
@@ -994,6 +1007,7 @@ _libertai_commands() {
 'login:Log in (browser sign-in or paste an API key)' \
 'logout:Clear saved credentials (secrets removed; other settings kept)' \
 'status:Show current auth state and defaults' \
+'usage:Show plan tier, allowance windows (5h + weekly), and prepaid credits' \
 'keys:Manage API keys' \
 'models:List available models' \
 'ask:One-shot prompt, non-streaming' \
@@ -1138,6 +1152,7 @@ _libertai__subcmd__help_commands() {
 'login:Log in (browser sign-in or paste an API key)' \
 'logout:Clear saved credentials (secrets removed; other settings kept)' \
 'status:Show current auth state and defaults' \
+'usage:Show plan tier, allowance windows (5h + weekly), and prepaid credits' \
 'keys:Manage API keys' \
 'models:List available models' \
 'ask:One-shot prompt, non-streaming' \
@@ -1395,6 +1410,11 @@ _libertai__subcmd__help__subcmd__skills__subcmd__uninstall_commands() {
 _libertai__subcmd__help__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'libertai help status commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__usage_commands] )) ||
+_libertai__subcmd__help__subcmd__usage_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help usage commands' commands "$@"
 }
 (( $+functions[_libertai__subcmd__hermes_commands] )) ||
 _libertai__subcmd__hermes_commands() {
@@ -1709,6 +1729,11 @@ _libertai__subcmd__skills__subcmd__uninstall_commands() {
 _libertai__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'libertai status commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__usage_commands] )) ||
+_libertai__subcmd__usage_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai usage commands' commands "$@"
 }
 
 if [ "$funcstack[1]" = "_libertai" ]; then

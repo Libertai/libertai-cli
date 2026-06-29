@@ -70,3 +70,4 @@ pub mod search;
 pub mod search_tool;
 pub mod skills;
 pub mod status;
+pub mod usage;
