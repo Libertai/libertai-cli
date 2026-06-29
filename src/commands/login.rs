@@ -12,7 +12,10 @@ const DEFAULT_CONSOLE_BASE: &str = "https://console.libertai.io";
 
 pub fn run() -> Result<()> {
     let term = Term::stderr();
-    let options = &["Sign in with your browser (recommended)", "Paste API key"];
+    let options = &[
+        "Sign in with your browser (recommended)",
+        "Paste API key (inference only — no usage/keys)",
+    ];
 
     let choice = Select::new()
         .with_prompt("How would you like to log in?")
