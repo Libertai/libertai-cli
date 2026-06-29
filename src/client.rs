@@ -546,8 +546,9 @@ pub fn revoke_session(cfg: &Config, refresh_token: &str) -> Result<()> {
 }
 
 /// Mirrors the backend `SubscriptionResponse`. Every window/credit field is
-/// optional there, so all are `Option` here. Serialized verbatim by
-/// `libertai usage --json`, so field names are a stable contract.
+/// optional there, so all are `Option` here. The named fields are a stable
+/// contract; `extra` captures any other fields the backend returns so
+/// `libertai usage --json` re-emits them too (lossless as the API evolves).
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Subscription {
     pub tier: String,
@@ -569,6 +570,10 @@ pub struct Subscription {
     pub weekly_resets_at: Option<String>,
     #[serde(default)]
     pub prepaid_balance: Option<f64>,
+    /// Fields the backend adds beyond the ones above, preserved verbatim so
+    /// `--json` never silently drops new API data.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Fetch the caller's subscription + allowance snapshot. Needs a session JWT

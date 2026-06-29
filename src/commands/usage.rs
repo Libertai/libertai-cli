@@ -81,7 +81,27 @@ fn percent(used: Option<f64>, limit: Option<f64>) -> u32 {
     }
 }
 
-/// 16-cell bar colored by usage: >=90% red, >=75% amber(yellow), else green.
+/// Usage band driving the bar color. Split out from `bar` so the thresholds
+/// are unit-testable without inspecting ANSI escapes.
+#[derive(Debug, PartialEq, Eq)]
+enum BarLevel {
+    Green,
+    Amber,
+    Red,
+}
+
+/// >=90% red, >=75% amber, else green.
+fn bar_level(pct: u32) -> BarLevel {
+    if pct >= 90 {
+        BarLevel::Red
+    } else if pct >= 75 {
+        BarLevel::Amber
+    } else {
+        BarLevel::Green
+    }
+}
+
+/// 16-cell bar colored by usage band (see `bar_level`).
 fn bar(pct: u32, st: &Styler) -> String {
     const WIDTH: u32 = 16;
     let filled = (pct * WIDTH / 100).min(WIDTH);
@@ -90,37 +110,29 @@ fn bar(pct: u32, st: &Styler) -> String {
         "█".repeat(filled as usize),
         "░".repeat((WIDTH - filled) as usize)
     );
-    if pct >= 90 {
-        st.red(&s)
-    } else if pct >= 75 {
-        st.yellow(&s)
-    } else {
-        st.green(&s)
+    match bar_level(pct) {
+        BarLevel::Red => st.red(&s),
+        BarLevel::Amber => st.yellow(&s),
+        BarLevel::Green => st.green(&s),
     }
 }
 
 /// Format an integer with comma grouping, e.g. 1040 → "1,040", 999 → "999".
 fn group_thousands(n: i64) -> String {
-    let digits = n.abs().to_string();
-    let grouped: String = digits
-        .chars()
-        .rev()
-        .enumerate()
-        .flat_map(|(i, c)| {
-            if i > 0 && i % 3 == 0 {
-                Some(',').into_iter().chain(Some(c))
-            } else {
-                None.into_iter().chain(Some(c))
-            }
-        })
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
+    let digits = n.unsigned_abs().to_string();
+    let len = digits.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, ch) in digits.char_indices() {
+        // Insert a comma before every group of 3 digits counted from the right.
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
     if n < 0 {
-        format!("-{grouped}")
+        format!("-{out}")
     } else {
-        grouped
+        out
     }
 }
 
@@ -259,22 +271,45 @@ mod tests {
     }
 
     #[test]
-    fn json_output_preserves_field_names() {
-        let sub = crate::client::Subscription {
-            tier: "go".into(),
-            has_subscription: true,
-            status: Some("active".into()),
-            window_5h_used: Some(1.0),
-            window_5h_limit: Some(2.0),
-            window_5h_resets_at: None,
-            weekly_used: None,
-            weekly_limit: None,
-            weekly_resets_at: None,
-            prepaid_balance: Some(4.2),
-        };
+    fn bar_level_thresholds() {
+        // Boundaries of each band (>=90 red, >=75 amber, else green).
+        assert_eq!(bar_level(0), BarLevel::Green);
+        assert_eq!(bar_level(74), BarLevel::Green);
+        assert_eq!(bar_level(75), BarLevel::Amber);
+        assert_eq!(bar_level(89), BarLevel::Amber);
+        assert_eq!(bar_level(90), BarLevel::Red);
+        assert_eq!(bar_level(100), BarLevel::Red);
+    }
+
+    #[test]
+    fn reset_at_label_handles_none_and_invalid() {
+        assert_eq!(reset_at_label(None), "");
+        assert_eq!(reset_at_label(Some("not-a-timestamp")), "");
+    }
+
+    #[test]
+    fn reset_at_label_formats_local_time() {
+        // Exact local time is machine-TZ dependent, so assert the shape rather
+        // than a fixed string: "Resets <Wkd> <h>:<mm> <AM/PM>".
+        let label = reset_at_label(Some("2026-07-05T16:59:00Z"));
+        assert!(label.starts_with("Resets "), "got: {label}");
+        assert!(
+            label.ends_with(" AM") || label.ends_with(" PM"),
+            "expected a 12-hour clock suffix, got: {label}"
+        );
+        assert!(label.contains(':'), "expected H:MM, got: {label}");
+    }
+
+    #[test]
+    fn json_output_preserves_field_names_and_extra() {
+        // Unknown backend fields must survive the round-trip (lossless --json).
+        let json = r#"{"tier":"go","has_subscription":true,"window_5h_used":1.0,
+            "prepaid_balance":4.2,"some_new_field":"keepme"}"#;
+        let sub: crate::client::Subscription = serde_json::from_str(json).unwrap();
         let v = serde_json::to_value(&sub).unwrap();
         assert_eq!(v["tier"], "go");
         assert_eq!(v["window_5h_used"], 1.0);
         assert_eq!(v["prepaid_balance"], 4.2);
+        assert_eq!(v["some_new_field"], "keepme");
     }
 }
