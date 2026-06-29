@@ -9,13 +9,13 @@ use serde_json::{json, Value};
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
 
-const EXACT_WARN_AT: usize = 3;
-const EXACT_HALT_AT: usize = 5;
-const SAME_TOOL_WARN_AT: usize = 6;
-const SAME_TOOL_HALT_AT: usize = 10;
-const SAME_RESULT_WARN_AT: usize = 3;
-const SAME_RESULT_HALT_AT: usize = 5;
-const RECENT_LIMIT: usize = 32;
+const EXACT_WARN_AT: usize = 6;
+const EXACT_HALT_AT: usize = 10;
+const SAME_TOOL_WARN_AT: usize = 12;
+const SAME_TOOL_HALT_AT: usize = 20;
+const SAME_RESULT_WARN_AT: usize = 6;
+const SAME_RESULT_HALT_AT: usize = 10;
+const RECENT_LIMIT: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GuardrailDecision {
@@ -311,23 +311,21 @@ mod tests {
 
     #[test]
     fn warns_then_halts_repeated_exact_calls() {
+        // EXACT_WARN_AT=6, EXACT_HALT_AT=10 — the call is pushed before the
+        // count, so trailing counts run 1..=10: 5 Allow, 4 Warn, then Halt.
         let mut state = ToolGuardrailState::default();
-        assert_eq!(
-            state.before_call("read", &input("a")),
-            GuardrailDecision::Allow
-        );
-        assert_eq!(
-            state.before_call("read", &input("a")),
-            GuardrailDecision::Allow
-        );
-        assert!(matches!(
-            state.before_call("read", &input("a")),
-            GuardrailDecision::Warn(_)
-        ));
-        assert!(matches!(
-            state.before_call("read", &input("a")),
-            GuardrailDecision::Warn(_)
-        ));
+        for _ in 0..5 {
+            assert_eq!(
+                state.before_call("read", &input("a")),
+                GuardrailDecision::Allow
+            );
+        }
+        for _ in 5..9 {
+            assert!(matches!(
+                state.before_call("read", &input("a")),
+                GuardrailDecision::Warn(_)
+            ));
+        }
         assert!(matches!(
             state.before_call("read", &input("a")),
             GuardrailDecision::Halt(_)
@@ -336,15 +334,17 @@ mod tests {
 
     #[test]
     fn same_tool_repeats_ignore_interleaved_tools() {
+        // SAME_TOOL_WARN_AT=12 — 11 grep calls stay Allow, the 12th warns;
+        // an interleaved read resets the streak, so the next grep is Allow.
         let mut state = ToolGuardrailState::default();
-        for i in 0..5 {
+        for i in 0..11 {
             assert_eq!(
                 state.before_call("grep", &json!({ "pattern": i })),
                 GuardrailDecision::Allow
             );
         }
         assert!(matches!(
-            state.before_call("grep", &json!({ "pattern": 5 })),
+            state.before_call("grep", &json!({ "pattern": 11 })),
             GuardrailDecision::Warn(_)
         ));
         assert_eq!(
@@ -352,29 +352,29 @@ mod tests {
             GuardrailDecision::Allow
         );
         assert_eq!(
-            state.before_call("grep", &json!({ "pattern": 6 })),
+            state.before_call("grep", &json!({ "pattern": 12 })),
             GuardrailDecision::Allow
         );
     }
 
     #[test]
     fn warns_then_halts_repeated_results() {
+        // SAME_RESULT_WARN_AT=6, SAME_RESULT_HALT_AT=10 — 5 Allow, 4 Warn, Halt.
         let mut state = ToolGuardrailState::default();
         let output = ToolOutput {
             content: vec![ContentBlock::Text(TextContent::new("same\n result"))],
             details: None,
             is_error: false,
         };
-        assert_eq!(state.after_result(&output), GuardrailDecision::Allow);
-        assert_eq!(state.after_result(&output), GuardrailDecision::Allow);
-        assert!(matches!(
-            state.after_result(&output),
-            GuardrailDecision::Warn(_)
-        ));
-        assert!(matches!(
-            state.after_result(&output),
-            GuardrailDecision::Warn(_)
-        ));
+        for _ in 0..5 {
+            assert_eq!(state.after_result(&output), GuardrailDecision::Allow);
+        }
+        for _ in 5..9 {
+            assert!(matches!(
+                state.after_result(&output),
+                GuardrailDecision::Warn(_)
+            ));
+        }
         assert!(matches!(
             state.after_result(&output),
             GuardrailDecision::Halt(_)
