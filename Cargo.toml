@@ -59,7 +59,7 @@ regex = "1"
 dirs = "5"
 url = "2"
 dialoguer = { version = "0.12", default-features = false, features = ["password"] }
-indicatif = "0.17"
+indicatif = "0.18"
 owo-colors = "4"
 anyhow = "1"
 base64 = "0.22"
