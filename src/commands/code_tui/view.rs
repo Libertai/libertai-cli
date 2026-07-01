@@ -14,7 +14,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::commands::code_team::AgentHandle;
 use crate::commands::code_tui::agents_panel;
 use crate::commands::code_tui::app::{
-    slash_palette_filtered, App, Focus, Phase, SubagentOutcome, TranscriptEntry,
+    mention_popup_filtered, slash_palette_filtered, App, Focus, Phase, SubagentOutcome,
+    TranscriptEntry,
 };
 use crate::commands::code_tui::footer;
 use crate::commands::code_tui::input;
@@ -100,6 +101,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // popup). Bottom-anchored, above the footer with a 2-row gap.
     if app.slash_palette.is_some() {
         draw_slash_palette(frame, area, app);
+    }
+
+    // Draw the @-mention file-autocomplete popup with the same stacking
+    // rationale as the palette (bottom-anchored, above the footer, input
+    // bar visible behind it). Mutually exclusive with the palette.
+    if app.mention_popup.is_some() {
+        draw_mention_popup(frame, area, app);
     }
 }
 
@@ -856,9 +864,12 @@ fn draw_slash_palette(frame: &mut Frame, area: Rect, app: &App) {
     // Palette geometry: 80% width, centered; bottom-anchored with a 2-row
     // gap above the footer. Height is the entry count + 2 border rows, capped
     // at 7 content rows (10 total with borders) so a long list never fills the
-    // screen. An empty filtered list still renders a bordered "no matches" box.
+    // screen. An empty filtered list still renders a bordered "no matches" box
+    // — the clamp floor of 1 keeps a content row for that hint (a bare
+    // `.min(7)` gave an empty list ZERO content rows, so the hint line was
+    // built but never drawn).
     let palette_width = ((area.width as f32) * 0.8) as u16;
-    let visible_rows = entries.len().min(7);
+    let visible_rows = entries.len().clamp(1, 7);
     let palette_height = visible_rows.saturating_add(2) as u16;
     let palette_x = area.x + (area.width.saturating_sub(palette_width)) / 2;
     let palette_y = area.height.saturating_sub(palette_height).saturating_sub(2);
@@ -936,6 +947,90 @@ fn draw_slash_palette(frame: &mut Frame, area: Rect, app: &App) {
 
     let para = Paragraph::new(lines).block(block);
     frame.render_widget(para, palette_area);
+}
+
+/// Draw the @-mention file-autocomplete popup. Mirrors
+/// [`draw_slash_palette`]'s geometry exactly (80% width, bottom-anchored
+/// with a 2-row gap, capped at 7 content rows, windowed scrolling, the
+/// selected row ACCENT+BOLD+REVERSED) — single-column path rows instead of
+/// the name/description pair, directories distinguished by their trailing
+/// `/`. Reads [`mention_popup_filtered`] — the same list the key handler
+/// used for this frame, so the two never disagree on the row set.
+fn draw_mention_popup(frame: &mut Frame, area: Rect, app: &App) {
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+    let Some(popup) = &app.mention_popup else {
+        return;
+    };
+
+    let entries = mention_popup_filtered(app);
+
+    let popup_width = ((area.width as f32) * 0.8) as u16;
+    // Clamp floor 1 (not `.min(7)`): an empty filtered list keeps one
+    // content row so the "(no matching files)" hint actually renders.
+    let visible_rows = entries.len().clamp(1, 7);
+    let popup_height = visible_rows.saturating_add(2) as u16;
+    let popup_x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = area.height.saturating_sub(popup_height).saturating_sub(2);
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    let title = " @files — esc to close ";
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme::MUTED))
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let total = entries.len();
+    let selected = popup.selected.min(total.saturating_sub(1));
+
+    let visible = visible_rows;
+    let half = visible / 2;
+    let win_start = if total <= visible {
+        0
+    } else {
+        selected.saturating_sub(half).min(total - visible)
+    };
+
+    let selected_style = Style::default()
+        .fg(theme::ACCENT)
+        .add_modifier(Modifier::BOLD | Modifier::REVERSED);
+    let dir_style = Style::default().fg(theme::MUTED);
+    let file_style = Style::default().fg(theme::PRIMARY);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(no matching files)",
+            Style::default().fg(theme::MUTED),
+        )));
+    } else {
+        for (i, path) in entries.iter().enumerate() {
+            if i < win_start || i >= win_start + visible {
+                continue;
+            }
+            let style = if i == selected {
+                selected_style
+            } else if path.ends_with('/') {
+                dir_style
+            } else {
+                file_style
+            };
+            lines.push(Line::from(Span::styled(path.clone(), style)));
+        }
+    }
+
+    let para = Paragraph::new(lines).block(block);
+    frame.render_widget(para, popup_area);
 }
 
 /// Render a single overlay [`TranscriptEntry`] to styled [`Line`]s,

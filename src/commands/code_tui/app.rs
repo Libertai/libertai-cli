@@ -379,6 +379,11 @@ pub struct App {
     /// Slash-command palette overlay (if active) — FEATURE-A. Opened by
     /// typing `/` in an empty Idle textarea; `None` when closed.
     pub slash_palette: Option<SlashPalette>,
+    /// Inline @-mention file-autocomplete popup (if active). Opened by
+    /// typing `@` at a word boundary in the Idle composer; `None` when
+    /// closed. Mutually exclusive with `slash_palette` in practice (the
+    /// palette needs an empty textarea and owns keys while open).
+    pub mention_popup: Option<MentionPopup>,
     /// Raw diff string stashed by the `AgentMsg::DiffReady` handler; consumed
     /// by `view::draw_diff_view` via `diff::parse_diff` each frame. Kept on
     /// `App` (not `DiffView`) so a re-open keeps the text the overlay is
@@ -683,6 +688,29 @@ impl Default for ToolOutputView {
 pub struct SlashPalette {
     /// Selected row index within the current filtered list.
     pub selected: usize,
+}
+
+/// Inline @-mention file-autocomplete popup state. Opened by typing `@` at
+/// a word boundary in the Idle composer; the popup lists [`candidates`]
+/// (walked once at open) filtered by the token between the anchored `@`
+/// and the cursor. Unlike [`SlashPalette`] — where the whole textarea IS
+/// the filter — the mention popup lives mid-prompt: closing it (Esc,
+/// Ctrl+C, invariant break) must NEVER clear the textarea, and accepting
+/// replaces only the `@token` range. Pure main-thread state, mirroring the
+/// palette (no out-of-band writes, no bg-thread involvement).
+///
+/// [`candidates`]: MentionPopup::candidates
+pub struct MentionPopup {
+    /// Selected row index within the current filtered list.
+    pub selected: usize,
+    /// `(row, col)` of the `@` char that opened the popup. The active
+    /// query is the chars between this anchor and the cursor; every key
+    /// re-checks the anchor invariant (see [`mention_query`]) and closes
+    /// the popup when it breaks.
+    pub anchor: (usize, usize),
+    /// Candidate relative paths (directories carry a trailing `/`),
+    /// enumerated once at open by [`code_ui::mention_candidates`].
+    pub candidates: Vec<String>,
 }
 
 /// A single entry in the conversation transcript.
@@ -1404,6 +1432,15 @@ fn spawn_background(
                         *shared_abort
                             .lock()
                             .unwrap_or_else(|e| e.into_inner()) = Some(abort_handle);
+
+                        // Expand inline `@path` mentions into appended file
+                        // attachments BEFORE guidance/hooks/style so
+                        // everything downstream sees the full prompt. Runs
+                        // here (bg thread) — not in the Submit arm — so the
+                        // transcript shows what the user typed, not the
+                        // attached file bodies. Covers queued drains and
+                        // cron prompts too (both arrive via Cmd::Prompt).
+                        let prompt = code_ui::expand_at_mentions(&prompt, &cwd);
 
                         // Apply turn guidance + user-prompt-submit hooks.
                         let prompt = code_mode_prompt::apply_turn_guidance(
@@ -2309,6 +2346,7 @@ pub fn run(
         agent_overlay: None,
         diff_view: None,
         slash_palette: None,
+        mention_popup: None,
         pending_diff: None,
         tool_output_view: None,
         registry,
@@ -3079,6 +3117,10 @@ fn handle_key(
         // DIVERGE (round 5 went too far) while keeping the Ctrl+C-always-aborts
         // behavior that fixed CTRLC-SWALLOWED-OVERLAYS.
         app.slash_palette = None;
+        // The @-mention popup is the same kind of transient filter UI —
+        // close it too, but do NOT touch the textarea (it holds the user's
+        // in-progress prompt, unlike the palette's throwaway filter).
+        app.mention_popup = None;
         app.set_dirty();
         return None;
     }
@@ -3092,6 +3134,15 @@ fn handle_key(
     // — see [`handle_slash_palette_key`].
     if app.slash_palette.is_some() {
         return handle_slash_palette_key(app, key, cmd_tx);
+    }
+
+    // Inline @-mention file-autocomplete popup: same early-return shape as
+    // the palette (it owns Up/Down/Enter/Tab/Esc/Backspace while open;
+    // printable chars are fed to the textarea INSIDE the handler). Mutually
+    // exclusive with the palette in practice — the palette needs an empty
+    // textarea, the mention popup an `@` mid-prompt.
+    if app.mention_popup.is_some() {
+        return handle_mention_popup_key(app, key, cmd_tx);
     }
 
     // Diff viewer overlay (M7b `/diff`) takes priority over scrollback
@@ -3398,6 +3449,30 @@ fn handle_key(
         {
             app.textarea.input(key);
             app.slash_palette = Some(SlashPalette { selected: 0 });
+            app.set_dirty();
+            None
+        }
+        // Typing `@` at a word boundary (start-of-line or after whitespace)
+        // in the Idle composer opens the @-mention file-autocomplete popup.
+        // The `@` is inserted first (so the anchor points at a real char),
+        // then the popup is armed with the anchor + a one-shot candidate
+        // walk. SHIFT is accepted alongside NONE because terminals in the
+        // kitty/enhanced keyboard protocol report Shift+2 as Char('@') with
+        // the SHIFT modifier set. Mid-word `@` (emails, `user@host`) stays
+        // literal. Streaming is excluded, matching the palette.
+        (KeyCode::Char('@'), m)
+            if (m == KeyModifiers::NONE || m == KeyModifiers::SHIFT)
+                && app.phase == Phase::Idle
+                && mention_trigger_ok(&app.textarea) =>
+        {
+            app.textarea.input(key);
+            let (row, col) = app.textarea.cursor();
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            app.mention_popup = Some(MentionPopup {
+                selected: 0,
+                anchor: (row, col.saturating_sub(1)),
+                candidates: code_ui::mention_candidates(&cwd),
+            });
             app.set_dirty();
             None
         }
@@ -4277,6 +4352,288 @@ fn clamp_palette_selected(app: &mut App) {
         if let Some(palette) = &mut app.slash_palette {
             palette.selected = if filtered_len > 0 {
                 palette.selected.min(filtered_len - 1)
+            } else {
+                0
+            };
+        }
+    }
+}
+
+/// Cap on the @-mention popup's filtered result list — navigating more
+/// than this many rows with Up/Down is useless, and the cap bounds the
+/// per-key ranking work against a [`code_ui::MENTION_WALK_MAX`]-sized
+/// candidate set.
+const MENTION_FILTER_MAX: usize = 50;
+
+/// The `@`-trigger word-boundary check: the char immediately before the
+/// cursor must be nothing (start of line / empty buffer) or whitespace, so
+/// a mid-word `@` (an email, `user@host`) stays literal and never opens
+/// the popup.
+fn mention_trigger_ok(ta: &TextArea<'static>) -> bool {
+    let (row, col) = ta.cursor();
+    if col == 0 {
+        return true;
+    }
+    ta.lines()
+        .get(row)
+        .and_then(|l| l.chars().nth(col - 1))
+        .is_none_or(char::is_whitespace)
+}
+
+/// The active mention query: the chars between the anchored `@` and the
+/// cursor. `None` means the anchor invariant broke — the cursor left the
+/// anchor row, moved to/before the `@`, the `@` itself was deleted or
+/// overwritten, or whitespace entered the token (the user finished the
+/// word) — and the popup must close. Re-checked after every key that
+/// feeds the textarea, mirroring the palette's leading-`/` invariant.
+fn mention_query(app: &App) -> Option<String> {
+    let popup = app.mention_popup.as_ref()?;
+    let (arow, acol) = popup.anchor;
+    let (crow, ccol) = app.textarea.cursor();
+    if crow != arow || ccol <= acol {
+        return None;
+    }
+    let line = app.textarea.lines().get(arow)?;
+    let chars: Vec<char> = line.chars().collect();
+    if chars.get(acol) != Some(&'@') || ccol > chars.len() {
+        return None;
+    }
+    let query: String = chars[acol + 1..ccol].iter().collect();
+    if query.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(query)
+}
+
+/// Filter + rank the popup's cached candidates against the active mention
+/// query (case-insensitive): rank 0 = file/dir name starts with the query,
+/// rank 1 = any path component starts with it, rank 2 = substring anywhere;
+/// ties break shorter-path-first, then alpha. Capped at
+/// [`MENTION_FILTER_MAX`]. Called by both the key handler and the renderer
+/// (same single-source-of-truth contract as [`slash_palette_filtered`]).
+/// A broken anchor invariant returns an empty list — the key handler closes
+/// the popup before the next render in that case.
+pub(crate) fn mention_popup_filtered(app: &App) -> Vec<String> {
+    let Some(popup) = &app.mention_popup else {
+        return Vec::new();
+    };
+    let Some(query) = mention_query(app) else {
+        return Vec::new();
+    };
+    let q = query.to_ascii_lowercase();
+    let mut ranked: Vec<(u8, &String)> = popup
+        .candidates
+        .iter()
+        .filter_map(|p| {
+            let pl = p.to_ascii_lowercase();
+            // A directory the query already spells out in full is a no-op
+            // completion (re-accepting it would just re-insert itself
+            // forever) — drop it so drill-down lists only what's inside.
+            if pl.ends_with('/') && pl == q {
+                return None;
+            }
+            let name = pl.trim_end_matches('/').rsplit('/').next().unwrap_or(&pl);
+            let rank = if name.starts_with(&q) {
+                0
+            } else if pl
+                .trim_end_matches('/')
+                .split('/')
+                .any(|c| c.starts_with(&q))
+            {
+                1
+            } else if pl.contains(&q) {
+                2
+            } else {
+                return None;
+            };
+            Some((rank, p))
+        })
+        .collect();
+    ranked.sort_by(|a, b| (a.0, a.1.len(), a.1.as_str()).cmp(&(b.0, b.1.len(), b.1.as_str())));
+    ranked
+        .into_iter()
+        .take(MENTION_FILTER_MAX)
+        .map(|(_, p)| p.clone())
+        .collect()
+}
+
+/// Handle a key while the @-mention popup is open. Modeled on
+/// [`handle_slash_palette_key`] — same early-return dispatch, same
+/// PALETTE-CTRL-CORRUPT feed gate, same post-feed invariant re-check +
+/// clamp — with three deliberate differences, all because the popup lives
+/// MID-PROMPT (the textarea holds the user's real composition, not a
+/// throwaway filter):
+/// - Esc / Ctrl+O / invariant-break close the popup but NEVER clear the
+///   textarea (the palette's Esc clears it).
+/// - Accept replaces only the `@token` range (anchor→cursor) via
+///   Jump + delete_str + insert_str, not a whole-buffer replace.
+/// - Accepting a directory (trailing `/`) inserts `@dir/` WITHOUT a
+///   trailing space and keeps the popup open — the query becomes `dir/`
+///   and the filter drills down into it. Accepting a file inserts
+///   `@path ` and closes.
+///
+/// Left/Right are additionally fed (the palette drops them): mid-prompt
+/// caret movement is real editing, and the invariant re-check closes the
+/// popup if the caret leaves the token. SHIFT+Char is also fed (file
+/// names have uppercase; terminals report `_` and `@` with SHIFT under
+/// the enhanced keyboard protocol) — tui-textarea-2 inserts the plain
+/// char for shifted keys.
+fn handle_mention_popup_key(
+    app: &mut App,
+    key: KeyEvent,
+    _cmd_tx: &mpsc::Sender<Cmd>,
+) -> Option<Action> {
+    // Snapshot once per keypress (same (R8) rationale as the palette).
+    // Stale for the arms that feed the textarea — those re-check the
+    // invariant + clamp against the new text themselves.
+    let filtered = mention_popup_filtered(app);
+    let filtered_len = filtered.len();
+    match key.code {
+        // Esc: close the popup, KEEP the textarea (the user's prompt).
+        KeyCode::Esc => {
+            app.mention_popup = None;
+            app.set_dirty();
+            None
+        }
+        KeyCode::Up => {
+            if let Some(popup) = &mut app.mention_popup {
+                if filtered_len > 0 {
+                    popup.selected = popup.selected.min(filtered_len - 1);
+                    popup.selected = (popup.selected + filtered_len - 1) % filtered_len;
+                } else {
+                    popup.selected = 0;
+                }
+            }
+            app.set_dirty();
+            None
+        }
+        KeyCode::Down => {
+            if let Some(popup) = &mut app.mention_popup {
+                if filtered_len > 0 {
+                    popup.selected = popup.selected.min(filtered_len - 1);
+                    popup.selected = (popup.selected + 1) % filtered_len;
+                } else {
+                    popup.selected = 0;
+                }
+            }
+            app.set_dirty();
+            None
+        }
+        // Enter/Tab: accept the selected path — replace the `@token`
+        // range with `@{path}`. An empty filtered list just closes the
+        // popup (swallowing ONE Enter, so a mid-prompt Enter with no
+        // matches doesn't accidentally submit).
+        KeyCode::Enter | KeyCode::Tab => {
+            let picked = filtered
+                .get(
+                    app.mention_popup
+                        .as_ref()
+                        .map(|p| p.selected.min(filtered_len.saturating_sub(1)))
+                        .unwrap_or(0),
+                )
+                .cloned();
+            let anchor = app.mention_popup.as_ref().map(|p| p.anchor);
+            match (picked, anchor) {
+                (Some(path), Some((arow, acol))) => {
+                    let (_, ccol) = app.textarea.cursor();
+                    // Invariant (checked by the non-empty `filtered`):
+                    // cursor is on `arow`, strictly after `acol`. Delete
+                    // the `@token` range forward from the anchor, then
+                    // insert the replacement at the anchor.
+                    app.textarea.move_cursor(tui_textarea::CursorMove::Jump(
+                        arow.min(u16::MAX as usize) as u16,
+                        acol.min(u16::MAX as usize) as u16,
+                    ));
+                    app.textarea.delete_str(ccol.saturating_sub(acol));
+                    let is_dir = path.ends_with('/');
+                    if is_dir {
+                        // Drill-down: keep the popup open; the new query is
+                        // `dir/` and the filter narrows into the directory.
+                        // Selection resets to the top of the new context.
+                        app.textarea.insert_str(format!("@{path}"));
+                        if let Some(popup) = &mut app.mention_popup {
+                            popup.selected = 0;
+                        }
+                    } else {
+                        app.textarea.insert_str(format!("@{path} "));
+                        app.mention_popup = None;
+                    }
+                    app.set_dirty();
+                }
+                _ => {
+                    app.mention_popup = None;
+                    app.set_dirty();
+                }
+            }
+            None
+        }
+        // Backspace: feed, then re-check the anchor invariant (deleting
+        // the `@` closes the popup — text is otherwise untouched).
+        KeyCode::Backspace => {
+            app.textarea.input(key);
+            if mention_query(app).is_none() {
+                app.mention_popup = None;
+            } else {
+                clamp_mention_selected(app);
+            }
+            app.set_dirty();
+            None
+        }
+        // Ctrl+O: open the external editor, mirroring the palette's arm
+        // (the main-match Ctrl+O is unreachable while this handler owns
+        // keys). Unlike the palette (PALETTE-CTRL-O-LEAK), the textarea is
+        // NOT cleared — it holds the user's real prompt, which is exactly
+        // what the editor should be seeded with.
+        KeyCode::Char('o')
+            if key.modifiers == KeyModifiers::CONTROL && app.phase == Phase::Idle =>
+        {
+            app.mention_popup = None;
+            app.set_dirty();
+            Some(Action::OpenEditor)
+        }
+        // Feed gate, extending the palette's (PALETTE-CTRL-CORRUPT +
+        // PALETTE-GATE-DROPS-HOME-END-DELETE) gate: NONE-modifier
+        // Char/Home/End/Delete/Left/Right, plus SHIFT+Char (uppercase in
+        // file names). Ctrl-combos are NEVER fed — tui-textarea-2's
+        // `input()` actively interprets them (Ctrl+M newline, Ctrl+H/D/W
+        // deletes) and would corrupt the prompt. After ANY feed, re-check
+        // the anchor invariant (Home/End/Left/Right can move the caret out
+        // of the token — that closes the popup, keeping the text) + clamp.
+        _ => {
+            let feed = (key.modifiers == KeyModifiers::NONE
+                && matches!(
+                    key.code,
+                    KeyCode::Char(_)
+                        | KeyCode::Home
+                        | KeyCode::End
+                        | KeyCode::Delete
+                        | KeyCode::Left
+                        | KeyCode::Right
+                ))
+                || (key.modifiers == KeyModifiers::SHIFT && matches!(key.code, KeyCode::Char(_)));
+            if feed {
+                app.textarea.input(key);
+                if mention_query(app).is_none() {
+                    app.mention_popup = None;
+                } else {
+                    clamp_mention_selected(app);
+                }
+                app.set_dirty();
+            }
+            None
+        }
+    }
+}
+
+/// Clamp `mention_popup.selected` to the current filtered list length,
+/// mirroring [`clamp_palette_selected`] (same two-phase borrow, same
+/// call-after-every-filter-changing-key contract).
+fn clamp_mention_selected(app: &mut App) {
+    if app.mention_popup.is_some() {
+        let filtered_len = mention_popup_filtered(app).len();
+        if let Some(popup) = &mut app.mention_popup {
+            popup.selected = if filtered_len > 0 {
+                popup.selected.min(filtered_len - 1)
             } else {
                 0
             };
@@ -7697,6 +8054,7 @@ mod tests {
             agent_overlay: None,
             diff_view: None,
             slash_palette: None,
+            mention_popup: None,
             pending_diff: None,
             tool_output_view: None,
             registry: AgentRegistry::new(),
@@ -15307,5 +15665,263 @@ task = "Do the thing"
 
         // Clean up the test log (don't leak into the user's config dir).
         let _ = std::fs::remove_file(&log_path);
+    }
+
+    // ---- @-mention inline file autocomplete ----
+
+    /// Drive one plain (NO-modifier) key through the REAL handle_key
+    /// dispatch — the mention tests never call textarea.input directly,
+    /// per the rounds-3/4 lesson that a green suite can mask a behavioral
+    /// break when the test bypasses the real dispatch.
+    fn mention_press(
+        app: &mut App,
+        cmd_tx: &mpsc::Sender<Cmd>,
+        shared_abort: &SharedAbort,
+        code: KeyCode,
+    ) -> Option<Action> {
+        handle_key(
+            app,
+            KeyEvent::new(code, KeyModifiers::NONE),
+            cmd_tx,
+            shared_abort,
+        )
+    }
+
+    /// Swap the opened popup's real-cwd candidate walk for a fixed list so
+    /// filter/accept assertions are hermetic (the open-trigger walks the
+    /// test process's actual cwd, whose contents we must not depend on).
+    fn set_mention_candidates(app: &mut App, candidates: &[&str]) {
+        app.mention_popup
+            .as_mut()
+            .expect("popup must be open before seeding candidates")
+            .candidates = candidates.iter().map(|s| s.to_string()).collect();
+    }
+
+    /// `@` at a word boundary (start-of-line or after whitespace) opens the
+    /// popup anchored ON the `@` char; mid-word `@` (an email, `user@host`)
+    /// stays literal and never opens it.
+    #[test]
+    fn mention_popup_opens_on_word_boundary_at_only() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+
+        for c in ['h', 'i', '@'] {
+            mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char(c));
+        }
+        assert!(
+            app.mention_popup.is_none(),
+            "mid-word @ must stay literal (email shape)"
+        );
+        assert_eq!(app.textarea.lines().join(""), "hi@");
+
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char(' '));
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char('@'));
+        let popup = app
+            .mention_popup
+            .as_ref()
+            .expect("word-boundary @ must open the popup");
+        assert_eq!(
+            popup.anchor,
+            (0, 4),
+            "anchor must sit ON the @ char (row 0, col 4 after \"hi@ \")"
+        );
+        assert_eq!(app.textarea.lines().join(""), "hi@ @");
+    }
+
+    /// `@` during Streaming stays literal — the popup is an Idle-only
+    /// affordance, matching the slash palette.
+    #[test]
+    fn mention_popup_does_not_open_while_streaming() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Streaming;
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char('@'));
+        assert!(app.mention_popup.is_none());
+        assert_eq!(app.textarea.lines().join(""), "@");
+    }
+
+    /// Filter typing narrows + ranks (filename-prefix first, then shorter
+    /// path), and Enter replaces ONLY the `@token` range — the text before
+    /// the token survives, a trailing space is appended, the popup closes.
+    #[test]
+    fn mention_popup_filter_ranks_and_accept_replaces_token_mid_prompt() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+        set_textarea_text(&mut app.textarea, "check ");
+
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char('@'));
+        assert!(app.mention_popup.is_some());
+        set_mention_candidates(&mut app, &["docs/notes.md", "src/main.rs", "Makefile"]);
+
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char('m'));
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char('a'));
+        assert_eq!(
+            mention_popup_filtered(&app),
+            vec!["Makefile".to_string(), "src/main.rs".to_string()],
+            "\"ma\" must rank filename-prefix matches, shorter path first, and drop docs/notes.md"
+        );
+
+        let action = mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Enter);
+        assert!(action.is_none(), "accept must not submit the prompt");
+        assert!(app.mention_popup.is_none(), "file accept closes the popup");
+        assert_eq!(
+            app.textarea.lines().join(""),
+            "check @Makefile ",
+            "accept must replace only the @token range, keeping the prefix"
+        );
+    }
+
+    /// Accepting a directory (trailing `/`) drills down: the token becomes
+    /// `@dir/`, the popup STAYS open, the already-spelled-out dir drops
+    /// from the list, and a second Enter completes a file inside it.
+    #[test]
+    fn mention_popup_dir_accept_drills_down_then_completes_file() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char('@'));
+        set_mention_candidates(&mut app, &["src/", "src/main.rs", "Makefile"]);
+
+        // Empty query: all three match rank 0; shortest path ("src/") is
+        // selected. Enter drills down instead of closing.
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Enter);
+        assert_eq!(app.textarea.lines().join(""), "@src/");
+        assert!(
+            app.mention_popup.is_some(),
+            "dir accept must keep the popup open for drill-down"
+        );
+        assert_eq!(
+            mention_popup_filtered(&app),
+            vec!["src/main.rs".to_string()],
+            "query \"src/\" must drop the exact dir (no-op completion) + non-matching entries"
+        );
+
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Enter);
+        assert_eq!(app.textarea.lines().join(""), "@src/main.rs ");
+        assert!(app.mention_popup.is_none());
+    }
+
+    /// Esc closes the popup but KEEPS the composed text — the mention popup
+    /// lives mid-prompt, unlike the palette whose Esc clears its throwaway
+    /// `/filter` text.
+    #[test]
+    fn mention_popup_esc_keeps_text() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+        set_textarea_text(&mut app.textarea, "note ");
+
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char('@'));
+        set_mention_candidates(&mut app, &["src/main.rs"]);
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char('s'));
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Esc);
+        assert!(app.mention_popup.is_none());
+        assert_eq!(
+            app.textarea.lines().join(""),
+            "note @s",
+            "Esc must keep the user's prompt (incl. the literal @token)"
+        );
+    }
+
+    /// Backspacing the `@` away breaks the anchor invariant: the popup
+    /// closes and the preceding text is untouched.
+    #[test]
+    fn mention_popup_backspace_past_at_closes_and_keeps_text() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+        set_textarea_text(&mut app.textarea, "see ");
+
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char('@'));
+        assert!(app.mention_popup.is_some());
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Backspace);
+        assert!(
+            app.mention_popup.is_none(),
+            "deleting the @ must close the popup"
+        );
+        assert_eq!(app.textarea.lines().join(""), "see ");
+    }
+
+    /// Home moves the caret out of the token (before the `@`): the anchor
+    /// invariant breaks, the popup closes, the text stays.
+    #[test]
+    fn mention_popup_home_caret_leaves_token_closes() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char('@'));
+        set_mention_candidates(&mut app, &["src/main.rs"]);
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char('m'));
+        assert!(app.mention_popup.is_some());
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Home);
+        assert!(
+            app.mention_popup.is_none(),
+            "caret before the @ must close the popup"
+        );
+        assert_eq!(app.textarea.lines().join(""), "@m");
+    }
+
+    /// Enter with zero matches closes the popup WITHOUT submitting — the
+    /// one swallowed Enter protects a mid-prompt composition from an
+    /// accidental send.
+    #[test]
+    fn mention_popup_enter_no_matches_closes_without_submit() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char('@'));
+        set_mention_candidates(&mut app, &["Makefile"]);
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char('z'));
+        assert!(
+            app.mention_popup.is_some(),
+            "a no-match filter keeps the popup open (renders 'no matching files')"
+        );
+        let action = mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Enter);
+        assert!(action.is_none(), "no-match Enter must NOT submit");
+        assert!(app.mention_popup.is_none());
+        assert_eq!(app.textarea.lines().join(""), "@z");
+    }
+
+    /// The top-of-handle_key Ctrl+C Streaming intercept clears the mention
+    /// popup like the palette (both are transient filter UIs) — but the
+    /// textarea keeps the user's prompt.
+    #[test]
+    fn mention_popup_ctrl_c_streaming_clears_popup_keeps_text() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+        set_textarea_text(&mut app.textarea, "fix ");
+        mention_press(&mut app, &cmd_tx, &shared_abort, KeyCode::Char('@'));
+        assert!(app.mention_popup.is_some());
+
+        // Phase flips out-of-band (queued drain / cron) — then Ctrl+C.
+        app.phase = Phase::Streaming;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+        assert!(app.mention_popup.is_none());
+        assert_eq!(app.phase, Phase::Idle);
+        assert_eq!(
+            app.textarea.lines().join(""),
+            "fix @",
+            "Ctrl+C must not clear the composed prompt"
+        );
     }
 }

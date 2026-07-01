@@ -60,6 +60,10 @@ dirs = "6"
 url = "2"
 dialoguer = { version = "0.12", default-features = false, features = ["password"] }
 indicatif = "0.18"
+# Gitignore-aware repo walker for the @-mention file autocomplete popup.
+# Already pulled in transitively via pi_agent_rust; declared directly so
+# the TUI can enumerate candidate paths itself.
+ignore = "0.4"
 owo-colors = "4"
 anyhow = "1"
 base64 = "0.22"

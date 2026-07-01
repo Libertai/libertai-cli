@@ -543,6 +543,7 @@ pub(crate) fn hotkey_lines() -> &'static [&'static str] {
         "Alt+D / Ctrl+Delete — delete the next word",
         "Home / End — jump to start or end of the current line",
         "Enter — submit the current prompt",
+        "@ — at a word boundary, autocomplete a file to mention (its content attaches on submit)",
         "Alt+Enter / Ctrl+J — insert a newline (Shift+Enter on terminals that report it)",
         "Paste — bracketed paste inserts text, newlines included, without submitting",
         "Ctrl+C — clear the current line or interrupt streaming",
@@ -1026,6 +1027,121 @@ fn parse_path_and_rest(input: &str) -> Result<(PathBuf, &str)> {
         Some(idx) => Ok((PathBuf::from(&input[..idx]), &input[idx..])),
         None => Ok((PathBuf::from(input), "")),
     }
+}
+
+/// Walk cap for [`mention_candidates`]: a huge repo stops enumerating here
+/// so opening the @-mention popup stays a bounded one-shot cost.
+pub(crate) const MENTION_WALK_MAX: usize = 5000;
+/// Max `@path` mentions expanded per prompt by [`expand_at_mentions`] —
+/// keeps a mention-heavy prompt from ballooning the context with
+/// attachments.
+pub(crate) const MENTION_EXPAND_MAX_FILES: usize = 8;
+
+/// Enumerate candidate paths for the @-mention popup: a gitignore-aware
+/// walk rooted at `cwd`, relative paths, dotfiles included but `.git`
+/// skipped, directories marked with a trailing `/`. Capped at
+/// [`MENTION_WALK_MAX`] entries and sorted shallow-first (depth, then
+/// alpha) so top-level files rank above deep ones. Called once when the
+/// popup opens — not per keystroke.
+pub(crate) fn mention_candidates(cwd: &Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let walker = ignore::WalkBuilder::new(cwd)
+        .hidden(false)
+        .follow_links(false)
+        .require_git(false)
+        .filter_entry(|e| e.file_name() != ".git")
+        .build();
+    for entry in walker.flatten() {
+        if out.len() >= MENTION_WALK_MAX {
+            break;
+        }
+        let path = entry.path();
+        if path == cwd {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(cwd) else {
+            continue;
+        };
+        let mut s = rel.to_string_lossy().into_owned();
+        if entry.file_type().is_some_and(|t| t.is_dir()) {
+            s.push('/');
+        }
+        out.push(s);
+    }
+    out.sort_by_key(|p| (p.trim_end_matches('/').matches('/').count(), p.clone()));
+    out
+}
+
+/// Expand inline `@path` mentions into appended file attachments.
+///
+/// The prompt text itself is left untouched (the transcript and the model
+/// both still see the literal `@path` tokens); attachments are appended
+/// after it, one fenced block per file, mirroring [`build_mention_prompt`]'s
+/// shape. A token expands only when ALL of:
+/// - it starts a whitespace-separated word (`@` at start-of-word),
+/// - the path is relative, with no `..` components (the popup never inserts
+///   either form; an absolute or parent path stays literal — `/mention` is
+///   the explicit escape hatch for those),
+/// - it resolves to an existing regular file under `cwd`,
+/// - the file is UTF-8 and within [`MENTION_ATTACHMENT_MAX_BYTES`].
+///
+/// A word whose raw form doesn't resolve is retried with trailing
+/// punctuation stripped (`@src/main.rs,` → `src/main.rs`). Duplicates
+/// attach once; at most [`MENTION_EXPAND_MAX_FILES`] files attach.
+pub(crate) fn expand_at_mentions(prompt: &str, cwd: &Path) -> String {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut attachments: Vec<String> = Vec::new();
+    for word in prompt.split_whitespace() {
+        if attachments.len() >= MENTION_EXPAND_MAX_FILES {
+            break;
+        }
+        let Some(raw) = word.strip_prefix('@') else {
+            continue;
+        };
+        if raw.is_empty() {
+            continue;
+        }
+        // Raw form first; on a miss retry with trailing prose punctuation
+        // stripped so "see @src/main.rs." still resolves.
+        let trimmed = raw.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '`', '\'', '"']);
+        let candidate = [raw, trimmed]
+            .into_iter()
+            .find(|c| !c.is_empty() && mention_expandable(c, cwd));
+        let Some(rel) = candidate else {
+            continue;
+        };
+        if !seen.insert(rel.to_string()) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(cwd.join(rel)) else {
+            continue;
+        };
+        if bytes.len() > MENTION_ATTACHMENT_MAX_BYTES {
+            continue;
+        }
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        attachments.push(format!("Mentioned file: `{rel}`\n\n```text\n{text}\n```"));
+    }
+    if attachments.is_empty() {
+        return prompt.to_string();
+    }
+    format!("{prompt}\n\n{}", attachments.join("\n\n"))
+}
+
+/// A mention token is expandable iff it's a relative path without `..`
+/// components that resolves to an existing regular file under `cwd`.
+fn mention_expandable(rel: &str, cwd: &Path) -> bool {
+    let path = Path::new(rel);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    cwd.join(path).is_file()
 }
 
 fn normalize_status_line_template(value: &str) -> String {
@@ -5082,6 +5198,11 @@ mod tests {
             joined.contains("Ctrl+O"),
             "/hotkeys must advertise Ctrl+O: {joined}"
         );
+        // The inline @-mention file autocomplete — advertised in /hotkeys.
+        assert!(
+            joined.contains("autocomplete a file to mention"),
+            "/hotkeys must advertise the @-mention popup: {joined}"
+        );
     }
 
     #[test]
@@ -6704,5 +6825,105 @@ mod tests {
         assert_eq!(summary.output_total, 65);
         assert_eq!(summary.context_high_water, 180);
         assert_eq!(summary.context_window, 1_000);
+    }
+
+    // ---- @-mention expansion + candidate walk ----
+
+    #[test]
+    fn expand_at_mentions_inlines_existing_relative_file() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("notes.txt"), "hello world").unwrap();
+        let out = expand_at_mentions("see @notes.txt please", temp.path());
+        assert!(
+            out.starts_with("see @notes.txt please"),
+            "the typed prompt must be preserved untouched at the front: {out:?}"
+        );
+        assert!(out.contains("Mentioned file: `notes.txt`"));
+        assert!(out.contains("hello world"));
+    }
+
+    #[test]
+    fn expand_at_mentions_skips_missing_absolute_and_parent_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("escape.txt"), "x").unwrap();
+        // `@nope.txt` doesn't exist; `@/etc/hostname` is absolute;
+        // `@../escape.txt` has a parent component (even though the file
+        // exists one level up); `user@host` has no word-leading `@`.
+        let sub = temp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let prompt = "ping @nope.txt @/etc/hostname @../escape.txt user@host";
+        assert_eq!(
+            expand_at_mentions(prompt, &sub),
+            prompt,
+            "nothing expandable must leave the prompt byte-identical"
+        );
+    }
+
+    #[test]
+    fn expand_at_mentions_strips_trailing_punctuation_and_dedups() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("a.txt"), "alpha").unwrap();
+        let out = expand_at_mentions("read @a.txt, then @a.txt again", temp.path());
+        assert_eq!(
+            out.matches("Mentioned file: `a.txt`").count(),
+            1,
+            "punctuation-trimmed + raw mentions of one file attach once: {out:?}"
+        );
+    }
+
+    #[test]
+    fn expand_at_mentions_skips_oversized_and_caps_file_count() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("big.txt"),
+            vec![b'x'; MENTION_ATTACHMENT_MAX_BYTES + 1],
+        )
+        .unwrap();
+        let prompt = "look @big.txt";
+        assert_eq!(
+            expand_at_mentions(prompt, temp.path()),
+            prompt,
+            "an over-cap file must not attach"
+        );
+
+        let mut prompt = String::from("many:");
+        for i in 0..(MENTION_EXPAND_MAX_FILES + 3) {
+            std::fs::write(temp.path().join(format!("f{i}.txt")), "x").unwrap();
+            prompt.push_str(&format!(" @f{i}.txt"));
+        }
+        let out = expand_at_mentions(&prompt, temp.path());
+        assert_eq!(
+            out.matches("Mentioned file: ").count(),
+            MENTION_EXPAND_MAX_FILES,
+            "attachment count must cap at MENTION_EXPAND_MAX_FILES"
+        );
+    }
+
+    #[test]
+    fn mention_candidates_respects_gitignore_marks_dirs_and_sorts_shallow_first() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(temp.path().join("ignored.txt"), "x").unwrap();
+        std::fs::write(temp.path().join("keep.txt"), "x").unwrap();
+        std::fs::create_dir(temp.path().join("sub")).unwrap();
+        std::fs::write(temp.path().join("sub").join("inner.txt"), "x").unwrap();
+
+        let got = mention_candidates(temp.path());
+        assert!(got.contains(&"keep.txt".to_string()), "{got:?}");
+        assert!(
+            got.contains(&"sub/".to_string()),
+            "dirs must carry a trailing slash: {got:?}"
+        );
+        assert!(got.contains(&"sub/inner.txt".to_string()), "{got:?}");
+        assert!(
+            !got.iter().any(|p| p.contains("ignored.txt")),
+            ".gitignore must be honored even without a .git dir (require_git(false)): {got:?}"
+        );
+        let pos_keep = got.iter().position(|p| p == "keep.txt").unwrap();
+        let pos_inner = got.iter().position(|p| p == "sub/inner.txt").unwrap();
+        assert!(
+            pos_keep < pos_inner,
+            "shallow entries must sort before deep ones: {got:?}"
+        );
     }
 }
