@@ -314,6 +314,14 @@ pub struct App {
     pub transcript: Vec<TranscriptEntry>,
     /// Scroll position of the transcript (0 = bottom/latest).
     pub scroll: u16,
+    /// Auto-tail flag: when `true` the transcript snaps to the bottom as new
+    /// content arrives (`scroll = 0`); when `false` the user has scrolled up
+    /// into history and incoming agent output must NOT yank them back down.
+    /// Mirrors the `follow` contract the AgentOverlay / DiffView /
+    /// ToolOutputView overlays already document. Set false when the user
+    /// scrolls up (PageUp / wheel-up), re-armed to true when they scroll back
+    /// to the bottom (PageDown / wheel-down reaching 0) or on `/clear`.
+    pub follow: bool,
     /// Spinner frame index.
     pub spinner_idx: usize,
     /// When the current turn started (for elapsed display).
@@ -2317,6 +2325,7 @@ pub fn run(
         mode,
         transcript: Vec::new(),
         scroll: 0,
+        follow: true,
         spinner_idx: 0,
         turn_started: None,
         output_chars: 0,
@@ -2388,6 +2397,13 @@ pub fn run(
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     app.bar.git_branch = current_git_branch();
+
+    // (Fix 6) Open with a small welcome banner instead of a bare transcript,
+    // so the session starts with orientation (version, model, key input
+    // affordances). Pushed after `model_label` is seeded above.
+    app.transcript
+        .push(TranscriptEntry::System(welcome_entry(&app.bar.model_label)));
+    app.transcript.push(TranscriptEntry::Blank);
 
     // Discover custom slash commands once at startup (cheap filesystem
     // scan) so Tier 3 of `handle_slash_command` can resolve them without a
@@ -2790,9 +2806,7 @@ fn run_loop(
                                 app.spinner_label = "thinking…";
                             }
                             Action::ClearTranscript => {
-                                app.transcript.clear();
-                                app.render_cache.clear();
-                                app.scroll = 0;
+                                clear_transcript(app);
                             }
                             Action::OpenEditor => {
                                 // Suspend the TUI, hand the terminal to
@@ -2811,10 +2825,17 @@ fn run_loop(
                     use crossterm::event::MouseEventKind;
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
+                            // Scrolling up into history disarms auto-tail so
+                            // incoming agent output won't yank the view down.
                             app.scroll = app.scroll.saturating_add(3);
+                            app.follow = false;
                         }
                         MouseEventKind::ScrollDown => {
                             app.scroll = app.scroll.saturating_sub(3);
+                            // Reaching the bottom re-arms auto-tail.
+                            if app.scroll == 0 {
+                                app.follow = true;
+                            }
                         }
                         _ => {}
                     }
@@ -3163,11 +3184,17 @@ fn handle_key(
     // Scrollback navigation works in all phases.
     match key.code {
         KeyCode::PageUp => {
+            // Scrolling up into history disarms auto-tail (see `autoscroll`).
             app.scroll = app.scroll.saturating_add(10);
+            app.follow = false;
             return None;
         }
         KeyCode::PageDown => {
             app.scroll = app.scroll.saturating_sub(10);
+            // Reaching the bottom re-arms auto-tail.
+            if app.scroll == 0 {
+                app.follow = true;
+            }
             return None;
         }
         _ => {}
@@ -3434,7 +3461,9 @@ fn handle_key(
                 app.queued.push(prompt.clone());
                 app.transcript
                     .push(TranscriptEntry::System(format!("› queued: {prompt}")));
+                // User-initiated: snap to bottom and re-arm auto-tail.
                 app.scroll = 0;
+                app.follow = true;
             }
             None
         }
@@ -3565,7 +3594,9 @@ fn handle_shell_escape(app: &mut App, prompt: &str) {
             app.transcript
                 .push(TranscriptEntry::System(msg.to_string()));
             app.transcript.push(TranscriptEntry::Blank);
+            // User-initiated: snap to bottom and re-arm auto-tail.
             app.scroll = 0;
+            app.follow = true;
         }
         ShellEscapeAction::Run(cmd) => {
             let res =
@@ -3604,7 +3635,9 @@ fn handle_shell_escape(app: &mut App, prompt: &str) {
                 app.pending_shell_contexts.push(res.prompt_context);
             }
             app.transcript.push(TranscriptEntry::Blank);
+            // User-initiated: snap to bottom and re-arm auto-tail.
             app.scroll = 0;
+            app.follow = true;
         }
     }
 }
@@ -7376,6 +7409,54 @@ fn overlay_auto_tail(app: &mut App, agent_name: &str) {
     }
 }
 
+/// Snap the main transcript to the bottom (`scroll = 0`) for incoming agent
+/// output, but ONLY when auto-tail is armed (`app.follow`). If the user has
+/// scrolled up into history (`follow == false`), streaming output must not
+/// yank the view back down — mirrors `overlay_auto_tail` for the main pane.
+/// User-initiated actions (`/clear`, queuing a message, `!` shell escape)
+/// re-arm follow and force `scroll = 0` directly, not through this helper.
+fn autoscroll(app: &mut App) {
+    if app.follow {
+        app.scroll = 0;
+    }
+}
+
+/// Reset transcript, render cache, scroll position, and status-bar occupancy
+/// for `/clear` (and its `/new` alias). Called from the `Action::ClearTranscript`
+/// arm of the run loop; extracted so the reset is unit-testable.
+///
+/// - `scroll = 0` + `follow = true` (Fix 2): a `/clear` is a user action, so
+///   snap to the (now empty) bottom and re-arm auto-tail.
+/// - `bar.input_tokens = 0` (Fix 5): clearing the conversation empties the
+///   context, so the token/ctx% chip must reset too — otherwise it keeps the
+///   pre-clear occupancy until the next Usage event. The `ctx%` is derived
+///   from `input_tokens` / `context_window`, so zeroing `input_tokens` clears
+///   both the token count and the percentage. `model_label` / `context_window`
+///   (model capability, not occupancy) and the session cost accumulator
+///   (`estimated_cost`, real spend that persists across a clear) are kept.
+fn clear_transcript(app: &mut App) {
+    app.transcript.clear();
+    app.render_cache.clear();
+    app.scroll = 0;
+    app.follow = true;
+    app.bar.input_tokens = 0;
+}
+
+/// Build the one-shot startup welcome banner (Fix 6), shown as a muted
+/// `System` transcript entry so the TUI opens with orientation instead of a
+/// blank pane. Three short lines: binary + version, the active model, and the
+/// essential input affordances (`/help`, `@`, `!`). Plain text only — a
+/// `System` entry renders muted via `theme`, and any embedded ANSI would be
+/// stripped by the scrollback renderer, so no escape codes are emitted here.
+fn welcome_entry(model_label: &str) -> String {
+    format!(
+        "libertai code v{}\n\
+         model: {model_label}\n\
+         type /help for commands · @ to mention files · ! to run a shell command",
+        env!("CARGO_PKG_VERSION"),
+    )
+}
+
 fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
     match msg {
         AgentMsg::TextDelta(delta) => {
@@ -7386,7 +7467,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             } else {
                 app.transcript.push(TranscriptEntry::Assistant(delta));
             }
-            app.scroll = 0; // auto-scroll to bottom
+            autoscroll(app);
         }
         AgentMsg::ToolStart {
             tool_name, args, ..
@@ -7404,7 +7485,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.current_tool = Some(tool_name.clone());
             app.current_tool_detail = detail;
             app.spinner_label = spinner_verb_for_tool(&tool_name);
-            app.scroll = 0; // auto-scroll to bottom
+            autoscroll(app);
         }
         AgentMsg::ToolEnd {
             tool_name, output, ..
@@ -7490,7 +7571,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.current_tool = None;
             app.current_tool_detail = String::new();
             app.transcript.push(TranscriptEntry::Blank);
-            app.scroll = 0; // auto-scroll to bottom
+            autoscroll(app);
 
             // Refresh the git-branch chip (#19): it's seeded once at run()
             // start, but a `git checkout` mid-session wouldn't otherwise be
@@ -7663,7 +7744,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                     };
                     if let Some(text) = advisory {
                         app.transcript.push(TranscriptEntry::System(text));
-                        app.scroll = 0;
+                        autoscroll(app);
                         app.compaction_warned = true;
                     }
                 }
@@ -7671,12 +7752,12 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
         }
         AgentMsg::System(text) => {
             app.transcript.push(TranscriptEntry::System(text));
-            app.scroll = 0; // auto-scroll to bottom
+            autoscroll(app);
         }
         AgentMsg::CommandResult(text) => {
             app.transcript.push(TranscriptEntry::System(text));
             app.transcript.push(TranscriptEntry::Blank);
-            app.scroll = 0; // auto-scroll to bottom
+            autoscroll(app);
         }
         // (todo-fix) Stash the latest task list for the pinned overlay.
         // No transcript entry — the list renders in place above the
@@ -7728,21 +7809,21 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.current_tool = None;
             app.current_tool_detail = String::new();
             app.spinner_label = "thinking…";
-            app.scroll = 0; // auto-scroll to bottom
-                            // (Round-11) Symmetric with the TurnEnd stash refresh: PromptReady
-                            // unconditionally starts a real parent turn (phase=Streaming) but
-                            // previously did NOT touch `pre_approval_phase`. The async slash-
-                            // expansion window (build_custom_slash_prompt on the separately-
-                            // suspended bg thread) is large enough that a previously-spawned
-                            // teammate subprocess can connect + be accepted by the IPC poll
-                            // (guard approval.is_none() is true while the parent was Idle)
-                            // BEFORE the expansion completes — so the stash is Some(Idle) when
-                            // PromptReady fires. Without this refresh, resolving the teammate
-                            // modal would hit the Remote arm `pre_approval_phase.take()
-                            // .unwrap_or(Idle)` -> Idle, clobbering the now-live streaming
-                            // parent turn to a phantom Idle (frozen spinner + Ctrl+C quits the
-                            // app instead of aborting). Track the new Streaming phase so the
-                            // restore lands on Streaming (correct — the parent IS streaming).
+            autoscroll(app);
+            // (Round-11) Symmetric with the TurnEnd stash refresh: PromptReady
+            // unconditionally starts a real parent turn (phase=Streaming) but
+            // previously did NOT touch `pre_approval_phase`. The async slash-
+            // expansion window (build_custom_slash_prompt on the separately-
+            // suspended bg thread) is large enough that a previously-spawned
+            // teammate subprocess can connect + be accepted by the IPC poll
+            // (guard approval.is_none() is true while the parent was Idle)
+            // BEFORE the expansion completes — so the stash is Some(Idle) when
+            // PromptReady fires. Without this refresh, resolving the teammate
+            // modal would hit the Remote arm `pre_approval_phase.take()
+            // .unwrap_or(Idle)` -> Idle, clobbering the now-live streaming
+            // parent turn to a phantom Idle (frozen spinner + Ctrl+C quits the
+            // app instead of aborting). Track the new Streaming phase so the
+            // restore lands on Streaming (correct — the parent IS streaming).
             if app.approval.is_some() {
                 app.pre_approval_phase = Some(app.phase);
             }
@@ -7782,7 +7863,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             {
                 if name == &agent_name {
                     existing.push_str(&text);
-                    app.scroll = 0;
+                    autoscroll(app);
                     overlay_auto_tail(app, &agent_name);
                     return;
                 }
@@ -7791,7 +7872,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                 agent_name: agent_name.clone(),
                 text,
             });
-            app.scroll = 0; // auto-scroll to bottom
+            autoscroll(app);
             overlay_auto_tail(app, &agent_name);
         }
         AgentMsg::SubagentToolStart {
@@ -7818,7 +7899,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                 tool_name,
                 args,
             });
-            app.scroll = 0; // auto-scroll to bottom
+            autoscroll(app);
             overlay_auto_tail(app, &agent_name);
         }
         AgentMsg::SubagentToolEnd {
@@ -7872,7 +7953,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                 output: rendered,
                 is_error,
             });
-            app.scroll = 0; // auto-scroll to bottom
+            autoscroll(app);
             overlay_auto_tail(app, &agent_name);
         }
         AgentMsg::SubagentEnd {
@@ -7912,7 +7993,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                 outcome,
             });
             app.transcript.push(TranscriptEntry::Blank);
-            app.scroll = 0; // auto-scroll to bottom
+            autoscroll(app);
             overlay_auto_tail(app, &agent_name);
         }
         AgentMsg::WorkflowEnd {
@@ -7934,14 +8015,14 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                 "workflow \"{name}\" {label}"
             )));
             app.transcript.push(TranscriptEntry::Blank);
-            app.scroll = 0; // auto-scroll to bottom
+            autoscroll(app);
         }
         AgentMsg::Error(e) => {
             // (MED-9) Errors render with the error color, not the dim System
             // style, so failures are visible.
             app.transcript
                 .push(TranscriptEntry::Error(format!("error: {e}")));
-            app.scroll = 0; // auto-scroll to bottom
+            autoscroll(app);
         }
     }
 }
@@ -8032,6 +8113,7 @@ mod tests {
             mode: ModeFlag::new(Mode::Normal),
             transcript: Vec::new(),
             scroll: 0,
+            follow: true,
             spinner_idx: 0,
             turn_started: None,
             output_chars: 0,
@@ -9042,6 +9124,119 @@ mod tests {
             Some(TranscriptEntry::Assistant(ref s)) if s == "hello world"
         ));
         assert_eq!(app.output_chars, 11);
+    }
+
+    // --- (Fix 2 / Fix 5) auto-tail follow flag + /clear reset --------------
+
+    /// (Fix 2) While following (the default), incoming agent output snaps the
+    /// transcript to the bottom (`scroll = 0`) via `autoscroll`.
+    #[test]
+    fn autoscroll_snaps_to_bottom_when_following() {
+        let mut app = test_app();
+        let (cmd_tx, _rx) = mpsc::channel::<Cmd>();
+        assert!(app.follow, "follow defaults to true");
+        app.scroll = 7; // pretend the view had drifted up
+        handle_agent_msg(&mut app, AgentMsg::TextDelta("hi".into()), &cmd_tx);
+        assert_eq!(app.scroll, 0, "following: agent output snaps to bottom");
+    }
+
+    /// (Fix 2) When the user has scrolled up (`follow == false`), incoming
+    /// agent output must NOT yank the view back to the bottom — the whole
+    /// point of the flag. Covers two distinct autoscroll sites (TextDelta and
+    /// System).
+    #[test]
+    fn autoscroll_preserves_position_when_not_following() {
+        let mut app = test_app();
+        let (cmd_tx, _rx) = mpsc::channel::<Cmd>();
+        app.follow = false;
+        app.scroll = 7;
+        handle_agent_msg(&mut app, AgentMsg::TextDelta("hi".into()), &cmd_tx);
+        assert_eq!(app.scroll, 7, "not following: TextDelta preserves position");
+        handle_agent_msg(&mut app, AgentMsg::System("note".into()), &cmd_tx);
+        assert_eq!(app.scroll, 7, "not following: System preserves position");
+    }
+
+    /// (Fix 2) PageUp disarms follow (scrolls into history); PageDown back to
+    /// the bottom re-arms it. Mirrors the mouse wheel up/down semantics.
+    #[test]
+    fn page_up_disarms_follow_page_down_rearms() {
+        let mut app = test_app();
+        app.phase = Phase::Idle;
+        let (cmd_tx, _rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+        assert!(app.scroll > 0, "PageUp scrolls up into history");
+        assert!(!app.follow, "PageUp disarms follow");
+        // PageDown all the way back to the bottom re-arms follow.
+        for _ in 0..3 {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+                &cmd_tx,
+                &shared_abort,
+            );
+        }
+        assert_eq!(app.scroll, 0, "PageDown reaches the bottom");
+        assert!(app.follow, "reaching the bottom re-arms follow");
+    }
+
+    /// (Fix 2 + Fix 5) `/clear` snaps to the bottom, re-arms follow, and
+    /// resets the status-bar token/ctx% chip — while KEEPING model_label,
+    /// context_window (capability), and the session cost accumulator.
+    #[test]
+    fn clear_transcript_rearms_follow_and_clears_ctx_chip() {
+        let mut app = test_app();
+        app.transcript.push(TranscriptEntry::System("old".into()));
+        app.scroll = 9;
+        app.follow = false;
+        app.bar.input_tokens = 12_345;
+        app.bar.context_window = 200_000;
+        app.bar.model_label = "glm-5.2".into();
+        app.bar.estimated_cost = Some(0.42);
+
+        clear_transcript(&mut app);
+
+        assert!(app.transcript.is_empty(), "transcript cleared");
+        assert_eq!(app.scroll, 0, "snaps to bottom");
+        assert!(app.follow, "re-arms follow");
+        assert_eq!(app.bar.input_tokens, 0, "token/ctx% chip reset");
+        assert_eq!(app.bar.context_window, 200_000, "context_window kept");
+        assert_eq!(app.bar.model_label, "glm-5.2", "model_label kept");
+        assert_eq!(app.bar.estimated_cost, Some(0.42), "session cost kept");
+    }
+
+    /// (Fix 6) The startup welcome banner is three plain lines — binary +
+    /// version, the active model, and the input affordances — carrying NO
+    /// ANSI escapes (which would otherwise leak through the System render).
+    #[test]
+    fn welcome_entry_is_three_plain_lines() {
+        let w = welcome_entry("liberai/glm-5.2");
+        let lines: Vec<&str> = w.lines().collect();
+        assert_eq!(lines.len(), 3, "welcome is 3 lines: {w:?}");
+        assert!(
+            lines[0].starts_with("libertai code v"),
+            "line 1 has binary + version: {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains(env!("CARGO_PKG_VERSION")),
+            "version present"
+        );
+        assert!(
+            lines[1].contains("liberai/glm-5.2"),
+            "line 2 has the model label"
+        );
+        assert!(
+            lines[2].contains("/help") && lines[2].contains('@') && lines[2].contains('!'),
+            "line 3 lists /help, @, and !: {:?}",
+            lines[2]
+        );
+        assert!(!w.contains('\x1b'), "no ANSI escapes in the welcome banner");
     }
 
     #[test]

@@ -12,6 +12,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 use crate::commands::code_team::{AgentCapability, AgentHandle, AgentStatus};
 use crate::commands::code_tui::theme;
@@ -24,7 +25,11 @@ pub fn draw_header(frame: &mut Frame, area: Rect, count: usize, focused: bool) {
     } else {
         format!(" agents ({count}) ")
     };
-    let dash_count = area.width.saturating_sub(label.len() as u16) as usize;
+    // Fill the divider by DISPLAY width, not byte length: the focused label
+    // carries multi-byte glyphs (`—`, `↑`, `↓`, `·`) that each render as one
+    // cell, so `label.len()` (bytes) over-counts and leaves the dash fill ~8
+    // cells short of the pane edge.
+    let dash_count = area.width.saturating_sub(label.width() as u16) as usize;
     let style = if focused {
         theme::bold_accent()
     } else {
@@ -126,4 +131,53 @@ pub fn draw(
         .collect();
 
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// Render `draw_header` into a fresh `TestBackend` and return the single
+    /// row as a `String`.
+    fn header_row(width: u16, count: usize, focused: bool) -> String {
+        let backend = TestBackend::new(width, 1);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| draw_header(f, f.area(), count, focused))
+            .unwrap();
+        let buf = term.backend().buffer();
+        (0..width).map(|x| buf[(x, 0)].symbol()).collect()
+    }
+
+    /// (Fix 4) The FOCUSED header carries multi-byte glyphs (`—`, `↑`, `↓`,
+    /// `·`). The dash fill must be computed by DISPLAY width so the divider +
+    /// label span the whole pane; the old `label.len()` (byte length)
+    /// over-counted and stopped the fill ~8 cells short of the edge.
+    #[test]
+    fn focused_header_dash_fill_spans_full_width() {
+        let width = 80u16;
+        let row = header_row(width, 3, true);
+        // Label carries a single trailing space, so trimmed content is
+        // exactly one column short of the pane edge when the fill is correct.
+        let trimmed_w = row.trim_end().width();
+        assert!(
+            trimmed_w >= (width as usize) - 1,
+            "focused header must fill the width; got {trimmed_w} cols (the \
+             byte-length bug stopped ~8 cells short): {:?}",
+            row.trim_end()
+        );
+        assert!(row.contains("agents (3)"), "label text present");
+        assert!(row.contains('↑') && row.contains('↓'), "nav hints present");
+    }
+
+    /// Regression guard: the unfocused header (no multi-byte hints) still
+    /// fills the width after the display-width switch.
+    #[test]
+    fn unfocused_header_fills_width() {
+        let width = 40u16;
+        let row = header_row(width, 2, false);
+        assert!(row.trim_end().width() >= (width as usize) - 1);
+        assert!(row.contains("agents (2)"));
+    }
 }

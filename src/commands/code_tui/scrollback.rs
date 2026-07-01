@@ -2,11 +2,13 @@
 //! markdown formatting and a scrollbar.
 
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
+use crate::commands::chat_render::strip_ansi;
 use crate::commands::code_team::AgentStatus;
 use crate::commands::code_tui::app::{App, SubagentOutcome, TranscriptEntry};
 use crate::commands::code_tui::{markdown, theme, wrap};
@@ -105,6 +107,61 @@ impl Default for RenderCache {
 /// System / AutoAllowed / Blank) are intentionally truncated, counted as 1.
 pub(crate) fn visual_line_count(lines: &[Line]) -> usize {
     lines.len()
+}
+
+/// Render a plain (non-markdown) transcript string into styled `Line`s the
+/// way the rest of `draw` expects: pre-wrapped, one visual row per `Line`,
+/// no ANSI, no collapsed newlines.
+///
+/// System entries (slash-command output — `/tree`, `/help`, `/status`,
+/// `/doctor`, `/changelog`, `/usage`) arrive as a single multi-line string,
+/// often carrying raw ANSI (e.g. `\x1b[1m` bold from `render_project_tree`).
+/// The old `Line::from(Span::styled(text, …))` path put ALL of that in one
+/// `Line`: the wrap-off renderer collapsed every embedded `\n` and truncated
+/// the result to the pane width, and the raw `\x1b[…m` bytes leaked into the
+/// buffer as visible garbage. This helper fixes that by:
+///   - stripping ANSI CSI sequences (reusing [`strip_ansi`]) so no escape
+///     bytes reach the renderer,
+///   - splitting on `\n` so each source line is its own row,
+///   - emitting lines that already fit `width` VERBATIM (preserving internal
+///     whitespace so preformatted output — tree branches, aligned columns —
+///     keeps its alignment), and word-wrapping only the over-wide ones so
+///     they aren't silently truncated. A wrapped line keeps its leading
+///     indentation on the first chunk.
+///
+/// Not cached (unlike markdown `Assistant`/`SubagentText` blocks): the work is
+/// a cheap strip + split, matching the inline word-wrap the `User`/`ToolResult`
+/// arms already do each frame. The flat 1-row-per-`Line` count model holds —
+/// every emitted `Line` fits `width`.
+fn plain_lines(text: &str, style: Style, width: usize) -> Vec<Line<'static>> {
+    let stripped = strip_ansi(text);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    for raw in stripped.lines() {
+        if raw.width() <= width {
+            out.push(Line::from(Span::styled(raw.to_string(), style)));
+            continue;
+        }
+        // Over-wide source line: word-wrap it, preserving its leading indent
+        // on the first chunk so wrapped preformatted text stays aligned.
+        let indent: String = raw.chars().take_while(|c| c.is_whitespace()).collect();
+        let content = &raw[indent.len()..];
+        for (i, chunk) in wrap::word_wrap(content, width, indent.width())
+            .into_iter()
+            .enumerate()
+        {
+            if i == 0 {
+                out.push(Line::from(Span::styled(format!("{indent}{chunk}"), style)));
+            } else {
+                out.push(Line::from(Span::styled(chunk, style)));
+            }
+        }
+    }
+    // An empty System string (or one that is only a trailing newline) still
+    // occupies one blank row, matching the old single-`Line` behaviour.
+    if out.is_empty() {
+        out.push(Line::from(Span::styled(String::new(), style)));
+    }
+    out
 }
 
 /// Draw the scrollback transcript.
@@ -364,8 +421,13 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             TranscriptEntry::AutoAllowed(text) => {
                 lines.push(Line::from(Span::styled(text, theme::muted())));
             }
+            // System entries carry multi-line, sometimes ANSI-decorated text
+            // (slash commands like `/tree`, `/help`, `/status`, `/doctor`).
+            // Render them through `plain_lines`: strip ANSI, split on '\n',
+            // and wrap over-wide lines — otherwise the whole block collapses
+            // to one truncated row with raw `\x1b[…m` bytes leaking in.
             TranscriptEntry::System(text) => {
-                lines.push(Line::from(Span::styled(text, theme::muted())));
+                lines.extend(plain_lines(text, theme::muted(), usable_width));
             }
             // (MED-9) Errors render in the error color, not dim — mirrors the
             // ToolResult `is_error` styling above so failures are visible.
@@ -613,5 +675,80 @@ mod tests {
                 .any(|l| l.spans.iter().any(|s| s.content == "rs")),
             "open fence still shows the lang label"
         );
+    }
+
+    /// Concatenate a `Line`'s span contents into a plain `String`.
+    fn line_text(l: &Line) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// (Fix 1) A multi-line System string renders as SEPARATE rows — the old
+    /// single-`Line` path collapsed every `\n` into one truncated row.
+    #[test]
+    fn plain_lines_splits_on_newline() {
+        let out = plain_lines("alpha\nbeta\ngamma", theme::muted(), 80);
+        assert_eq!(out.len(), 3, "one row per source line");
+        assert_eq!(line_text(&out[0]), "alpha");
+        assert_eq!(line_text(&out[1]), "beta");
+        assert_eq!(line_text(&out[2]), "gamma");
+    }
+
+    /// (Fix 1) ANSI CSI escapes are stripped, not leaked: a `/tree`-style
+    /// entry (`\x1b[1m…\x1b[0m` bold + `|-- ` connectors + newlines) renders
+    /// as clean rows with NO `\x1b`/`[1m` bytes and NO newline collapse.
+    #[test]
+    fn plain_lines_strips_ansi_and_preserves_tree_rows() {
+        let tree = "\x1b[1mmention-demo/\x1b[0m\n|-- docs/\n|   `-- README.md\n`-- src/";
+        let out = plain_lines(tree, theme::muted(), 80);
+        assert_eq!(out.len(), 4, "four tree rows, not one collapsed line");
+        // No escape bytes or CSI remnants leak into any rendered row.
+        for l in &out {
+            let t = line_text(l);
+            assert!(!t.contains('\x1b'), "no ESC byte should leak: {t:?}");
+            assert!(!t.contains("[1m"), "no CSI remnant should leak: {t:?}");
+        }
+        assert_eq!(line_text(&out[0]), "mention-demo/");
+        // Internal whitespace of a fitting line is preserved verbatim so the
+        // tree stays aligned (word-wrap would have collapsed `|   `).
+        assert_eq!(line_text(&out[2]), "|   `-- README.md");
+    }
+
+    /// (Fix 1) An over-wide source line is word-wrapped to `width` (each row
+    /// fits), rather than truncated to one row by the wrap-off renderer.
+    #[test]
+    fn plain_lines_wraps_over_wide_line() {
+        let width = 20usize;
+        let long = "word ".repeat(12); // ~60 cols, one source line
+        let out = plain_lines(&long, theme::muted(), width);
+        assert!(out.len() > 1, "long line must wrap to multiple rows");
+        for l in &out {
+            assert!(
+                line_text(l).width() <= width,
+                "each wrapped row must fit width {width}"
+            );
+        }
+    }
+
+    /// (Fix 1) A wrapped over-wide line keeps its leading indentation on the
+    /// first chunk (requirement d).
+    #[test]
+    fn plain_lines_preserves_leading_indent_on_wrap() {
+        let width = 12usize;
+        let out = plain_lines("    alpha beta gamma delta", theme::muted(), width);
+        assert!(out.len() > 1, "must wrap");
+        assert!(
+            line_text(&out[0]).starts_with("    "),
+            "first wrapped chunk keeps the 4-space indent: {:?}",
+            line_text(&out[0])
+        );
+    }
+
+    /// (Fix 1) An empty System string still occupies exactly one (blank) row,
+    /// matching the old single-`Line` behaviour so counts don't shift.
+    #[test]
+    fn plain_lines_empty_is_one_blank_row() {
+        let out = plain_lines("", theme::muted(), 40);
+        assert_eq!(out.len(), 1);
+        assert_eq!(line_text(&out[0]), "");
     }
 }

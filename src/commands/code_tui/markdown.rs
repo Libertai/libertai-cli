@@ -1437,6 +1437,48 @@ mod tests {
         }
     }
 
+    /// (Fix 3) The table DIVIDER — the row rendered under the header in place
+    /// of the markdown `|---|---|` separator — must be composed ONLY of
+    /// box-drawing glyphs (`─` runs joined by `─┼─`) at EVERY width, including
+    /// the narrow ones where columns shrink and the last column collapses to
+    /// `…`. This guards the reported "stray `<<` in the separator row at
+    /// narrow widths" artifact shape: the divider must never contain `<`, and
+    /// no rendered row may leak a raw ANSI byte. (The `<<` was ultimately
+    /// traced to the raw-ANSI `System`-entry render path, not `render_table`;
+    /// this locks the divider invariant so a future change can't reintroduce a
+    /// stray-glyph separator.)
+    #[test]
+    fn table_divider_is_box_drawing_at_narrow_widths() {
+        // A 3-col table wide enough that the last column shrinks to `…` at the
+        // narrower widths — the exact shape from the finding
+        // (`name | description | …`).
+        let src = "| name | description | value |\n| --- | --- | --- |\n\
+                   | alpha | a fairly long description that pushes the table wide | 123 |\n";
+        for w in [80usize, 60, 40, 30, 20, 12, 8] {
+            let out = render(src, w);
+            assert!(
+                out.len() >= 3,
+                "table renders header + divider + body at width {w}"
+            );
+            // The divider is the SECOND rendered line (header, divider, body…).
+            let divider: String = out[1].spans.iter().map(|s| s.content.as_ref()).collect();
+            for ch in divider.chars() {
+                assert!(
+                    ch == '─' || ch == '┼',
+                    "divider at width {w} must be box-drawing only, found {ch:?} in {divider:?}"
+                );
+            }
+            // No rendered row may leak a `<`/`>` or a raw ANSI escape byte.
+            for line in &out {
+                let t: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert!(
+                    !t.contains('<') && !t.contains('>') && !t.contains('\x1b'),
+                    "no stray `<`/`>`/ANSI in a table row at width {w}: {t:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn table_alignment_from_separator() {
         // Right-aligned second column: cells should be right-padded.
