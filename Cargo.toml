@@ -120,7 +120,7 @@ asupersync = { version = "=0.3.2", default-features = false, features = ["tls-na
 # transitive crates). Same version + features as pi's own dependency so
 # the lockfile stays unified. Use rquickjs (not boa) — boa would add
 # ~50 ICU4X crates.
-rquickjs = { version = "0.11", features = ["futures", "loader"] }
+rquickjs = { version = "0.12", features = ["futures", "loader"] }
 async-trait = "0.1"
 futures = "0.3"
 # `libertai code` interactive REPL — raw-mode input bar, cursor control,
