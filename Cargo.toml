@@ -154,7 +154,7 @@ uuid = { version = "1", features = ["v4"] }
 # code_ui.rs with declarative layout, double-buffering, automatic
 # resize/scroll. tui-textarea-2 for the multi-line input bar.
 ratatui = { version = "0.30", features = ["all-widgets", "macros"] }
-tui-textarea-2 = "0.11"
+tui-textarea-2 = "0.12"
 # Character display width for the markdown pre-wrap word-wrapping in
 # `libertai code`. Ratatui pulls unicode-width in transitively but we
 # declare it explicitly so `use unicode_width::UnicodeWidthStr` resolves
