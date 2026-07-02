@@ -488,6 +488,19 @@ pub struct App {
     /// input, no agent messages, not streaming, no reaped agent exits) nothing
     /// sets it, so the loop skips `terminal.draw` and stays at ~0% CPU.
     pub dirty: bool,
+    /// (Fix 2) True when the last turn ended because the USER aborted it
+    /// (Ctrl+C / Esc). The `TurnEnd` handler then HOLDS the queue instead of
+    /// auto-firing the next queued message (an abort usually means "stop",
+    /// not "send the next one"). Consumed (reset to false) at TurnEnd either
+    /// way; a held queue is re-sent by pressing Enter on an empty Idle line
+    /// (see `submit_idle_line`).
+    pub turn_aborted_by_user: bool,
+    /// (Fix 1) Set when a queued `/quit`/`/exit` is drained at a turn
+    /// boundary. A queued slash command can return `Action::Quit`, but the
+    /// `AgentMsg` handler that runs `drain_queued` can't return an `Action`,
+    /// so it records the request here; `run_loop` checks this after draining
+    /// agent messages and breaks the loop to exit.
+    pub pending_quit: bool,
 }
 
 impl App {
@@ -2401,6 +2414,8 @@ pub fn run(
         custom_commands: Vec::new(),
         pr_comment_drafts: Vec::new(),
         dirty: true, // force the first frame (run_loop only draws when dirty)
+        turn_aborted_by_user: false,
+        pending_quit: false,
     };
 
     // Seed the cwd + git-branch chips for the footer. These never change
@@ -2841,19 +2856,9 @@ fn run_loop(
                         match action {
                             Action::Quit => break,
                             Action::Submit(prompt) => {
-                                // Echo the user prompt into the transcript.
-                                app.transcript.push(TranscriptEntry::User(prompt.clone()));
-                                app.transcript.push(TranscriptEntry::Blank);
-                                let _ = cmd_tx.send(Cmd::Prompt {
-                                    text: prompt,
-                                    output_style: app.bar.output_style.clone(),
-                                });
-                                app.phase = Phase::Streaming;
-                                app.turn_started = Some(Instant::now());
-                                app.output_chars = 0;
-                                app.current_tool = None;
-                                app.current_tool_detail = String::new();
-                                app.spinner_label = "thinking…";
+                                // Echo the user prompt + begin a streaming turn
+                                // (shared with the queued-drain path).
+                                begin_turn(app, &cmd_tx, prompt);
                             }
                             Action::ClearTranscript => {
                                 clear_transcript(app);
@@ -2936,6 +2941,15 @@ fn run_loop(
                     return Ok(());
                 }
             }
+        }
+
+        // (Fix 1) A queued `/quit`/`/exit` drained at a turn boundary (or via
+        // an empty-line Enter re-send) requested exit. `drain_queued` runs
+        // inside `handle_agent_msg`/`handle_key`, neither of which can return
+        // an `Action`, so it records `pending_quit`; honor it here by breaking
+        // the loop (same exit path as `Action::Quit`).
+        if app.pending_quit {
+            break;
         }
 
         // (Issue-1) Poll the teammate-approval socket non-blocking. Only
@@ -3111,23 +3125,44 @@ enum Action {
 /// avoid the two drifting apart.
 ///
 /// Reads the textarea as the line, then routes:
-/// - empty line + queued messages → `None` (nothing to submit; the queue
-///   drains on its own);
+/// - empty line + queued messages → drain the held queue (Fix 2: a queue held
+///   from a user-aborted turn is re-sent by pressing Enter on an empty line),
+///   returning `None`;
 /// - empty line + nothing queued → `None`;
-/// - non-empty: clear the textarea, then
+/// - non-empty: clear the textarea, record the raw line in history + reset the
+///   history-walk state (Fix 4: for ALL three branches, so a stale stashed
+///   draft can't resurface on the next Down-arrow), then
 ///   - `!`/`!!` → run the shell escape synchronously on the main thread
 ///     (`None`),
 ///   - `/…` → dispatch the slash command (its own return),
-///   - otherwise → push to history, prefix any pending `!cmd` shell context,
-///     and return `Action::Submit`.
+///   - otherwise → prefix any pending `!cmd` shell context and return
+///     `Action::Submit`.
 fn submit_idle_line(app: &mut App, cmd_tx: &mpsc::Sender<Cmd>) -> Option<Action> {
     let prompt = app.textarea.lines().join("\n");
     if prompt.is_empty() && !app.queued.is_empty() {
+        // (Fix 2) A queue HELD from a user-aborted turn is sent on an explicit
+        // empty-line Enter: drain the first now (starting a turn); the rest
+        // drain at that turn's end via the normal TurnEnd path. `drain_queued`
+        // sends `Cmd::Prompt` directly, so there's no Action to return.
+        drain_queued(app, cmd_tx);
         None
     } else if !prompt.is_empty() {
         // Clear the textarea.
         app.textarea = TextArea::default();
         reset_textarea_style(&mut app.textarea);
+        // (Fix 4) Every submitted line — plain prompt, `/slash`, or `!shell` —
+        // enters the single shell-style history (dedup-adjacent) and resets the
+        // history-walk cursor + stashed draft. Slash/custom handlers that build
+        // a prompt (e.g. /review, /mention) also push the RAW invocation to
+        // history; the dedup-adjacent guard makes this push a no-op there.
+        if app.history.back().is_none_or(|last| last != &prompt) {
+            app.history.push_back(prompt.clone());
+            if app.history.len() > HISTORY_MAX_LIMIT {
+                app.history.pop_front();
+            }
+        }
+        app.history_idx = None;
+        app.stashed_live = None;
         // Shell escape (`!`/`!!`) runs on the MAIN thread synchronously before
         // the `/` slash check. The underlying `run_shell_escape_tui` spawns a
         // subprocess that blocks until it exits — acceptable for a quick
@@ -3142,14 +3177,6 @@ fn submit_idle_line(app: &mut App, cmd_tx: &mpsc::Sender<Cmd>) -> Option<Action>
         if prompt.starts_with('/') {
             handle_slash_command(app, &prompt, cmd_tx)
         } else {
-            if app.history.back().is_none_or(|last| last != &prompt) {
-                app.history.push_back(prompt.clone());
-                if app.history.len() > HISTORY_MAX_LIMIT {
-                    app.history.pop_front();
-                }
-            }
-            app.history_idx = None;
-            app.stashed_live = None;
             // Apply pending shell-escape output contexts (`!cmd`) as a prefix
             // to the next real prompt, mirroring the legacy REPL, then drain.
             let prompt = apply_pending_shell_context(&app.pending_shell_contexts, &prompt);
@@ -3239,6 +3266,9 @@ fn handle_key(
             abort.abort();
         }
         app.phase = Phase::Idle;
+        // (Fix 2) User-initiated abort: the incoming TurnEnd must HOLD the
+        // queue instead of auto-firing the next queued message.
+        app.turn_aborted_by_user = true;
         // (R5-CTRLC-ORPHANS-SUBAGENT-LOG) Clear ONLY the transient slash-palette
         // filter UI. Persistent overlays/diffs the user opened deliberately
         // (incl. a COMPLETED subagent's overlay whose handle is
@@ -3440,6 +3470,8 @@ fn handle_key(
                     abort.abort();
                 }
                 app.phase = Phase::Idle;
+                // (Fix 2) User-initiated abort: hold the queue at TurnEnd.
+                app.turn_aborted_by_user = true;
                 None
             } else if !app.textarea.is_empty() {
                 // (B2-CTRLC-CLEAR) Idle Ctrl+C with a non-empty input line
@@ -3478,6 +3510,8 @@ fn handle_key(
             }
             app.phase = Phase::Idle;
             app.turn_started = None;
+            // (Fix 2) User-initiated abort: hold the queue at TurnEnd.
+            app.turn_aborted_by_user = true;
             None
         }
         (KeyCode::Char('d'), KeyModifiers::CONTROL)
@@ -5542,7 +5576,7 @@ const WIRED_COMMANDS: &[(&str, &[&str], &str)] = &[
     ("/ide", &[], "Show IDE integration status"),
     ("/hotkeys", &[], "Show hotkey bindings"),
     ("/theme", &[], "Show or request a theme"),
-    ("/vim", &[], "Toggle vim input mode"),
+    ("/vim", &[], "Show or toggle vim input mode (on/off)"),
     ("/bug", &[], "Render a bug-report template"),
     ("/hooks", &[], "Show hook configuration"),
     ("/mcp", &[], "Show MCP server status"),
@@ -5576,6 +5610,12 @@ const WIRED_COMMANDS: &[(&str, &[&str], &str)] = &[
     ),
     ("/output-style", &[], "Show or set the output style"),
     ("/history", &[], "Show recent prompt history"),
+    (
+        "/queue",
+        &[],
+        "Show or edit queued messages: /queue [clear | drop <n>]",
+    ),
+    ("/reload", &[], "Re-discover custom commands"),
     ("/team", &[], "Spawn a team of teammate agents"),
     ("/agent", &[], "Spawn a background agent"),
     ("/agents", &[], "List live agents"),
@@ -5657,6 +5697,23 @@ fn help_commands_line() -> String {
     )
 }
 
+/// Parse an optional quote-aware path argument for `/tree` and `/diff`
+/// (Fix 7), reusing the `/mention` path parser so quoted paths with spaces
+/// behave identically. Empty/whitespace → `Ok(None)`; a bare or quoted path →
+/// `Ok(Some(unquoted))`; an unterminated quote → `Err`.
+fn parse_optional_path_arg(raw: &str) -> anyhow::Result<Option<String>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let (path, _rest) = code_ui::parse_path_and_rest(raw)?;
+    if path.as_os_str().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(path.to_string_lossy().into_owned()))
+    }
+}
+
 fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) -> Option<Action> {
     let trimmed = input.trim();
     let (cmd, rest) = match trimmed.split_once(' ') {
@@ -5720,8 +5777,9 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     app.transcript
                         .push(TranscriptEntry::System(format!("→ {label} mode")));
                 } else {
-                    app.transcript
-                        .push(TranscriptEntry::System(format!("unknown mode: {rest}")));
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "unknown mode: {rest}  (valid: normal | accept-edits | plan)"
+                    )));
                 }
             }
             None
@@ -6342,21 +6400,22 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             // --json`); `None` means the text tree (rest is the optional
             // path). The result text is RENDERED back as a `CommandResult`
             // system entry.
-            if let Some(path) = code_ui::tree_json_request_arg(rest) {
-                let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Tree {
-                    path: Some(path.trim())
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string),
-                    json: true,
-                }));
-            } else {
-                let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Tree {
-                    path: Some(rest.trim())
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string),
-                    json: false,
-                }));
-            }
+            let (raw_path, json) = match code_ui::tree_json_request_arg(rest) {
+                Some(path) => (path, true),
+                None => (rest.to_string(), false),
+            };
+            // (Fix 7) Route the path through the same quote-aware parser
+            // /mention uses so `/tree "my dir"` works.
+            let path = match parse_optional_path_arg(&raw_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    app.transcript
+                        .push(TranscriptEntry::System(format!("/tree: {e:#}")));
+                    app.transcript.push(TranscriptEntry::Blank);
+                    return None;
+                }
+            };
+            let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Tree { path, json }));
             app.transcript
                 .push(TranscriptEntry::System("tree…".to_string()));
             None
@@ -6369,13 +6428,18 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             // diff back as `AgentMsg::DiffReady`, which opens the `DiffView`
             // overlay; an empty diff surfaces as a `CommandResult` "no
             // changes" line.
-            let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Diff {
-                path: if rest.is_empty() {
-                    None
-                } else {
-                    Some(rest.to_string())
-                },
-            }));
+            // (Fix 7) Route the path through the same quote-aware parser
+            // /mention uses so `/diff "my file"` works.
+            let path = match parse_optional_path_arg(rest) {
+                Ok(p) => p,
+                Err(e) => {
+                    app.transcript
+                        .push(TranscriptEntry::System(format!("/diff: {e:#}")));
+                    app.transcript.push(TranscriptEntry::Blank);
+                    return None;
+                }
+            };
+            let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::Diff { path }));
             app.transcript
                 .push(TranscriptEntry::System("diff…".to_string()));
             None
@@ -6752,8 +6816,17 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                         )));
                     }
                     None => {
+                        // (Fix 6) Enumerate the valid style names from the same
+                        // source the setter (`find_style` → `load_styles`) uses,
+                        // so the error lists exactly what would resolve.
+                        let names: Vec<String> =
+                            crate::commands::code_output_style::load_styles(cwd.as_deref())
+                                .into_iter()
+                                .map(|s| s.name)
+                                .collect();
                         app.transcript.push(TranscriptEntry::System(format!(
-                            "unknown output style: {rest}",
+                            "unknown output style: {rest}  (valid: {})",
+                            names.join(", ")
                         )));
                     }
                 }
@@ -6772,6 +6845,76 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                         .push(TranscriptEntry::System(format!("  {}. {item}", i + 1,)));
                 }
             }
+            None
+        }
+        "/queue" => {
+            // (Fix 3) Inspect/cancel the pending queue (messages typed with
+            // Enter during a streaming turn, or held after a user abort — see
+            // Fix 2). `/queue` lists them numbered; `/queue clear` drops all;
+            // `/queue drop <n>` removes one (1-based, in list order).
+            let (sub, arg) = match rest.split_once(char::is_whitespace) {
+                Some((s, a)) => (s, a.trim()),
+                None => (rest, ""),
+            };
+            match sub {
+                "" => {
+                    if app.queued.is_empty() {
+                        app.transcript
+                            .push(TranscriptEntry::System("queue is empty.".to_string()));
+                    } else {
+                        app.transcript.push(TranscriptEntry::System(format!(
+                            "{} queued message(s):",
+                            app.queued.len()
+                        )));
+                        for (i, item) in app.queued.iter().enumerate() {
+                            app.transcript
+                                .push(TranscriptEntry::System(format!("  {}. {item}", i + 1)));
+                        }
+                    }
+                }
+                "clear" => {
+                    let n = app.queued.len();
+                    app.queued.clear();
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "dropped {n} queued message(s)."
+                    )));
+                }
+                "drop" => match arg.parse::<usize>() {
+                    Ok(n) if n >= 1 && n <= app.queued.len() => {
+                        let removed = app.queued.remove(n - 1);
+                        app.transcript.push(TranscriptEntry::System(format!(
+                            "dropped queued message {n}: {removed}"
+                        )));
+                    }
+                    _ => {
+                        app.transcript.push(TranscriptEntry::System(format!(
+                            "usage: /queue drop <n>  ({} queued)",
+                            app.queued.len()
+                        )));
+                    }
+                },
+                _ => {
+                    app.transcript.push(TranscriptEntry::System(
+                        "usage: /queue [clear | drop <n>]".to_string(),
+                    ));
+                }
+            }
+            app.transcript.push(TranscriptEntry::Blank);
+            None
+        }
+        "/reload" => {
+            // (Fix 5) Explicitly re-discover custom slash commands (the same
+            // cheap filesystem walk run once at startup), so a template added
+            // mid-session is picked up without restarting. The unknown-command
+            // fallthrough also re-discovers once on a miss; this is the manual
+            // trigger + a count report.
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            app.custom_commands = code_slash_registry::discover(&cwd);
+            let n = app.custom_commands.len();
+            app.transcript.push(TranscriptEntry::System(format!(
+                "reloaded {n} custom command(s)."
+            )));
+            app.transcript.push(TranscriptEntry::Blank);
             None
         }
         "/team" => {
@@ -7110,6 +7253,21 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
             // via `Cmd::Prompt`. On ambiguity, list the matching invocations.
             // On a miss, fall through to the Tier 4 unknown message so a valid
             // custom template never shows "unknown command".
+            //
+            // (Fix 5) Custom commands are discovered ONCE at startup, so a
+            // template file added mid-session wouldn't resolve until restart.
+            // On a cache MISS, re-discover once (a cheap filesystem walk) and
+            // retry before erroring, so a freshly-added command works without
+            // an explicit `/reload`. A hit/ambiguity needs no rescan. (The
+            // first resolve's borrow of `custom_commands` is a temporary that
+            // ends before the reassignment, so the rescan doesn't conflict.)
+            if matches!(
+                code_slash_router::resolve_custom(&app.custom_commands, cmd),
+                CustomResolveResult::NotFound
+            ) {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                app.custom_commands = code_slash_registry::discover(&cwd);
+            }
             match code_slash_router::resolve_custom(&app.custom_commands, cmd) {
                 CustomResolveResult::Hit(hit) => {
                     // Record the raw invocation in history (so up-arrow
@@ -7441,21 +7599,15 @@ fn advance_question(app: &mut App) {
         }
     }
 }
-/// Drain the first queued message, if any, into a new turn.
-///
-/// Extracted from the `AgentMsg::TurnEnd` handler so the queued-drain
-/// logic is unit-testable in isolation. Returns `true` if a queued
-/// message was submitted (and the app transitioned back to
-/// `Phase::Streaming`), `false` if the queue was empty.
-fn drain_queued(app: &mut App, cmd_tx: &mpsc::Sender<Cmd>) -> bool {
-    if app.queued.is_empty() {
-        return false;
-    }
-    let next = app.queued.remove(0);
-    app.transcript.push(TranscriptEntry::User(next.clone()));
+/// Echo `text` as the User transcript line and begin a new streaming turn:
+/// send `Cmd::Prompt` (threading the live output style) and reset the
+/// streaming phase/spinner state. Shared by the `run_loop` `Action::Submit`
+/// arm and the queued-drain path so the two never drift.
+fn begin_turn(app: &mut App, cmd_tx: &mpsc::Sender<Cmd>, text: String) {
+    app.transcript.push(TranscriptEntry::User(text.clone()));
     app.transcript.push(TranscriptEntry::Blank);
     let _ = cmd_tx.send(Cmd::Prompt {
-        text: next,
+        text,
         output_style: app.bar.output_style.clone(),
     });
     app.phase = Phase::Streaming;
@@ -7464,7 +7616,61 @@ fn drain_queued(app: &mut App, cmd_tx: &mpsc::Sender<Cmd>) -> bool {
     app.current_tool = None;
     app.current_tool_detail = String::new();
     app.spinner_label = "thinking…";
-    true
+}
+
+/// Drain queued messages into the next turn.
+///
+/// Extracted from the `AgentMsg::TurnEnd` handler so the queued-drain logic is
+/// unit-testable in isolation. Returns `true` if a queued message started a
+/// new turn (the app transitioned back to `Phase::Streaming`), `false` if the
+/// queue drained without starting one (empty, or only local-effect entries).
+///
+/// (Fix 1) Entries are drained IN ORDER. `!`/`!!` shell escapes and slash
+/// commands that DON'T submit a turn (e.g. `/forget`, `/help`) are executed in
+/// place and draining continues — otherwise a queued `/forget` ahead of a real
+/// prompt would be sent to the MODEL as plain text (live-verified: the model
+/// replied asking what "rget" meant), and a local command ahead of a prompt
+/// would strand the prompt (no `TurnEnd` would arrive to drain it). The FIRST
+/// entry that starts a real turn — a plain prompt, or a slash command that
+/// returns `Action::Submit` (like `/mention`) — begins streaming and STOPS the
+/// drain; the rest stay queued and drain at that turn's end. A queued slash
+/// command returning `Action::Quit` records `pending_quit` (honored by
+/// `run_loop`); `Action::ClearTranscript` clears in place and continues;
+/// `Action::OpenEditor` can't originate from `handle_slash_command` (it's a
+/// Ctrl+O-only binding) so it's ignored defensively — the `AgentMsg` handler
+/// doesn't own the terminal the editor would need.
+fn drain_queued(app: &mut App, cmd_tx: &mpsc::Sender<Cmd>) -> bool {
+    while !app.queued.is_empty() {
+        let entry = app.queued.remove(0);
+        if entry.starts_with('!') {
+            // Local-only shell escape (mirrors submit_idle_line's `!`/`!!`
+            // routing): run it and keep draining.
+            handle_shell_escape(app, &entry);
+            continue;
+        }
+        if entry.starts_with('/') {
+            match handle_slash_command(app, &entry, cmd_tx) {
+                None => continue,
+                Some(Action::Submit(text)) => {
+                    begin_turn(app, cmd_tx, text);
+                    return true;
+                }
+                Some(Action::ClearTranscript) => {
+                    clear_transcript(app);
+                    continue;
+                }
+                Some(Action::Quit) => {
+                    app.pending_quit = true;
+                    return false;
+                }
+                Some(Action::OpenEditor) => continue,
+            }
+        } else {
+            begin_turn(app, cmd_tx, entry);
+            return true;
+        }
+    }
+    false
 }
 
 /// Map a tool name to the spinner verb shown during `ToolStart`
@@ -7814,8 +8020,25 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
 
             // If there are queued messages, submit the first one. This MUST
             // run BEFORE the `pre_approval_phase` refresh below so the refresh
-            // observes the post-drain phase.
-            drain_queued(app, cmd_tx);
+            // observes the post-drain phase (round-11 ordering invariant).
+            //
+            // (Fix 2) EXCEPT when the user aborted this turn (Ctrl+C / Esc):
+            // auto-firing the queue then would submit the very message the user
+            // was trying to stop. In that case HOLD the queue and tell the user
+            // how to send it (Enter on an empty line). The abort flag is
+            // consumed either way so a later, non-aborted turn drains normally.
+            // Either branch leaves `app.phase` at Idle-or-Streaming for the
+            // refresh below to observe.
+            if std::mem::take(&mut app.turn_aborted_by_user) {
+                if !app.queued.is_empty() {
+                    let n = app.queued.len();
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "‣ {n} queued message(s) held — Enter on empty line to send"
+                    )));
+                }
+            } else {
+                drain_queued(app, cmd_tx);
+            }
 
             // (Round-10/Round-11) If a teammate (Remote) approval modal is up,
             // reflect the parent's CURRENT (post-drain) phase so the
@@ -8391,6 +8614,8 @@ mod tests {
             custom_commands: Vec::new(),
             pr_comment_drafts: Vec::new(),
             dirty: true,
+            turn_aborted_by_user: false,
+            pending_quit: false,
         }
     }
 
@@ -9328,6 +9553,284 @@ mod tests {
             }
             other => panic!("expected Cmd::Prompt, got {other:?}"),
         }
+    }
+
+    // --- Batch 4 fixes -----------------------------------------------------
+
+    // (Fix 1) A queued SLASH command is routed through handle_slash_command
+    // (a local effect) instead of being sent to the model as a plain prompt.
+    // Draining then continues to the next entry: a following plain prompt
+    // starts the turn, and the slash command NEVER produces a Cmd::Prompt.
+    #[test]
+    fn drain_queued_routes_slash_command_locally_then_submits_prompt() {
+        let mut app = test_app();
+        app.queued = vec!["/help".to_string(), "hello".to_string()];
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        assert!(
+            drain_queued(&mut app, &cmd_tx),
+            "a real prompt after the slash command starts a turn"
+        );
+
+        // Exactly one Cmd::Prompt — for the plain prompt, not "/help".
+        match cmd_rx.try_recv().expect("expected a Cmd::Prompt") {
+            Cmd::Prompt { text, .. } => assert_eq!(text, "hello"),
+            other => panic!("expected Cmd::Prompt for the plain prompt, got {other:?}"),
+        }
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "the slash command must NOT be sent as a model prompt"
+        );
+        assert!(app.queued.is_empty(), "both entries drained");
+        assert_eq!(app.phase, Phase::Streaming);
+        // /help pushed its command listing into the transcript (local effect).
+        assert!(
+            app.transcript
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::System(s) if s.starts_with("Commands:"))),
+            "the queued /help ran locally"
+        );
+    }
+
+    // (Fix 1) A queue of only local-effect slash commands drains fully WITHOUT
+    // starting a turn (returns false, phase stays Idle) — no model prompt.
+    #[test]
+    fn drain_queued_local_only_slash_does_not_start_turn() {
+        let mut app = test_app();
+        app.phase = Phase::Idle;
+        app.queued = vec!["/help".to_string()];
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        assert!(!drain_queued(&mut app, &cmd_tx));
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no model prompt for a local slash"
+        );
+        assert!(app.queued.is_empty());
+        assert_eq!(app.phase, Phase::Idle);
+    }
+
+    // (Fix 1) A queued /quit resolves to Action::Quit; drain_queued records
+    // `pending_quit` (run_loop honors it) rather than losing the request.
+    #[test]
+    fn drain_queued_quit_command_sets_pending_quit() {
+        let mut app = test_app();
+        app.queued = vec!["/quit".to_string(), "unreached".to_string()];
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        assert!(
+            !drain_queued(&mut app, &cmd_tx),
+            "quit does not start a turn"
+        );
+        assert!(app.pending_quit, "queued /quit sets pending_quit");
+        assert!(cmd_rx.try_recv().is_err(), "no prompt sent");
+        // The drain stopped at /quit; the trailing entry stays queued.
+        assert_eq!(app.queued, vec!["unreached".to_string()]);
+    }
+
+    // (Fix 2) A turn the USER aborted holds the queue at TurnEnd instead of
+    // auto-firing the next message. The abort flag is consumed and a System
+    // notice tells the user how to send the held messages.
+    #[test]
+    fn turn_end_after_user_abort_holds_queue() {
+        let mut app = test_app();
+        app.phase = Phase::Streaming;
+        app.queued = vec!["held".to_string()];
+        app.turn_aborted_by_user = true;
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_agent_msg(&mut app, AgentMsg::TurnEnd { elapsed_secs: 1 }, &cmd_tx);
+
+        assert_eq!(app.queued, vec!["held".to_string()], "queue is held");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "no prompt auto-fired after abort"
+        );
+        assert!(!app.turn_aborted_by_user, "abort flag consumed at TurnEnd");
+        assert!(
+            app.transcript.iter().any(
+                |e| matches!(e, TranscriptEntry::System(s) if s.contains("queued message(s) held"))
+            ),
+            "user is told the queue is held"
+        );
+    }
+
+    // (Fix 2) Without the abort flag, TurnEnd drains the queue as before.
+    #[test]
+    fn turn_end_without_abort_drains_queue() {
+        let mut app = test_app();
+        app.phase = Phase::Streaming;
+        app.queued = vec!["next".to_string()];
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_agent_msg(&mut app, AgentMsg::TurnEnd { elapsed_secs: 1 }, &cmd_tx);
+
+        match cmd_rx.try_recv().expect("expected a Cmd::Prompt") {
+            Cmd::Prompt { text, .. } => assert_eq!(text, "next"),
+            other => panic!("expected Cmd::Prompt, got {other:?}"),
+        }
+        assert!(app.queued.is_empty());
+        assert_eq!(app.phase, Phase::Streaming);
+    }
+
+    // (Fix 2) Enter on an EMPTY Idle line with a held queue drains it (sends
+    // the first held message + starts a turn).
+    #[test]
+    fn submit_idle_empty_line_with_queue_drains() {
+        let mut app = test_app();
+        app.phase = Phase::Idle;
+        app.queued = vec!["held".to_string()];
+        // textarea is empty by default.
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = submit_idle_line(&mut app, &cmd_tx);
+
+        assert!(
+            action.is_none(),
+            "drain sends Cmd::Prompt directly, no Action"
+        );
+        match cmd_rx.try_recv().expect("expected a Cmd::Prompt") {
+            Cmd::Prompt { text, .. } => assert_eq!(text, "held"),
+            other => panic!("expected Cmd::Prompt, got {other:?}"),
+        }
+        assert!(app.queued.is_empty());
+        assert_eq!(app.phase, Phase::Streaming);
+    }
+
+    // (Fix 3) /queue lists, clears, and drops queued messages.
+    #[test]
+    fn slash_queue_lists_clears_and_drops() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        // Bare /queue on an empty queue.
+        handle_slash_command(&mut app, "/queue", &cmd_tx);
+        assert!(app
+            .transcript
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::System(s) if s == "queue is empty.")));
+
+        // List.
+        app.queued = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        handle_slash_command(&mut app, "/queue", &cmd_tx);
+        assert!(app
+            .transcript
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::System(s) if s == "3 queued message(s):")));
+
+        // Drop the middle one (1-based).
+        handle_slash_command(&mut app, "/queue drop 2", &cmd_tx);
+        assert_eq!(app.queued, vec!["a".to_string(), "c".to_string()]);
+
+        // Out-of-range drop is a usage message, queue unchanged.
+        handle_slash_command(&mut app, "/queue drop 9", &cmd_tx);
+        assert_eq!(app.queued, vec!["a".to_string(), "c".to_string()]);
+
+        // Clear.
+        handle_slash_command(&mut app, "/queue clear", &cmd_tx);
+        assert!(app.queued.is_empty());
+    }
+
+    // (Fix 4) Submitting a slash command resets the history-walk state and
+    // records the raw invocation in history, so a stale stashed draft can't
+    // resurface on the next Down-arrow.
+    #[test]
+    fn submit_idle_slash_resets_history_walk_and_records_history() {
+        let mut app = test_app();
+        app.phase = Phase::Idle;
+        set_textarea_text(&mut app.textarea, "/help");
+        app.history_idx = Some(0);
+        app.stashed_live = Some("stale draft".to_string());
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        submit_idle_line(&mut app, &cmd_tx);
+
+        assert!(app.history_idx.is_none(), "history cursor reset");
+        assert!(app.stashed_live.is_none(), "stashed draft cleared");
+        assert_eq!(
+            app.history.back().map(String::as_str),
+            Some("/help"),
+            "the slash invocation entered history"
+        );
+    }
+
+    // (Fix 5) /reload re-discovers custom commands and reports a count.
+    #[test]
+    fn slash_reload_reports_count() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_slash_command(&mut app, "/reload", &cmd_tx);
+
+        assert!(
+            app.transcript
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::System(s) if s.starts_with("reloaded ") && s.ends_with("custom command(s)."))),
+            "reload reports a count"
+        );
+    }
+
+    // (Fix 6) Unknown /mode + /output-style values append the valid choices.
+    #[test]
+    fn unknown_mode_and_output_style_list_valid_values() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_slash_command(&mut app, "/mode bogus", &cmd_tx);
+        assert!(app
+            .transcript
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::System(s)
+                if s.contains("unknown mode: bogus") && s.contains("normal | accept-edits | plan"))));
+
+        handle_slash_command(&mut app, "/output-style no-such-style", &cmd_tx);
+        assert!(app
+            .transcript
+            .iter()
+            .any(|e| matches!(e, TranscriptEntry::System(s)
+                if s.contains("unknown output style: no-such-style") && s.contains("concise"))));
+    }
+
+    // (Fix 7) /diff and /tree accept quoted paths with spaces via the shared
+    // /mention path parser.
+    #[test]
+    fn slash_diff_and_tree_accept_quoted_paths() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        handle_slash_command(&mut app, "/diff \"my file.rs\"", &cmd_tx);
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::Diff { path })) => {
+                assert_eq!(path.as_deref(), Some("my file.rs"));
+            }
+            other => panic!("expected BgCommand::Diff with unquoted path, got {other:?}"),
+        }
+
+        handle_slash_command(&mut app, "/tree \"my dir\"", &cmd_tx);
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::Tree { path, json })) => {
+                assert_eq!(path.as_deref(), Some("my dir"));
+                assert!(!json);
+            }
+            other => panic!("expected BgCommand::Tree with unquoted path, got {other:?}"),
+        }
+    }
+
+    // (Fix 7) parse_optional_path_arg: empty → None, bare/quoted → Some,
+    // unterminated quote → Err.
+    #[test]
+    fn parse_optional_path_arg_variants() {
+        assert_eq!(parse_optional_path_arg("").unwrap(), None);
+        assert_eq!(parse_optional_path_arg("   ").unwrap(), None);
+        assert_eq!(
+            parse_optional_path_arg("src/foo.rs").unwrap().as_deref(),
+            Some("src/foo.rs")
+        );
+        assert_eq!(
+            parse_optional_path_arg("\"a b/c.rs\"").unwrap().as_deref(),
+            Some("a b/c.rs")
+        );
+        assert!(parse_optional_path_arg("\"unterminated").is_err());
     }
 
     // --- Category (2): handle_agent_msg state transitions ------------------
@@ -15707,8 +16210,8 @@ task = "Do the thing"
          /skills /memory /review /security-review /mention /ide /hotkeys /theme /vim /bug \
          /hooks /mcp /forget /undo /notify /notifications /usage /cost /doctor /compact \
          /changelog /tree /diff /output /commit /pr_comments /pr-comments /copy /status /statusline \
-         /statusline-command /output-style /history /team /agent /agents /workflows /image /attach \
-         /schedule  !<cmd>  !!  custom templates (e.g. /project/my-command)";
+         /statusline-command /output-style /history /queue /reload /team /agent /agents /workflows \
+         /image /attach /schedule  !<cmd>  !!  custom templates (e.g. /project/my-command)";
         assert_eq!(help_commands_line(), expected);
 
         // Spec inclusions: the help line MUST surface these (the prior

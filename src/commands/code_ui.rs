@@ -539,12 +539,15 @@ pub(crate) fn forget_json_payload(approvals: &ApprovalState, query: &str) -> ser
 pub(crate) fn hotkey_lines() -> &'static [&'static str] {
     &[
         "Shift+Tab — cycle normal / accept-edits / plan modes",
+        "Tab — toggle focus to the agents panel (when agents exist)",
         "Up / Down — move between draft lines, then walk submitted prompt history",
+        "PageUp / PageDown — scroll the transcript",
         "Left / Right / Ctrl+B / Ctrl+F — move cursor in the current line",
         "Ctrl+Left / Ctrl+Right / Alt+B / Alt+F — move by word",
         "Backspace / Delete — edit the current line",
         "Ctrl+W / Alt+Backspace — delete the previous word",
         "Alt+D / Ctrl+Delete — delete the next word",
+        "Ctrl+U / Ctrl+R — undo / redo edits in the input line",
         "Home / End — jump to start or end of the current line",
         "Enter — submit the current prompt",
         "@ — at a word boundary, autocomplete a file to mention (its content attaches on submit)",
@@ -553,6 +556,7 @@ pub(crate) fn hotkey_lines() -> &'static [&'static str] {
         "Ctrl+C — clear the input line (quit when empty) or interrupt streaming",
         "Esc — stop the running turn from the mid-turn input row",
         "Ctrl+O — open the input in $VISUAL/$EDITOR (vi fallback)",
+        "s / x — stop the viewed agent, r — reply (inside the agent overlay)",
         "Ctrl+D — exit when the line is empty",
     ]
 }
@@ -861,6 +865,37 @@ pub(crate) fn changelog_json_payload(
     })
 }
 
+/// True when `cwd` is inside a git work tree that has NO commits yet (HEAD
+/// doesn't resolve). Used (Fix 8) to turn the raw, locale-dependent `git log`
+/// / `git diff` "no commits yet" / "ambiguous argument 'HEAD'" stderr into a
+/// friendly one-liner. Returns false when HEAD resolves, when `cwd` isn't a
+/// git repo at all (so the caller keeps the real "not a git repository"
+/// stderr), or when git is unavailable.
+fn git_no_commits_yet(cwd: &Path) -> bool {
+    let in_work_tree = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .arg("rev-parse")
+        .arg("--is-inside-work-tree")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !in_work_tree {
+        return false;
+    }
+    let head_ok = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .arg("rev-parse")
+        .arg("--verify")
+        .arg("--quiet")
+        .arg("HEAD")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    !head_ok
+}
+
 pub(crate) fn recent_git_commits_in(cwd: &Path, limit: usize) -> Result<Vec<String>> {
     let output = Command::new("git")
         .arg("-C")
@@ -872,6 +907,12 @@ pub(crate) fn recent_git_commits_in(cwd: &Path, limit: usize) -> Result<Vec<Stri
         .output()
         .context("run git log")?;
     if !output.status.success() {
+        // (Fix 8) A brand-new repo with no commits fails here with a raw,
+        // locale-dependent "does not have any commits yet"; surface a friendly
+        // one-liner instead, keeping raw stderr for genuinely unexpected fails.
+        if git_no_commits_yet(cwd) {
+            anyhow::bail!("no commits yet in this repository");
+        }
         let stderr = String::from_utf8_lossy(&output.stderr);
         let message = stderr.trim();
         if message.is_empty() {
@@ -905,6 +946,12 @@ pub(crate) fn git_diff_in(cwd: &Path, path: Option<&str>) -> Result<String> {
     }
     let output = cmd.output().context("run git diff")?;
     if !output.status.success() {
+        // (Fix 8) A repo with no commits fails here with a raw "ambiguous
+        // argument 'HEAD'"; surface a friendly one-liner, keeping raw stderr
+        // for genuinely unexpected failures.
+        if git_no_commits_yet(cwd) {
+            anyhow::bail!("no commits yet in this repository");
+        }
         let stderr = String::from_utf8_lossy(&output.stderr);
         let message = stderr.trim();
         if message.is_empty() {
@@ -999,9 +1046,13 @@ fn parse_mention_prompt(input: &str) -> Result<(PathBuf, String)> {
     Ok((path, rest.trim().to_string()))
 }
 
-fn parse_path_and_rest(input: &str) -> Result<(PathBuf, &str)> {
+/// Split a leading path (bare, or single/double-quoted with `\`-escapes) off
+/// `input`, returning `(path, rest)`. Shared by `/mention`, `/tree`, and
+/// `/diff` (Fix 7) so quoted paths with spaces parse the same everywhere —
+/// callers must not duplicate this state machine.
+pub(crate) fn parse_path_and_rest(input: &str) -> Result<(PathBuf, &str)> {
     let Some(first) = input.chars().next() else {
-        anyhow::bail!("usage: /image <path> [prompt]");
+        anyhow::bail!("usage: <path> [rest]");
     };
     if first == '"' || first == '\'' {
         let quote = first;
@@ -1022,7 +1073,7 @@ fn parse_path_and_rest(input: &str) -> Result<(PathBuf, &str)> {
             }
         }
         let Some(end) = end else {
-            anyhow::bail!("unterminated quoted image path");
+            anyhow::bail!("unterminated quoted path");
         };
         return Ok((PathBuf::from(path), &input[end..]));
     }
@@ -5197,6 +5248,24 @@ mod tests {
         assert!(joined.contains("Ctrl+D"));
         assert!(joined.contains("Alt+Enter / Ctrl+J"));
         assert!(joined.contains("bracketed paste"));
+        // (Fix 9) truth pass: focus toggle, transcript scroll, input
+        // undo/redo, and the agent-overlay stop/reply keys are advertised.
+        assert!(
+            joined.contains("Tab — toggle focus to the agents panel"),
+            "/hotkeys must advertise Tab focus toggle: {joined}"
+        );
+        assert!(
+            joined.contains("PageUp / PageDown"),
+            "/hotkeys must advertise transcript scroll: {joined}"
+        );
+        assert!(
+            joined.contains("Ctrl+U / Ctrl+R"),
+            "/hotkeys must advertise input undo/redo: {joined}"
+        );
+        assert!(
+            joined.contains("stop the viewed agent") && joined.contains("reply"),
+            "/hotkeys must advertise the agent-overlay s/x/r keys: {joined}"
+        );
         // (MED-10) Ctrl+O opens an external editor — advertised in /hotkeys.
         assert!(
             joined.contains("Ctrl+O"),
@@ -5225,6 +5294,27 @@ mod tests {
             .split_whitespace()
             .next()
             .is_some_and(|hash| hash.len() >= 7));
+    }
+
+    // (Fix 8) A git repo with NO commits yields a friendly one-liner from
+    // `recent_git_commits_in` / `git_diff_in` instead of raw, locale-dependent
+    // git stderr ("does not have any commits yet" / "ambiguous argument HEAD").
+    #[test]
+    fn git_helpers_report_friendly_no_commits_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .arg("init")
+            .output()
+            .expect("git init");
+        assert!(init.status.success(), "git init failed: {init:?}");
+
+        let log_err = recent_git_commits_in(dir.path(), 5).unwrap_err();
+        assert_eq!(log_err.to_string(), "no commits yet in this repository");
+
+        let diff_err = git_diff_in(dir.path(), None).unwrap_err();
+        assert_eq!(diff_err.to_string(), "no commits yet in this repository");
     }
 
     #[test]
