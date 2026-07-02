@@ -546,7 +546,7 @@ pub(crate) fn hotkey_lines() -> &'static [&'static str] {
         "@ — at a word boundary, autocomplete a file to mention (its content attaches on submit)",
         "Alt+Enter / Ctrl+J — insert a newline (Shift+Enter on terminals that report it)",
         "Paste — bracketed paste inserts text, newlines included, without submitting",
-        "Ctrl+C — clear the current line or interrupt streaming",
+        "Ctrl+C — clear the input line (quit when empty) or interrupt streaming",
         "Esc — stop the running turn from the mid-turn input row",
         "Ctrl+O — open the input in $VISUAL/$EDITOR (vi fallback)",
         "Ctrl+D — exit when the line is empty",

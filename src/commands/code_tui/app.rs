@@ -2696,6 +2696,26 @@ fn subagent_end_bell_enabled(cfg: &LibertaiConfig, completed: bool) -> bool {
 /// thin wrapper around this; mirroring the legacy input-bar paste behaviour
 /// (multi-line paste edits the textarea instead of firing a prompt).
 fn apply_paste(app: &mut App, data: &str) {
+    // (B2-PASTE-GATE) Paste must respect the same dispatch gating as
+    // `handle_key`. While a modal or overlay owns the screen the input
+    // textarea is hidden (`input::draw` renders it only in Idle/Streaming with
+    // `Focus::Input`; the centered modal/overlay rects cover it) AND typed keys
+    // are swallowed there (the approval/ask handlers own them; the diff /
+    // tool-output / agent-overlay handlers' `_ =>` arms drop Char keys). A
+    // paste routed into that hidden textarea would silently diverge from what
+    // the user sees — the same class of bug the swallow guards prevent for
+    // typed keys — so swallow it. (The agent overlay's `r` reply reads the
+    // textarea, but there is no way to TYPE into it while the overlay is open:
+    // every Char key is swallowed by `handle_agent_overlay_key`, so a paste
+    // there is the same silent-divergence bug and is likewise swallowed.)
+    if app.approval.is_some()
+        || app.ask.is_some()
+        || app.agent_overlay.is_some()
+        || app.diff_view.is_some()
+        || app.tool_output_view.is_some()
+    {
+        return;
+    }
     app.textarea.insert_str(data);
     // (PALETTE-3) Paste bypasses the palette guard in
     // `handle_slash_palette_key` (it calls `insert_str` directly), so a paste
@@ -2710,6 +2730,24 @@ fn apply_paste(app: &mut App, data: &str) {
             app.slash_palette = None;
         } else {
             clamp_palette_selected(app);
+        }
+    }
+    // (B2-PASTE-MENTION) Mirror the PALETTE-3 precedent for the @-mention
+    // popup: `apply_paste` calls `insert_str` directly, bypassing
+    // `handle_mention_popup_key`'s post-feed invariant re-check. A paste
+    // (especially multi-line — a newline or a space breaks the token) can
+    // break the anchor invariant (`mention_query`) while leaving
+    // `mention_popup` `Some` with an empty filtered list; the next Enter is
+    // then intercepted by the popup's empty-list arm and swallowed (a zombie
+    // popup that eats the keystroke). Re-run the popup's own post-feed check:
+    // close it if the invariant broke, else clamp the selection to the new
+    // filtered length (a single-line paste into the token survives, so keep
+    // the popup + clamp).
+    if app.mention_popup.is_some() {
+        if mention_query(app).is_none() {
+            app.mention_popup = None;
+        } else {
+            clamp_mention_selected(app);
         }
     }
     app.set_dirty();
@@ -3052,6 +3090,63 @@ enum Action {
     OpenEditor,
 }
 
+/// Submit the current Idle input line. This is the shared body of the
+/// Enter-Idle key arm and the slash-palette "Enter executes" path (Fix 9), so
+/// history / slash-command / shell-escape semantics stay IDENTICAL between a
+/// manual Enter and a palette Enter — extracted rather than duplicated to
+/// avoid the two drifting apart.
+///
+/// Reads the textarea as the line, then routes:
+/// - empty line + queued messages → `None` (nothing to submit; the queue
+///   drains on its own);
+/// - empty line + nothing queued → `None`;
+/// - non-empty: clear the textarea, then
+///   - `!`/`!!` → run the shell escape synchronously on the main thread
+///     (`None`),
+///   - `/…` → dispatch the slash command (its own return),
+///   - otherwise → push to history, prefix any pending `!cmd` shell context,
+///     and return `Action::Submit`.
+fn submit_idle_line(app: &mut App, cmd_tx: &mpsc::Sender<Cmd>) -> Option<Action> {
+    let prompt = app.textarea.lines().join("\n");
+    if prompt.is_empty() && !app.queued.is_empty() {
+        None
+    } else if !prompt.is_empty() {
+        // Clear the textarea.
+        app.textarea = TextArea::default();
+        reset_textarea_style(&mut app.textarea);
+        // Shell escape (`!`/`!!`) runs on the MAIN thread synchronously before
+        // the `/` slash check. The underlying `run_shell_escape_tui` spawns a
+        // subprocess that blocks until it exits — acceptable for a quick
+        // command the user explicitly invoked (the legacy REPL did the same).
+        // A long-running command will block the UI briefly; that matches
+        // legacy behavior and is fine for M3a.
+        if prompt.starts_with('!') {
+            handle_shell_escape(app, &prompt);
+            return None;
+        }
+        // Check for slash commands.
+        if prompt.starts_with('/') {
+            handle_slash_command(app, &prompt, cmd_tx)
+        } else {
+            if app.history.back().is_none_or(|last| last != &prompt) {
+                app.history.push_back(prompt.clone());
+                if app.history.len() > HISTORY_MAX_LIMIT {
+                    app.history.pop_front();
+                }
+            }
+            app.history_idx = None;
+            app.stashed_live = None;
+            // Apply pending shell-escape output contexts (`!cmd`) as a prefix
+            // to the next real prompt, mirroring the legacy REPL, then drain.
+            let prompt = apply_pending_shell_context(&app.pending_shell_contexts, &prompt);
+            app.pending_shell_contexts.clear();
+            Some(Action::Submit(prompt))
+        }
+    } else {
+        None
+    }
+}
+
 /// Handle a keyboard event. Returns `Some(Action)` if the loop should
 /// do something (quit, submit), `None` otherwise.
 fn handle_key(
@@ -3181,6 +3276,19 @@ fn handle_key(
         return handle_tool_output_view_key(app, key, cmd_tx);
     }
 
+    // Agent output overlay — owns EVERY key while open, like the diff /
+    // tool-output viewers above. This guard MUST sit here, with the other
+    // overlay early-returns, and BEFORE the generic PageUp/PageDown scrollback
+    // block and the Shift+Tab mode-cycle below: those two would otherwise fire
+    // "under" an open overlay (PageUp/PageDown scrolling the hidden transcript,
+    // and Shift+Tab silently changing the security-relevant PERMISSION MODE)
+    // while the user is looking at the overlay. `handle_agent_overlay_key`
+    // handles Up/PageUp + Down/PageDown itself (overlay scroll) and swallows
+    // Shift+Tab (its `_ =>` arm) + Tab (which closes the overlay).
+    if app.agent_overlay.is_some() {
+        return handle_agent_overlay_key(app, key, cmd_tx);
+    }
+
     // Scrollback navigation works in all phases.
     match key.code {
         KeyCode::PageUp => {
@@ -3223,31 +3331,33 @@ fn handle_key(
         return None;
     }
 
-    // Tab: toggle focus between input and agents panel.
+    // Tab: toggle focus between input and agents panel. (The agent overlay,
+    // if open, is handled by its guard above — which closes it on Tab — so we
+    // never reach here with an overlay open.)
     if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE {
-        // Close overlay first if open.
-        if app.agent_overlay.is_some() {
-            app.agent_overlay = None;
-            return None;
-        }
         let agents = app.registry.snapshot();
-        if agents.is_empty() {
-            return None; // no agents to browse
-        }
-        app.focus = match app.focus {
-            Focus::Input => Focus::Agents,
-            Focus::Agents => Focus::Input,
-        };
-        // Clamp selection.
-        if app.agent_selection >= agents.len() {
-            app.agent_selection = 0;
+        match app.focus {
+            // Input → Agents: only when there is at least one agent to browse.
+            Focus::Input => {
+                if agents.is_empty() {
+                    return None; // no agents to browse
+                }
+                app.focus = Focus::Agents;
+                // Clamp selection.
+                if app.agent_selection >= agents.len() {
+                    app.agent_selection = 0;
+                }
+            }
+            // Agents → Input: ALWAYS allowed, even if the registry emptied
+            // (all agents finished) while focus was on the panel — otherwise
+            // the user is stranded in a browse mode whose textarea is hidden,
+            // with the hint still advertising tab/esc. Esc also works, but Tab
+            // must too.
+            Focus::Agents => {
+                app.focus = Focus::Input;
+            }
         }
         return None;
-    }
-
-    // Agent overlay keys (takes priority over everything).
-    if app.agent_overlay.is_some() {
-        return handle_agent_overlay_key(app, key, cmd_tx);
     }
 
     // Agent panel browse mode.
@@ -3287,7 +3397,15 @@ fn handle_key(
                 app.focus = Focus::Input;
                 return None;
             }
-            _ => {}
+            // (B2-AGENTS-SWALLOW) Any other key while browsing the agents panel
+            // is swallowed instead of falling through to the main match's
+            // textarea catch-all below. The textarea is NOT rendered in this
+            // focus (`input::draw` shows a "browsing agents" hint line), so a
+            // fall-through would silently mutate a hidden draft (e.g. a typed
+            // letter, Ctrl+J, a Char paste-adjacent key). Tab / Shift+Tab /
+            // PageUp / PageDown are handled by earlier guards and never reach
+            // here; scrollback nav therefore still works while browsing.
+            _ => return None,
         }
     }
 
@@ -3297,7 +3415,9 @@ fn handle_key(
                 // Poison-recovery (#21): on Ctrl+C we read+take the shared
                 // abort handle. A poisoned lock yielding a stale handle
                 // (or None) is strictly better than panicking the TUI on
-                // the interrupt path.
+                // the interrupt path. (The top-of-handle_key Ctrl+C intercept
+                // already aborts a Streaming turn before it reaches here, so
+                // this branch is defensive — kept identical for safety.)
                 if let Some(abort) = shared_abort
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -3307,7 +3427,20 @@ fn handle_key(
                 }
                 app.phase = Phase::Idle;
                 None
+            } else if !app.textarea.is_empty() {
+                // (B2-CTRLC-CLEAR) Idle Ctrl+C with a non-empty input line
+                // CLEARS the line (Claude Code + /hotkeys contract) instead of
+                // quitting outright — a single stray Ctrl+C must not nuke the
+                // session while a draft sits in the bar. Also drop the
+                // history-navigation cursor + stashed live draft so a stale
+                // entry can't resurface via Up/Down afterwards.
+                set_textarea_text(&mut app.textarea, "");
+                app.history_idx = None;
+                app.stashed_live = None;
+                None
             } else {
+                // Empty line: Ctrl+C quits (unchanged — only when there is
+                // nothing to clear).
                 Some(Action::Quit)
             }
         }
@@ -3407,46 +3540,7 @@ fn handle_key(
                 app.textarea.input(key);
                 return None;
             }
-            let prompt = app.textarea.lines().join("\n");
-            if prompt.is_empty() && !app.queued.is_empty() {
-                None
-            } else if !prompt.is_empty() {
-                // Clear the textarea.
-                app.textarea = TextArea::default();
-                reset_textarea_style(&mut app.textarea);
-                // Shell escape (`!`/`!!`) runs on the MAIN thread
-                // synchronously before the `/` slash check. The underlying
-                // `run_shell_escape_tui` spawns a subprocess that blocks
-                // until it exits — acceptable for a quick command the user
-                // explicitly invoked (the legacy REPL did the same). A
-                // long-running command will block the UI briefly; that
-                // matches legacy behavior and is fine for M3a.
-                if prompt.starts_with('!') {
-                    handle_shell_escape(app, &prompt);
-                    return None;
-                }
-                // Check for slash commands.
-                if prompt.starts_with('/') {
-                    handle_slash_command(app, &prompt, cmd_tx)
-                } else {
-                    if app.history.back().is_none_or(|last| last != &prompt) {
-                        app.history.push_back(prompt.clone());
-                        if app.history.len() > HISTORY_MAX_LIMIT {
-                            app.history.pop_front();
-                        }
-                    }
-                    app.history_idx = None;
-                    app.stashed_live = None;
-                    // Apply pending shell-escape output contexts (`!cmd`)
-                    // as a prefix to the next real prompt, mirroring the
-                    // legacy REPL, then drain them.
-                    let prompt = apply_pending_shell_context(&app.pending_shell_contexts, &prompt);
-                    app.pending_shell_contexts.clear();
-                    Some(Action::Submit(prompt))
-                }
-            } else {
-                None
-            }
+            submit_idle_line(app, cmd_tx)
         }
         (KeyCode::Enter, _) if app.phase == Phase::Streaming => {
             // Queue a message while the agent is working.
@@ -3503,6 +3597,21 @@ fn handle_key(
                 candidates: code_ui::mention_candidates(&cwd),
             });
             app.set_dirty();
+            None
+        }
+        // (B2-CTRLJ-NEWLINE) Ctrl+J inserts a literal newline. In raw mode
+        // crossterm decodes 0x0A as `Char('j')` + CONTROL, and tui-textarea-2's
+        // `input()` maps THAT to `delete_line_by_head` — a DESTRUCTIVE delete
+        // from the cursor to the line start, not a newline. The /hotkeys list
+        // advertises "Alt+Enter / Ctrl+J — insert a newline", so intercept it
+        // here (before the catch-all, which would feed it to `input()` and
+        // trigger the delete) and insert an explicit newline, honoring the
+        // documented binding. Fires in Idle + Streaming (both compose into the
+        // textarea).
+        (KeyCode::Char('j'), KeyModifiers::CONTROL)
+            if app.phase == Phase::Idle || app.phase == Phase::Streaming =>
+        {
+            app.textarea.insert_newline();
             None
         }
         // Allow textarea input in all phases (Idle + Streaming).
@@ -4041,6 +4150,19 @@ fn handle_agent_overlay_key(
                 }
             }
         }
+        // (B2-OVERLAY-CTRL-O) Ctrl+O opens the external editor, mirroring the
+        // diff / tool-output viewers (the main-match Ctrl+O is unreachable
+        // while this handler owns keys). Close the overlay first (the editor
+        // takes over the screen); Idle-only (suspending mid-stream freezes the
+        // turn). Placed before the `_ =>` swallow so a Ctrl+O isn't dropped.
+        // Returns early so the trailing `None` is bypassed.
+        KeyCode::Char('o')
+            if key.modifiers == KeyModifiers::CONTROL && app.phase == Phase::Idle =>
+        {
+            app.agent_overlay = None;
+            app.set_dirty();
+            return Some(Action::OpenEditor);
+        }
         _ => {}
     }
     None
@@ -4084,6 +4206,21 @@ fn handle_diff_view_key(
                 }
             }
             app.set_dirty();
+        }
+        // (B2-OVERLAY-CTRL-O) Ctrl+O opens the external editor, mirroring the
+        // palette / mention-popup arms — the main-match Ctrl+O is unreachable
+        // while this handler owns keys (`handle_key` returns early into it).
+        // Close the viewer first (the editor takes over the screen) and clear
+        // `pending_diff`, matching the Esc/Tab arm; Idle-only (suspending the
+        // TUI mid-stream would freeze the in-flight turn). Returns early so the
+        // trailing `None` is bypassed.
+        KeyCode::Char('o')
+            if key.modifiers == KeyModifiers::CONTROL && app.phase == Phase::Idle =>
+        {
+            app.diff_view = None;
+            app.pending_diff = None;
+            app.set_dirty();
+            return Some(Action::OpenEditor);
         }
         _ => {}
     }
@@ -4149,6 +4286,17 @@ fn handle_tool_output_view_key(
             }
             app.set_dirty();
         }
+        // (B2-OVERLAY-CTRL-O) Ctrl+O opens the external editor, mirroring the
+        // diff viewer's arm above (the main-match Ctrl+O is unreachable while
+        // this handler owns keys). Close the viewer first; Idle-only. Returns
+        // early so the trailing `None` is bypassed.
+        KeyCode::Char('o')
+            if key.modifiers == KeyModifiers::CONTROL && app.phase == Phase::Idle =>
+        {
+            app.tool_output_view = None;
+            app.set_dirty();
+            return Some(Action::OpenEditor);
+        }
         _ => {}
     }
     None
@@ -4187,7 +4335,7 @@ pub(crate) fn slash_palette_filtered(app: &App) -> Vec<(String, String)> {
 fn handle_slash_palette_key(
     app: &mut App,
     key: KeyEvent,
-    _cmd_tx: &mpsc::Sender<Cmd>,
+    cmd_tx: &mpsc::Sender<Cmd>,
 ) -> Option<Action> {
     // (R8) Compute the filtered list ONCE per keypress and reuse the bound
     // Vec for length/windowing/Enter lookup. The previous code recomputed
@@ -4239,10 +4387,11 @@ fn handle_slash_palette_key(
             app.set_dirty();
             None
         }
-        // Enter/Tab: accept the selected entry — set the textarea to
-        // "{name} " (trailing space so the user can keep typing args) and
-        // close the palette. No-op if the filtered list is empty. (R8) Reuses
-        // the once-computed `filtered` Vec instead of recomputing.
+        // Tab COMPLETES the selected entry — sets the textarea to "{name} "
+        // (trailing space so the user can keep typing args) and closes the
+        // palette. Enter COMPLETES AND EXECUTES immediately (Claude Code
+        // parity — no double-Enter). No-op if the filtered list is empty.
+        // (R8) Reuses the once-computed `filtered` Vec instead of recomputing.
         KeyCode::Enter | KeyCode::Tab => {
             let picked = filtered
                 .get(
@@ -4256,6 +4405,17 @@ fn handle_slash_palette_key(
                 set_textarea_text(&mut app.textarea, &format!("{name} "));
                 app.slash_palette = None;
                 app.set_dirty();
+                // (B2-PALETTE-EXECUTE) On Enter, run the completed command
+                // right away by routing the just-filled line through the SAME
+                // path a manual Enter takes (`submit_idle_line`), so history /
+                // slash / shell-escape semantics stay identical between the two
+                // sites. Tab falls through to `None` (complete-only). A command
+                // that needs args (e.g. `/mention`) submits bare here → its
+                // usage line, the existing bare-invocation behavior; the user
+                // picks with Tab instead to add args first.
+                if key.code == KeyCode::Enter {
+                    return submit_idle_line(app, cmd_tx);
+                }
             }
             None
         }
@@ -4330,18 +4490,30 @@ fn handle_slash_palette_key(
         //   - Char(_) + Delete CHANGE the filter text -> re-check the leading-'/'
         //     invariant (close the palette if the '/' was deleted) + clamp
         //     `selected` to the new filtered length (mirroring the Backspace arm).
-        //   - Home + End MOVE the caret but DON'T change the filter text -> only
-        //     `set_dirty()` (to redraw the caret); the leading-'/' re-check +
-        //     `clamp_palette_selected` would be no-ops against unchanged text, so
-        //     they're skipped to avoid a needless filtered-list recompute.
-        // The NONE-modifier guard is kept on ALL three (Home/End/Delete) so
-        // Ctrl+Home/Ctrl+End/Ctrl+D stay excluded (those are different ops /
-        // Ctrl-combos that must not corrupt the filter).
+        //   - Home + End + Left + Right MOVE the caret but DON'T change the
+        //     filter text -> only `set_dirty()` (to redraw the caret); the
+        //     leading-'/' re-check + `clamp_palette_selected` would be no-ops
+        //     against unchanged text, so they're skipped to avoid a needless
+        //     filtered-list recompute.
+        // (B2-PALETTE-LEFT-RIGHT) Left/Right were previously dropped (the
+        // round-4 gate fed only Char/Home/End/Delete), so the user couldn't
+        // move the filter caret with the arrow keys while the @-mention popup's
+        // gate already fed them. They're now in the NONE-modifier feed set,
+        // grouped with Home/End (a caret move can't change the leading `/`).
+        // The NONE-modifier guard is kept on ALL of Home/End/Delete/Left/Right
+        // so Ctrl+Home/Ctrl+End/Ctrl+D/Ctrl+Left/Ctrl+Right stay excluded
+        // (those are different ops / Ctrl-combos that must not corrupt the
+        // filter).
         _ => {
             if key.modifiers == KeyModifiers::NONE
                 && matches!(
                     key.code,
-                    KeyCode::Char(_) | KeyCode::Home | KeyCode::End | KeyCode::Delete
+                    KeyCode::Char(_)
+                        | KeyCode::Home
+                        | KeyCode::End
+                        | KeyCode::Delete
+                        | KeyCode::Left
+                        | KeyCode::Right
                 )
             {
                 app.textarea.input(key);
@@ -4357,7 +4529,7 @@ fn handle_slash_palette_key(
                         }
                     }
                     // Caret-move keys: text unchanged, just redraw the caret.
-                    KeyCode::Home | KeyCode::End => {}
+                    KeyCode::Home | KeyCode::End | KeyCode::Left | KeyCode::Right => {}
                     _ => {}
                 }
                 app.set_dirty();
@@ -13959,6 +14131,494 @@ task = "Do the thing"
         assert!(app.dirty);
     }
 
+    // (B2-PASTE-GATE) A paste must be SWALLOWED while a full-screen overlay
+    // owns the display — the input textarea is hidden (covered by the centered
+    // overlay rect) and typed keys are swallowed there, so routing a paste into
+    // it would silently diverge from what the user sees. Covers the agent
+    // overlay, the diff viewer, and the tool-output viewer.
+    #[test]
+    fn apply_paste_swallowed_while_overlay_open() {
+        // Agent overlay.
+        let mut app = test_app();
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "x".into(),
+            ..Default::default()
+        });
+        apply_paste(&mut app, "should not land");
+        assert!(
+            app.textarea.is_empty(),
+            "paste must be swallowed while the agent overlay is open"
+        );
+
+        // Diff viewer.
+        let mut app = test_app();
+        app.diff_view = Some(DiffView::default());
+        apply_paste(&mut app, "should not land");
+        assert!(
+            app.textarea.is_empty(),
+            "paste must be swallowed while the diff viewer is open"
+        );
+
+        // Tool-output viewer.
+        let mut app = test_app();
+        app.tool_output_view = Some(ToolOutputView::default());
+        apply_paste(&mut app, "should not land");
+        assert!(
+            app.textarea.is_empty(),
+            "paste must be swallowed while the tool-output viewer is open"
+        );
+    }
+
+    // (B2-PASTE-GATE) Same swallow contract for the approval modal — the ask
+    // modal takes the identical `.is_some()` path. Unix-only because the modal
+    // fixture needs a `UnixStream` responder.
+    #[cfg(unix)]
+    #[test]
+    fn apply_paste_swallowed_while_approval_modal_open() {
+        let mut app = test_app();
+        app.approval = Some(remote_approval_modal());
+        apply_paste(&mut app, "should not land");
+        assert!(
+            app.textarea.is_empty(),
+            "paste must be swallowed while the approval modal is open"
+        );
+    }
+
+    // (B2-PASTE-MENTION) A paste that breaks the @-mention anchor invariant
+    // (e.g. embeds whitespace, ending the token) must CLOSE the popup — leaving
+    // it `Some` with an empty filter would let its empty-list Enter arm swallow
+    // the user's next Enter (a zombie popup). The pasted text is KEPT (the
+    // textarea holds the real prompt).
+    #[test]
+    fn apply_paste_closes_zombie_mention_popup_on_invariant_break() {
+        let mut app = test_app();
+        set_textarea_text(&mut app.textarea, "@"); // caret just after the @
+        app.mention_popup = Some(MentionPopup {
+            selected: 0,
+            anchor: (0, 0),
+            candidates: vec!["src/".to_string(), "src/main.rs".to_string()],
+        });
+
+        // The space in the paste ends the mention token → invariant breaks.
+        apply_paste(&mut app, "foo bar");
+
+        assert!(
+            app.mention_popup.is_none(),
+            "an invariant-breaking paste must close the zombie popup"
+        );
+        assert_eq!(
+            app.textarea.lines().join("\n"),
+            "@foo bar",
+            "the pasted text is kept (the textarea holds the real prompt)"
+        );
+    }
+
+    // (B2-PASTE-MENTION) A single-line paste that stays inside the token keeps
+    // the popup open and clamps the (possibly stale) selection into the new
+    // filtered list.
+    #[test]
+    fn apply_paste_keeps_mention_popup_on_in_token_paste() {
+        let mut app = test_app();
+        set_textarea_text(&mut app.textarea, "@");
+        app.mention_popup = Some(MentionPopup {
+            selected: 99, // deliberately out of range to prove the clamp runs
+            anchor: (0, 0),
+            candidates: vec![
+                "src/".to_string(),
+                "src/main.rs".to_string(),
+                "README.md".to_string(),
+            ],
+        });
+
+        apply_paste(&mut app, "src"); // no whitespace → token stays "src"
+
+        assert!(
+            app.mention_popup.is_some(),
+            "an in-token paste keeps the popup open"
+        );
+        let filtered = mention_popup_filtered(&app);
+        assert!(!filtered.is_empty(), "precondition: /src matches something");
+        assert!(
+            app.mention_popup.as_ref().unwrap().selected < filtered.len(),
+            "the stale selection must be clamped into the new filtered list"
+        );
+    }
+
+    // (B2-CTRLC-CLEAR) Idle Ctrl+C with a non-empty input line CLEARS the line
+    // (and drops the history-navigation state) instead of quitting — a stray
+    // Ctrl+C must not nuke a session mid-draft.
+    #[test]
+    fn ctrl_c_idle_nonempty_clears_line_does_not_quit() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+        set_textarea_text(&mut app.textarea, "half-typed prompt");
+        // Seed history-nav state to prove Ctrl+C resets it.
+        app.history_idx = Some(0);
+        app.stashed_live = Some("stash".to_string());
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(
+            action.is_none(),
+            "Ctrl+C with a non-empty line must NOT quit (returns None)"
+        );
+        assert!(app.textarea.is_empty(), "Ctrl+C must clear the input line");
+        assert!(
+            app.history_idx.is_none(),
+            "Ctrl+C must reset history navigation"
+        );
+        assert!(
+            app.stashed_live.is_none(),
+            "Ctrl+C must drop the stashed live draft"
+        );
+    }
+
+    // (B2-CTRLC-CLEAR) Idle Ctrl+C on an already-empty line quits (unchanged).
+    #[test]
+    fn ctrl_c_idle_empty_line_quits() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(
+            matches!(action, Some(Action::Quit)),
+            "Ctrl+C on an empty line must quit"
+        );
+    }
+
+    // (B2-CTRLJ-NEWLINE) Ctrl+J inserts a literal newline (the documented
+    // binding), NOT the destructive delete-to-line-start that tui-textarea-2's
+    // `input()` maps Ctrl+J to. The pre-existing text must survive.
+    #[test]
+    fn ctrl_j_inserts_newline_not_delete_to_head() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+        set_textarea_text(&mut app.textarea, "hello"); // caret at end
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(action.is_none());
+        assert_eq!(
+            app.textarea.lines().len(),
+            2,
+            "Ctrl+J must add a second line"
+        );
+        assert_eq!(
+            app.textarea.lines().join("\n"),
+            "hello\n",
+            "Ctrl+J inserts a newline after 'hello' — the text must NOT be deleted to line start"
+        );
+    }
+
+    // (B2-OVERLAY-ORDER) With the agent overlay open, Shift+Tab must be
+    // swallowed by the overlay handler and MUST NOT cycle the (security-
+    // relevant) permission mode — the overlay guard now sits ABOVE the
+    // Shift+Tab mode-cycle in the dispatch chain.
+    #[test]
+    fn agent_overlay_open_shift_tab_does_not_cycle_mode() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.mode.set(Mode::Normal);
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "x".into(),
+            ..Default::default()
+        });
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(action.is_none());
+        assert!(
+            matches!(app.mode.get(), Mode::Normal),
+            "Shift+Tab under an open overlay must NOT change the permission mode"
+        );
+        assert!(app.agent_overlay.is_some(), "the overlay stays open");
+    }
+
+    // (B2-OVERLAY-ORDER) With the agent overlay open, PageUp must scroll the
+    // OVERLAY (not the hidden transcript underneath) — the overlay guard now
+    // sits above the generic scrollback PageUp/PageDown block.
+    #[test]
+    fn agent_overlay_open_pageup_scrolls_overlay_not_transcript() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.scroll = 0;
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "x".into(),
+            ..Default::default()
+        });
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(action.is_none());
+        assert_eq!(
+            app.scroll, 0,
+            "PageUp under an open overlay must NOT scroll the hidden transcript"
+        );
+        assert!(
+            app.agent_overlay.as_ref().unwrap().scroll > 0,
+            "PageUp scrolls the overlay itself"
+        );
+    }
+
+    // (B2-AGENTS-SWALLOW) An unmatched key while browsing the agents panel is
+    // swallowed, NOT written into the hidden textarea (which `input::draw`
+    // replaces with a hint line in this focus).
+    #[test]
+    fn focus_agents_unmatched_key_does_not_mutate_textarea() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.registry.register(reg_teammate("t"));
+        app.focus = Focus::Agents;
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(action.is_none());
+        assert!(
+            app.textarea.is_empty(),
+            "an unmatched key while browsing agents must NOT mutate the hidden textarea"
+        );
+        assert!(
+            matches!(app.focus, Focus::Agents),
+            "focus stays on the agents panel"
+        );
+    }
+
+    // (B2-TAB-RETURN) Tab from the agents panel ALWAYS returns focus to Input,
+    // even if the registry emptied (all agents finished) while focus was on the
+    // panel — otherwise the user is stranded with a hidden textarea.
+    #[test]
+    fn tab_from_agents_focus_returns_to_input_even_when_registry_empty() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.focus = Focus::Agents;
+        assert!(
+            app.registry.snapshot().is_empty(),
+            "precondition: empty registry"
+        );
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(action.is_none());
+        assert!(
+            matches!(app.focus, Focus::Input),
+            "Tab must return focus to Input even with an empty registry"
+        );
+    }
+
+    // (B2-TAB-RETURN) The empty-registry no-op is kept ONLY for the
+    // Input→Agents direction (nothing to browse).
+    #[test]
+    fn tab_from_input_with_empty_registry_stays_on_input() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.focus = Focus::Input;
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(action.is_none());
+        assert!(
+            matches!(app.focus, Focus::Input),
+            "Tab from Input with no agents is a no-op (nothing to browse)"
+        );
+    }
+
+    // (B2-PALETTE-LEFT-RIGHT) Left/Right are fed to the textarea while the
+    // palette is open (they were previously dropped): they move the filter
+    // caret without changing the filter text and keep the palette open.
+    #[test]
+    fn slash_palette_left_right_move_caret_and_keep_palette() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+        set_textarea_text(&mut app.textarea, "/cl"); // caret at col 3
+        app.slash_palette = Some(SlashPalette { selected: 0 });
+        let (_, col0) = app.textarea.cursor();
+        assert_eq!(col0, 3, "precondition: caret at end");
+
+        // Left must be FED (moves the caret), not dropped.
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+        assert!(action.is_none());
+        let (_, col1) = app.textarea.cursor();
+        assert_eq!(col1, 2, "Left must move the filter caret (fed to textarea)");
+        assert_eq!(
+            app.textarea.lines().join(""),
+            "/cl",
+            "Left must not change the filter text"
+        );
+        assert!(
+            app.slash_palette.is_some(),
+            "Left must keep the palette open"
+        );
+
+        // Right moves the caret back.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            &cmd_tx,
+            &shared_abort,
+        );
+        let (_, col2) = app.textarea.cursor();
+        assert_eq!(col2, 3, "Right must move the caret back");
+        assert!(
+            app.slash_palette.is_some(),
+            "Right must keep the palette open"
+        );
+    }
+
+    // (B2-OVERLAY-CTRL-O) Ctrl+O in Idle closes the diff viewer + clears
+    // pending_diff and opens the external editor (the arm was previously
+    // swallowed while the viewer owned keys).
+    #[test]
+    fn diff_view_ctrl_o_opens_editor_and_closes() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+        app.pending_diff = Some("diff".to_string());
+        app.diff_view = Some(DiffView::default());
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(
+            matches!(action, Some(Action::OpenEditor)),
+            "Ctrl+O must open the editor"
+        );
+        assert!(app.diff_view.is_none(), "Ctrl+O closes the diff viewer");
+        assert!(
+            app.pending_diff.is_none(),
+            "Ctrl+O clears pending_diff (matching Esc/Tab)"
+        );
+    }
+
+    // (B2-OVERLAY-CTRL-O) Same for the tool-output viewer.
+    #[test]
+    fn tool_output_view_ctrl_o_opens_editor_and_closes() {
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+        app.tool_output_view = Some(ToolOutputView::default());
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+
+        assert!(matches!(action, Some(Action::OpenEditor)));
+        assert!(app.tool_output_view.is_none());
+    }
+
+    // (B2-OVERLAY-CTRL-O) Same for the agent overlay, and it must be Idle-only:
+    // in Streaming, Ctrl+O is swallowed (suspending the TUI mid-stream would
+    // freeze the in-flight turn).
+    #[test]
+    fn agent_overlay_ctrl_o_opens_editor_in_idle_but_not_streaming() {
+        // Idle: opens the editor + closes the overlay.
+        let mut app = test_app();
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        app.phase = Phase::Idle;
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "x".into(),
+            ..Default::default()
+        });
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+        assert!(matches!(action, Some(Action::OpenEditor)));
+        assert!(app.agent_overlay.is_none());
+
+        // Streaming: swallowed, overlay stays open.
+        let mut app = test_app();
+        app.phase = Phase::Streaming;
+        app.agent_overlay = Some(AgentOverlay {
+            agent_name: "x".into(),
+            ..Default::default()
+        });
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            &cmd_tx,
+            &shared_abort,
+        );
+        assert!(
+            action.is_none(),
+            "Ctrl+O in Streaming must be swallowed (no editor mid-stream)"
+        );
+        assert!(
+            app.agent_overlay.is_some(),
+            "overlay stays open in Streaming"
+        );
+    }
+
     // (M7a-8) `BracketedPasteGuard` is constructible via `enter()` and drops
     // cleanly — the RAII seam `run()` uses to enable bracketed paste
     // (`ESC[?2004h`) and disable it on drop (`ESC[?2004l`), including the
@@ -14818,28 +15478,67 @@ task = "Do the thing"
         );
     }
 
-    // (FEATURE-A-enter) Enter accepts the selected entry: sets the textarea to
-    // "{name} " (trailing space for args) and closes the palette.
+    // (B2-PALETTE-EXECUTE) Tab COMPLETES the selected entry without executing:
+    // it sets the textarea to "{name} " (trailing space for args), closes the
+    // palette, and does NOT dispatch the command (no Cmd sent, no Action).
     #[test]
-    fn slash_palette_enter_inserts_name_plus_space() {
+    fn slash_palette_tab_completes_without_executing() {
         let mut app = test_app();
-        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
         set_textarea_text(&mut app.textarea, "/clear");
         // /clear is the only match for the exact `/clear` prefix among
         // primaries (it has no aliases that also start with `/clear`).
         app.slash_palette = Some(SlashPalette { selected: 0 });
 
-        handle_slash_palette_key(
+        let action = handle_slash_palette_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &cmd_tx,
+        );
+
+        assert!(action.is_none(), "Tab must complete-only (no Action)");
+        assert!(app.slash_palette.is_none(), "Tab must close the palette");
+        assert_eq!(
+            app.textarea.lines().join(""),
+            "/clear ",
+            "Tab must set the textarea to '/clear ' (trailing space), NOT execute"
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "Tab must NOT dispatch the command (no Cmd::Clear)"
+        );
+    }
+
+    // (B2-PALETTE-EXECUTE) Enter COMPLETES AND EXECUTES the selected entry in
+    // one keystroke (Claude Code parity — no double-Enter): it routes the
+    // completed `/clear` line through the same submission path a manual Enter
+    // takes, so it returns `Action::ClearTranscript`, sends `Cmd::Clear`,
+    // closes the palette, and clears the textarea.
+    #[test]
+    fn slash_palette_enter_executes_selected_command() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        set_textarea_text(&mut app.textarea, "/clear");
+        app.slash_palette = Some(SlashPalette { selected: 0 });
+
+        let action = handle_slash_palette_key(
             &mut app,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &cmd_tx,
         );
 
+        assert!(
+            matches!(action, Some(Action::ClearTranscript)),
+            "Enter on /clear must EXECUTE (return ClearTranscript)"
+        );
         assert!(app.slash_palette.is_none(), "Enter must close the palette");
-        assert_eq!(
-            app.textarea.lines().join(""),
-            "/clear ",
-            "Enter must set the textarea to '/clear ' (trailing space)"
+        assert!(
+            app.textarea.is_empty(),
+            "the submission path must clear the textarea after executing"
+        );
+        assert!(
+            matches!(cmd_rx.try_recv(), Ok(Cmd::Clear)),
+            "Enter on /clear must dispatch Cmd::Clear to the bg thread"
         );
     }
 
