@@ -16,9 +16,13 @@
 //! — newlines included — and lands in the buffer as a single edit
 //! instead of submitting line by line. Alt+Enter / Ctrl+J (and
 //! Shift+Enter on terminals that report it, e.g. the kitty keyboard
-//! protocol) insert a deliberate newline. The bar grows one row per
-//! buffer line up to `MAX_INPUT_ROWS`, then scrolls a window that keeps
-//! the cursor visible.
+//! protocol) insert a deliberate newline. In the ratatui TUI the input
+//! bar is a `tui-textarea` widget whose footer row grows one row per
+//! draft line up to `MAX_INPUT_ROWS` (6); past that the textarea's own
+//! viewport scrolls to keep the cursor visible. The row sizing lives in
+//! `code_tui::view::compute_footer_layout`, which floors the input row at
+//! 1 even under extreme height pressure so a multi-line draft is never
+//! clipped away.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;

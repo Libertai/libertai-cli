@@ -799,6 +799,18 @@ pub struct ApprovalModal {
     /// approval socket (Issue-1) — the teammate is blocked on its socket
     /// read + the responder writes the choice back over the connection.
     pub responder: ApprovalResponder,
+    /// (B3 Fix 3) First preview line shown, i.e. a top-anchored scroll
+    /// offset into the wrapped preview. `0` shows the top; PageDown/Down
+    /// increase it (revealing lower lines), PageUp/Up decrease it. Pure view
+    /// state — it never touches the approval CHOICE / responder protocol
+    /// (rounds 9-12 invariants).
+    pub scroll: u16,
+    /// (B3 Fix 3) Max legal `scroll` (last wrapped preview line that can be
+    /// the top of the viewport), pinned by the last draw so the key handler
+    /// clamps against the real scrollable range. Mirrors
+    /// [`DiffView::max_scroll`]. Defaults to `0` (nothing to scroll until a
+    /// draw measures the preview).
+    pub max_scroll: u16,
 }
 
 /// The channel a resolved approval choice goes back through.
@@ -2958,6 +2970,8 @@ fn run_loop(
                             preview: req.preview,
                             always_rule: req.always_rule,
                             responder: ApprovalResponder::Remote(responder),
+                            scroll: 0,
+                            max_scroll: 0,
                         });
                         app.phase = Phase::Approval;
                         app.set_dirty();
@@ -7182,6 +7196,47 @@ fn handle_approval_key(app: &mut App, key: KeyEvent, shared_abort: &SharedAbort)
         return None;
     }
 
+    // (B3 Fix 3) Preview scroll — PURE VIEW STATE. These keys do NOT
+    // `take()` the modal, resolve a choice, or touch the responder/phase
+    // (rounds 9-12 invariants); they only move the top-anchored `scroll`
+    // offset into the wrapped preview and redraw. Up/PageUp reveal earlier
+    // lines, Down/PageDown later ones; `scroll` is clamped to `max_scroll`
+    // (pinned by the last draw to the real scrollable range). None of these
+    // are choice keys (y/s/a/p/r/o/n/q/Esc), so they can't shadow the choice
+    // set — an unresolved modal stays up. Return None so the key never leaks
+    // past the modal.
+    match key.code {
+        KeyCode::Down => {
+            if let Some(a) = app.approval.as_mut() {
+                a.scroll = a.scroll.saturating_add(1).min(a.max_scroll);
+            }
+            app.set_dirty();
+            return None;
+        }
+        KeyCode::PageDown => {
+            if let Some(a) = app.approval.as_mut() {
+                a.scroll = a.scroll.saturating_add(5).min(a.max_scroll);
+            }
+            app.set_dirty();
+            return None;
+        }
+        KeyCode::Up => {
+            if let Some(a) = app.approval.as_mut() {
+                a.scroll = a.scroll.saturating_sub(1);
+            }
+            app.set_dirty();
+            return None;
+        }
+        KeyCode::PageUp => {
+            if let Some(a) = app.approval.as_mut() {
+                a.scroll = a.scroll.saturating_sub(5);
+            }
+            app.set_dirty();
+            return None;
+        }
+        _ => {}
+    }
+
     let approval = app.approval.take()?;
     let choice = match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => PromptChoice::Allow,
@@ -7815,6 +7870,8 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                     preview,
                     always_rule,
                     responder: ApprovalResponder::Local(responder),
+                    scroll: 0,
+                    max_scroll: 0,
                 });
                 app.phase = Phase::Approval;
             }
@@ -10527,6 +10584,8 @@ task = "Do the thing"
             preview: "bash(echo hi)".to_string(),
             always_rule: "bash(echo *)".to_string(),
             responder: ApprovalResponder::Remote(responder),
+            scroll: 0,
+            max_scroll: 0,
         }
     }
 
@@ -10677,6 +10736,8 @@ task = "Do the thing"
             preview: "bash(echo hi)".to_string(),
             always_rule: "bash(echo *)".to_string(),
             responder: ApprovalResponder::Local(resp_tx),
+            scroll: 0,
+            max_scroll: 0,
         });
 
         let _ = handle_approval_key(
@@ -10694,6 +10755,324 @@ task = "Do the thing"
             app.pre_approval_phase,
             Some(Phase::Idle),
             "Local arm ignores the stash"
+        );
+    }
+
+    // (B3 Fix 3) The preview-scroll keys are PURE VIEW STATE: they move
+    // `scroll` (clamped to `max_scroll`), leave the modal up + phase
+    // unchanged, and never resolve a choice or touch the responder. The
+    // choice keys still resolve normally afterwards.
+    #[test]
+    fn approval_scroll_keys_are_view_only_and_clamp() {
+        let mut app = test_app();
+        let shared_abort: SharedAbort = Arc::new(Mutex::new(None));
+        let (resp_tx, _resp_rx) = mpsc::channel::<PromptChoice>();
+        app.phase = Phase::Approval;
+        app.approval = Some(ApprovalModal {
+            tool_name: "bash".to_string(),
+            preview: "many\nlines\nof\npreview".to_string(),
+            always_rule: "bash(*)".to_string(),
+            responder: ApprovalResponder::Local(resp_tx),
+            scroll: 0,
+            max_scroll: 3,
+        });
+
+        // PageDown moves +5 but clamps to max_scroll (3) and does NOT resolve.
+        let a = handle_approval_key(
+            &mut app,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &shared_abort,
+        );
+        assert!(a.is_none());
+        assert!(app.approval.is_some(), "scroll must not resolve the modal");
+        assert_eq!(
+            app.phase,
+            Phase::Approval,
+            "scroll must not change the phase"
+        );
+        assert_eq!(
+            app.approval.as_ref().unwrap().scroll,
+            3,
+            "PageDown clamps to max_scroll"
+        );
+
+        // Up moves -1.
+        handle_approval_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &shared_abort,
+        );
+        assert_eq!(app.approval.as_ref().unwrap().scroll, 2);
+
+        // Down moves +1.
+        handle_approval_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &shared_abort,
+        );
+        assert_eq!(app.approval.as_ref().unwrap().scroll, 3);
+
+        // A choice key still resolves the modal (semantics untouched).
+        handle_approval_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &shared_abort,
+        );
+        assert!(app.approval.is_none(), "a choice key resolves the modal");
+    }
+
+    // (B3 Fix 1) The approval modal is one opaque box: `Clear` wipes the
+    // transcript behind it, so nothing bleeds through the modal interior.
+    #[test]
+    fn approval_modal_is_opaque_over_transcript() {
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app();
+        // Paint the whole background with a sentinel glyph the modal never
+        // emits.
+        for _ in 0..40 {
+            app.transcript
+                .push(TranscriptEntry::System("X".repeat(120)));
+        }
+        let (resp_tx, _rx) = mpsc::channel::<PromptChoice>();
+        app.phase = Phase::Approval;
+        app.approval = Some(ApprovalModal {
+            tool_name: "bash".to_string(),
+            preview: "echo hello world".to_string(),
+            always_rule: "bash(echo *)".to_string(),
+            responder: ApprovalResponder::Local(resp_tx),
+            scroll: 0,
+            max_scroll: 0,
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).expect("TestBackend");
+        term.draw(|f| crate::commands::code_tui::view::draw(f, &mut app))
+            .expect("draw");
+        let buf = term.backend().buffer();
+
+        // Locate the modal box by its rounded corners.
+        let sym = |x: u16, y: u16| {
+            buf.cell(ratatui::layout::Position { x, y })
+                .unwrap()
+                .symbol()
+                .to_string()
+        };
+        let mut corner = None;
+        'outer: for y in 0..24u16 {
+            for x in 0..80u16 {
+                if sym(x, y) == "╭" {
+                    corner = Some((x, y));
+                    break 'outer;
+                }
+            }
+        }
+        let (mx, my) = corner.expect("modal top-left corner rendered");
+        let mut mw = 0u16;
+        for x in mx..80 {
+            if sym(x, my) == "╮" {
+                mw = x - mx;
+                break;
+            }
+        }
+        let mut mh = 0u16;
+        for y in my..24 {
+            if sym(mx, y) == "╰" {
+                mh = y - my;
+                break;
+            }
+        }
+        assert!(mw > 2 && mh > 2, "found a bordered modal box ({mw}x{mh})");
+
+        // Non-vacuous: the background to the LEFT of the modal is still 'X'
+        // on the modal's rows, proving the sentinel WAS painted there.
+        assert!(
+            (my + 1..my + mh).any(|y| (0..mx).any(|x| sym(x, y) == "X")),
+            "sentinel must be painted in the background beside the modal"
+        );
+
+        // The interior must contain NO sentinel — Clear wiped it opaque.
+        for y in (my + 1)..(my + mh) {
+            for x in (mx + 1)..(mx + mw) {
+                assert_ne!(
+                    sym(x, y),
+                    "X",
+                    "transcript bled through the modal interior at ({x},{y})"
+                );
+            }
+        }
+    }
+
+    // (B3 Fix 2) At 80 cols the deny option — which the old single-line row
+    // truncated off-screen — is rendered.
+    #[test]
+    fn approval_modal_renders_deny_option_at_80_cols() {
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app();
+        let (resp_tx, _rx) = mpsc::channel::<PromptChoice>();
+        app.phase = Phase::Approval;
+        app.approval = Some(ApprovalModal {
+            tool_name: "bash".to_string(),
+            preview: "echo hi".to_string(),
+            always_rule: "bash(echo *)".to_string(),
+            responder: ApprovalResponder::Local(resp_tx),
+            scroll: 0,
+            max_scroll: 0,
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).expect("TestBackend");
+        term.draw(|f| crate::commands::code_tui::view::draw(f, &mut app))
+            .expect("draw");
+        let text = buffer_text(term.backend().buffer());
+        assert!(
+            text.contains("Deny"),
+            "deny option must be visible at 80 cols"
+        );
+        assert!(text.contains("Allow"), "allow option must be visible");
+    }
+
+    // (B3 Fix 3) A long preview shows the "… (N more lines — PageDown)"
+    // truncation hint and pins a positive `max_scroll` for the key handler.
+    #[test]
+    fn approval_modal_shows_more_indicator_and_pins_max_scroll() {
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app();
+        let (resp_tx, _rx) = mpsc::channel::<PromptChoice>();
+        let preview = (0..50)
+            .map(|i| format!("preview line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.phase = Phase::Approval;
+        app.approval = Some(ApprovalModal {
+            tool_name: "bash".to_string(),
+            preview,
+            always_rule: "bash(*)".to_string(),
+            responder: ApprovalResponder::Local(resp_tx),
+            scroll: 0,
+            max_scroll: 0,
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).expect("TestBackend");
+        term.draw(|f| crate::commands::code_tui::view::draw(f, &mut app))
+            .expect("draw");
+
+        assert!(
+            app.approval.as_ref().unwrap().max_scroll > 0,
+            "a long preview pins a positive max_scroll"
+        );
+        let text = buffer_text(term.backend().buffer());
+        assert!(
+            text.contains("more line") && text.contains("PageDown"),
+            "the truncation indicator must be shown: {text:?}"
+        );
+    }
+
+    /// Build a single-question `AskModal` from a JSON payload for render tests.
+    fn ask_modal_from(question: &str, options: serde_json::Value) -> AskModal {
+        let (tx, _rx) = mpsc::channel::<crate::commands::code_approvals::AskOutcome>();
+        let payload = serde_json::json!({
+            "questions": [{ "question": question, "options": options }]
+        });
+        AskModal::from_payload(&payload, tx).expect("payload parses")
+    }
+
+    // (B3 Fix 4) A long question wraps instead of being clipped: its LAST word
+    // is still present in the rendered buffer (the old un-wrapped render clipped
+    // the tail at the modal width).
+    #[test]
+    fn ask_modal_wraps_long_question_no_clip() {
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app();
+        let question = "This is a deliberately long ask-user question that must wrap \
+            across several rows inside the modal instead of being silently truncated ENDSENTINEL";
+        app.ask = Some(ask_modal_from(
+            question,
+            serde_json::json!([{ "label": "Yes" }, { "label": "No" }]),
+        ));
+        app.phase = Phase::Ask;
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).expect("TestBackend");
+        term.draw(|f| crate::commands::code_tui::view::draw(f, &mut app))
+            .expect("draw");
+        let text = buffer_text(term.backend().buffer());
+        assert!(
+            text.contains("ENDSENTINEL"),
+            "the question tail must wrap into view, not be clipped: {text:?}"
+        );
+    }
+
+    // (B3 Fix 4) In free-text mode a long answer keeps the terminal cursor
+    // strictly inside the modal border (tail-scroll + clamp).
+    #[test]
+    fn ask_modal_free_text_cursor_stays_inside_box() {
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app();
+        // No options → free-text mode.
+        let mut modal = ask_modal_from("Type a long answer:", serde_json::json!([]));
+        modal.free_text_mode = true;
+        modal.free_text = "x".repeat(300);
+        app.ask = Some(modal);
+        app.phase = Phase::Ask;
+
+        let backend = TestBackend::new(80, 24);
+        let mut term = ratatui::Terminal::new(backend).expect("TestBackend");
+        term.draw(|f| crate::commands::code_tui::view::draw(f, &mut app))
+            .expect("draw");
+        let buf = term.backend().buffer();
+        let sym = |x: u16, y: u16| {
+            buf.cell(ratatui::layout::Position { x, y })
+                .unwrap()
+                .symbol()
+                .to_string()
+        };
+
+        // Locate the modal box.
+        let mut corner = None;
+        'outer: for y in 0..24u16 {
+            for x in 0..80u16 {
+                if sym(x, y) == "╭" {
+                    corner = Some((x, y));
+                    break 'outer;
+                }
+            }
+        }
+        let (mx, my) = corner.expect("modal top-left corner rendered");
+        let mut mw = 0u16;
+        for x in mx..80 {
+            if sym(x, my) == "╮" {
+                mw = x - mx;
+                break;
+            }
+        }
+        let mut mh = 0u16;
+        for y in my..24 {
+            if sym(mx, y) == "╰" {
+                mh = y - my;
+                break;
+            }
+        }
+
+        let pos = term.get_cursor_position().expect("cursor position");
+        assert!(
+            pos.x > mx && pos.x < mx + mw,
+            "cursor x {} must be inside the modal border [{}, {})",
+            pos.x,
+            mx + 1,
+            mx + mw
+        );
+        assert!(
+            pos.y > my && pos.y < my + mh,
+            "cursor y {} must be inside the modal border [{}, {})",
+            pos.y,
+            my + 1,
+            my + mh
         );
     }
 

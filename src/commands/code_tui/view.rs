@@ -48,8 +48,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .unwrap_or(0)
         .min(area.height / 2);
 
-    // Compute footer height from the frame area, not a separate syscall.
-    let footer_height = compute_footer_height(agent_rows, &app.queued, todo_rows, area.height);
+    // (B3 Fix 5) The input bar grows one row per draft line, capped at
+    // `MAX_INPUT_ROWS`, so a multi-line draft is visible instead of clipped
+    // to the old hardcoded single row.
+    let input_lines = app.textarea.lines().len() as u16;
+
+    // (B3 Fix 6) Compute the footer's per-component heights ONCE, with a
+    // documented degradation priority so the constraint sum can never exceed
+    // the footer Rect and silently collapse the input row. `draw_footer`
+    // consumes the SAME struct, so the height and the layout never disagree.
+    let footer_layout =
+        compute_footer_layout(agent_rows, &app.queued, todo_rows, input_lines, area.height);
+    let footer_height = footer_layout.total();
 
     // Split: scrollback (variable) + footer (fixed).
     let chunks = Layout::default()
@@ -67,7 +77,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     scrollback::draw(frame, scrollback_area, app);
 
     // Draw footer (agents + spinner + queued + rule + input).
-    draw_footer(frame, footer_area, app, &agents, agent_rows, todo_rows);
+    draw_footer(frame, footer_area, app, &agents, &footer_layout);
 
     // Draw approval modal overlay if active.
     if app.phase == Phase::Approval {
@@ -113,7 +123,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 /// Agent row count for the footer's agents panel, clamped to a third of
 /// the terminal height. Computed once in [`draw`] and shared with
-/// [`compute_footer_height`] (to size the footer) and [`draw_footer`]
+/// [`compute_footer_layout`] (to size the footer) and [`draw_footer`]
 /// (to lay out + render the panel) so the two never disagree on the
 /// `term_height / 3` denominator (tui-bugs #11).
 fn agent_rows(agents: &[Arc<AgentHandle>], term_height: u16) -> u16 {
@@ -124,52 +134,166 @@ fn agent_rows(agents: &[Arc<AgentHandle>], term_height: u16) -> u16 {
     }
 }
 
-/// Compute the footer height from the precomputed agent-row count and
-/// the snapshot of queued msgs.
+/// (B3 Fix 5) Max rows the input bar grows to before the textarea's own
+/// viewport takes over and scrolls to keep the cursor visible.
+const MAX_INPUT_ROWS: u16 = 6;
+
+/// The footer's per-component heights, computed once by
+/// [`compute_footer_layout`] so [`draw`] (which sizes the footer Rect via
+/// [`FooterLayout::total`]) and [`draw_footer`] (which builds the row
+/// constraints) consume the SAME numbers and can never disagree on the
+/// constraint sum (B3 Fix 6 / tui-bugs #11).
+///
+/// The rows, top-to-bottom, are: `todo` overlay, agents header, agents
+/// panel, spinner, queued previews, status rule, input bar.
+struct FooterLayout {
+    todo_rows: u16,
+    agent_header: u16,
+    agent_rows: u16,
+    spinner_h: u16,
+    queued_rows: u16,
+    rule_h: u16,
+    input_h: u16,
+}
+
+impl FooterLayout {
+    /// Sum of the component heights — the total footer height. Guaranteed
+    /// `<= term_height - 1` for any `term_height >= 2` (see
+    /// [`compute_footer_layout`]), so the scrollback always keeps its
+    /// `Constraint::Min(1)` row.
+    fn total(&self) -> u16 {
+        self.todo_rows
+            + self.agent_header
+            + self.agent_rows
+            + self.spinner_h
+            + self.queued_rows
+            + self.rule_h
+            + self.input_h
+    }
+}
+
+/// Compute the footer's per-component heights from the precomputed agent-row
+/// count, the queued-message snapshot, the `todo` overlay height, and the
+/// draft's line count.
 ///
 /// `term_height` is the frame's area height — not a separate syscall.
 /// `agent_rows` is computed once by the caller via [`agent_rows`] and
-/// passed in so the height and the layout use the same value.
+/// `todo_rows` by the caller (both already clamped to a fraction of the
+/// terminal); they're passed in so the height and the layout use one value.
+/// `input_lines` is `app.textarea.lines().len()`, clamped to `[1,
+/// MAX_INPUT_ROWS]` here.
 ///
-/// `todo_rows` is the `todo` overlay height — `None` when no task list is
-/// pinned (`app.todo == None`), else `1 + items.len()` (a header row plus
-/// one row per item). The overlay sits at the TOP of the footer.
-fn compute_footer_height(
+/// # Degradation priority
+///
+/// The natural component heights can sum to more than the footer's budget
+/// (`term_height - 1` — the scrollback always keeps at least one row). When
+/// that happens the components are shrunk in a FIXED priority so the layout
+/// always fits the footer Rect and the cassowary solver never silently
+/// collapses the input bar: the input bar is sacred (floored at 1), then the
+/// status rule, spinner, queued previews, agents panel, and the `todo`
+/// overlay shrink first — the `todo` overlay gives way first, the input bar
+/// last. The returned layout's [`FooterLayout::total`] is therefore
+/// `<= term_height - 1` for any `term_height >= 2`.
+fn compute_footer_layout(
     agent_rows: u16,
     queued: &[String],
     todo_rows: u16,
+    input_lines: u16,
     term_height: u16,
-) -> u16 {
-    let agent_header = if agent_rows > 0 { 1 } else { 0 };
-    let queued_rows = queued.len().min(3) as u16;
-    // spinner + queued + rule + input
-    let base = 1 + queued_rows + 1 + 1;
-    let total = todo_rows + agent_header + agent_rows + base;
-    total.min(term_height.saturating_sub(1))
+) -> FooterLayout {
+    // Natural (unclamped-by-budget) component heights.
+    let mut todo = todo_rows;
+    let mut a_rows = agent_rows;
+    let mut a_header: u16 = if agent_rows > 0 { 1 } else { 0 };
+    let mut queued_rows = queued.len().min(3) as u16;
+    let mut spinner = 1u16;
+    let mut rule = 1u16;
+    let mut input = input_lines.clamp(1, MAX_INPUT_ROWS);
+
+    // The footer never fills the whole screen: the scrollback keeps its
+    // `Constraint::Min(1)` row, so the footer's budget is `term_height - 1`.
+    let budget = term_height.saturating_sub(1);
+    let natural = todo + a_header + a_rows + spinner + queued_rows + rule + input;
+    let mut overflow = natural.saturating_sub(budget);
+
+    // Shrink in the degradation priority (least-protected first). Each step
+    // takes as much as it can up to its floor, then defers to the next.
+    // 1. todo overlay → 0
+    let take = todo.min(overflow);
+    todo -= take;
+    overflow -= take;
+    // 2. agents panel → 0; once no rows remain the header is meaningless and
+    //    is dropped too (freeing its row).
+    if overflow > 0 {
+        let take = a_rows.min(overflow);
+        a_rows -= take;
+        overflow -= take;
+    }
+    if a_rows == 0 && a_header > 0 {
+        // Dropping the now-orphaned header frees one more row (saturating so
+        // an already-satisfied overflow stays at 0).
+        overflow = overflow.saturating_sub(a_header);
+        a_header = 0;
+    }
+    // 3. queued previews → 0
+    if overflow > 0 {
+        let take = queued_rows.min(overflow);
+        queued_rows -= take;
+        overflow -= take;
+    }
+    // 4. spinner → 0
+    if overflow > 0 {
+        let take = spinner.min(overflow);
+        spinner -= take;
+        overflow -= take;
+    }
+    // 5. status rule → 0
+    if overflow > 0 {
+        let take = rule.min(overflow);
+        rule -= take;
+        overflow -= take;
+    }
+    // 6. input bar — sacred: never below 1 row.
+    if overflow > 0 {
+        let take = input.saturating_sub(1).min(overflow);
+        input -= take;
+    }
+
+    FooterLayout {
+        todo_rows: todo,
+        agent_header: a_header,
+        agent_rows: a_rows,
+        spinner_h: spinner,
+        queued_rows,
+        rule_h: rule,
+        input_h: input,
+    }
 }
 
 /// Draw the footer block: agents panel + spinner + queued + rule + input.
 ///
-/// `agent_rows` is the precomputed panel row count (see [`agent_rows`]),
-/// sized off the terminal height — not `area.height`, which is the
-/// already-clamped footer area and would disagree with the height
-/// computation (tui-bugs #11).
-///
-/// `todo_rows` is the `todo` overlay height (see [`compute_footer_height`]);
-/// `0` means no overlay. The overlay renders FIRST (top of the footer).
+/// `layout` carries the per-component heights computed once by
+/// [`compute_footer_layout`] (see [`FooterLayout`]); the row constraints are
+/// built directly from it so the constraint sum equals the footer Rect that
+/// [`draw`] sized from the SAME struct — the cassowary solver can never
+/// shrink a row unpredictably (B3 Fix 6). The `todo` overlay renders FIRST
+/// (top of the footer), the input bar LAST (bottom).
 fn draw_footer(
     frame: &mut Frame,
     area: Rect,
     app: &mut App,
     agents: &[Arc<AgentHandle>],
-    agent_rows: u16,
-    todo_rows: u16,
+    layout: &FooterLayout,
 ) {
-    let agent_header = if agent_rows > 0 { 1 } else { 0 };
-    let queued_rows = app.queued.len().min(3) as u16;
-    let spinner_h = 1u16;
-    let rule_h = 1u16;
-    let input_h = 1u16;
+    let FooterLayout {
+        todo_rows,
+        agent_header,
+        agent_rows,
+        spinner_h,
+        queued_rows,
+        rule_h,
+        input_h,
+    } = *layout;
 
     // Build vertical layout for the footer.
     let chunks = Layout::default()
@@ -185,11 +309,15 @@ fn draw_footer(
             if agent_rows > 0 {
                 c.push(Constraint::Length(agent_rows));
             }
-            c.push(Constraint::Length(spinner_h));
+            if spinner_h > 0 {
+                c.push(Constraint::Length(spinner_h));
+            }
             for _ in 0..queued_rows {
                 c.push(Constraint::Length(1));
             }
-            c.push(Constraint::Length(rule_h));
+            if rule_h > 0 {
+                c.push(Constraint::Length(rule_h));
+            }
             c.push(Constraint::Length(input_h));
             c
         })
@@ -233,9 +361,12 @@ fn draw_footer(
         chunk_idx += 1;
     }
 
-    // Spinner.
-    footer::draw_spinner(frame, chunks[chunk_idx], app);
-    chunk_idx += 1;
+    // Spinner (dropped under extreme height pressure — see the degradation
+    // priority in `compute_footer_layout`).
+    if spinner_h > 0 {
+        footer::draw_spinner(frame, chunks[chunk_idx], app);
+        chunk_idx += 1;
+    }
 
     // Queued previews.
     for (i, queued_text) in app.queued.iter().take(queued_rows as usize).enumerate() {
@@ -243,88 +374,164 @@ fn draw_footer(
     }
     chunk_idx += queued_rows as usize;
 
-    // Rule line (status bar).
-    footer::draw_rule(frame, chunks[chunk_idx], app);
-    chunk_idx += 1;
+    // Rule line (status bar) — also droppable under extreme height pressure.
+    if rule_h > 0 {
+        footer::draw_rule(frame, chunks[chunk_idx], app);
+        chunk_idx += 1;
+    }
 
-    // Input bar.
+    // Input bar — always present (sacred, floored at 1 row).
     input::draw(frame, chunks[chunk_idx], app);
 }
 
+/// The approval-choice controls, one `(label, style-color)` per option.
+/// Kept as a function so the draw path and the option-line packer agree on
+/// the exact key set — every key here is a live arm of
+/// [`crate::commands::code_tui::app::handle_approval_key`]: `y`=Allow,
+/// `s`=Session, `a`=Always, `p`=Prefix, `r`=Root(GrantRoot), `o`=Domain,
+/// `n`/Esc=Deny. The deny option names Esc explicitly so it's discoverable
+/// even when the terminal is too narrow to fit every option on one row (B3
+/// Fix 2 — the old single line truncated at the pane width and hid deny).
+fn approval_option_tokens() -> Vec<(&'static str, ratatui::style::Color)> {
+    vec![
+        ("[y] Allow", theme::SUCCESS),
+        ("[s] Session", theme::WARNING),
+        ("[a] Always", theme::ACCENT),
+        // (M4/#10) Per-call scope choices, shown dim so the primary y/s/a/n
+        // flow stays visually dominant.
+        ("[p] Prefix", theme::MUTED),
+        ("[r] Root", theme::MUTED),
+        ("[o] Domain", theme::MUTED),
+        ("[n]/Esc Deny", theme::ERROR),
+    ]
+}
+
+/// Pack the approval option tokens into as many rows as needed so every
+/// option is always visible (B3 Fix 2). Tokens flow left-to-right separated
+/// by two spaces; a token that would overflow `width` starts a new row. A
+/// single token wider than `width` still gets its own row (Paragraph
+/// truncates it, but the option keys are short so this never bites).
+fn pack_approval_options(width: usize) -> Vec<ratatui::text::Line<'static>> {
+    use ratatui::style::Style;
+    use ratatui::text::{Line, Span};
+    const SEP: &str = "  ";
+    let sep_w = SEP.width();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut cur: Vec<Span<'static>> = Vec::new();
+    let mut cur_w = 0usize;
+    for (label, color) in approval_option_tokens() {
+        let lw = label.width();
+        let add = if cur.is_empty() { lw } else { sep_w + lw };
+        if !cur.is_empty() && cur_w + add > width {
+            lines.push(Line::from(std::mem::take(&mut cur)));
+            cur_w = 0;
+        }
+        if !cur.is_empty() {
+            cur.push(Span::raw(SEP));
+            cur_w += sep_w;
+        }
+        cur.push(Span::styled(label, Style::default().fg(color)));
+        cur_w += lw;
+    }
+    if !cur.is_empty() {
+        lines.push(Line::from(cur));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    lines
+}
+
 /// Draw the approval modal as a centered popup.
-fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
+///
+/// The modal is a single opaque box: `Clear` wipes the transcript behind it
+/// (B3 Fix 1) and a rounded, padded [`Block`] frames the content so nothing
+/// bleeds through around the labels. The preview region scrolls (B3 Fix 3 —
+/// `approval.scroll`, a top-anchored offset into the wrapped preview) with a
+/// "… (N more lines — PageDown)" hint when there's more below, and the
+/// options wrap across rows so the deny choice is never truncated off-screen
+/// (B3 Fix 2). All the choice/scroll KEY handling lives in
+/// `handle_approval_key`; this function is pure rendering + it pins
+/// `approval.max_scroll` to the real scrollable range at the end.
+fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &mut App) {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+    use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
     let Some(approval) = &app.approval else {
         return;
     };
 
-    // Modal size: 70% width, max 80% height, centered.
+    // Modal size: 70% width, max 80% height, centered. The block reserves 2
+    // columns for borders + 2 for horizontal padding, so content wraps to
+    // `modal_width - 4`.
     let modal_width = (area.width as f32 * 0.7) as u16;
     let max_modal_height = (area.height as f32 * 0.8) as u16;
-    let usable_width = modal_width.saturating_sub(4) as usize;
+    let content_width = modal_width.saturating_sub(4).max(1) as usize;
 
-    // Pre-wrap the preview into explicit Lines (word-wrapped to the
-    // usable width). This gives us an exact line count that matches
-    // what will be rendered — no relying on Paragraph::wrap, which
-    // uses WordWrapper and can produce more lines than a naive char
-    // count predicts (words aren't broken mid-word).
-    let prefix = "Preview: ";
-    let prefix_len = prefix.chars().count();
-    let wrapped_preview = wrap::word_wrap(&approval.preview, usable_width, prefix_len);
+    // Pre-wrap the preview into explicit lines (word-wrapped to the content
+    // width). An exact line count lets us window a scroll region precisely.
+    let wrapped_preview = wrap::word_wrap(&approval.preview, content_width, 0);
+    let total_preview = wrapped_preview.len();
 
-    // Fixed lines: tool (1) + always_rule (1) + blank (1) + controls (1) = 4.
-    // Plus 2 border rows.
-    let fixed_inner = 4;
-    let preview_lines = wrapped_preview.len();
-    let needed_height = 2 + fixed_inner + preview_lines;
-    let modal_height = needed_height.min(max_modal_height as usize) as u16;
+    // Option rows are wrapping-independent of height — compute them first so
+    // the chrome budget knows how many rows they need (they're never clipped:
+    // deny must always show).
+    let option_lines = pack_approval_options(content_width);
+    let option_rows = option_lines.len();
 
-    // How many preview lines fit without clipping the controls?
-    let inner_height = modal_height.saturating_sub(2) as usize;
-    let max_preview_lines = inner_height.saturating_sub(fixed_inner).max(1);
+    // Fixed chrome rows: tool (1) + "Preview:" label (1) + always_rule (1)
+    // + blank separator (1) + the option rows.
+    let chrome_rows = 4 + option_rows;
+    let natural_inner = chrome_rows + total_preview;
 
-    // Truncate preview lines if needed, appending an ellipsis.
-    let display_lines: Vec<String> = if wrapped_preview.len() <= max_preview_lines {
-        wrapped_preview
+    // Cap the modal at 80% height. If everything fits, show all preview with
+    // no indicator; otherwise reserve one row for the "… more" hint and give
+    // the rest to a scrollable preview window (>= 0 rows on a tiny terminal).
+    let cap_inner = (max_modal_height as usize).saturating_sub(2);
+    let (inner_height, preview_region) = if natural_inner <= cap_inner {
+        (natural_inner, total_preview)
     } else {
-        let mut out: Vec<String> = wrapped_preview[..max_preview_lines.saturating_sub(1)].to_vec();
-        let mut last = wrapped_preview
-            .get(max_preview_lines.saturating_sub(1))
-            .cloned()
-            .unwrap_or_default();
-        // Truncate the last line and add ellipsis.
-        let max_chars = usable_width.saturating_sub(1);
-        if last.chars().count() > max_chars {
-            last = last.chars().take(max_chars).collect();
-        }
-        last.push('…');
-        out.push(last);
-        out
+        let region = cap_inner.saturating_sub(chrome_rows + 1);
+        (cap_inner, region)
     };
 
+    // Clamp the scroll offset to the real scrollable range and window the
+    // preview. `max_scroll` is pinned back onto the modal after the borrow of
+    // `approval` ends so the key handler clamps against the same value.
+    let max_scroll = total_preview.saturating_sub(preview_region);
+    let scroll = (approval.scroll as usize).min(max_scroll);
+    let visible_preview: &[String] = if preview_region == 0 || total_preview == 0 {
+        &[]
+    } else {
+        let end = (scroll + preview_region).min(total_preview);
+        &wrapped_preview[scroll..end]
+    };
+    let more_below = total_preview.saturating_sub(scroll + visible_preview.len());
+
+    let modal_height = (inner_height as u16).saturating_add(2);
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
 
+    // (B3 Fix 1) Clear the transcript behind the modal so it reads as one
+    // opaque box, then frame it — mirrors the slash palette / mention popup.
     frame.render_widget(Clear, modal_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(theme::ACCENT))
+        .padding(Padding::horizontal(1))
         .title(Span::styled(
-            " Approval ",
+            " approval required ",
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         ));
 
-    // Build the content lines. The "Preview: " prefix goes on the
-    // first preview line; subsequent lines are plain.
-    let mut lines: Vec<Line> = Vec::with_capacity(2 + fixed_inner + display_lines.len());
+    // Build the content lines top-to-bottom.
+    let mut lines: Vec<Line> = Vec::with_capacity(chrome_rows + preview_region + 1);
     lines.push(Line::from(vec![
         Span::styled("Tool: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
@@ -332,42 +539,105 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().add_modifier(Modifier::BOLD),
         ),
     ]));
-    for (i, pl) in display_lines.iter().enumerate() {
-        if i == 0 {
-            lines.push(Line::from(vec![
-                Span::styled(prefix, Style::default().fg(Color::DarkGray)),
-                Span::raw(pl.clone()),
-            ]));
-        } else {
-            lines.push(Line::from(Span::raw(pl.clone())));
-        }
+    lines.push(Line::from(Span::styled(
+        "Preview:",
+        Style::default().fg(Color::DarkGray),
+    )));
+    for pl in visible_preview {
+        lines.push(Line::from(Span::raw(pl.clone())));
+    }
+    if more_below > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "… ({more_below} more line{} — PageDown)",
+                if more_below == 1 { "" } else { "s" }
+            ),
+            Style::default()
+                .fg(theme::MUTED)
+                .add_modifier(Modifier::ITALIC),
+        )));
     }
     lines.push(Line::from(vec![
         Span::styled("Always rule: ", Style::default().fg(Color::DarkGray)),
         Span::styled(&approval.always_rule, Style::default().fg(theme::ACCENT)),
     ]));
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("[y] Allow  ", Style::default().fg(theme::SUCCESS)),
-        Span::styled("[s] Session  ", Style::default().fg(theme::WARNING)),
-        Span::styled("[a] Always  ", Style::default().fg(theme::ACCENT)),
-        // (M4/#10) Per-call scope choices: p=Prefix, r=GrantRoot, o=Domain.
-        // Shown dim so the primary y/s/a/n flow stays visually dominant;
-        // the keys record an always-rule at the chosen scope (falling back
-        // to the default rule when the call has no candidate for it).
-        Span::styled(
-            "[p] Prefix  [r] Root  [o] Domain  ",
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled("[n] Deny", Style::default().fg(theme::ERROR)),
-    ]));
+    lines.extend(option_lines);
 
-    // No Wrap — lines are already pre-wrapped to fit.
+    // No Wrap — lines are already pre-wrapped/packed to fit the content width.
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, modal_area);
+
+    // (B3 Fix 3) Pin `max_scroll` to the real scrollable range so
+    // `handle_approval_key`'s scroll arms clamp against it — mirrors the diff
+    // viewer's post-draw pin. Saturate the `u16` cast for a pathological
+    // >65535-line preview.
+    if let Some(a) = app.approval.as_mut() {
+        a.max_scroll = max_scroll.min(u16::MAX as usize) as u16;
+    }
+}
+
+/// Render `text` word-wrapped to `width` display columns as styled owned
+/// [`Line`]s: the first line carries `prefix` (styled `prefix_style`),
+/// continuation lines are indented by `prefix`'s display width so they align
+/// under the body. The wrapped body uses `body_style`. Used by the ask modal
+/// (B3 Fix 4) to wrap the question and long options instead of silently
+/// clipping them at the modal width.
+fn wrapped_labeled_lines(
+    prefix: &str,
+    prefix_style: ratatui::style::Style,
+    text: &str,
+    body_style: ratatui::style::Style,
+    width: usize,
+) -> Vec<ratatui::text::Line<'static>> {
+    use ratatui::text::{Line, Span};
+    let prefix_w = prefix.width();
+    let body_width = width.saturating_sub(prefix_w).max(1);
+    let wrapped = wrap::word_wrap(text, body_width, 0);
+    let indent = " ".repeat(prefix_w);
+    wrapped
+        .into_iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            if i == 0 {
+                Line::from(vec![
+                    Span::styled(prefix.to_string(), prefix_style),
+                    Span::styled(chunk, body_style),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw(indent.clone()),
+                    Span::styled(chunk, body_style),
+                ])
+            }
+        })
+        .collect()
+}
+
+/// Take the trailing run of `s` whose cumulative display width is `<=
+/// budget`, taking whole code points so a wide glyph is never split. Used to
+/// tail-scroll the ask modal's free-text input so a long answer stays inside
+/// the box with the cursor visible (B3 Fix 4).
+fn tail_by_width(s: &str, budget: usize) -> String {
+    let mut w = 0usize;
+    let mut start = s.len();
+    for (idx, ch) in s.char_indices().rev() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        w += cw;
+        start = idx;
+    }
+    s[start..].to_string()
 }
 
 /// Draw the ask-user modal as a centered popup.
+///
+/// (B3 Fix 4) The question and each option are word-wrapped to the modal
+/// width — grown up to the 80%-height cap to fit — instead of being silently
+/// clipped. In free-text mode the input tail-scrolls so a long answer stays
+/// inside the box and the terminal cursor is clamped within the border.
 fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
@@ -381,90 +651,118 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
     let total = modal.questions.len();
     let current = modal.current + 1;
 
-    // Compute modal height based on content.
-    let content_lines = if modal.free_text_mode {
-        4 // question + blank + input + hint
-    } else {
-        q.options.len() + 4 // question + optional header + hint + blank + options
-    };
-    // (R5) Clamp before the `u16` cast so a pathological >65535-option ask
-    // modal doesn't wrap `content_lines` and corrupt the layout. Saturating
-    // add keeps the +4 padding without overflow.
-    let modal_height = (content_lines.min(u16::MAX as usize - 4) as u16)
-        .saturating_add(4)
-        .min(area.height.saturating_sub(2));
     let modal_width = (area.width as f32 * 0.7) as u16;
-    let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
-    let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
-    let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
+    // Content wraps to the inner width (borders consume 2 columns).
+    let content_width = modal_width.saturating_sub(2).max(1) as usize;
+    let max_modal_height = area.height.saturating_sub(2);
 
-    frame.render_widget(Clear, modal_area);
-
-    let title = format!(" Question {current}/{total} ");
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme::ACCENT))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ));
-
-    let inner = block.inner(modal_area);
-    frame.render_widget(block, modal_area);
+    let q_style = Style::default().add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(theme::MUTED);
 
     if modal.free_text_mode {
-        // Free-text input mode.
-        let lines = vec![
-            Line::from(vec![
-                Span::styled("Q: ", Style::default().fg(theme::MUTED)),
-                Span::styled(&q.question, Style::default().add_modifier(Modifier::BOLD)),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("❯ ", theme::bold_accent()),
-                Span::raw(&modal.free_text),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "[enter] submit  [esc] cancel",
-                Style::default().fg(theme::MUTED),
-            )),
-        ];
-        let para = Paragraph::new(lines);
-        frame.render_widget(para, inner);
-        // Set cursor position.
-        // Use display width (not char count) so CJK/emoji wide glyphs
-        // don't leave the cursor mid-glyph (MED-2).
-        let cursor_x = inner.x + 2 + (modal.free_text.width() as u16);
-        let cursor_y = inner.y + 2;
-        frame.set_cursor_position((cursor_x, cursor_y));
-    } else {
-        // Options list mode.
-        let mut lines = vec![Line::from(vec![
-            Span::styled("Q: ", Style::default().fg(theme::MUTED)),
-            Span::styled(&q.question, Style::default().add_modifier(Modifier::BOLD)),
-        ])];
-        if !q.header.is_empty() {
+        // Free-text input mode. Wrap the question, then reserve rows for the
+        // blank / input / blank / hint.
+        let mut lines: Vec<Line> =
+            wrapped_labeled_lines("Q: ", label_style, &q.question, q_style, content_width);
+        let q_lines = lines.len();
+
+        // Tail-scroll the free-text so the visible tail + "❯ " prefix fit the
+        // content width, keeping the cursor inside the box.
+        let input_avail = content_width.saturating_sub(2);
+        let full_w = modal.free_text.width();
+        let (visible, visible_w) = if full_w <= input_avail {
+            (modal.free_text.clone(), full_w)
+        } else {
+            let t = tail_by_width(&modal.free_text, input_avail);
+            let w = t.width();
+            (t, w)
+        };
+
+        let hint_lines = wrap::word_wrap("[enter] submit  [esc] cancel", content_width, 0);
+        let hint_count = hint_lines.len();
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("❯ ", theme::bold_accent()),
+            Span::raw(visible),
+        ]));
+        lines.push(Line::from(""));
+        for h in hint_lines {
             lines.push(Line::from(Span::styled(
-                &q.header,
-                Style::default().fg(theme::ACCENT),
+                h,
+                Style::default().fg(theme::MUTED),
             )));
         }
 
+        let content_rows = q_lines + 3 + hint_count;
+        let modal_height = (content_rows as u16)
+            .saturating_add(2)
+            .min(max_modal_height.max(3));
+        let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
+        let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+        let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
+
+        frame.render_widget(Clear, modal_area);
+        let title = format!(" Question {current}/{total} ");
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(theme::ACCENT))
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(modal_area);
+        frame.render_widget(block, modal_area);
+        frame.render_widget(Paragraph::new(lines), inner);
+
+        // Clamp the terminal cursor inside the box. The input row is at
+        // `q_lines + 1` (after the wrapped question + one blank); if the modal
+        // was height-capped so that row is off-screen, keep the cursor on the
+        // last inner row.
+        let input_row = (q_lines as u16).saturating_add(1);
+        let cursor_y = inner
+            .y
+            .saturating_add(input_row)
+            .min(inner.y + inner.height.saturating_sub(1));
+        let cursor_x = inner
+            .x
+            .saturating_add(2)
+            .saturating_add(visible_w as u16)
+            .min(inner.x + inner.width.saturating_sub(1));
+        frame.set_cursor_position((cursor_x, cursor_y));
+    } else {
+        // Options list mode. Wrap the question + header + hint.
+        let mut header_lines: Vec<Line> =
+            wrapped_labeled_lines("Q: ", label_style, &q.question, q_style, content_width);
+        if !q.header.is_empty() {
+            header_lines.extend(wrapped_labeled_lines(
+                "",
+                Style::default(),
+                &q.header,
+                Style::default().fg(theme::ACCENT),
+                content_width,
+            ));
+        }
         let hint = if q.multi_select {
             "↑↓ move · space toggle · enter confirm · esc cancel"
         } else {
             "↑↓ move · 1-9 pick · enter confirm · esc cancel"
         };
-        lines.push(Line::from(Span::styled(
-            hint,
-            Style::default().fg(theme::MUTED),
-        )));
+        for h in wrap::word_wrap(hint, content_width, 0) {
+            header_lines.push(Line::from(Span::styled(
+                h,
+                Style::default().fg(theme::MUTED),
+            )));
+        }
 
-        // Build option items.
+        // Build option items, wrapping any that overflow the content width so
+        // nothing is clipped. Options that fit keep the rich marker/label/desc
+        // styling; long ones wrap with the marker on the first row and an
+        // indented, muted continuation.
+        let mut option_rows = 0usize;
         let items: Vec<ListItem> = q
             .options
             .iter()
@@ -475,32 +773,70 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
                 } else {
                     "○ "
                 };
-                let mut spans = vec![
-                    Span::styled(marker, Style::default().fg(theme::ACCENT)),
-                    Span::raw(&opt.label),
-                ];
-                if let Some(desc) = &opt.description {
-                    spans.push(Span::styled(
-                        format!(" — {desc}"),
-                        Style::default().fg(theme::MUTED),
-                    ));
-                }
-                ListItem::new(Line::from(spans))
+                let combined = match &opt.description {
+                    Some(d) => format!("{} — {d}", opt.label),
+                    None => opt.label.clone(),
+                };
+                let item_lines: Vec<Line> = if combined.width() + 2 <= content_width {
+                    // Fits on one row — keep the pretty label/desc distinction.
+                    let mut spans = vec![
+                        Span::styled(marker, Style::default().fg(theme::ACCENT)),
+                        Span::raw(opt.label.clone()),
+                    ];
+                    if let Some(desc) = &opt.description {
+                        spans.push(Span::styled(
+                            format!(" — {desc}"),
+                            Style::default().fg(theme::MUTED),
+                        ));
+                    }
+                    vec![Line::from(spans)]
+                } else {
+                    wrapped_labeled_lines(
+                        marker,
+                        Style::default().fg(theme::ACCENT),
+                        &combined,
+                        Style::default(),
+                        content_width,
+                    )
+                };
+                option_rows += item_lines.len();
+                ListItem::new(item_lines)
             })
             .collect();
 
-        // Render the header (question + optional header + hint),
-        // then the list below it.
-        // (R5) Clamp before the `u16` cast so a >65535-line header doesn't
-        // wrap and corrupt the list area below. The +1 blank separator uses
-        // saturating_add to avoid overflow.
-        let header_height = (lines.len().min(u16::MAX as usize - 1) as u16).saturating_add(1);
+        // Header height (wrapped rows + a blank separator before the list).
+        let header_height = header_lines.len().saturating_add(1);
+        let content_rows = header_height + option_rows;
+        let modal_height = (content_rows.min(u16::MAX as usize - 2) as u16)
+            .saturating_add(2)
+            .min(max_modal_height.max(3));
+        let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
+        let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+        let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
+
+        frame.render_widget(Clear, modal_area);
+        let title = format!(" Question {current}/{total} ");
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(theme::ACCENT))
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(modal_area);
+        frame.render_widget(block, modal_area);
+
+        // Clamp the header area to the inner height so the list area never has
+        // a negative/zero height on a tiny terminal.
+        let header_h = (header_height as u16).min(inner.height);
         let header_area = Rect {
-            height: header_height,
+            height: header_h,
             ..inner
         };
-        let header_para = Paragraph::new(lines);
-        frame.render_widget(header_para, header_area);
+        frame.render_widget(Paragraph::new(header_lines), header_area);
 
         let list_area = Rect {
             y: header_area.y + header_area.height,
@@ -1181,5 +1517,161 @@ fn render_entry_lines<'a>(
             format!("{entry:?}"),
             theme::muted(),
         ))],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unicode_width::UnicodeWidthStr;
+
+    // ---- Fix 5 / Fix 6: footer layout ------------------------------------
+
+    /// (Fix 5) The input row grows one row per draft line, capped at
+    /// `MAX_INPUT_ROWS`, and never drops below 1.
+    #[test]
+    fn footer_input_row_grows_with_draft_lines() {
+        let empty: Vec<String> = Vec::new();
+        let tall = 60u16; // ample room — no degradation
+        assert_eq!(compute_footer_layout(0, &empty, 0, 1, tall).input_h, 1);
+        assert_eq!(compute_footer_layout(0, &empty, 0, 4, tall).input_h, 4);
+        assert_eq!(
+            compute_footer_layout(0, &empty, 0, 10, tall).input_h,
+            MAX_INPUT_ROWS,
+            "draft taller than the cap clamps to MAX_INPUT_ROWS"
+        );
+        assert_eq!(
+            compute_footer_layout(0, &empty, 0, 0, tall).input_h,
+            1,
+            "an empty draft still reserves one input row"
+        );
+    }
+
+    /// (Fix 6) At a tiny terminal height with agents + a pinned todo + queued
+    /// previews, the constraint sum must fit `term_height - 1` AND the input
+    /// row must survive (>= 1) — the regression that let the cassowary solver
+    /// collapse the input row.
+    #[test]
+    fn footer_layout_fits_and_keeps_input_at_tiny_height() {
+        let queued = vec!["a".to_string(), "b".to_string()];
+        let term_height = 10u16;
+        let fl = compute_footer_layout(3, &queued, 4, 1, term_height);
+        assert!(fl.input_h >= 1, "input row must never collapse below 1");
+        assert!(
+            fl.total() <= term_height - 1,
+            "footer total {} must leave the scrollback its Min(1) row (budget {})",
+            fl.total(),
+            term_height - 1
+        );
+    }
+
+    /// (Fix 6) Under extreme pressure (everything maxed, 4-row terminal) the
+    /// input row still survives and the total still fits the budget — the
+    /// chrome (todo, agents, queued, spinner, rule) gives way first.
+    #[test]
+    fn footer_layout_input_survives_extreme_pressure() {
+        let queued: Vec<String> = (0..4).map(|i| i.to_string()).collect();
+        let term_height = 4u16;
+        let fl = compute_footer_layout(20, &queued, 20, 6, term_height);
+        assert!(fl.input_h >= 1, "input row is sacred");
+        assert!(
+            fl.total() <= term_height - 1,
+            "total {} must fit budget {}",
+            fl.total(),
+            term_height - 1
+        );
+        // The chrome collapsed first: todo + agents are gone.
+        assert_eq!(fl.todo_rows, 0);
+        assert_eq!(fl.agent_rows, 0);
+        assert_eq!(
+            fl.agent_header, 0,
+            "orphaned agent header dropped with its rows"
+        );
+    }
+
+    // ---- Fix 2: approval option wrapping ---------------------------------
+
+    /// (Fix 2) At a narrow width the options wrap across rows and every
+    /// option — including the deny choice, which names Esc — stays visible.
+    #[test]
+    fn approval_options_wrap_and_keep_deny_visible() {
+        let narrow = pack_approval_options(40);
+        assert!(
+            narrow.len() > 1,
+            "narrow width must wrap options across rows, got {}",
+            narrow.len()
+        );
+        let joined: String = narrow
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            joined.contains("Deny"),
+            "deny option must be present: {joined:?}"
+        );
+        assert!(
+            joined.contains("Esc"),
+            "Esc-to-deny must be named: {joined:?}"
+        );
+        for (i, l) in narrow.iter().enumerate() {
+            let w: usize = l.spans.iter().map(|s| s.content.width()).sum();
+            assert!(w <= 40, "row {i} width {w} must fit 40 cols");
+        }
+    }
+
+    /// (Fix 2) A wide terminal keeps all options on a single row.
+    #[test]
+    fn approval_options_single_row_when_wide() {
+        let wide = pack_approval_options(200);
+        assert_eq!(wide.len(), 1, "all options fit one row at width 200");
+        let joined: String = wide[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        for token in ["[y] Allow", "[s] Session", "[a] Always", "[n]/Esc Deny"] {
+            assert!(joined.contains(token), "missing {token} in {joined:?}");
+        }
+    }
+
+    // ---- Fix 4: ask modal wrap helpers -----------------------------------
+
+    /// (Fix 4) `wrapped_labeled_lines` wraps the body across rows, keeps the
+    /// prefix on the first row + an aligned indent on continuations, and
+    /// every rendered row fits the width.
+    #[test]
+    fn wrapped_labeled_lines_wraps_indents_and_fits() {
+        use ratatui::style::Style;
+        let text = "one two three four five six seven eight nine ten";
+        let lines = wrapped_labeled_lines("Q: ", Style::default(), text, Style::default(), 12);
+        assert!(lines.len() > 1, "long text must wrap");
+        let first: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            first.starts_with("Q: "),
+            "prefix on the first row: {first:?}"
+        );
+        let second: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            second.starts_with("   "),
+            "continuation indented by the prefix width: {second:?}"
+        );
+        for (i, l) in lines.iter().enumerate() {
+            let w: usize = l.spans.iter().map(|s| s.content.width()).sum();
+            assert!(w <= 12, "row {i} width {w} must fit 12 cols");
+        }
+    }
+
+    /// (Fix 4) `tail_by_width` returns the trailing run that fits the budget,
+    /// taking whole (possibly wide) glyphs.
+    #[test]
+    fn tail_by_width_keeps_trailing_fit() {
+        assert_eq!(tail_by_width("abcdefgh", 3), "fgh");
+        assert_eq!(
+            tail_by_width("abc", 10),
+            "abc",
+            "shorter than budget returns whole"
+        );
+        // 4 full-width CJK chars (8 cols); budget 4 keeps the last two.
+        let s = "中文测试";
+        let t = tail_by_width(s, 4);
+        assert_eq!(t, "测试");
+        assert!(t.width() <= 4);
     }
 }
