@@ -351,6 +351,12 @@ pub struct App {
     pub queued: Vec<String>,
     /// Multi-line input editor (tui-textarea widget).
     pub textarea: TextArea<'static>,
+    /// (B4-INPUT-SCROLL) First visible *visual* row of the input viewport
+    /// when the wrapped draft is taller than the input bar. Recomputed each
+    /// frame in `view::draw` via `input_layout::clamp_input_scroll` against
+    /// the SAME `input_h` the footer layout allocated; reset to 0 whenever
+    /// the textarea is replaced.
+    pub input_scroll: usize,
     /// Input history (capped at [`HISTORY_MAX_LIMIT`]).
     pub history: VecDeque<String>,
     /// History navigation index.
@@ -2368,6 +2374,7 @@ pub fn run(
             ta.set_placeholder_style(Style::default().fg(Color::DarkGray));
             ta
         },
+        input_scroll: 0,
         history: VecDeque::new(),
         history_idx: None,
         stashed_live: None,
@@ -3150,6 +3157,7 @@ fn submit_idle_line(app: &mut App, cmd_tx: &mpsc::Sender<Cmd>) -> Option<Action>
         // Clear the textarea.
         app.textarea = TextArea::default();
         reset_textarea_style(&mut app.textarea);
+        app.input_scroll = 0;
         // (Fix 4) Every submitted line — plain prompt, `/slash`, or `!shell` —
         // enters the single shell-style history (dedup-adjacent) and resets the
         // history-walk cursor + stashed draft. Slash/custom handlers that build
@@ -3600,6 +3608,7 @@ fn handle_key(
             if !prompt.is_empty() {
                 app.textarea = TextArea::default();
                 reset_textarea_style(&mut app.textarea);
+                app.input_scroll = 0;
                 app.queued.push(prompt.clone());
                 app.transcript
                     .push(TranscriptEntry::System(format!("› queued: {prompt}")));
@@ -8576,6 +8585,7 @@ mod tests {
             todo: None,
             queued: Vec::new(),
             textarea: TextArea::default(),
+            input_scroll: 0,
             history: VecDeque::new(),
             history_idx: None,
             stashed_live: None,

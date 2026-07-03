@@ -19,6 +19,7 @@ use crate::commands::code_tui::app::{
 };
 use crate::commands::code_tui::footer;
 use crate::commands::code_tui::input;
+use crate::commands::code_tui::input_layout;
 use crate::commands::code_tui::markdown;
 use crate::commands::code_tui::scrollback;
 use crate::commands::code_tui::theme;
@@ -48,10 +49,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .unwrap_or(0)
         .min(area.height / 2);
 
-    // (B3 Fix 5) The input bar grows one row per draft line, capped at
-    // `MAX_INPUT_ROWS`, so a multi-line draft is visible instead of clipped
-    // to the old hardcoded single row.
-    let input_lines = app.textarea.lines().len() as u16;
+    // (B3 Fix 5 / B4-INPUT-WIDTH) The input bar grows one row per *visual*
+    // (soft-wrapped) row of the draft, capped at `MAX_INPUT_ROWS`, so a
+    // multi-line or long-wrapping draft is visible instead of clipped or
+    // horizontally scrolled. The wrap layout is computed ONCE here from the
+    // same width `input::draw` uses, so height and render can never
+    // disagree.
+    let input_wrap = input_layout::wrap_layout(
+        app.textarea.lines(),
+        input_layout::input_wrap_width(area.width),
+    );
+    let input_lines = input_wrap.len() as u16;
 
     // (B3 Fix 6) Compute the footer's per-component heights ONCE, with a
     // documented degradation priority so the constraint sum can never exceed
@@ -60,6 +68,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let footer_layout =
         compute_footer_layout(agent_rows, &app.queued, todo_rows, input_lines, area.height);
     let footer_height = footer_layout.total();
+
+    // (B4-INPUT-SCROLL) Update the input viewport scroll against the SAME
+    // `input_h` the layout just allocated, so the cursor is always inside
+    // the rows `input::draw` will actually render this frame.
+    let (cursor_vrow, _) =
+        input_layout::visual_cursor(&input_wrap, app.textarea.lines(), app.textarea.cursor());
+    app.input_scroll = input_layout::clamp_input_scroll(
+        app.input_scroll,
+        cursor_vrow,
+        footer_layout.input_h as usize,
+        input_wrap.len(),
+    );
 
     // Split: scrollback (variable) + footer (fixed).
     let chunks = Layout::default()
@@ -180,8 +200,9 @@ impl FooterLayout {
 /// `agent_rows` is computed once by the caller via [`agent_rows`] and
 /// `todo_rows` by the caller (both already clamped to a fraction of the
 /// terminal); they're passed in so the height and the layout use one value.
-/// `input_lines` is `app.textarea.lines().len()`, clamped to `[1,
-/// MAX_INPUT_ROWS]` here.
+/// `input_lines` is the draft's soft-wrapped *visual* row count
+/// (`input_layout::wrap_layout(...).len()`, B4-INPUT-WIDTH), clamped to
+/// `[1, MAX_INPUT_ROWS]` here.
 ///
 /// # Degradation priority
 ///

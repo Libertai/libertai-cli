@@ -6,6 +6,7 @@ pub mod diff;
 pub mod footer;
 pub mod highlight;
 pub mod input;
+pub mod input_layout;
 pub mod markdown;
 pub mod scrollback;
 pub mod terminal;
