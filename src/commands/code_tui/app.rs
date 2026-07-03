@@ -357,6 +357,14 @@ pub struct App {
     /// the SAME `input_h` the footer layout allocated; reset to 0 whenever
     /// the textarea is replaced.
     pub input_scroll: usize,
+    /// (B4-PASTE-COLLAPSE) Full text of large pastes, in paste order. A
+    /// paste over the collapse threshold inserts a compact
+    /// `[Pasted text #N +M lines]` placeholder into the textarea instead of
+    /// the payload; `begin_turn` substitutes the placeholders back before
+    /// the prompt is sent. Session-lifetime and never truncated, so history
+    /// recall / queued messages / palette drafts holding a placeholder keep
+    /// expanding correctly.
+    pub pasted_blobs: Vec<String>,
     /// Input history (capped at [`HISTORY_MAX_LIMIT`]).
     pub history: VecDeque<String>,
     /// History navigation index.
@@ -2375,6 +2383,7 @@ pub fn run(
             ta
         },
         input_scroll: 0,
+        pasted_blobs: Vec::new(),
         history: VecDeque::new(),
         history_idx: None,
         stashed_live: None,
@@ -2729,6 +2738,33 @@ fn subagent_end_bell_enabled(cfg: &LibertaiConfig, completed: bool) -> bool {
 /// terminal through crossterm. `run_loop`'s `Event::Paste(data)` arm is a
 /// thin wrapper around this; mirroring the legacy input-bar paste behaviour
 /// (multi-line paste edits the textarea instead of firing a prompt).
+/// (B4-PASTE-COLLAPSE) Collapse threshold: a paste this big becomes a
+/// placeholder instead of flooding the input bar. Pure for unit tests.
+pub(crate) fn paste_should_collapse(data: &str) -> bool {
+    data.lines().count() >= 10 || data.chars().count() >= 1000
+}
+
+/// (B4-PASTE-COLLAPSE) The placeholder inserted for blob `n` (1-based).
+/// Regenerated from the blob itself wherever it's needed, so there is no
+/// separate line-count bookkeeping to drift.
+pub(crate) fn paste_placeholder(n: usize, blob: &str) -> String {
+    format!("[Pasted text #{n} +{} lines]", blob.lines().count())
+}
+
+/// (B4-PASTE-COLLAPSE) Substitute every exact placeholder occurrence with
+/// its blob. Exact-match only: a placeholder the user edited or truncated
+/// passes through verbatim (they visibly changed what they're sending).
+pub(crate) fn expand_paste_placeholders(text: &str, blobs: &[String]) -> String {
+    let mut out = text.to_string();
+    for (i, blob) in blobs.iter().enumerate() {
+        let ph = paste_placeholder(i + 1, blob);
+        if out.contains(&ph) {
+            out = out.replace(&ph, blob);
+        }
+    }
+    out
+}
+
 fn apply_paste(app: &mut App, data: &str) {
     // (B2-PASTE-GATE) Paste must respect the same dispatch gating as
     // `handle_key`. While a modal or overlay owns the screen the input
@@ -2750,7 +2786,18 @@ fn apply_paste(app: &mut App, data: &str) {
     {
         return;
     }
-    app.textarea.insert_str(data);
+    // (B4-PASTE-COLLAPSE) A large paste is stashed and represented by a
+    // compact single-line placeholder — the input bar stays usable and the
+    // palette/mention invariant re-checks below get a short token instead
+    // of a wall of text. Expansion happens at `begin_turn`. Small pastes
+    // insert verbatim, newlines included, without submitting.
+    if paste_should_collapse(data) {
+        app.pasted_blobs.push(data.to_string());
+        let ph = paste_placeholder(app.pasted_blobs.len(), data);
+        app.textarea.insert_str(&ph);
+    } else {
+        app.textarea.insert_str(data);
+    }
     // (PALETTE-3) Paste bypasses the palette guard in
     // `handle_slash_palette_key` (it calls `insert_str` directly), so a paste
     // over an open palette can drop the leading `/` (pasting "/clear" over a
@@ -7649,6 +7696,14 @@ fn advance_question(app: &mut App) {
 fn begin_turn(app: &mut App, cmd_tx: &mpsc::Sender<Cmd>, text: String) {
     app.transcript.push(TranscriptEntry::User(text.clone()));
     app.transcript.push(TranscriptEntry::Blank);
+    // (B4-PASTE-COLLAPSE) The transcript (and history/queue, which fed
+    // `text` here) keep the compact placeholder; the MODEL gets the full
+    // pasted payload. This is the single funnel for Action::Submit, the
+    // queued drain, and slash-built prompts, so no second call site.
+    // Slash (`/…`) and shell-escape (`!`) branches in `submit_idle_line`
+    // never reach begin_turn — a placeholder there passes through
+    // literally, which is harmless.
+    let text = expand_paste_placeholders(&text, &app.pasted_blobs);
     let _ = cmd_tx.send(Cmd::Prompt {
         text,
         output_style: app.bar.output_style.clone(),
@@ -8600,6 +8655,75 @@ mod tests {
     }
 
     #[test]
+    fn paste_collapse_thresholds() {
+        // 9 lines → verbatim; 10 lines → collapse.
+        let nine = vec!["x"; 9].join("\n");
+        let ten = vec!["x"; 10].join("\n");
+        assert!(!paste_should_collapse(&nine));
+        assert!(paste_should_collapse(&ten));
+        // 999 chars → verbatim; 1000 chars → collapse.
+        assert!(!paste_should_collapse(&"a".repeat(999)));
+        assert!(paste_should_collapse(&"a".repeat(1000)));
+    }
+
+    #[test]
+    fn paste_placeholder_counts_lines() {
+        assert_eq!(paste_placeholder(1, "a\nb\nc"), "[Pasted text #1 +3 lines]");
+        assert_eq!(paste_placeholder(4, "one"), "[Pasted text #4 +1 lines]");
+    }
+
+    #[test]
+    fn expand_paste_placeholders_exact_match_only() {
+        let blobs: Vec<String> = vec!["AAA\nBBB".into(), "CCC".into()];
+        // Both placeholders in one prompt, out of order.
+        let text = format!(
+            "second: {} first: {}",
+            paste_placeholder(2, &blobs[1]),
+            paste_placeholder(1, &blobs[0]),
+        );
+        assert_eq!(
+            expand_paste_placeholders(&text, &blobs),
+            "second: CCC first: AAA\nBBB"
+        );
+        // Same placeholder pasted twice expands twice.
+        let twice = format!(
+            "{} and {}",
+            paste_placeholder(1, &blobs[0]),
+            paste_placeholder(1, &blobs[0]),
+        );
+        assert_eq!(
+            expand_paste_placeholders(&twice, &blobs),
+            "AAA\nBBB and AAA\nBBB"
+        );
+        // An edited placeholder passes through verbatim.
+        let edited = "[Pasted text #1 +999 lines]";
+        assert_eq!(expand_paste_placeholders(edited, &blobs), edited);
+        // No blobs → identity.
+        assert_eq!(expand_paste_placeholders("hello", &[]), "hello");
+    }
+
+    #[test]
+    fn apply_paste_collapses_large_and_keeps_small_verbatim() {
+        let mut app = test_app();
+        // Small paste inserts verbatim (newlines included).
+        apply_paste(&mut app, "a\nb");
+        assert_eq!(app.textarea.lines(), &["a".to_string(), "b".to_string()]);
+        assert!(app.pasted_blobs.is_empty());
+        // Large paste becomes a placeholder + a stashed blob.
+        let big = vec!["line"; 12].join("\n");
+        apply_paste(&mut app, &big);
+        assert_eq!(app.pasted_blobs.len(), 1);
+        let joined = app.textarea.lines().join("\n");
+        assert!(
+            joined.contains("[Pasted text #1 +12 lines]"),
+            "expected placeholder in {joined:?}"
+        );
+        // Round-trip: expanding the buffer restores the payload.
+        let expanded = expand_paste_placeholders(&joined, &app.pasted_blobs);
+        assert!(expanded.contains(&big));
+    }
+
+    #[test]
     fn backslash_continuation_detects_backslash_before_cursor() {
         let ls: Vec<String> = vec!["hello\\".into()];
         // Cursor right after the backslash.
@@ -8655,6 +8779,7 @@ mod tests {
             queued: Vec::new(),
             textarea: TextArea::default(),
             input_scroll: 0,
+            pasted_blobs: Vec::new(),
             history: VecDeque::new(),
             history_idx: None,
             stashed_live: None,
