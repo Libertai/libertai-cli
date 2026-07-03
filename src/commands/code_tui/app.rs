@@ -2897,6 +2897,14 @@ fn run_loop(
             app.set_dirty();
         }
 
+        // (WF-E/WF-F) While any workflow runs, keep re-rendering each tick:
+        // a BACKGROUND run leaves the app in Phase::Idle where nothing else
+        // sets `dirty`, so without this poke the live workflow tree (and
+        // its spinner/elapsed) would freeze until the next keystroke.
+        if app.workflows.active_count() > 0 {
+            app.set_dirty();
+        }
+
         // Draw only when state changed since the last draw (#10). The dirty
         // flag is set at every mutation site below (input, agent messages,
         // spinner advance, reaped agent exits); when truly idle nothing sets
@@ -3097,6 +3105,11 @@ fn run_loop(
         // and a one-shot per-agent "agent exited" notification as each
         // background/teammate process is reaped (HIGH-2: per-agent + team
         // notifications are both gated on code_turn_notifications).
+        // (WF-E) Background-workflow completion notifications (one-shot per
+        // run): System line + bell for the human, <task-notification>
+        // prompt for the model.
+        poll_background_workflows(app, &cmd_tx);
+
         let (completed_teams, reaped_agents, reaped) = poll_agent_status(&app.registry);
         // An exited process changes the live panel even when no team fully
         // completes — mark dirty so the panel redraws after a reap.
@@ -4097,6 +4110,56 @@ fn workflow_status_label(status: code_workflow::WorkflowStatus) -> &'static str 
         Completed => "completed",
         Failed => "failed",
         Stopped => "stopped",
+    }
+}
+
+/// (WF-E) The `<task-notification>` prompt injected into the parent
+/// session when a background workflow settles. Wire format matches Claude
+/// Code's task notifications (see claude_code_import.rs) so the model
+/// treats it as ambient work news, not a user message. Pure, for tests.
+fn workflow_notification_text(state: &code_workflow::WorkflowState) -> String {
+    let status = workflow_status_label(state.status());
+    let outcome = state
+        .outcome
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| "(no summary recorded)".to_string());
+    format!(
+        "<task-notification>Workflow {id} \"{name}\" {status} in {secs}s. {outcome}</task-notification>",
+        id = state.id,
+        name = state.name,
+        secs = state.elapsed().as_secs(),
+    )
+}
+
+/// (WF-E) Fire the one-shot completion notification for every settled
+/// background workflow: a dim System transcript line + bell (same policy
+/// as subagent ends) for the human, and a `<task-notification>` prompt
+/// (via the cron `Cmd::Prompt` seam — the bg thread serializes it behind
+/// any in-flight turn) for the model. Called from `run_loop` each tick;
+/// exactly-once via `WorkflowState::take_pending_notification`.
+fn poll_background_workflows(app: &mut App, cmd_tx: &mpsc::Sender<Cmd>) {
+    for state in app.workflows.snapshot() {
+        if !state.take_pending_notification() {
+            continue;
+        }
+        let status = workflow_status_label(state.status());
+        let completed = state.status() == code_workflow::WorkflowStatus::Completed;
+        if subagent_end_bell_enabled(&app.cfg, completed) {
+            crate::commands::code_term::tui_bell();
+        }
+        app.transcript.push(TranscriptEntry::System(format!(
+            "workflow \"{}\" {status} ({}) · /workflows for details",
+            state.name, state.id,
+        )));
+        app.transcript.push(TranscriptEntry::Blank);
+        app.set_dirty();
+        let _ = cmd_tx.send(Cmd::Prompt {
+            text: workflow_notification_text(&state),
+            // Style-neutral, like a fired cron job.
+            output_style: None,
+        });
     }
 }
 
@@ -8690,6 +8753,56 @@ mod tests {
         let h = registry.register(reg);
         h.set_status(status);
         h
+    }
+
+    /// (WF-E) A settled background workflow notifies EXACTLY once: one
+    /// System line + one <task-notification> Cmd::Prompt, then the latch
+    /// holds. Sync and still-running workflows never notify.
+    #[test]
+    fn poll_background_workflows_notifies_once() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        // A background run that settles.
+        let state = app
+            .workflows
+            .register_for_test("wf-1-9".into(), "audit".into());
+        state
+            .background
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        *state.outcome.lock().unwrap() = Some("workflow audit completed (2 agents)".into());
+        state.set_status(code_workflow::WorkflowStatus::Completed);
+
+        poll_background_workflows(&mut app, &cmd_tx);
+        let sent = cmd_rx.try_recv().expect("expected a Cmd::Prompt");
+        match sent {
+            Cmd::Prompt { text, .. } => {
+                assert!(text.starts_with("<task-notification>"), "text: {text}");
+                assert!(text.contains("wf-1-9") && text.contains("\"audit\""));
+                assert!(text.contains("completed"));
+                assert!(text.contains("2 agents"));
+                assert!(text.ends_with("</task-notification>"));
+            }
+            other => panic!("expected Cmd::Prompt, got {other:?}"),
+        }
+        assert!(
+            app.transcript
+                .iter()
+                .any(|e| matches!(e, TranscriptEntry::System(s) if s.contains("audit"))),
+            "System line expected"
+        );
+
+        // Second poll: latch holds, nothing more is sent.
+        poll_background_workflows(&mut app, &cmd_tx);
+        assert!(cmd_rx.try_recv().is_err(), "must notify exactly once");
+
+        // A sync (non-background) settled run never notifies.
+        let sync_state = app
+            .workflows
+            .register_for_test("wf-1-10".into(), "sync".into());
+        sync_state.set_status(code_workflow::WorkflowStatus::Completed);
+        poll_background_workflows(&mut app, &cmd_tx);
+        assert!(cmd_rx.try_recv().is_err(), "sync runs never notify");
     }
 
     #[test]

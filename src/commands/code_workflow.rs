@@ -171,6 +171,22 @@ pub struct WorkflowState {
     /// freezes for finished rows in `/workflows` and the live tree.
     pub finished_at: Mutex<Option<Instant>>,
     pub phases: Mutex<Vec<PhaseProgress>>,
+    /// (WF-E) True for a detached run: `execute` returned immediately and
+    /// the TUI's `poll_background_workflows` owes the parent session a
+    /// `<task-notification>` when the run reaches a terminal status.
+    pub background: std::sync::atomic::AtomicBool,
+    /// (WF-E) One-shot latch so the completion notification fires exactly
+    /// once against the run-loop's tick polling.
+    pub notified: std::sync::atomic::AtomicBool,
+    /// (WF-E) The run's final summary (incl. the script result / error),
+    /// written by the JS thread when the run settles. Embedded in the
+    /// notification and shown by `/workflows`.
+    pub outcome: Mutex<Option<String>>,
+    /// (WF-E) `log()` lines. Always recorded here (`/workflows` reads
+    /// them); additionally streamed via `on_update` for synchronous runs
+    /// only — a background run's parent tool call is already Done, so late
+    /// ToolUpdates would reference a finished call.
+    pub logs: Mutex<Vec<String>>,
 }
 
 impl WorkflowState {
@@ -182,7 +198,20 @@ impl WorkflowState {
             started_at: Instant::now(),
             finished_at: Mutex::new(None),
             phases: Mutex::new(Vec::new()),
+            background: std::sync::atomic::AtomicBool::new(false),
+            notified: std::sync::atomic::AtomicBool::new(false),
+            outcome: Mutex::new(None),
+            logs: Mutex::new(Vec::new()),
         })
+    }
+
+    /// (WF-E) True when this detached run finished but the completion
+    /// notification hasn't fired yet; flips the one-shot latch. Exactly-
+    /// once against the 80 ms tick via `AtomicBool::swap`.
+    pub fn take_pending_notification(&self) -> bool {
+        self.background.load(Ordering::Relaxed)
+            && self.status() != WorkflowStatus::Running
+            && !self.notified.swap(true, Ordering::Relaxed)
     }
 
     pub fn status(&self) -> WorkflowStatus {
@@ -259,6 +288,15 @@ impl WorkflowRegistry {
 
     pub fn remove(&self, id: &str) {
         self.workflows.lock().unwrap().retain(|w| w.id != id);
+    }
+
+    /// Test seam for other modules' unit tests (`WorkflowState::new` is
+    /// private): register and return a fresh Running state.
+    #[cfg(test)]
+    pub(crate) fn register_for_test(&self, id: String, name: String) -> Arc<WorkflowState> {
+        let s = WorkflowState::new(id, name);
+        self.register(Arc::clone(&s));
+        s
     }
 
     pub fn snapshot(&self) -> Vec<Arc<WorkflowState>> {
@@ -760,11 +798,20 @@ impl WorkflowRunResult {
 /// The thread entry point. Builds a `current_thread()` asupersync runtime
 /// (separate from the bg runtime) that drives the rquickjs `AsyncRuntime`,
 /// sets up the host functions, runs the drive loop, and sends the result.
-fn run_workflow_on_thread(ctx: WorkflowRunCtx, result_tx: mpsc::Sender<WorkflowRunResult>) {
+///
+/// (WF-E) `result_tx` is `Some` for a synchronous run (the parent tool
+/// call blocks on it) and `None` for a background run — backgroundness is
+/// explicit, not a silent send to a dropped receiver. Either way the final
+/// summary lands in `state.outcome` so `/workflows` and the completion
+/// notification can read it.
+fn run_workflow_on_thread(ctx: WorkflowRunCtx, result_tx: Option<mpsc::Sender<WorkflowRunResult>>) {
     let outcome = run_workflow_inner(&ctx);
-    // Always emit a workflow_end ToolUpdate so the TUI surfaces a single
-    // end line (mirrors TaskTool's subagent_end). Best-effort — if the
-    // receiver is gone (parent aborted), the send is a no-op.
+    *ctx.state.outcome.lock().unwrap() = Some(outcome.summary.clone());
+    // For synchronous runs, emit a workflow_end ToolUpdate so the TUI
+    // surfaces a single end line (mirrors TaskTool's subagent_end).
+    // Best-effort — if the receiver is gone (parent aborted), the send is
+    // a no-op. Background runs have `on_update: None` by construction
+    // (their parent call is Done; the notification path takes over).
     let outcome_label = match outcome.final_status {
         WorkflowStatus::Completed => "completed",
         WorkflowStatus::Failed => "failed",
@@ -788,7 +835,9 @@ fn run_workflow_on_thread(ctx: WorkflowRunCtx, result_tx: mpsc::Sender<WorkflowR
             })),
         });
     }
-    let _ = result_tx.send(outcome);
+    if let Some(tx) = result_tx {
+        let _ = tx.send(outcome);
+    }
 }
 
 /// The synchronous core: build the sandbox, run the drive loop, return the
@@ -1064,9 +1113,13 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
                 .await;
         }
 
-        // Surface log() lines to the parent turn (best-effort).
+        // Surface log() lines: always recorded on the state (WF-E — the
+        // live tree + /workflows read them, and background runs have no
+        // on_update), and additionally streamed to the parent turn for
+        // synchronous runs (best-effort).
         let logs = ctx.bridge.drain_logs();
         if !logs.is_empty() {
+            ctx.state.logs.lock().unwrap().extend(logs.iter().cloned());
             if let Some(on_update) = &ctx.on_update {
                 for line in logs {
                     on_update(ToolUpdate {
@@ -1330,6 +1383,10 @@ impl Tool for WorkflowTool {
                 "name": {
                     "type": "string",
                     "description": "Optional human-readable name for this workflow run (shown in /workflows). Defaults to 'workflow'."
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Default true: return immediately with the run id and receive a <task-notification> with the result when the workflow completes. Set false to block this tool call until the workflow finishes and get the result inline."
                 }
             },
             "required": ["script"]
@@ -1406,13 +1463,37 @@ impl Tool for WorkflowTool {
             ));
         }
 
+        // (WF-E) Background is the DEFAULT (Claude Code parity): the tool
+        // returns immediately with the run id and the TUI injects a
+        // `<task-notification>` turn when the run settles. `background:
+        // false` keeps the blocking path. Safe default because the tool is
+        // only registered when the TUI injects a workflow registry — the
+        // notification poller always exists.
+        let background = input
+            .get("background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        state
+            .background
+            .store(background, std::sync::atomic::Ordering::Relaxed);
+
         // The JS QuickJS context is `!Send`, so it CANNOT live across an
         // `.await` in this `execute` future (pi's `Tool::execute` is
         // `#[async_trait]` → `Pin<Box<dyn Future + Send>>`). Mirror pi's own
         // JS-extension layer: run the QuickJS runtime on a DEDICATED OS
         // thread, and communicate via channels. The `execute` future (on the
         // bg runtime) only holds `Send` data + the channel receiver.
-        let (result_tx, result_rx) = mpsc::channel::<WorkflowRunResult>();
+        //
+        // (WF-E) Backgroundness is explicit: a background run gets NO
+        // result channel and NO on_update (its parent tool call is Done
+        // before the run settles; late ToolUpdates would reference a
+        // finished call). Logs/outcome land on the WorkflowState instead.
+        let (result_tx, result_rx) = if background {
+            (None, None)
+        } else {
+            let (tx, rx) = mpsc::channel::<WorkflowRunResult>();
+            (Some(tx), Some(rx))
+        };
         let spawn_ctx = WorkflowRunCtx {
             script,
             wf_name: wf_name.clone(),
@@ -1427,7 +1508,7 @@ impl Tool for WorkflowTool {
             cwd: self.cwd.clone(),
             bash_wrapper: self.bash_command_wrapper.clone(),
             bg_handle: bg_handle.expect("checked above"),
-            on_update,
+            on_update: if background { None } else { on_update },
         };
 
         // Detach the JS thread. It owns the QuickJS runtime + context,
@@ -1446,12 +1527,44 @@ impl Tool for WorkflowTool {
                 pi::sdk::Error::tool(NAME.to_string(), format!("workflow: thread spawn: {e}"))
             })?;
 
-        // Await the result. This future holds only `Send` data + the
-        // channel receiver, so it's `Send`. The JS thread does all the
-        // `!Send` work.
-        let result = result_rx
-            .recv()
-            .map_err(|e| pi::sdk::Error::tool(NAME.to_string(), format!("workflow: {e}")))?;
+        let Some(result_rx) = result_rx else {
+            // (WF-E) Background: return immediately with the run id.
+            return Ok(ToolOutput {
+                content: vec![ContentBlock::Text(TextContent::new(format!(
+                    "Workflow \"{wf_name}\" started in the background (id: {wf_id}). \
+                     Continue with other work — you will receive a <task-notification> \
+                     with the result when it completes. Live progress: /workflows."
+                )))],
+                details: Some(serde_json::json!({
+                    "kind": "workflow_started",
+                    "id": wf_id,
+                    "name": wf_name,
+                })),
+                is_error: false,
+            }
+            .into());
+        };
+
+        // Await the result WITHOUT blocking the runtime thread: the bg
+        // asupersync runtime is current_thread and the phase agents spawn
+        // onto it via `bg_handle` — a blocking `recv()` here would freeze
+        // the very executor those agents need and deadlock the run the
+        // moment a script calls agent(). Poll + yield instead (the same
+        // pattern the JS drive loop uses on its own runtime).
+        let result = loop {
+            match result_rx.try_recv() {
+                Ok(r) => break r,
+                Err(mpsc::TryRecvError::Empty) => {
+                    asupersync::runtime::yield_now().await;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(pi::sdk::Error::tool(
+                        NAME.to_string(),
+                        "workflow: JS thread exited without a result".to_string(),
+                    ));
+                }
+            }
+        };
         let _ = self.workflows.snapshot();
         Ok(result.into_output())
     }
@@ -1659,7 +1772,7 @@ mod tests {
                     on_update: None,
                 };
                 let (tx, rx) = mpsc::channel();
-                std::thread::spawn(move || run_workflow_on_thread(ctx, tx));
+                std::thread::spawn(move || run_workflow_on_thread(ctx, Some(tx)));
                 let r = rx.recv().expect("workflow result");
                 *out_in.lock().unwrap() = Some(r);
             }
@@ -1788,6 +1901,111 @@ mod tests {
         assert!(JS_PRELUDE.contains("opts.agent"));
         assert!(JS_PRELUDE.contains("opts.schema"));
         assert!(JS_PRELUDE.contains("agentType, schema"));
+    }
+
+    /// (WF-E) A background run returns `workflow_started` immediately;
+    /// the run settles on its own thread, records its outcome on the
+    /// state, and the notification latch fires exactly once.
+    #[test]
+    fn background_execute_returns_immediately_and_latches_once() {
+        asupersync::test_utils::run_test(|| async {
+            let workflows = WorkflowRegistry::new();
+            let tool = WorkflowTool::new(
+                ModeFlag::new(crate::commands::code_factory::Mode::Normal),
+                Arc::new(ApprovalState::new()),
+                Arc::new(AllowingUi),
+                0,
+                PathBuf::from("."),
+                AgentRegistry::new(),
+                Arc::clone(&workflows),
+                None,
+                Some(Arc::new(crate::config::Config::default())),
+            );
+            let exec = tool
+                .execute(
+                    "c1",
+                    serde_json::json!({"script": "return 42;", "name": "bg-test"}),
+                    None,
+                )
+                .await
+                .expect("execute");
+            let ToolExecution::Done(out) = exec else {
+                panic!("expected Done");
+            };
+            assert!(!out.is_error);
+            let details = out.details.expect("details");
+            assert_eq!(details["kind"], "workflow_started");
+            let id = details["id"].as_str().expect("id").to_string();
+
+            // The JS thread settles on its own; poll the registry (bounded).
+            let state = workflows
+                .snapshot()
+                .into_iter()
+                .find(|w| w.id == id)
+                .expect("registered");
+            for _ in 0..200 {
+                if state.status() != WorkflowStatus::Running {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(state.status(), WorkflowStatus::Completed);
+            assert!(
+                state
+                    .outcome
+                    .lock()
+                    .unwrap()
+                    .as_deref()
+                    .is_some_and(|o| o.contains("42")),
+                "outcome must carry the script result"
+            );
+            // Exactly-once notification latch.
+            assert!(state.take_pending_notification());
+            assert!(!state.take_pending_notification());
+        });
+    }
+
+    /// (WF-E) `background: false` keeps the blocking path and returns the
+    /// script result inline.
+    #[test]
+    fn sync_execute_blocks_and_returns_result_inline() {
+        asupersync::test_utils::run_test(|| async {
+            let workflows = WorkflowRegistry::new();
+            let tool = WorkflowTool::new(
+                ModeFlag::new(crate::commands::code_factory::Mode::Normal),
+                Arc::new(ApprovalState::new()),
+                Arc::new(AllowingUi),
+                0,
+                PathBuf::from("."),
+                AgentRegistry::new(),
+                Arc::clone(&workflows),
+                None,
+                Some(Arc::new(crate::config::Config::default())),
+            );
+            let exec = tool
+                .execute(
+                    "c1",
+                    serde_json::json!({
+                        "script": "return {answer: 7};",
+                        "name": "sync-test",
+                        "background": false
+                    }),
+                    None,
+                )
+                .await
+                .expect("execute");
+            let ToolExecution::Done(out) = exec else {
+                panic!("expected Done");
+            };
+            assert!(!out.is_error);
+            let details = out.details.expect("details");
+            assert_eq!(details["kind"], "workflow_result");
+            assert_eq!(details["status"], "completed");
+            assert_eq!(details["result"]["answer"], 7);
+            // A sync run never owes a notification.
+            let state = &workflows.snapshot()[0];
+            assert!(!state.take_pending_notification());
+        });
     }
 
     /// (WF-A3) Run ids are unique within the session.
