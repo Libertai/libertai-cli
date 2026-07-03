@@ -93,9 +93,15 @@ const DESCRIPTION: &str = concat!(
     "subagents in parallel or as a pipeline. Use when a task decomposes ",
     "into independent subtasks that benefit from concurrent execution or ",
     "when you need a fan-out → verify → synthesize structure. The script ",
-    "calls agent(prompt), parallel(thunks), pipeline(items, ...stages), ",
-    "phase(title, fn), and log(...args). Phase agents run as isolated ",
-    "subagents (read-only by default) and appear in /agents while running."
+    "calls agent(prompt, opts?), parallel(thunks), pipeline(items, ",
+    "...stages), phase(title, fn), and log(...args). agent() opts: label ",
+    "(display name), tools (narrow within the ceiling), agent (a named ",
+    "subagent type whose tools:/model: frontmatter is honored — this is ",
+    "how a phase gets write access), schema (a JSON Schema; the promise ",
+    "then resolves with the schema-validated object instead of prose). ",
+    "The script's return value becomes the tool result. Phase agents run ",
+    "as isolated subagents (read-only by default) and appear in /agents ",
+    "and the live workflow tree while running."
 );
 
 /// Soft wall-clock cap for a whole workflow run, overridable via the env
@@ -396,6 +402,32 @@ struct AgentSpawnCtx {
     bg_handle: asupersync::runtime::RuntimeHandle,
 }
 
+/// (WF-B/WF-C) Everything `run_phase_agent` needs beyond the prompt,
+/// resolved synchronously at dispatch time so registration already knows
+/// the true capability and label.
+struct PhaseAgentSpec {
+    /// Resolved tool set (ceiling ∩ requested, TaskTool policy).
+    tools: Vec<String>,
+    /// Named-agent system-prompt wrap (`named_subagent_prompt`), if any.
+    append_system_prompt: Option<String>,
+    /// Model override from the named agent's frontmatter, if any.
+    model: Option<String>,
+    /// (WF-C) JSON schema the agent must satisfy via `structured_output`.
+    schema: Option<serde_json::Value>,
+}
+
+/// Push an immediate rejection for `id` (dispatch-time failure: unknown
+/// agent type, bad schema, dead runtime). Mirrors the spawn-failure path:
+/// completion queued for the drive loop + in-flight released.
+fn reject_dispatch(ctx: &AgentSpawnCtx, id: String, message: String) {
+    ctx.bridge
+        .completions
+        .lock()
+        .unwrap()
+        .push(PendingCompletion::Reject { id, message });
+    ctx.bridge.in_flight.fetch_sub(1, Ordering::Relaxed);
+}
+
 /// Register the phase-agent handle, spawn it on asupersync, and return its
 /// `call_id`. Called synchronously from the `__wf_native_agent` host fn.
 /// The spawned task runs `run_phase_agent`, then pushes a completion onto
@@ -405,10 +437,84 @@ fn dispatch_phase_agent(
     prompt: String,
     label: Option<String>,
     tools_json: Option<String>,
+    agent_name: Option<String>,
+    schema_json: Option<String>,
 ) -> String {
     let id = ctx.bridge.alloc_id();
     ctx.bridge.in_flight.fetch_add(1, Ordering::Relaxed);
 
+    // (WF-B2) Named subagent type (`opts.agent`), resolved synchronously
+    // at dispatch so the tool ceiling, model, and capability are known
+    // BEFORE registration. Unknown name → immediate reject.
+    let agent_def = match &agent_name {
+        Some(name) => match crate::commands::code_agents::find_agent(&ctx.cwd, name) {
+            Ok(Some(def)) => Some(def),
+            Ok(None) => {
+                reject_dispatch(
+                    ctx,
+                    id.clone(),
+                    format!("workflow agent(): unknown agent type `{name}`"),
+                );
+                return id;
+            }
+            Err(e) => {
+                reject_dispatch(
+                    ctx,
+                    id.clone(),
+                    format!("workflow agent(): could not load agents: {e:#}"),
+                );
+                return id;
+            }
+        },
+        None => None,
+    };
+
+    // (WF-C) Schema for structured output. A present-but-invalid schema is
+    // a script bug — reject rather than silently degrade to prose.
+    let schema: Option<serde_json::Value> = match &schema_json {
+        Some(s) => match serde_json::from_str(s) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                reject_dispatch(
+                    ctx,
+                    id.clone(),
+                    format!("workflow agent(): bad schema: {e}"),
+                );
+                return id;
+            }
+        },
+        None => None,
+    };
+
+    // (WF-B1) Tool policy mirrors TaskTool (shared helper): ceiling is the
+    // named definition's `tools:` frontmatter, else TASK_DEFAULT_TOOLS;
+    // `opts.tools` narrows within the ceiling. Phase agents are no longer
+    // hard-locked read-only — a write-capable named agent is honored, and
+    // ApprovalTool still wraps every mutating tool.
+    let requested: Vec<String> = tools_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .unwrap_or_default();
+    let ceiling: Vec<String> = agent_def
+        .as_ref()
+        .and_then(|a| a.tools.clone())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| {
+            crate::commands::code_task::TASK_DEFAULT_TOOLS
+                .iter()
+                .map(|&s| s.to_string())
+                .collect()
+        });
+    let mut tools = crate::commands::code_task::resolve_subagent_tools(ceiling, requested);
+    if schema.is_some() && !tools.iter().any(|t| t == "structured_output") {
+        // (WF-C) The schema contract needs the structured_output tool; it
+        // is registered on every session but filtered by enabled_tools.
+        tools.push("structured_output".to_string());
+    }
+    let capability = crate::commands::code_team::AgentCapability::from_tools(&tools);
+
+    // (WF-B4) Scannable panel labels: `wf:<phase>/<label>`, with fallbacks
+    // `main` (no phase() yet) and `agent-<n>` (no label).
     let phase_title = ctx
         .state
         .phases
@@ -416,12 +522,19 @@ fn dispatch_phase_agent(
         .unwrap()
         .last()
         .map(|p| p.title.clone())
-        .unwrap_or_default();
-    let display_name = label
-        .clone()
-        .unwrap_or_else(|| format!("phase:{}", phase_title));
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "main".to_string());
+    let agent_n = ctx.state.agents().len() + 1;
+    let display_name = format!(
+        "wf:{phase_title}/{}",
+        label
+            .clone()
+            .or_else(|| agent_name.clone())
+            .unwrap_or_else(|| format!("agent-{agent_n}"))
+    );
     let prompt_preview: String = prompt.chars().take(80).collect();
 
+    let model = agent_def.as_ref().and_then(|a| a.model.clone());
     let handle = ctx
         .registry
         .register(crate::commands::code_team::AgentRegistration {
@@ -431,9 +544,11 @@ fn dispatch_phase_agent(
                 parent: None,
             },
             color: AgentColor::color_for_name(&display_name),
-            capability: crate::commands::code_team::AgentCapability::ReadOnly,
+            capability,
             cwd: ctx.cwd.clone(),
-            model: ctx.cfg.default_code_model.clone(),
+            model: model
+                .clone()
+                .unwrap_or_else(|| ctx.cfg.default_code_model.clone()),
             prompt_preview,
             parent: None,
             pid: None,
@@ -441,22 +556,27 @@ fn dispatch_phase_agent(
         });
     handle.set_status(AgentStatus::Working);
 
-    // Track under the current phase (or a synthetic "default" phase if
+    // Track under the current phase (or a synthetic "main" phase if
     // phase() was never called).
     {
         let mut phases = ctx.state.phases.lock().unwrap();
         if phases.last().is_none() {
             phases.push(PhaseProgress {
-                title: "default".to_string(),
+                title: "main".to_string(),
                 agents: vec![],
             });
         }
         phases.last_mut().unwrap().agents.push(Arc::clone(&handle));
     }
 
-    let tools = tools_json
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok());
+    let spec = PhaseAgentSpec {
+        tools,
+        append_system_prompt: agent_def
+            .as_ref()
+            .map(crate::commands::code_task::named_subagent_prompt),
+        model,
+        schema,
+    };
 
     let spawn_ctx = SpawnTaskCtx {
         bridge: Arc::clone(&ctx.bridge),
@@ -474,18 +594,18 @@ fn dispatch_phase_agent(
     // reject immediately so the script's `await` unblocks with an error.
     let id_for_return = id.clone();
     let id_for_task = id.clone();
-    if let Err(_e) = ctx.bg_handle.try_spawn(async move {
-        spawn_phase_agent_task(spawn_ctx, id_for_task, handle, prompt, tools).await;
-    }) {
-        ctx.bridge
-            .completions
-            .lock()
-            .unwrap()
-            .push(PendingCompletion::Reject {
-                id,
-                message: "workflow: bg runtime unavailable to spawn the subagent".to_string(),
-            });
-        ctx.bridge.in_flight.fetch_sub(1, Ordering::Relaxed);
+    if ctx
+        .bg_handle
+        .try_spawn(async move {
+            spawn_phase_agent_task(spawn_ctx, id_for_task, handle, prompt, spec).await;
+        })
+        .is_err()
+    {
+        reject_dispatch(
+            ctx,
+            id,
+            "workflow: bg runtime unavailable to spawn the subagent".to_string(),
+        );
     }
     id_for_return
 }
@@ -506,14 +626,20 @@ struct SpawnTaskCtx {
 
 /// The spawned task body: run the phase agent, finalize its status, and
 /// push a completion onto the bridge for the drive loop to settle in JS.
+/// (WF-C) With a schema, the promise resolves with the schema-validated
+/// object's JSON (captured from the agent's `structured_output` call)
+/// instead of the assistant's prose; a schema'd agent that never produced
+/// validated output is a REJECTION — the script must be able to trust the
+/// shape.
 async fn spawn_phase_agent_task(
     ctx: SpawnTaskCtx,
     id: String,
     handle: Arc<AgentHandle>,
     prompt: String,
-    tools: Option<Vec<String>>,
+    spec: PhaseAgentSpec,
 ) {
     let _guard = WorkflowAgentGuard::new(Arc::clone(&handle), Arc::clone(&ctx.registry));
+    let schema_requested = spec.schema.is_some();
     let result = run_phase_agent(
         ctx.mode.clone(),
         Arc::clone(&ctx.approvals),
@@ -524,30 +650,38 @@ async fn spawn_phase_agent_task(
         Arc::clone(&ctx.cfg),
         ctx.bash_wrapper.clone(),
         prompt,
-        tools,
+        spec,
     )
     .await;
-    let (payload, ok) = match result {
-        Ok(text) => {
+    let completion = match result {
+        Ok(agent_result) => {
             handle.set_status(AgentStatus::Completed);
             ctx.registry.remove(handle.id);
-            (text, true)
+            match (schema_requested, agent_result.structured) {
+                (true, Some(data)) => PendingCompletion::Resolve {
+                    id,
+                    json: data.to_string(),
+                },
+                (true, None) => PendingCompletion::Reject {
+                    id,
+                    message: "workflow agent(): schema requested but the phase agent \
+                              did not return schema-validated output"
+                        .to_string(),
+                },
+                (false, _) => PendingCompletion::Resolve {
+                    id,
+                    json: serde_json::to_string(&agent_result.text)
+                        .unwrap_or_else(|_| "\"\"".to_string()),
+                },
+            }
         }
         Err(e) => {
             handle.set_status(AgentStatus::Failed);
             ctx.registry.remove(handle.id);
-            (e, false)
+            PendingCompletion::Reject { id, message: e }
         }
     };
-    let json = serde_json::to_string(&payload).unwrap_or_else(|_| "\"\"".to_string());
-    ctx.bridge.completions.lock().unwrap().push(if ok {
-        PendingCompletion::Resolve { id, json }
-    } else {
-        PendingCompletion::Reject {
-            id,
-            message: payload,
-        }
-    });
+    ctx.bridge.completions.lock().unwrap().push(completion);
     ctx.bridge.in_flight.fetch_sub(1, Ordering::Relaxed);
 }
 
@@ -767,9 +901,18 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
                     move |_c: Ctx,
                           prompt: String,
                           label: Option<String>,
-                          tools_json: Option<String>|
+                          tools_json: Option<String>,
+                          agent_name: Option<String>,
+                          schema_json: Option<String>|
                           -> rquickjs::Result<String> {
-                        Ok(dispatch_phase_agent(&agent_ctx, prompt, label, tools_json))
+                        Ok(dispatch_phase_agent(
+                            &agent_ctx,
+                            prompt,
+                            label,
+                            tools_json,
+                            agent_name,
+                            schema_json,
+                        ))
                     },
                 ),
             )?;
@@ -1106,16 +1249,23 @@ const JS_PRELUDE: &str = r#"
     }
   };
 
-  // agent(prompt, opts?) → Promise<string>. `opts` is an optional object
-  // with `label` (display name in /workflows) and `tools` (array). The
-  // native fn returns a call_id synchronously; we stash resolve/reject
-  // keyed by it and let the drive loop settle.
+  // agent(prompt, opts?) → Promise<string|object>. `opts` is an optional
+  // object with `label` (display name in /workflows + agents panel),
+  // `tools` (array, narrows within the agent's ceiling), `agent` (a named
+  // subagent type from .claude/agents/), and `schema` (a JSON Schema —
+  // the promise then resolves with the schema-validated OBJECT instead of
+  // prose). The native fn returns a call_id synchronously; we stash
+  // resolve/reject keyed by it and let the drive loop settle.
   globalThis.agent = function (prompt, opts) {
     opts = opts || {};
     const label = (opts && typeof opts.label === 'string') ? opts.label : null;
     const tools = (opts && Array.isArray(opts.tools)) ? opts.tools : null;
+    const agentType = (opts && typeof opts.agent === 'string') ? opts.agent : null;
+    const schema = (opts && opts.schema !== undefined && opts.schema !== null)
+      ? JSON.stringify(opts.schema) : null;
     return new Promise(function (resolve, reject) {
-      const id = __wf_native_agent(prompt, label, tools ? JSON.stringify(tools) : null);
+      const id = __wf_native_agent(prompt, label,
+        tools ? JSON.stringify(tools) : null, agentType, schema);
       __wf_pending.set(id, { resolve: resolve, reject: reject });
     });
   };
@@ -1175,7 +1325,7 @@ impl Tool for WorkflowTool {
             "properties": {
                 "script": {
                     "type": "string",
-                    "description": "JavaScript workflow body. Calls agent(prompt), parallel([thunks]), pipeline(items, ...stages), phase(title, fn), log(...args). The body is wrapped in an async function, so top-level await is allowed."
+                    "description": "JavaScript workflow body. Calls agent(prompt, {label, tools, agent, schema}), parallel([thunks]), pipeline(items, ...stages), phase(title, fn), log(...args). The body is wrapped in an async function, so top-level await is allowed; `return <value>` becomes the workflow result."
                 },
                 "name": {
                     "type": "string",
@@ -1307,11 +1457,53 @@ impl Tool for WorkflowTool {
     }
 }
 
+/// What a phase agent produced: the assistant's final prose plus, when a
+/// schema was requested (WF-C), the schema-validated `structured_output`
+/// payload captured from the agent's tool events.
+struct PhaseAgentResult {
+    text: String,
+    structured: Option<serde_json::Value>,
+}
+
+/// (WF-C) Pull the validated payload out of a `structured_output`
+/// `ToolExecutionEnd` event, if that's what `event` is. Pure, for tests.
+fn extract_structured_data(event: &AgentEvent) -> Option<serde_json::Value> {
+    match event {
+        AgentEvent::ToolExecutionEnd {
+            tool_name,
+            result,
+            is_error,
+            ..
+        } if tool_name == "structured_output" && !is_error => {
+            let details = result.details.as_ref()?;
+            if details.get("validated").and_then(|v| v.as_bool()) == Some(true) {
+                details.get("data").cloned()
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// (WF-C) Prompt suffix binding the phase agent to the schema contract.
+fn schema_prompt_suffix(schema: &serde_json::Value) -> String {
+    format!(
+        "\n\n## Required output\n\
+         You MUST call the `structured_output` tool exactly once before \
+         finishing, passing this JSON `schema` verbatim and your result as \
+         `data`. The tool validates the shape; fix and retry on validation \
+         errors. Your promise to the caller is the validated object — prose \
+         alone is a failure.\n\n```json\n{schema}\n```"
+    )
+}
+
 /// Run one phase agent — a trimmed near-copy of `TaskTool::execute`'s
-/// session-build + await path (no worktree, no named-agent lookup: the
-/// workflow script's `agent(prompt)` is a plain prompt with an optional
-/// tools list). Registered in the shared `AgentRegistry` so /agents shows
-/// it. Returns the assistant's final text, or an error string.
+/// session-build + await path (no worktree — a documented follow-up for
+/// write-capable phase agents). Tool policy, named-agent wrap, model
+/// override, and schema all arrive pre-resolved in `spec` (WF-B/WF-C).
+/// Returns the assistant's final text + captured structured payload, or an
+/// error string.
 #[allow(clippy::too_many_arguments)] // trimmed near-copy of TaskTool::execute's session-build
 async fn run_phase_agent(
     mode: ModeFlag,
@@ -1323,27 +1515,12 @@ async fn run_phase_agent(
     cfg: Arc<crate::config::Config>,
     bash_command_wrapper: Option<Vec<String>>,
     prompt: String,
-    tools: Option<Vec<String>>,
-) -> Result<String, String> {
-    // Resolve the child's tool set. Workflow phase agents default to the
-    // same read-only set as TaskTool; an explicit `tools` opt-in
-    // intersects with that ceiling.
-    const DEFAULT_TOOLS: &[&str] = &["read", "grep", "find", "ls"];
-    let ceiling: Vec<String> = DEFAULT_TOOLS.iter().map(|s| s.to_string()).collect();
-    let filtered: Vec<String> = match &tools {
-        None => ceiling,
-        Some(req) => {
-            let f: Vec<String> = req
-                .iter()
-                .filter(|name| ceiling.iter().any(|allowed| allowed == *name))
-                .cloned()
-                .collect();
-            if f.is_empty() {
-                ceiling
-            } else {
-                f
-            }
-        }
+    spec: PhaseAgentSpec,
+) -> Result<PhaseAgentResult, String> {
+    let filtered = spec.tools;
+    let prompt = match &spec.schema {
+        Some(schema) => format!("{prompt}{}", schema_prompt_suffix(schema)),
+        None => prompt,
     };
 
     let mut features = crate::commands::code_factory::FactoryFeatures::cli_defaults();
@@ -1366,15 +1543,15 @@ async fn run_phase_agent(
         skill_cwd: Some(cwd.clone()),
         context_snapshot: None,
         cron_store: None,
-        // (M6/#15) Phase agents spawned by a workflow are themselves
-        // read-only subagents; they don't host a workflow registry (a
-        // workflow nesting inside a workflow would blow past
-        // MAX_TASK_DEPTH). Leave unset.
+        // (M6/#15) Phase agents don't host a workflow registry (a workflow
+        // nesting inside a workflow would blow past MAX_TASK_DEPTH).
+        // Leave unset.
         workflows: None,
     }
     .child();
 
-    let model = cfg.default_code_model.clone();
+    // (WF-B2) Named-agent frontmatter can override the model.
+    let model = spec.model.unwrap_or_else(|| cfg.default_code_model.clone());
     let options = build_session_options(CodeSessionConfig {
         provider: cfg.default_code_provider.clone(),
         model: model.clone(),
@@ -1384,7 +1561,7 @@ async fn run_phase_agent(
         tool_factory: Arc::new(factory),
         persistence: SessionPersistence::Ephemeral,
         enabled_tools: Some(filtered),
-        append_system_prompt: None,
+        append_system_prompt: spec.append_system_prompt,
         max_tokens: Some(DEFAULT_MAX_TOKENS),
         bash_command_wrapper: bash_command_wrapper.clone(),
         auto_compaction_enabled: cfg.code_auto_compaction_enabled,
@@ -1403,8 +1580,18 @@ async fn run_phase_agent(
     // for prompt_with_abort and rely on the WorkflowAgentGuard for cleanup.
     let _ = abort_handle;
 
+    // (WF-C) Capture the validated structured_output payload from the
+    // agent's tool events (interior mutability — the event callback is a
+    // plain Fn). The LAST successful call wins, matching "call it exactly
+    // once" in the prompt contract.
+    let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let captured_in = Arc::clone(&captured);
     let assistant = handle
-        .prompt_with_abort(prompt, abort_signal, |_event: AgentEvent| {})
+        .prompt_with_abort(prompt, abort_signal, move |event: AgentEvent| {
+            if let Some(data) = extract_structured_data(&event) {
+                *captured_in.lock().unwrap() = Some(data);
+            }
+        })
         .await
         .map_err(|e| format!("run failed: {e}"))?;
     let text = assistant
@@ -1416,7 +1603,8 @@ async fn run_phase_agent(
         })
         .collect::<Vec<_>>()
         .join("");
-    Ok(text)
+    let structured = captured.lock().unwrap().take();
+    Ok(PhaseAgentResult { text, structured })
 }
 
 #[cfg(test)]
@@ -1521,6 +1709,85 @@ mod tests {
             "syntax error must be captured, summary: {}",
             r.summary
         );
+    }
+
+    /// (WF-B2) An unknown named agent type rejects the agent() promise at
+    /// dispatch — end-to-end through the real engine, no LLM needed. The
+    /// script catches the rejection, proving completion delivery works.
+    #[test]
+    fn engine_unknown_agent_type_rejects_promise() {
+        let r = run_engine(
+            "try { await agent('x', {agent: 'no-such-agent-xyz'}); return 'unexpected'; } \
+             catch (e) { return 'caught: ' + String(e); }",
+        );
+        assert_eq!(
+            r.final_status,
+            WorkflowStatus::Completed,
+            "summary: {}",
+            r.summary
+        );
+        let json = r.result_json.expect("result");
+        assert!(
+            json.contains("caught:") && json.contains("unknown agent type"),
+            "result: {json}"
+        );
+    }
+
+    /// (WF-C) extract_structured_data pulls the validated payload out of a
+    /// structured_output ToolExecutionEnd and nothing else.
+    #[test]
+    fn extract_structured_data_captures_validated_payload() {
+        let mk = |tool: &str, is_error: bool, details: Option<serde_json::Value>| {
+            AgentEvent::ToolExecutionEnd {
+                tool_name: tool.to_string(),
+                tool_call_id: "c1".to_string(),
+                result: ToolOutput {
+                    content: vec![],
+                    details,
+                    is_error,
+                },
+                is_error,
+            }
+        };
+        // Happy path.
+        let ev = mk(
+            "structured_output",
+            false,
+            Some(serde_json::json!({"validated": true, "data": {"x": 1}})),
+        );
+        assert_eq!(
+            extract_structured_data(&ev),
+            Some(serde_json::json!({"x": 1}))
+        );
+        // Wrong tool.
+        let ev = mk(
+            "read",
+            false,
+            Some(serde_json::json!({"validated": true, "data": 1})),
+        );
+        assert_eq!(extract_structured_data(&ev), None);
+        // Errored call.
+        let ev = mk(
+            "structured_output",
+            true,
+            Some(serde_json::json!({"validated": true, "data": 1})),
+        );
+        assert_eq!(extract_structured_data(&ev), None);
+        // Not validated.
+        let ev = mk(
+            "structured_output",
+            false,
+            Some(serde_json::json!({"validated": false})),
+        );
+        assert_eq!(extract_structured_data(&ev), None);
+    }
+
+    /// (WF-B/WF-C) The prelude threads agent type + schema to the native fn.
+    #[test]
+    fn prelude_passes_agent_and_schema() {
+        assert!(JS_PRELUDE.contains("opts.agent"));
+        assert!(JS_PRELUDE.contains("opts.schema"));
+        assert!(JS_PRELUDE.contains("agentType, schema"));
     }
 
     /// (WF-A3) Run ids are unique within the session.

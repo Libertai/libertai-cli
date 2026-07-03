@@ -50,7 +50,28 @@ const DESCRIPTION: &str = concat!(
 /// frontmatter is honored (see M1.3), so a subagent can be made
 /// write-capable. Worktree isolation and the shared approval state
 /// remain the guardrails for write-capable subagents.
-const TASK_DEFAULT_TOOLS: &[&str] = &["read", "grep", "find", "ls"];
+pub(crate) const TASK_DEFAULT_TOOLS: &[&str] = &["read", "grep", "find", "ls"];
+
+/// Resolve a subagent's tool set from its `ceiling` (a named definition's
+/// `tools:` frontmatter, or [`TASK_DEFAULT_TOOLS`]) and the caller's
+/// `requested` narrowing. `requested` intersects with the ceiling; an
+/// empty or fully-filtered request falls back to the ceiling so the child
+/// always has at least the ceiling set. Shared by `TaskTool` and the
+/// workflow engine's phase agents (WF-B) so the two policies never drift.
+pub(crate) fn resolve_subagent_tools(ceiling: Vec<String>, requested: Vec<String>) -> Vec<String> {
+    if requested.is_empty() {
+        return ceiling;
+    }
+    let filtered: Vec<String> = requested
+        .into_iter()
+        .filter(|name| ceiling.iter().any(|allowed| allowed == name))
+        .collect();
+    if filtered.is_empty() {
+        ceiling
+    } else {
+        filtered
+    }
+}
 
 pub struct TaskTool {
     mode: ModeFlag,
@@ -274,19 +295,7 @@ impl Tool for TaskTool {
             .and_then(|a| a.tools.clone())
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| TASK_DEFAULT_TOOLS.iter().map(|&s| s.to_string()).collect());
-        let filtered: Vec<String> = if requested.is_empty() {
-            ceiling.clone()
-        } else {
-            let f: Vec<String> = requested
-                .into_iter()
-                .filter(|name| ceiling.iter().any(|allowed| allowed == name))
-                .collect();
-            if f.is_empty() {
-                ceiling
-            } else {
-                f
-            }
-        };
+        let filtered: Vec<String> = resolve_subagent_tools(ceiling, requested);
 
         // Load our own Config — subtask runs against the same LibertAI
         // endpoint + model the parent is on. `code_models.rs` has
@@ -646,7 +655,7 @@ fn task_wants_same_cwd(input: &serde_json::Value) -> bool {
             .unwrap_or(false)
 }
 
-fn named_subagent_prompt(agent: &code_agents::AgentDefinition) -> String {
+pub(crate) fn named_subagent_prompt(agent: &code_agents::AgentDefinition) -> String {
     format!(
         "## Named sub-agent: {name}\n\n\
 You are running as the `{name}` sub-agent inside a parent LibertAI session. \
@@ -1266,6 +1275,24 @@ mod tests {
         assert!(should_skip_snapshot_entry("target"));
         assert!(should_skip_snapshot_entry("node_modules"));
         assert!(!should_skip_snapshot_entry("src"));
+    }
+
+    #[test]
+    fn resolve_subagent_tools_intersects_with_ceiling_fallback() {
+        use super::resolve_subagent_tools;
+        let ceiling = || vec!["read".to_string(), "grep".to_string()];
+        // Empty request → ceiling.
+        assert_eq!(resolve_subagent_tools(ceiling(), vec![]), ceiling());
+        // Narrowing request intersects.
+        assert_eq!(
+            resolve_subagent_tools(ceiling(), vec!["read".into(), "bash".into()]),
+            vec!["read".to_string()]
+        );
+        // Fully-filtered request falls back to the ceiling.
+        assert_eq!(
+            resolve_subagent_tools(ceiling(), vec!["bash".into()]),
+            ceiling()
+        );
     }
 
     #[test]
