@@ -3596,12 +3596,18 @@ fn handle_key(
                 app.textarea.input(key);
                 return None;
             }
+            if take_backslash_continuation(app) {
+                return None;
+            }
             submit_idle_line(app, cmd_tx)
         }
         (KeyCode::Enter, _) if app.phase == Phase::Streaming => {
             // Queue a message while the agent is working.
             if key.modifiers != KeyModifiers::NONE {
                 app.textarea.input(key);
+                return None;
+            }
+            if take_backslash_continuation(app) {
                 return None;
             }
             let prompt = app.textarea.lines().join("\n");
@@ -3721,6 +3727,34 @@ fn open_external_editor(app: &mut App, guard: &mut TerminalGuard) -> anyhow::Res
     app.set_dirty();
     drop(tf);
     Ok(())
+}
+
+/// (B4-BACKSLASH-CONT) True when the char immediately before the cursor is
+/// a `\` — Enter should then continue the line instead of submitting
+/// (Claude Code parity). Pure so it's unit-testable.
+pub(crate) fn backslash_continuation(lines: &[String], cursor: (usize, usize)) -> bool {
+    let (row, col) = cursor;
+    col > 0
+        && lines
+            .get(row)
+            .and_then(|l| l.chars().nth(col - 1))
+            .is_some_and(|c| c == '\\')
+}
+
+/// (B4-BACKSLASH-CONT) If the cursor sits right after a `\`, consume the
+/// backslash and insert a newline; returns true when the Enter key was
+/// spent as a continuation. Called from both the Enter-idle (submit) and
+/// Enter-streaming (queue) arms. The palette/mention Enter paths do NOT go
+/// through this — a trailing `\` in a slash filter is not a continuation
+/// context.
+fn take_backslash_continuation(app: &mut App) -> bool {
+    if backslash_continuation(app.textarea.lines(), app.textarea.cursor()) {
+        app.textarea.delete_char(); // backspace the `\`
+        app.textarea.insert_newline();
+        true
+    } else {
+        false
+    }
 }
 
 /// Set the textarea content and reset cursor to end.
@@ -8563,6 +8597,41 @@ mod tests {
         let h = registry.register(reg);
         h.set_status(status);
         h
+    }
+
+    #[test]
+    fn backslash_continuation_detects_backslash_before_cursor() {
+        let ls: Vec<String> = vec!["hello\\".into()];
+        // Cursor right after the backslash.
+        assert!(backslash_continuation(&ls, (0, 6)));
+        // Cursor elsewhere on the line.
+        assert!(!backslash_continuation(&ls, (0, 3)));
+        // Col 0 never continues.
+        assert!(!backslash_continuation(&ls, (0, 0)));
+        // No backslash at all.
+        let plain: Vec<String> = vec!["hello".into()];
+        assert!(!backslash_continuation(&plain, (0, 5)));
+        // Later line with its own trailing backslash.
+        let multi: Vec<String> = vec!["a".into(), "b\\".into()];
+        assert!(backslash_continuation(&multi, (1, 2)));
+        // Double backslash still continues (consumes one, CC parity).
+        let dbl: Vec<String> = vec!["x\\\\".into()];
+        assert!(backslash_continuation(&dbl, (0, 3)));
+        // Out-of-range row is defensive-false.
+        assert!(!backslash_continuation(&ls, (9, 1)));
+    }
+
+    #[test]
+    fn take_backslash_continuation_swaps_backslash_for_newline() {
+        let mut app = test_app();
+        set_textarea_text(&mut app.textarea, "hello\\");
+        assert!(take_backslash_continuation(&mut app));
+        assert_eq!(app.textarea.lines(), &["hello".to_string(), String::new()]);
+        assert_eq!(app.textarea.cursor(), (1, 0));
+        // Without a trailing backslash nothing changes.
+        set_textarea_text(&mut app.textarea, "hello");
+        assert!(!take_backslash_continuation(&mut app));
+        assert_eq!(app.textarea.lines(), &["hello".to_string()]);
     }
 
     /// Build a minimal `App` for testing pure state transitions. Mirrors
