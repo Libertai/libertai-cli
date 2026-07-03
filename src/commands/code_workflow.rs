@@ -111,6 +111,21 @@ const ENV_TIMEOUT_SECS: &str = "LIBERTAI_WORKFLOW_TIMEOUT_SECS";
 const JS_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const JS_MAX_STACK_BYTES: usize = 1024 * 1024;
 
+/// (WF-A3) Per-process run counter so every workflow gets a unique id
+/// (`wf-<pid>-<n>`). The old `wf-<pid>` id collided across runs in one
+/// session, so `WorkflowRegistry::remove(&id)` on an early failure reaped
+/// every run and `/workflows` history was impossible. String ids stay
+/// journal-friendly for the deferred resume feature.
+static WF_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// (WF-A4) How many finished (non-Running) workflows the registry keeps as
+/// session history for `/workflows`. Oldest pruned first.
+const MAX_FINISHED_WORKFLOWS: usize = 20;
+
+/// Cap on the script's synthesized result embedded in the tool output /
+/// completion notification (WF-D). Full result lives only in JS.
+const MAX_RESULT_CHARS: usize = 4096;
+
 // ---------------------------------------------------------------------------
 // Live state — registry of running/recently-finished workflows, mirrored on
 // the `AgentRegistry` shape so `/workflows` can snapshot it.
@@ -146,6 +161,9 @@ pub struct WorkflowState {
     pub name: String,
     pub status: Mutex<WorkflowStatus>,
     pub started_at: Instant,
+    /// (WF-A6) Set when the run reaches a terminal status so `elapsed()`
+    /// freezes for finished rows in `/workflows` and the live tree.
+    pub finished_at: Mutex<Option<Instant>>,
     pub phases: Mutex<Vec<PhaseProgress>>,
 }
 
@@ -156,6 +174,7 @@ impl WorkflowState {
             name,
             status: Mutex::new(WorkflowStatus::Running),
             started_at: Instant::now(),
+            finished_at: Mutex::new(None),
             phases: Mutex::new(Vec::new()),
         })
     }
@@ -166,6 +185,22 @@ impl WorkflowState {
 
     pub fn set_status(&self, s: WorkflowStatus) {
         *self.status.lock().unwrap() = s;
+        // (WF-A6) Freeze the clock on the FIRST terminal transition.
+        if s != WorkflowStatus::Running {
+            let mut fin = self.finished_at.lock().unwrap();
+            if fin.is_none() {
+                *fin = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Wall-clock runtime: live for Running, frozen at the terminal
+    /// transition for finished runs.
+    pub fn elapsed(&self) -> std::time::Duration {
+        match *self.finished_at.lock().unwrap() {
+            Some(fin) => fin.duration_since(self.started_at),
+            None => self.started_at.elapsed(),
+        }
     }
 
     /// All agent handles across all phases, in phase→spawn order. Used by
@@ -194,7 +229,26 @@ impl WorkflowRegistry {
     }
 
     pub fn register(&self, state: Arc<WorkflowState>) {
-        self.workflows.lock().unwrap().push(state);
+        let mut ws = self.workflows.lock().unwrap();
+        ws.push(state);
+        // (WF-A4) Keep finished runs as session history, but bounded:
+        // prune the OLDEST non-Running entries beyond the cap. Running
+        // entries are never pruned.
+        let finished = ws
+            .iter()
+            .filter(|w| w.status() != WorkflowStatus::Running)
+            .count();
+        let mut to_prune = finished.saturating_sub(MAX_FINISHED_WORKFLOWS);
+        if to_prune > 0 {
+            ws.retain(|w| {
+                if to_prune > 0 && w.status() != WorkflowStatus::Running {
+                    to_prune -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
     }
 
     pub fn remove(&self, id: &str) {
@@ -245,6 +299,14 @@ struct WorkflowBridge {
     /// Progress lines emitted by `log(...)`, surfaced to the parent turn.
     /// The drive loop drains these into the `on_update` callback.
     logs: Mutex<Vec<String>>,
+    /// (WF-D) The script's resolved value, JSON-encoded — written by the
+    /// `__wf_native_result` host fn from the `.then` chain wrapping the
+    /// async IIFE. `None` when the script never settled (timeout/abort).
+    result: Mutex<Option<String>>,
+    /// (WF-D) A top-level rejection / thrown error, written by
+    /// `__wf_native_error`. Previously these vanished entirely and the run
+    /// reported "completed"; now they flip the run to Failed.
+    script_error: Mutex<Option<String>>,
 }
 
 impl WorkflowBridge {
@@ -254,6 +316,8 @@ impl WorkflowBridge {
             completions: Mutex::new(Vec::new()),
             in_flight: AtomicU64::new(0),
             logs: Mutex::new(Vec::new()),
+            result: Mutex::new(None),
+            script_error: Mutex::new(None),
         })
     }
 
@@ -519,22 +583,37 @@ struct WorkflowRunResult {
     summary: String,
     wf_name: String,
     final_status: WorkflowStatus,
+    /// (WF-D) The script's resolved value, JSON-encoded (already truncated
+    /// into `summary` for display; kept raw here for the details payload).
+    result_json: Option<String>,
+    /// (WF-D) Top-level script error (eval failure or unhandled rejection).
+    script_error: Option<String>,
 }
 
 impl WorkflowRunResult {
     fn into_output(self) -> ToolExecution {
+        let mut details = serde_json::json!({
+            "kind": "workflow_result",
+            "workflow": self.wf_name,
+            "status": match self.final_status {
+                WorkflowStatus::Completed => "completed",
+                WorkflowStatus::Failed => "failed",
+                WorkflowStatus::Stopped => "stopped",
+                WorkflowStatus::Running => "completed",
+            },
+        });
+        if let Some(json) = &self.result_json {
+            // Best-effort: embed the parsed value so downstream consumers
+            // get structure, falling back to the raw string.
+            details["result"] = serde_json::from_str(json)
+                .unwrap_or_else(|_| serde_json::Value::String(json.clone()));
+        }
+        if let Some(err) = &self.script_error {
+            details["script_error"] = serde_json::Value::String(err.clone());
+        }
         ToolOutput {
             content: vec![ContentBlock::Text(TextContent::new(self.summary))],
-            details: Some(serde_json::json!({
-                "kind": "workflow_result",
-                "workflow": self.wf_name,
-                "status": match self.final_status {
-                    WorkflowStatus::Completed => "completed",
-                    WorkflowStatus::Failed => "failed",
-                    WorkflowStatus::Stopped => "stopped",
-                    WorkflowStatus::Running => "completed",
-                },
-            })),
+            details: Some(details),
             is_error: matches!(
                 self.final_status,
                 WorkflowStatus::Failed | WorkflowStatus::Stopped
@@ -564,9 +643,13 @@ fn run_workflow_on_thread(ctx: WorkflowRunCtx, result_tx: mpsc::Sender<WorkflowR
                 "\n[workflow {} {}]\n",
                 ctx.wf_name, outcome_label
             )))],
+            // (WF-A5) Keys must match the TUI translator (`app.rs`
+            // "workflow_end" arm), which reads `name` + `id` — the old
+            // `workflow` key left both empty in every end line.
             details: Some(serde_json::json!({
                 "kind": "workflow_end",
-                "workflow": ctx.wf_name,
+                "name": ctx.wf_name,
+                "id": ctx.state.id,
                 "outcome": outcome_label,
             })),
         });
@@ -588,6 +671,8 @@ fn run_workflow_inner(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
                 summary: format!("workflow {}: QuickJS reactor init: {e}", ctx.wf_name),
                 wf_name: ctx.wf_name.clone(),
                 final_status: WorkflowStatus::Failed,
+                result_json: None,
+                script_error: None,
             };
         }
     };
@@ -602,6 +687,8 @@ fn run_workflow_inner(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
                 summary: format!("workflow {}: QuickJS runtime init: {e}", ctx.wf_name),
                 wf_name: ctx.wf_name.clone(),
                 final_status: WorkflowStatus::Failed,
+                result_json: None,
+                script_error: None,
             };
         }
     };
@@ -624,6 +711,8 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
                 summary: format!("workflow {}: QuickJS runtime init: {e}", ctx.wf_name),
                 wf_name: ctx.wf_name.clone(),
                 final_status: WorkflowStatus::Failed,
+                result_json: None,
+                script_error: None,
             };
         }
     };
@@ -637,6 +726,8 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
                 summary: format!("workflow {}: QuickJS context init: {e}", ctx.wf_name),
                 wf_name: ctx.wf_name.clone(),
                 final_status: WorkflowStatus::Failed,
+                result_json: None,
+                script_error: None,
             };
         }
     };
@@ -704,6 +795,26 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
                 }),
             )?;
 
+            // (WF-D) Script settlement capture: the `.then` chain around
+            // the async IIFE reports the resolved value (JSON) or the
+            // top-level error here. Previously both were discarded.
+            let bridge_result = Arc::clone(&bridge);
+            globals.set(
+                "__wf_native_result",
+                Func::from(move |_c: Ctx, json: String| -> rquickjs::Result<()> {
+                    *bridge_result.result.lock().unwrap() = Some(json);
+                    Ok(())
+                }),
+            )?;
+            let bridge_error = Arc::clone(&bridge);
+            globals.set(
+                "__wf_native_error",
+                Func::from(move |_c: Ctx, message: String| -> rquickjs::Result<()> {
+                    *bridge_error.script_error.lock().unwrap() = Some(message);
+                    Ok(())
+                }),
+            )?;
+
             js.eval::<(), _>(JS_PRELUDE)?;
             Ok(())
         })
@@ -714,6 +825,8 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
             summary: format!("workflow {}: sandbox setup: {e}", ctx.wf_name),
             wf_name: ctx.wf_name.clone(),
             final_status: WorkflowStatus::Failed,
+            result_json: None,
+            script_error: None,
         };
     }
 
@@ -722,7 +835,23 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
     // returned Promise value — it carries rquickjs's `'js` lifetime and
     // can't escape the `with` closure. The drive loop detects completion via
     // `rt.idle()` + the in-flight counter, not via this return.
-    let script_body = format!("(async () {{\n{}\n}})()", ctx.script);
+    //
+    // (WF-A1) The arrow `=>` was missing here — `(async () {…})()` is a
+    // SyntaxError, so every script failed instantly and the run still
+    // reported "completed (0 agents)". The `.then` chain (WF-D) captures
+    // the script's resolved value / top-level error via the native fns;
+    // JSON.stringify is guarded (circular values fall back to String(v)).
+    let script_body = format!(
+        "(async () => {{\n{}\n}})().then(function (v) {{\n\
+           let s; try {{ s = JSON.stringify(v === undefined ? null : v); }}\n\
+           catch (e) {{ s = JSON.stringify(String(v)); }}\n\
+           __wf_native_result(s === undefined ? \"null\" : s);\n\
+         }}, function (e) {{\n\
+           // QuickJS Error.stack has frames only, no message — send both.\n\
+           __wf_native_error(String(e) + (e && e.stack ? '\\n' + e.stack : ''));\n\
+         }})",
+        ctx.script
+    );
     let eval_ok: Result<(), rquickjs::Error> = context
         .with(|js| -> Result<(), rquickjs::Error> {
             // Ignore the returned Promise; a thrown syntax error surfaces as
@@ -731,21 +860,25 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
             Ok(())
         })
         .await;
+    // (WF-A2) A syntax/eval error must fail the RUN, not just log — the old
+    // code logged and fell through to "completed (0 agents)".
+    let mut eval_failed: Option<String> = None;
     if let Err(e) = eval_ok {
-        // Syntax/eval error — record it as a rejected log line + mark failed.
+        let msg = format!("script error: {e}");
         if let Some(on_update) = &ctx.on_update {
             on_update(ToolUpdate {
                 content: vec![ContentBlock::Text(TextContent::new(format!(
-                    "[workflow:{}] script error: {e}\n",
+                    "[workflow:{}] {msg}\n",
                     ctx.wf_name
                 )))],
                 details: Some(serde_json::json!({
                     "kind": "workflow_log",
                     "workflow": ctx.wf_name,
-                    "line": format!("script error: {e}"),
+                    "line": msg,
                 })),
             });
         }
+        eval_failed = Some(msg);
     }
 
     let timeout_secs = std::env::var(ENV_TIMEOUT_SECS)
@@ -828,6 +961,10 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
         asupersync::runtime::yield_now().await;
     }
 
+    // (WF-D) Script-level failure signals collected during the run.
+    let script_error = eval_failed.or_else(|| ctx.bridge.script_error.lock().unwrap().clone());
+    let result_json = ctx.bridge.result.lock().unwrap().clone();
+
     let final_status = if timed_out {
         ctx.state.set_status(WorkflowStatus::Stopped);
         WorkflowStatus::Stopped
@@ -837,7 +974,7 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
             .agents()
             .iter()
             .any(|h| h.status() == AgentStatus::Failed);
-        let s = if any_failed {
+        let s = if any_failed || script_error.is_some() {
             WorkflowStatus::Failed
         } else {
             WorkflowStatus::Completed
@@ -846,7 +983,7 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
         s
     };
 
-    let summary = format!(
+    let mut summary = format!(
         "workflow {} {} ({} agents across {} phases)",
         ctx.wf_name,
         match final_status {
@@ -858,10 +995,27 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
         ctx.state.agents().len(),
         ctx.state.phases.lock().unwrap().len(),
     );
+    // (WF-D) Surface what the script actually produced: the parent model
+    // (and the completion notification) finally see the synthesized value
+    // instead of bare counts. Truncated — orchestration results are meant
+    // to be summaries, not payload dumps.
+    if let Some(err) = &script_error {
+        summary.push_str(&format!("\n{err}"));
+    } else if let Some(json) = &result_json {
+        if json != "null" {
+            let mut shown = json.clone();
+            if shown.chars().count() > MAX_RESULT_CHARS {
+                shown = shown.chars().take(MAX_RESULT_CHARS).collect::<String>() + "… (truncated)";
+            }
+            summary.push_str(&format!("\nresult: {shown}"));
+        }
+    }
     WorkflowRunResult {
         summary,
         wf_name: ctx.wf_name.clone(),
         final_status,
+        result_json,
+        script_error,
     }
 }
 
@@ -906,6 +1060,15 @@ impl WorkflowTool {
             libertai_cfg,
         }
     }
+}
+
+/// (WF-A3) Allocate a session-unique workflow run id: `wf-<pid>-<n>`.
+fn next_wf_id() -> String {
+    format!(
+        "wf-{}-{}",
+        std::process::id(),
+        WF_COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+    )
 }
 
 fn err_output(text: &str) -> ToolExecution {
@@ -1070,8 +1233,9 @@ impl Tool for WorkflowTool {
             },
         };
 
-        // Workflow id + live state, registered for /workflows.
-        let wf_id = format!("wf-{}", std::process::id());
+        // Workflow id + live state, registered for /workflows. (WF-A3)
+        // Unique per run — pid alone collided across runs in one session.
+        let wf_id = next_wf_id();
         let state = WorkflowState::new(wf_id.clone(), wf_name.clone());
         self.workflows.register(Arc::clone(&state));
 
@@ -1258,6 +1422,152 @@ async fn run_phase_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+
+    struct AllowingUi;
+
+    #[async_trait]
+    impl ApprovalUi for AllowingUi {
+        async fn decide(
+            &self,
+            _tool_name: &str,
+            _preview: &str,
+            _always_rule: &str,
+        ) -> crate::commands::code_approvals::PromptChoice {
+            crate::commands::code_approvals::PromptChoice::Allow
+        }
+    }
+
+    /// Run `script` through the REAL engine (dedicated JS thread + drive
+    /// loop) with no `agent()` calls, returning the run result. Uses the
+    /// test runtime only to mint the `bg_handle` the ctx requires; the
+    /// blocking `recv` is safe because a no-agent script never spawns onto
+    /// that runtime.
+    fn run_engine(script: &str) -> WorkflowRunResult {
+        let out: Arc<Mutex<Option<WorkflowRunResult>>> = Arc::new(Mutex::new(None));
+        let out_in = Arc::clone(&out);
+        let script = script.to_string();
+        asupersync::test_utils::run_test(move || {
+            let out_in = Arc::clone(&out_in);
+            let script = script.clone();
+            async move {
+                let bg_handle =
+                    asupersync::runtime::Runtime::current_handle().expect("test runtime handle");
+                let state = WorkflowState::new("wf-test-1".into(), "t".into());
+                let ctx = WorkflowRunCtx {
+                    script: script.to_string(),
+                    wf_name: "t".into(),
+                    cfg: Arc::new(crate::config::Config::default()),
+                    state,
+                    bridge: WorkflowBridge::new(),
+                    registry: AgentRegistry::new(),
+                    mode: ModeFlag::new(crate::commands::code_factory::Mode::Normal),
+                    approvals: Arc::new(ApprovalState::new()),
+                    ui: Arc::new(AllowingUi),
+                    parent_depth: 0,
+                    cwd: PathBuf::from("."),
+                    bash_wrapper: None,
+                    bg_handle,
+                    on_update: None,
+                };
+                let (tx, rx) = mpsc::channel();
+                std::thread::spawn(move || run_workflow_on_thread(ctx, tx));
+                let r = rx.recv().expect("workflow result");
+                *out_in.lock().unwrap() = Some(r);
+            }
+        });
+        let r = out.lock().unwrap().take();
+        r.expect("result set")
+    }
+
+    /// (WF-A1) Regression: the async-IIFE wrapper must be VALID JS — the
+    /// missing `=>` made every script a SyntaxError that still reported
+    /// "completed (0 agents)". A trivial script must now complete AND its
+    /// return value must be captured (WF-D).
+    #[test]
+    fn engine_completes_script_and_captures_result() {
+        let r = run_engine("log('hello'); phase('p1', () => {}); return {ok: 1};");
+        assert_eq!(
+            r.final_status,
+            WorkflowStatus::Completed,
+            "summary: {}",
+            r.summary
+        );
+        assert!(r.script_error.is_none(), "err: {:?}", r.script_error);
+        let json = r.result_json.expect("script return captured");
+        assert!(json.contains("\"ok\":1"), "result json: {json}");
+        assert!(r.summary.contains("completed"));
+        assert!(r.summary.contains("result:"), "summary: {}", r.summary);
+    }
+
+    /// (WF-A2/WF-D) A thrown top-level error marks the run Failed and is
+    /// surfaced (previously it vanished and the run said "completed").
+    #[test]
+    fn engine_script_throw_marks_failed() {
+        let r = run_engine("throw new Error('boom');");
+        assert_eq!(r.final_status, WorkflowStatus::Failed);
+        let err = r.script_error.expect("script error captured");
+        assert!(err.contains("boom"), "err: {err}");
+        assert!(r.summary.contains("failed"), "summary: {}", r.summary);
+    }
+
+    /// (WF-A2) A syntax error also fails the run.
+    #[test]
+    fn engine_syntax_error_marks_failed() {
+        let r = run_engine("this is definitely not javascript ((");
+        assert_eq!(r.final_status, WorkflowStatus::Failed);
+        assert!(
+            r.script_error.is_some(),
+            "syntax error must be captured, summary: {}",
+            r.summary
+        );
+    }
+
+    /// (WF-A3) Run ids are unique within the session.
+    #[test]
+    fn wf_ids_unique_per_run() {
+        let a = next_wf_id();
+        let b = next_wf_id();
+        assert_ne!(a, b);
+        assert!(a.starts_with("wf-"));
+    }
+
+    /// (WF-A4) The registry keeps at most MAX_FINISHED_WORKFLOWS finished
+    /// runs (oldest pruned), never pruning Running ones.
+    #[test]
+    fn registry_caps_finished_history() {
+        let reg = WorkflowRegistry::new();
+        let running = WorkflowState::new("wf-run".into(), "live".into());
+        reg.register(Arc::clone(&running));
+        for i in 0..(MAX_FINISHED_WORKFLOWS + 5) {
+            let s = WorkflowState::new(format!("wf-f{i}"), "done".into());
+            s.set_status(WorkflowStatus::Completed);
+            reg.register(s);
+        }
+        let snap = reg.snapshot();
+        let finished = snap
+            .iter()
+            .filter(|w| w.status() != WorkflowStatus::Running)
+            .count();
+        assert_eq!(finished, MAX_FINISHED_WORKFLOWS);
+        assert!(
+            snap.iter().any(|w| w.id == "wf-run"),
+            "running entry must never be pruned"
+        );
+        // Oldest finished were pruned first.
+        assert!(!snap.iter().any(|w| w.id == "wf-f0"));
+        assert!(snap.iter().any(|w| w.id == "wf-f5"));
+    }
+
+    /// (WF-A6) elapsed() freezes at the terminal transition.
+    #[test]
+    fn elapsed_freezes_on_terminal_status() {
+        let s = WorkflowState::new("wf-e".into(), "e".into());
+        s.set_status(WorkflowStatus::Completed);
+        let e1 = s.elapsed();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        assert_eq!(s.elapsed(), e1, "elapsed must not advance after finish");
+    }
 
     /// WorkflowRegistry register/snapshot/remove behaves like AgentRegistry.
     #[test]
