@@ -77,6 +77,17 @@ fn fmt_elapsed_compact(d: std::time::Duration) -> String {
     }
 }
 
+/// (B4-INPUT-HINT) Draw the keymap hint shown above the input bar while a
+/// multi-line draft is being composed. Style matches the spinner's dim
+/// `· esc to stop` hint.
+pub fn draw_input_hint(frame: &mut Frame, area: Rect) {
+    let line = Line::from(Span::styled(
+        "⏎ send · \\⏎ or ctrl+j newline · ctrl+o editor",
+        theme::dim_muted(),
+    ));
+    frame.render_widget(Paragraph::new(line), area);
+}
+
 /// Draw a single queued-preview line: `› text`.
 pub fn draw_queued(frame: &mut Frame, area: Rect, text: &str) {
     let line = Line::from(vec![

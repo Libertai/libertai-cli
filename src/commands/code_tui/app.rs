@@ -3615,6 +3615,11 @@ fn handle_key(
             // History navigation: go to previous entry.
             // Only intercept when textarea is single-line (cursor on
             // first line). On multi-line, let textarea handle Up.
+            // (B4-HISTORY-LOGICAL) The row check is LOGICAL, not visual:
+            // on a single long line soft-wrapped to several visual rows,
+            // Up walks history even though the cursor visually sits on a
+            // continuation row — matching Claude Code, which also keys
+            // history off logical lines.
             let (row, _) = app.textarea.cursor();
             if row > 0 {
                 app.textarea.input(key);

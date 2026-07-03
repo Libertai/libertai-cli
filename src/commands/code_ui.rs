@@ -551,8 +551,8 @@ pub(crate) fn hotkey_lines() -> &'static [&'static str] {
         "Home / End — jump to start or end of the current line",
         "Enter — submit the current prompt",
         "@ — at a word boundary, autocomplete a file to mention (its content attaches on submit)",
-        "Alt+Enter / Ctrl+J — insert a newline (Shift+Enter on terminals that report it)",
-        "Paste — bracketed paste inserts text, newlines included, without submitting",
+        "Alt+Enter / Ctrl+J / \\+Enter — insert a newline (Shift+Enter on kitty-protocol terminals)",
+        "Paste — bracketed paste inserts text, newlines included, without submitting; large pastes collapse to [Pasted text #N +M lines] and expand on submit",
         "Ctrl+C — clear the input line (quit when empty) or interrupt streaming",
         "Esc — stop the running turn from the mid-turn input row",
         "Ctrl+O — open the input in $VISUAL/$EDITOR (vi fallback)",
@@ -5248,6 +5248,15 @@ mod tests {
         assert!(joined.contains("Ctrl+D"));
         assert!(joined.contains("Alt+Enter / Ctrl+J"));
         assert!(joined.contains("bracketed paste"));
+        // (B4) backslash continuation + paste collapse are advertised.
+        assert!(
+            joined.contains("\\+Enter"),
+            "/hotkeys must advertise backslash-Enter continuation: {joined}"
+        );
+        assert!(
+            joined.contains("[Pasted text #N"),
+            "/hotkeys must advertise large-paste collapse: {joined}"
+        );
         // (Fix 9) truth pass: focus toggle, transcript scroll, input
         // undo/redo, and the agent-overlay stop/reply keys are advertised.
         assert!(

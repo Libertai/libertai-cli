@@ -65,8 +65,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // documented degradation priority so the constraint sum can never exceed
     // the footer Rect and silently collapse the input row. `draw_footer`
     // consumes the SAME struct, so the height and the layout never disagree.
-    let footer_layout =
-        compute_footer_layout(agent_rows, &app.queued, todo_rows, input_lines, area.height);
+    // (B4-INPUT-HINT) Show the keymap hint row while composing multi-line.
+    let input_hint = input_lines > 1;
+
+    let footer_layout = compute_footer_layout(
+        agent_rows,
+        &app.queued,
+        todo_rows,
+        input_lines,
+        input_hint,
+        area.height,
+    );
     let footer_height = footer_layout.total();
 
     // (B4-INPUT-SCROLL) Update the input viewport scroll against the SAME
@@ -173,6 +182,10 @@ struct FooterLayout {
     spinner_h: u16,
     queued_rows: u16,
     rule_h: u16,
+    /// (B4-INPUT-HINT) Keymap hint row (`⏎ send · \⏎ newline …`) shown
+    /// while the draft spans multiple visual rows. Pure chrome — first to
+    /// go under height pressure.
+    hint_h: u16,
     input_h: u16,
 }
 
@@ -188,6 +201,7 @@ impl FooterLayout {
             + self.spinner_h
             + self.queued_rows
             + self.rule_h
+            + self.hint_h
             + self.input_h
     }
 }
@@ -220,6 +234,7 @@ fn compute_footer_layout(
     queued: &[String],
     todo_rows: u16,
     input_lines: u16,
+    input_hint: bool,
     term_height: u16,
 ) -> FooterLayout {
     // Natural (unclamped-by-budget) component heights.
@@ -229,16 +244,21 @@ fn compute_footer_layout(
     let mut queued_rows = queued.len().min(3) as u16;
     let mut spinner = 1u16;
     let mut rule = 1u16;
+    let mut hint: u16 = if input_hint { 1 } else { 0 };
     let mut input = input_lines.clamp(1, MAX_INPUT_ROWS);
 
     // The footer never fills the whole screen: the scrollback keeps its
     // `Constraint::Min(1)` row, so the footer's budget is `term_height - 1`.
     let budget = term_height.saturating_sub(1);
-    let natural = todo + a_header + a_rows + spinner + queued_rows + rule + input;
+    let natural = todo + a_header + a_rows + spinner + queued_rows + rule + hint + input;
     let mut overflow = natural.saturating_sub(budget);
 
     // Shrink in the degradation priority (least-protected first). Each step
     // takes as much as it can up to its floor, then defers to the next.
+    // 0. (B4-INPUT-HINT) keymap hint → 0 — pure chrome, first to go.
+    let take = hint.min(overflow);
+    hint -= take;
+    overflow -= take;
     // 1. todo overlay → 0
     let take = todo.min(overflow);
     todo -= take;
@@ -287,6 +307,7 @@ fn compute_footer_layout(
         spinner_h: spinner,
         queued_rows,
         rule_h: rule,
+        hint_h: hint,
         input_h: input,
     }
 }
@@ -313,6 +334,7 @@ fn draw_footer(
         spinner_h,
         queued_rows,
         rule_h,
+        hint_h,
         input_h,
     } = *layout;
 
@@ -338,6 +360,9 @@ fn draw_footer(
             }
             if rule_h > 0 {
                 c.push(Constraint::Length(rule_h));
+            }
+            if hint_h > 0 {
+                c.push(Constraint::Length(hint_h));
             }
             c.push(Constraint::Length(input_h));
             c
@@ -398,6 +423,12 @@ fn draw_footer(
     // Rule line (status bar) — also droppable under extreme height pressure.
     if rule_h > 0 {
         footer::draw_rule(frame, chunks[chunk_idx], app);
+        chunk_idx += 1;
+    }
+
+    // (B4-INPUT-HINT) Keymap hint row above the input while multi-line.
+    if hint_h > 0 {
+        footer::draw_input_hint(frame, chunks[chunk_idx]);
         chunk_idx += 1;
     }
 
@@ -1554,18 +1585,44 @@ mod tests {
     fn footer_input_row_grows_with_draft_lines() {
         let empty: Vec<String> = Vec::new();
         let tall = 60u16; // ample room — no degradation
-        assert_eq!(compute_footer_layout(0, &empty, 0, 1, tall).input_h, 1);
-        assert_eq!(compute_footer_layout(0, &empty, 0, 4, tall).input_h, 4);
         assert_eq!(
-            compute_footer_layout(0, &empty, 0, 10, tall).input_h,
+            compute_footer_layout(0, &empty, 0, 1, false, tall).input_h,
+            1
+        );
+        assert_eq!(
+            compute_footer_layout(0, &empty, 0, 4, false, tall).input_h,
+            4
+        );
+        assert_eq!(
+            compute_footer_layout(0, &empty, 0, 10, false, tall).input_h,
             MAX_INPUT_ROWS,
             "draft taller than the cap clamps to MAX_INPUT_ROWS"
         );
         assert_eq!(
-            compute_footer_layout(0, &empty, 0, 0, tall).input_h,
+            compute_footer_layout(0, &empty, 0, 0, false, tall).input_h,
             1,
             "an empty draft still reserves one input row"
         );
+    }
+
+    /// (B4-INPUT-HINT) The hint row appears when requested with room to
+    /// spare, and is the FIRST thing dropped under height pressure — before
+    /// the todo overlay, and long before the input row.
+    #[test]
+    fn footer_hint_row_drops_first_under_pressure() {
+        let empty: Vec<String> = Vec::new();
+        // Room to spare: hint present.
+        let fl = compute_footer_layout(0, &empty, 0, 3, true, 60);
+        assert_eq!(fl.hint_h, 1);
+        assert_eq!(fl.input_h, 3);
+        // Tight height: hint gives way before the todo overlay does.
+        // Natural: todo 3 + spinner 1 + rule 1 + hint 1 + input 2 = 8,
+        // budget 7 → overflow 1 → hint drops, todo survives.
+        let fl = compute_footer_layout(0, &empty, 3, 2, true, 8);
+        assert_eq!(fl.hint_h, 0, "hint is pure chrome — first to go");
+        assert_eq!(fl.todo_rows, 3, "todo survives while only hint drops");
+        assert_eq!(fl.input_h, 2, "input untouched");
+        assert!(fl.total() <= 7);
     }
 
     /// (Fix 6) At a tiny terminal height with agents + a pinned todo + queued
@@ -1576,7 +1633,7 @@ mod tests {
     fn footer_layout_fits_and_keeps_input_at_tiny_height() {
         let queued = vec!["a".to_string(), "b".to_string()];
         let term_height = 10u16;
-        let fl = compute_footer_layout(3, &queued, 4, 1, term_height);
+        let fl = compute_footer_layout(3, &queued, 4, 1, true, term_height);
         assert!(fl.input_h >= 1, "input row must never collapse below 1");
         assert!(
             fl.total() <= term_height - 1,
@@ -1593,7 +1650,7 @@ mod tests {
     fn footer_layout_input_survives_extreme_pressure() {
         let queued: Vec<String> = (0..4).map(|i| i.to_string()).collect();
         let term_height = 4u16;
-        let fl = compute_footer_layout(20, &queued, 20, 6, term_height);
+        let fl = compute_footer_layout(20, &queued, 20, 6, true, term_height);
         assert!(fl.input_h >= 1, "input row is sacred");
         assert!(
             fl.total() <= term_height - 1,
