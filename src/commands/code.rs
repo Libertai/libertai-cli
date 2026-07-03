@@ -51,6 +51,12 @@ pub fn run(
     dangerously_skip_permissions: bool,
 ) -> Result<()> {
     let cfg = config::load()?;
+    // (WF-G) Offline workflow-engine selftest: run the script through the
+    // real QuickJS engine (no LLM, no session, no terminal) and exit.
+    // Probe-suite hook — see code_workflow::run_selftest.
+    if let Ok(script) = std::env::var("LIBERTAI_WORKFLOW_SELFTEST") {
+        return crate::commands::code_workflow::run_selftest(&script, std::sync::Arc::new(cfg));
+    }
     // Pi's HTTP client reads PI_HTTP_REQUEST_TIMEOUT_SECS once via
     // OnceLock — set it before any pi-side request fires so the
     // configured idle timeout (cfg.http_timeout_secs, default 600s)

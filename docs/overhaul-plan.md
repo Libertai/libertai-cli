@@ -404,6 +404,24 @@ and confirm it fires.
 The minimal engine the user chose to ship. Deterministic fan-out +
 verify + synthesize, reusing existing infrastructure.
 
+> **Status (2026-07, WF-A…WF-G):** shipped on `rquickjs` (not boa — the
+> QuickJS AsyncRuntime + dedicated `!Send` JS thread pattern mirrors
+> pi's extension layer). Beyond the spec below, the shipped engine has:
+> unique `wf-<pid>-<n>` run ids + capped session history; script return
+> value / top-level error capture (`__wf_native_result`/`_error`);
+> `agent(prompt, {label, tools, agent, schema})` — named subagent types
+> honored via the shared TaskTool tool policy (write-capable agents
+> possible, still behind ApprovalTool), `schema` resolving the promise
+> with a validated object via `structured_output`; `wf:<phase>/<label>`
+> panel labels; **background-by-default** runs returning the id
+> immediately with a `<task-notification>` prompt injected on
+> completion (cron `Cmd::Prompt` seam); a live footer progress tree
+> (`code_tui/workflow_panel.rs`) + enriched `/workflows`; and an
+> offline probe hook (`LIBERTAI_WORKFLOW_SELFTEST`,
+> `tests/probes_workflow.rs`). Resume/persistence journal remains the
+> deferred follow-up (ids/state are Serialize-ready). Worktree
+> isolation for write-capable phase agents is a documented follow-up.
+
 1. **#15 Workflow engine** — add a `workflow` tool in
    `code_factory.rs` accepting a JS/script string defining phases (a
    constrained API: `agent()`, `parallel()`, `pipeline()`, `phase()`,

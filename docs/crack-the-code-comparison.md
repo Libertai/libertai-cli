@@ -405,6 +405,17 @@ existing `TaskTool` child factory; add a `/workflows` slash command to
 `AgentRegistry`. **Effort L** — needs a sandboxed script runtime + phase
 scheduler.
 
+**Shipped (WF-A…WF-G):** `code_workflow.rs` on rquickjs. Parity now
+includes the pieces this gap called out: unique task ids + background
+runs returning immediately + `<task-notification>` on completion,
+phase-tagged agent labels (`wf:<phase>/<label>`), `schema:` on
+`agent()` (via `structured_output`), named subagent types with the
+TaskTool tool-policy ceiling, a live footer progress tree
+(`code_tui/workflow_panel.rs`), and an enriched `/workflows` viewer.
+Still open vs Claude Code: resume (`resumeFromRunId` + journal),
+worktree isolation for write-capable phase agents, and a concurrency
+cap (currently unbounded within the bg runtime).
+
 ### #23 — Subagents unsandboxed under `--sandbox=strict`
 
 **Theirs:** Codex `SpawnAgentThreadInheritance { environments,

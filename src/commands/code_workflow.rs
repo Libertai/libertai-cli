@@ -850,6 +850,31 @@ fn run_workflow_on_thread(ctx: WorkflowRunCtx, result_tx: Option<mpsc::Sender<Wo
     }
 }
 
+/// Drain pending `log()` lines: record them on the state (always) and
+/// stream them to the parent turn via `on_update` (sync runs only).
+fn flush_workflow_logs(ctx: &WorkflowRunCtx) {
+    let logs = ctx.bridge.drain_logs();
+    if logs.is_empty() {
+        return;
+    }
+    ctx.state.logs.lock().unwrap().extend(logs.iter().cloned());
+    if let Some(on_update) = &ctx.on_update {
+        for line in logs {
+            on_update(ToolUpdate {
+                content: vec![ContentBlock::Text(TextContent::new(format!(
+                    "[workflow:{}] {line}\n",
+                    ctx.wf_name
+                )))],
+                details: Some(serde_json::json!({
+                    "kind": "workflow_log",
+                    "workflow": ctx.wf_name,
+                    "line": line,
+                })),
+            });
+        }
+    }
+}
+
 /// The synchronous core: build the sandbox, run the drive loop, return the
 /// outcome. Runs inside `block_on` on the dedicated thread's own
 /// `current_thread()` runtime — NOT the bg runtime. The phase-agent tasks
@@ -888,6 +913,80 @@ fn run_workflow_inner(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
 
     let result = runtime.block_on(async move { run_workflow_async(ctx).await });
     result
+}
+
+/// (WF-G) Offline engine selftest, invoked via
+/// `LIBERTAI_WORKFLOW_SELFTEST=<script> libertai code`. Runs `script`
+/// through the REAL engine (dedicated JS thread, drive loop, prelude) with
+/// no LLM session — `log`/`phase`/values/errors all work; `agent()` calls
+/// have no model behind them, so selftest scripts should not use them
+/// (they would run until the workflow timeout). Prints the summary + log
+/// lines to stderr; exit status reflects the run status. This gives the
+/// offline probe suite a real end-to-end hook.
+pub fn run_selftest(script: &str, cfg: Arc<crate::config::Config>) -> anyhow::Result<()> {
+    use crate::commands::code_approvals::PromptChoice;
+
+    struct DenyUi;
+    #[async_trait]
+    impl ApprovalUi for DenyUi {
+        async fn decide(&self, _tool: &str, _preview: &str, _rule: &str) -> PromptChoice {
+            PromptChoice::Deny
+        }
+    }
+
+    let reactor = asupersync::runtime::reactor::create_reactor()
+        .map_err(|e| anyhow::anyhow!("selftest reactor init: {e}"))?;
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .map_err(|e| anyhow::anyhow!("selftest runtime init: {e}"))?;
+
+    let state = WorkflowState::new(next_wf_id(), "selftest".to_string());
+    let state_for_logs = Arc::clone(&state);
+    let script = script.to_string();
+    let outcome = runtime.block_on(async move {
+        let bg_handle = asupersync::runtime::Runtime::current_handle()
+            .ok_or_else(|| anyhow::anyhow!("selftest: no runtime handle"))?;
+        let ctx = WorkflowRunCtx {
+            script,
+            wf_name: "selftest".to_string(),
+            cfg,
+            state,
+            bridge: WorkflowBridge::new(),
+            registry: AgentRegistry::new(),
+            mode: ModeFlag::new(crate::commands::code_factory::Mode::Normal),
+            approvals: Arc::new(ApprovalState::new()),
+            ui: Arc::new(DenyUi),
+            parent_depth: 0,
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            bash_wrapper: None,
+            bg_handle,
+            on_update: None,
+        };
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || run_workflow_on_thread(ctx, Some(tx)));
+        // Poll + yield (same reasoning as WorkflowTool::execute — never
+        // block the current_thread runtime).
+        loop {
+            match rx.try_recv() {
+                Ok(r) => break Ok::<_, anyhow::Error>(r),
+                Err(mpsc::TryRecvError::Empty) => asupersync::runtime::yield_now().await,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    anyhow::bail!("selftest: JS thread exited without a result")
+                }
+            }
+        }
+    })?;
+
+    for line in state_for_logs.logs.lock().unwrap().iter() {
+        eprintln!("workflow selftest log: {line}");
+    }
+    eprintln!("workflow selftest: {}", outcome.summary);
+    if outcome.final_status == WorkflowStatus::Completed {
+        Ok(())
+    } else {
+        anyhow::bail!("workflow selftest {}", outcome.summary)
+    }
 }
 
 /// The async drive loop, run on the dedicated thread's runtime. Owns the
@@ -1127,25 +1226,7 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
         // live tree + /workflows read them, and background runs have no
         // on_update), and additionally streamed to the parent turn for
         // synchronous runs (best-effort).
-        let logs = ctx.bridge.drain_logs();
-        if !logs.is_empty() {
-            ctx.state.logs.lock().unwrap().extend(logs.iter().cloned());
-            if let Some(on_update) = &ctx.on_update {
-                for line in logs {
-                    on_update(ToolUpdate {
-                        content: vec![ContentBlock::Text(TextContent::new(format!(
-                            "[workflow:{}] {line}\n",
-                            ctx.wf_name
-                        )))],
-                        details: Some(serde_json::json!({
-                            "kind": "workflow_log",
-                            "workflow": ctx.wf_name,
-                            "line": line,
-                        })),
-                    });
-                }
-            }
-        }
+        flush_workflow_logs(ctx);
 
         // Drain JS microtasks (resolve/reject callbacks, promise chains).
         rt.idle().await;
@@ -1166,6 +1247,11 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
         // completions land in the bridge which we drain above.
         asupersync::runtime::yield_now().await;
     }
+
+    // (WF-G) Final log flush: `log()` lines pushed during the LAST
+    // microtask drain (e.g. right before the script settles) arrive after
+    // the loop's drain but before the break — without this they were lost.
+    flush_workflow_logs(ctx);
 
     // (WF-D) Script-level failure signals collected during the run.
     let script_error = eval_failed.or_else(|| ctx.bridge.script_error.lock().unwrap().clone());
