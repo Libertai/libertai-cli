@@ -2247,6 +2247,26 @@ pub fn run(
     )?;
     guard.alt_screen = true;
 
+    // (B4-KITTY) Opt into the kitty keyboard protocol where supported so
+    // Shift+Enter arrives as Enter+SHIFT (the modified-Enter arms in
+    // `handle_key` already insert a newline for it). Pushed AFTER
+    // `EnterAlternateScreen` — the flag stack is per-screen-buffer — and
+    // recorded on the guard so suspend/resume/Drop pop and re-push it
+    // (external editor gets a vanilla keyboard; nothing leaks on exit).
+    // Raw mode is already on, so `supports_keyboard_enhancement` can poll
+    // safely. Terminals without support (xterm & co.) skip the push and
+    // keep today's behaviour (Alt+Enter / Ctrl+J / \+Enter).
+    if matches!(
+        crossterm::terminal::supports_keyboard_enhancement(),
+        Ok(true)
+    ) {
+        crossterm::execute!(
+            stdout,
+            crossterm::event::PushKeyboardEnhancementFlags(TerminalGuard::kbd_flags())
+        )?;
+        guard.kbd_enhanced = true;
+    }
+
     // Enable bracketed paste (`ESC[?2004h`) last so it is the first thing
     // torn down. Held as a RAII guard — NOT a bare `execute!` — so its Drop
     // emits `DisableBracketedPaste` (`ESC[?2004l`) on every exit path,
@@ -2906,6 +2926,15 @@ fn run_loop(
             app.set_dirty();
             match event::read()? {
                 Event::Key(key) => {
+                    // (B4-KITTY) Only act on key presses. Kitty-protocol
+                    // terminals (and some Windows/legacy paths) can deliver
+                    // Repeat/Release events; nothing was filtering kinds
+                    // before, so a Release would double-fire every binding.
+                    // Repeat is allowed (held-key auto-repeat should keep
+                    // moving the cursor); Release is dropped.
+                    if key.kind == crossterm::event::KeyEventKind::Release {
+                        continue;
+                    }
                     if let Some(action) = handle_key(app, key, &cmd_tx, shared_abort) {
                         match action {
                             Action::Quit => break,
@@ -3676,9 +3705,13 @@ fn handle_key(
         // (so the palette's filter has a prefix to read), then the palette
         // state is armed. Only fires when the textarea is empty — typing `/`
         // mid-prompt just appends a literal `/`. Streaming is excluded: the
-        // palette is an Idle-only affordance.
-        (KeyCode::Char('/'), KeyModifiers::NONE)
-            if app.phase == Phase::Idle && app.textarea.is_empty() =>
+        // palette is an Idle-only affordance. SHIFT is accepted alongside
+        // NONE for the same reason as the `@` arm below: kitty/enhanced
+        // keyboards report shifted-layout `/` with the SHIFT modifier set.
+        (KeyCode::Char('/'), m)
+            if (m == KeyModifiers::NONE || m == KeyModifiers::SHIFT)
+                && app.phase == Phase::Idle
+                && app.textarea.is_empty() =>
         {
             app.textarea.input(key);
             app.slash_palette = Some(SlashPalette { selected: 0 });

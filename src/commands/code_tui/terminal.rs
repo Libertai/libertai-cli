@@ -32,6 +32,13 @@ pub(crate) struct TerminalGuard {
     pub(crate) raw_mode: bool,
     pub(crate) alt_screen: bool,
     restore_mouse: bool,
+    /// (B4-KITTY) True when the kitty keyboard-enhancement flags were pushed
+    /// at setup (`supports_keyboard_enhancement()` reported yes). The flag
+    /// stack is per-screen-buffer, so suspend/Drop must POP while still in
+    /// the alternate screen (before `LeaveAlternateScreen`) and resume must
+    /// re-PUSH after re-entering it — otherwise the external editor (Ctrl+O)
+    /// would inherit an enhanced keyboard, or the flags would leak on exit.
+    pub(crate) kbd_enhanced: bool,
     pub(crate) terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
 }
 
@@ -45,8 +52,19 @@ impl TerminalGuard {
             raw_mode: false,
             alt_screen: false,
             restore_mouse,
+            kbd_enhanced: false,
             terminal: None,
         }
+    }
+
+    /// (B4-KITTY) The keyboard-enhancement flags we push where supported:
+    /// DISAMBIGUATE so modified keys (Shift+Enter) arrive distinguishable,
+    /// REPORT_ALTERNATE_KEYS for shifted-key fidelity. Deliberately NOT
+    /// REPORT_EVENT_TYPES — we don't want Repeat/Release event floods; the
+    /// Release filter in `run_loop` is belt-and-braces.
+    pub(crate) fn kbd_flags() -> crossterm::event::KeyboardEnhancementFlags {
+        use crossterm::event::KeyboardEnhancementFlags as K;
+        K::DISAMBIGUATE_ESCAPE_CODES | K::REPORT_ALTERNATE_KEYS
     }
 
     /// Suspend the TUI to hand the terminal to a subprocess (the external
@@ -64,6 +82,22 @@ impl TerminalGuard {
     pub(crate) fn suspend(&mut self) -> anyhow::Result<()> {
         use crossterm::execute;
         let disable_mouse = should_disable_mouse(self.restore_mouse);
+        // (B4-KITTY) Pop the enhancement flags FIRST, while still in the alt
+        // screen (the stack is per-screen-buffer) — the subprocess gets a
+        // vanilla keyboard.
+        if self.kbd_enhanced {
+            if let Some(terminal) = self.terminal.as_mut() {
+                let _ = execute!(
+                    terminal.backend_mut(),
+                    crossterm::event::PopKeyboardEnhancementFlags
+                );
+            } else {
+                let _ = execute!(
+                    std::io::stdout(),
+                    crossterm::event::PopKeyboardEnhancementFlags
+                );
+            }
+        }
         if let Some(terminal) = self.terminal.as_mut() {
             // Flush any buffered frame before leaving the alt screen so the
             // editor inherits a clean terminal. `Terminal::flush` is the
@@ -131,6 +165,21 @@ impl TerminalGuard {
         } else {
             execute!(std::io::stdout(), EnterAlternateScreen)?;
         }
+        // (B4-KITTY) Re-push the enhancement flags now that we're back in
+        // the alternate screen (inverse of the pop in `suspend`).
+        if self.kbd_enhanced {
+            if let Some(terminal) = self.terminal.as_mut() {
+                let _ = execute!(
+                    terminal.backend_mut(),
+                    crossterm::event::PushKeyboardEnhancementFlags(Self::kbd_flags())
+                );
+            } else {
+                let _ = execute!(
+                    std::io::stdout(),
+                    crossterm::event::PushKeyboardEnhancementFlags(Self::kbd_flags())
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -170,6 +219,21 @@ impl Drop for TerminalGuard {
         #[cfg(test)]
         drop_probe_mark_ran();
         let disable_mouse = should_disable_mouse(self.restore_mouse);
+        // (B4-KITTY) Best-effort pop of the enhancement flags before leaving
+        // the alt screen, so they never leak into the user's shell.
+        if self.kbd_enhanced {
+            if let Some(terminal) = self.terminal.as_mut() {
+                let _ = crossterm::execute!(
+                    terminal.backend_mut(),
+                    crossterm::event::PopKeyboardEnhancementFlags
+                );
+            } else if self.alt_screen {
+                let _ = crossterm::execute!(
+                    std::io::stdout(),
+                    crossterm::event::PopKeyboardEnhancementFlags
+                );
+            }
+        }
         if let Some(mut terminal) = self.terminal.take() {
             let _ = terminal.show_cursor();
             if disable_mouse {
