@@ -229,6 +229,16 @@ impl WorkflowState {
         }
     }
 
+    /// (WF-F) True when the run reached a terminal status within `within`
+    /// — the live tree keeps a short "completion flash" so the final state
+    /// is visible before the tree row disappears.
+    pub fn finished_within(&self, within: std::time::Duration) -> bool {
+        self.finished_at
+            .lock()
+            .unwrap()
+            .is_some_and(|f| f.elapsed() <= within)
+    }
+
     /// Wall-clock runtime: live for Running, frozen at the terminal
     /// transition for finished runs.
     pub fn elapsed(&self) -> std::time::Duration {

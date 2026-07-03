@@ -3094,8 +3094,10 @@ fn run_loop(
         // Animate spinner. The flag MUST be set when the frame advances so
         // the spinner never freezes (it animates every tick during
         // Streaming); when not streaming the index is unchanged and we leave
-        // the flag alone.
-        if app.phase == Phase::Streaming {
+        // the flag alone. (WF-F) Active workflows also animate — their live
+        // tree shows spinner glyphs while the app itself can be Idle
+        // (background runs).
+        if app.phase == Phase::Streaming || app.workflows.active_count() > 0 {
             app.spinner_idx = (app.spinner_idx + 1) % theme::SPINNER_FRAMES.len();
             app.set_dirty();
         }
@@ -5810,7 +5812,11 @@ const WIRED_COMMANDS: &[(&str, &[&str], &str)] = &[
     ("/team", &[], "Spawn a team of teammate agents"),
     ("/agent", &[], "Spawn a background agent"),
     ("/agents", &[], "List live agents"),
-    ("/workflows", &[], "List workflows"),
+    (
+        "/workflows",
+        &[],
+        "List workflow runs: id, status, elapsed, phases, outcome",
+    ),
     // Honest stubs (so these stop silently falling through to "unknown
     // command"): advertised in /help + the palette, with stub arms in
     // handle_slash_command pushing a "not yet supported in TUI" System line.
@@ -7317,17 +7323,31 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     snapshot.len()
                 )));
                 for wf in &snapshot {
+                    // (WF-F) Enriched row: run id, elapsed, background
+                    // marker — completed runs stay as session history
+                    // (capped in the registry).
+                    let bg = if wf.background.load(std::sync::atomic::Ordering::Relaxed) {
+                        " · background"
+                    } else {
+                        ""
+                    };
                     app.transcript.push(TranscriptEntry::System(format!(
-                        "  {} · {}",
+                        "  {} ({}) · {} · {}s{bg}",
                         wf.name,
-                        workflow_status_label(wf.status())
+                        wf.id,
+                        workflow_status_label(wf.status()),
+                        wf.elapsed().as_secs(),
                     )));
                     for phase in wf.phases.lock().unwrap().iter() {
+                        let done = phase
+                            .agents
+                            .iter()
+                            .filter(|a| !a.status().is_active())
+                            .count();
                         app.transcript.push(TranscriptEntry::System(format!(
-                            "    phase \"{}\" ({} agent{})",
+                            "    phase \"{}\" ({done}/{} done)",
                             phase.title,
                             phase.agents.len(),
-                            if phase.agents.len() == 1 { "" } else { "s" }
                         )));
                         for h in &phase.agents {
                             app.transcript.push(TranscriptEntry::System(format!(
@@ -7335,6 +7355,13 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                                 h.name,
                                 status_label(h.status())
                             )));
+                        }
+                    }
+                    // Stored outcome line (summary incl. script result).
+                    if let Some(outcome) = wf.outcome.lock().unwrap().as_deref() {
+                        for line in outcome.lines().take(4) {
+                            app.transcript
+                                .push(TranscriptEntry::System(format!("    {line}")));
                         }
                     }
                 }

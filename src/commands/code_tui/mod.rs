@@ -12,4 +12,5 @@ pub mod scrollback;
 pub mod terminal;
 pub mod theme;
 pub mod view;
+pub mod workflow_panel;
 pub mod wrap;

@@ -23,6 +23,7 @@ use crate::commands::code_tui::input_layout;
 use crate::commands::code_tui::markdown;
 use crate::commands::code_tui::scrollback;
 use crate::commands::code_tui::theme;
+use crate::commands::code_tui::workflow_panel;
 use crate::commands::code_tui::wrap;
 
 /// Draw the full TUI frame.
@@ -49,6 +50,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .unwrap_or(0)
         .min(area.height / 2);
 
+    // (WF-F) Live workflow tree height: natural rows for running (or
+    // just-settled) workflows, capped to a third of the terminal like the
+    // agents panel. Snapshot taken ONCE per frame and shared with
+    // draw_footer so height and render agree.
+    let wf_snapshot = app.workflows.snapshot();
+    let wf_rows = workflow_panel::rows_needed(&wf_snapshot).min(area.height / 3);
+
     // (B3 Fix 5 / B4-INPUT-WIDTH) The input bar grows one row per *visual*
     // (soft-wrapped) row of the draft, capped at `MAX_INPUT_ROWS`, so a
     // multi-line or long-wrapping draft is visible instead of clipped or
@@ -72,6 +80,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         agent_rows,
         &app.queued,
         todo_rows,
+        wf_rows,
         input_lines,
         input_hint,
         area.height,
@@ -105,8 +114,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Draw scrollback transcript.
     scrollback::draw(frame, scrollback_area, app);
 
-    // Draw footer (agents + spinner + queued + rule + input).
-    draw_footer(frame, footer_area, app, &agents, &footer_layout);
+    // Draw footer (workflow tree + agents + spinner + queued + rule + input).
+    draw_footer(
+        frame,
+        footer_area,
+        app,
+        &agents,
+        &wf_snapshot,
+        &footer_layout,
+    );
 
     // Draw approval modal overlay if active.
     if app.phase == Phase::Approval {
@@ -176,6 +192,9 @@ const MAX_INPUT_ROWS: u16 = 6;
 /// The rows, top-to-bottom, are: `todo` overlay, agents header, agents
 /// panel, spinner, queued previews, status rule, input bar.
 struct FooterLayout {
+    /// (WF-F) Live workflow progress tree — top of the footer, shrinks
+    /// before everything except the keymap hint.
+    wf_rows: u16,
     todo_rows: u16,
     agent_header: u16,
     agent_rows: u16,
@@ -195,7 +214,8 @@ impl FooterLayout {
     /// [`compute_footer_layout`]), so the scrollback always keeps its
     /// `Constraint::Min(1)` row.
     fn total(&self) -> u16 {
-        self.todo_rows
+        self.wf_rows
+            + self.todo_rows
             + self.agent_header
             + self.agent_rows
             + self.spinner_h
@@ -233,11 +253,13 @@ fn compute_footer_layout(
     agent_rows: u16,
     queued: &[String],
     todo_rows: u16,
+    wf_rows: u16,
     input_lines: u16,
     input_hint: bool,
     term_height: u16,
 ) -> FooterLayout {
     // Natural (unclamped-by-budget) component heights.
+    let mut wf = wf_rows;
     let mut todo = todo_rows;
     let mut a_rows = agent_rows;
     let mut a_header: u16 = if agent_rows > 0 { 1 } else { 0 };
@@ -250,7 +272,7 @@ fn compute_footer_layout(
     // The footer never fills the whole screen: the scrollback keeps its
     // `Constraint::Min(1)` row, so the footer's budget is `term_height - 1`.
     let budget = term_height.saturating_sub(1);
-    let natural = todo + a_header + a_rows + spinner + queued_rows + rule + hint + input;
+    let natural = wf + todo + a_header + a_rows + spinner + queued_rows + rule + hint + input;
     let mut overflow = natural.saturating_sub(budget);
 
     // Shrink in the degradation priority (least-protected first). Each step
@@ -259,6 +281,14 @@ fn compute_footer_layout(
     let take = hint.min(overflow);
     hint -= take;
     overflow -= take;
+    // 0b. (WF-F) workflow tree — shrinks before todo (the todo list is the
+    // turn's own working state; the tree is ambient progress that also
+    // lives in /workflows).
+    if overflow > 0 {
+        let take = wf.min(overflow);
+        wf -= take;
+        overflow -= take;
+    }
     // 1. todo overlay → 0
     let take = todo.min(overflow);
     todo -= take;
@@ -301,6 +331,7 @@ fn compute_footer_layout(
     }
 
     FooterLayout {
+        wf_rows: wf,
         todo_rows: todo,
         agent_header: a_header,
         agent_rows: a_rows,
@@ -325,9 +356,11 @@ fn draw_footer(
     area: Rect,
     app: &mut App,
     agents: &[Arc<AgentHandle>],
+    wf_snapshot: &[Arc<crate::commands::code_workflow::WorkflowState>],
     layout: &FooterLayout,
 ) {
     let FooterLayout {
+        wf_rows,
         todo_rows,
         agent_header,
         agent_rows,
@@ -343,6 +376,9 @@ fn draw_footer(
         .direction(Direction::Vertical)
         .constraints({
             let mut c = Vec::new();
+            if wf_rows > 0 {
+                c.push(Constraint::Length(wf_rows));
+            }
             if todo_rows > 0 {
                 c.push(Constraint::Length(todo_rows));
             }
@@ -370,6 +406,12 @@ fn draw_footer(
         .split(area);
 
     let mut chunk_idx = 0;
+
+    // (WF-F) Live workflow progress tree at the very top of the footer.
+    if wf_rows > 0 {
+        workflow_panel::draw(frame, chunks[chunk_idx], wf_snapshot, app.spinner_idx);
+        chunk_idx += 1;
+    }
 
     // (todo-fix) Pinned task-list overlay at the top of the footer.
     if todo_rows > 0 {
@@ -1586,20 +1628,20 @@ mod tests {
         let empty: Vec<String> = Vec::new();
         let tall = 60u16; // ample room — no degradation
         assert_eq!(
-            compute_footer_layout(0, &empty, 0, 1, false, tall).input_h,
+            compute_footer_layout(0, &empty, 0, 0, 1, false, tall).input_h,
             1
         );
         assert_eq!(
-            compute_footer_layout(0, &empty, 0, 4, false, tall).input_h,
+            compute_footer_layout(0, &empty, 0, 0, 4, false, tall).input_h,
             4
         );
         assert_eq!(
-            compute_footer_layout(0, &empty, 0, 10, false, tall).input_h,
+            compute_footer_layout(0, &empty, 0, 0, 10, false, tall).input_h,
             MAX_INPUT_ROWS,
             "draft taller than the cap clamps to MAX_INPUT_ROWS"
         );
         assert_eq!(
-            compute_footer_layout(0, &empty, 0, 0, false, tall).input_h,
+            compute_footer_layout(0, &empty, 0, 0, 0, false, tall).input_h,
             1,
             "an empty draft still reserves one input row"
         );
@@ -1612,17 +1654,35 @@ mod tests {
     fn footer_hint_row_drops_first_under_pressure() {
         let empty: Vec<String> = Vec::new();
         // Room to spare: hint present.
-        let fl = compute_footer_layout(0, &empty, 0, 3, true, 60);
+        let fl = compute_footer_layout(0, &empty, 0, 0, 3, true, 60);
         assert_eq!(fl.hint_h, 1);
         assert_eq!(fl.input_h, 3);
         // Tight height: hint gives way before the todo overlay does.
         // Natural: todo 3 + spinner 1 + rule 1 + hint 1 + input 2 = 8,
         // budget 7 → overflow 1 → hint drops, todo survives.
-        let fl = compute_footer_layout(0, &empty, 3, 2, true, 8);
+        let fl = compute_footer_layout(0, &empty, 3, 0, 2, true, 8);
         assert_eq!(fl.hint_h, 0, "hint is pure chrome — first to go");
         assert_eq!(fl.todo_rows, 3, "todo survives while only hint drops");
         assert_eq!(fl.input_h, 2, "input untouched");
         assert!(fl.total() <= 7);
+    }
+
+    /// (WF-F) The workflow tree shrinks AFTER the hint but BEFORE the todo
+    /// overlay, and the input row stays sacred throughout.
+    #[test]
+    fn footer_workflow_tree_shrinks_before_todo() {
+        let empty: Vec<String> = Vec::new();
+        // Room to spare: everything at natural height.
+        let fl = compute_footer_layout(0, &empty, 3, 4, 1, false, 60);
+        assert_eq!(fl.wf_rows, 4);
+        assert_eq!(fl.todo_rows, 3);
+        // Natural: wf 4 + todo 3 + spinner 1 + rule 1 + input 1 = 10,
+        // budget 8 → overflow 2 → wf gives 2 rows, todo untouched.
+        let fl = compute_footer_layout(0, &empty, 3, 4, 1, false, 9);
+        assert_eq!(fl.wf_rows, 2, "wf tree gives way first");
+        assert_eq!(fl.todo_rows, 3, "todo survives while wf shrinks");
+        assert_eq!(fl.input_h, 1);
+        assert!(fl.total() <= 8);
     }
 
     /// (Fix 6) At a tiny terminal height with agents + a pinned todo + queued
@@ -1633,7 +1693,7 @@ mod tests {
     fn footer_layout_fits_and_keeps_input_at_tiny_height() {
         let queued = vec!["a".to_string(), "b".to_string()];
         let term_height = 10u16;
-        let fl = compute_footer_layout(3, &queued, 4, 1, true, term_height);
+        let fl = compute_footer_layout(3, &queued, 4, 2, 1, true, term_height);
         assert!(fl.input_h >= 1, "input row must never collapse below 1");
         assert!(
             fl.total() <= term_height - 1,
@@ -1650,7 +1710,7 @@ mod tests {
     fn footer_layout_input_survives_extreme_pressure() {
         let queued: Vec<String> = (0..4).map(|i| i.to_string()).collect();
         let term_height = 4u16;
-        let fl = compute_footer_layout(20, &queued, 20, 6, true, term_height);
+        let fl = compute_footer_layout(20, &queued, 20, 10, 6, true, term_height);
         assert!(fl.input_h >= 1, "input row is sacred");
         assert!(
             fl.total() <= term_height - 1,
