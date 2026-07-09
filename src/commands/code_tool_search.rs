@@ -20,6 +20,7 @@ use serde::Deserialize;
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 use crate::commands::code_mcp_tool::{mcp_tool_metadata, McpToolMetadata};
 use crate::config::Config;
@@ -108,9 +109,9 @@ impl Tool for ToolSearchTool {
         Ok(render_matches(query, &matches, &metadata))
     }
 
-    fn is_read_only(&self) -> bool {
+    fn effects(&self) -> ToolEffects {
         // Reads the configured tool catalog only; no MCP calls, no writes.
-        true
+        ToolEffects::read()
     }
 }
 

@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 use uuid::Uuid;
 
 const NAME: &str = "mailbox";
@@ -154,10 +155,10 @@ impl Tool for MailboxTool {
         }
     }
 
-    fn is_read_only(&self) -> bool {
+    fn effects(&self) -> ToolEffects {
         // `send` writes a JSON file to a teammate's mailbox; `check`
         // mutates `read` flags in place. Both touch the filesystem.
-        false
+        ToolEffects::write()
     }
 }
 

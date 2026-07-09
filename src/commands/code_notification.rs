@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 use crate::commands::code_approvals::{ApprovalUi, NotifyOutcome};
 use crate::config::Config as LibertaiConfig;
@@ -105,8 +106,8 @@ impl Tool for PushNotificationTool {
         }
     }
 
-    fn is_read_only(&self) -> bool {
-        true
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::read()
     }
 }
 

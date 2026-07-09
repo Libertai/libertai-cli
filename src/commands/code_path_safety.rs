@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 const SAFE_ROOT_ENV: &str = "LIBERTAI_WRITE_SAFE_ROOT";
 
@@ -44,8 +45,8 @@ impl Tool for PathSafetyTool {
         self.inner.parameters()
     }
 
-    fn is_read_only(&self) -> bool {
-        self.inner.is_read_only()
+    fn effects(&self) -> ToolEffects {
+        self.inner.effects()
     }
 
     async fn execute(

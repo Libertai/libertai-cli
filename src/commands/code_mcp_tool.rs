@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -200,8 +201,8 @@ impl Tool for McpCallTool {
         }
     }
 
-    fn is_read_only(&self) -> bool {
-        false
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::write()
     }
 }
 
@@ -266,8 +267,8 @@ impl Tool for McpReadResourceTool {
         Ok(mcp_run_output("resources/read", server, "uri", uri, run))
     }
 
-    fn is_read_only(&self) -> bool {
-        true
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::read()
     }
 }
 
@@ -339,8 +340,8 @@ impl Tool for McpGetPromptTool {
         Ok(mcp_run_output("prompts/get", server, "prompt", name, run))
     }
 
-    fn is_read_only(&self) -> bool {
-        true
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::read()
     }
 }
 
@@ -388,8 +389,8 @@ impl Tool for NamedMcpTool {
         }
     }
 
-    fn is_read_only(&self) -> bool {
-        false
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::write()
     }
 }
 
@@ -645,7 +646,7 @@ mod tests {
         let tool = McpCallTool::new(cfg);
         assert_eq!(tool.name(), "mcp_call");
         assert_eq!(tool.parameters()["required"], json!(["server", "tool"]));
-        assert!(!tool.is_read_only());
+        assert!(tool.effects().writes());
     }
 
     #[test]
@@ -717,7 +718,7 @@ mod tests {
         assert_eq!(tools[0].name(), "mcp__github_docs__search_docs");
         assert_eq!(tools[0].description(), "Search docs");
         assert_eq!(tools[0].parameters()["required"], json!(["query"]));
-        assert!(!tools[0].is_read_only());
+        assert!(tools[0].effects().writes());
     }
 
     #[test]
@@ -749,7 +750,7 @@ mod tests {
         let tools = cached_mcp_context_tools(cfg);
         let names = tools.iter().map(|tool| tool.name()).collect::<Vec<_>>();
         assert_eq!(names, vec!["mcp_read_resource", "mcp_get_prompt"]);
-        assert!(tools.iter().all(|tool| tool.is_read_only()));
+        assert!(tools.iter().all(|tool| tool.effects().reads()));
     }
 
     #[test]

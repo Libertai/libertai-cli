@@ -52,6 +52,7 @@ use async_trait::async_trait;
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 use crate::commands::code_approvals::AskOutcome;
 
@@ -205,11 +206,11 @@ impl Tool for AskUserTool {
         }
     }
 
-    fn is_read_only(&self) -> bool {
+    fn effects(&self) -> ToolEffects {
         // This is interactive and must be an execution barrier: the
         // user prompt should appear exactly where the model placed it,
         // not in a parallel read-only batch after unrelated tools.
-        false
+        ToolEffects::write()
     }
 }
 
@@ -310,7 +311,7 @@ mod tests {
     #[test]
     fn ask_user_is_an_interactive_execution_barrier() {
         let tool = AskUserTool::new(Arc::new(AnswerUi));
-        assert!(!tool.is_read_only());
+        assert!(tool.effects().writes());
     }
 
     #[test]

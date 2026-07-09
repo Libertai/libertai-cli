@@ -93,29 +93,31 @@ zeroize = { version = "1", features = ["derive"] }
 # license field above stays "MIT" for the release branch while the bundled
 # dependency rider is tracked in the pinned fork.
 #
-# Pinned to our fork at Libertai/pi_agent_rust which carries four
-# patches on top of upstream main:
-# - `AgentSessionHandle::set_session_name` (in-process rename, upstream issue #62)
-# - `AgentSessionHandle::set_max_tokens` (per-prompt cap override, upstream issue #63)
-# - `hashline_edit` op defaulting to "replace" when omitted by the model
-# - `AgentSessionHandle::prompt_with_content[_with_abort]` (multimodal SDK)
-# - `AgentSessionHandle::{get_fork_messages,fork}` (desktop /fork integration)
-# - bash `run_in_background` support for long-running servers/watchers
-# - background bash follow-up tools (`bash_output`, `kill_bash`)
-# - native `task` subagent tool for research/code-search delegation
-# - asupersync 0.3.1 -> 0.3.2 bump (fixes franken-decision Result API break;
-#   0.3.2 is the latest stable-compatible release — 0.3.3+ require nightly;
-#   maps new `LockError::TimedOut` variant to `Session` error)
-# - compaction P3: AutoCompactionEnd payload carries tokensAfter (measured
-#   post-compaction via the new estimate_context_tokens_for_entries) +
-#   durationMs (wall-clock) + trigger ("threshold"/"manual"), so the
-#   PostCompact hook (#31) surfaces real numbers instead of a proxy.
-# - compaction P2: SessionOptions.compaction_token_budget_compact + config
-#   knob — a fast path that skips the LLM summarisation round-trip and keeps
-#   a budget-bounded verbatim transcript of the most-recent messages
-#   (compaction::budget_summary). Mirrors Codex's compact_token_budget.rs.
-pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "5bfa4a07", default-features = false }
-asupersync = { version = "=0.3.2", default-features = false, features = ["tls-native-roots"] }
+# Pinned to our fork at Libertai/pi_agent_rust, branch sync/upstream-20260709:
+# the fork's carried patch series rebased onto upstream 329c1f9b (2026-07-08).
+# Carried patches (highlights):
+# - pause-resume primitive for long-running tools (ToolExecution::Paused +
+#   Agent::resume_paused_tools), grafted onto upstream's effect-batching
+#   tool pipeline
+# - bash `run_in_background` + follow-up tools (`bash_output`, `kill_bash`)
+#   and the `command_wrapper` sandbox-launcher hook
+# - native `task` subagent tool + streamed child task updates
+# - `AgentSessionHandle::prompt_with_content[_with_abort]` (multimodal SDK),
+#   in-process session fork, live tool add/remove/refresh, compact
+#   instructions + compaction session overrides (P2 token-budget fast path,
+#   P3 enriched AutoCompactionEnd payload)
+# - read-path hardening: secret redaction, repeated-read dedup, stale-write
+#   warnings; `hashline_edit` op defaulting to "replace"
+# - per-project memory + git context block, PI_AGENT_NAME prompt branding,
+#   env-var hook to dump the assembled system prompt
+# - fix: import StopReason in session.rs (upstream #125 left its own CI red)
+# (set_session_name / max_tokens / set_max_tokens were dropped: upstream
+#  adopted them verbatim.)
+#
+# NOTE: this rev requires the nightly toolchain pinned in rust-toolchain.toml
+# (asupersync 0.3.4 + fsqlite use nightly features).
+pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "3775aae0", default-features = false }
+asupersync = { version = "=0.3.4", default-features = false, features = ["tls-native-roots"] }
 # JavaScript workflow engine (M6 #15) — rquickjs embeds QuickJS as an
 # async-capable sandbox in which user workflow scripts call `agent()`,
 # `parallel()`, `pipeline()`, `phase()`, `log()`. pi already pulls

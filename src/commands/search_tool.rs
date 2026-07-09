@@ -17,6 +17,7 @@ use serde_json::json;
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 use crate::client::{post_search, SearchRequest};
 use crate::config::Config;
@@ -159,8 +160,8 @@ impl Tool for SearchTool {
         .into())
     }
 
-    fn is_read_only(&self) -> bool {
-        true
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::read()
     }
 }
 

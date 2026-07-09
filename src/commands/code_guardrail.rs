@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 const EXACT_WARN_AT: usize = 6;
 const EXACT_HALT_AT: usize = 10;
@@ -132,8 +133,8 @@ impl Tool for GuardrailTool {
         self.inner.parameters()
     }
 
-    fn is_read_only(&self) -> bool {
-        self.inner.is_read_only()
+    fn effects(&self) -> ToolEffects {
+        self.inner.effects()
     }
 
     async fn execute(

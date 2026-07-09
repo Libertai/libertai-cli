@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 const NAME: &str = "todo";
 const LABEL: &str = "Todo";
@@ -147,10 +148,10 @@ impl Tool for TodoTool {
         .into())
     }
 
-    fn is_read_only(&self) -> bool {
+    fn effects(&self) -> ToolEffects {
         // No filesystem / network writes; safe to mark as read-only so
         // pi's parallelism allowances are preserved.
-        true
+        ToolEffects::read()
     }
 }
 

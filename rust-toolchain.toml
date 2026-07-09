@@ -1,3 +1,9 @@
+# Pinned to the same nightly as the pi_agent_rust fork (Libertai/pi_agent_rust).
+# Nightly is required transitively: asupersync 0.3.4+ uses feature(try_trait_v2)
+# and the fsqlite / sqlmodel-sqlite family uses feature(portable_simd). Our own
+# code uses no nightly features. Bump this in lockstep with the fork's
+# rust-toolchain.toml when bumping the pi_agent_rust rev.
 [toolchain]
-channel = "stable"
+channel = "nightly-2026-02-19"
 profile = "minimal"
+components = ["rustfmt", "clippy"]

@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 use crate::commands::code_skills::{self, AgentSkill, SkillPillar};
 
@@ -119,9 +120,9 @@ impl Tool for SkillTool {
         }
     }
 
-    fn is_read_only(&self) -> bool {
+    fn effects(&self) -> ToolEffects {
         // Only reads SKILL.md files from disk; no writes, no network.
-        true
+        ToolEffects::read()
     }
 }
 

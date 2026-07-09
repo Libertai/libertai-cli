@@ -44,6 +44,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 use crate::commands::code_ui::{context_percent, context_window_for};
 
@@ -203,8 +204,8 @@ impl Tool for ContextStatusTool {
             "additionalProperties": false,
         })
     }
-    fn is_read_only(&self) -> bool {
-        true
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::read()
     }
     async fn execute(
         &self,
@@ -266,8 +267,8 @@ impl Tool for RequestCompactionTool {
             "additionalProperties": false,
         })
     }
-    fn is_read_only(&self) -> bool {
-        false
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::write()
     }
     async fn execute(
         &self,
@@ -470,7 +471,7 @@ mod tests {
 
     #[test]
     fn tools_are_correctly_readonly() {
-        assert!(ContextStatusTool::new(snap()).is_read_only());
-        assert!(!RequestCompactionTool::new(snap()).is_read_only());
+        assert!(ContextStatusTool::new(snap()).effects().reads());
+        assert!(RequestCompactionTool::new(snap()).effects().writes());
     }
 }

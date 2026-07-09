@@ -23,6 +23,7 @@ use pi::sdk::{
     create_agent_session, AbortHandle, AgentEvent, Result as PiResult, Tool, ToolExecution,
     ToolOutput, ToolUpdate,
 };
+use pi::tools::ToolEffects;
 
 use crate::commands::code_agents;
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi};
@@ -621,10 +622,10 @@ impl Tool for TaskTool {
         .into())
     }
 
-    fn is_read_only(&self) -> bool {
+    fn effects(&self) -> ToolEffects {
         // The child may mutate (if its tool allowlist includes write/etc),
         // so we can't claim this as read-only.
-        false
+        ToolEffects::write()
     }
 }
 

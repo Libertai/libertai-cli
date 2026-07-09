@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 use crate::commands::code_mailbox::{now_epoch_ms, short_uuid};
 
@@ -514,8 +515,8 @@ impl Tool for CronCreateTool {
             Err(e) => Ok(err(&e)),
         }
     }
-    fn is_read_only(&self) -> bool {
-        false
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::write()
     }
 }
 
@@ -583,8 +584,8 @@ impl Tool for CronListTool {
         }
         Ok(text(out.trim_end()))
     }
-    fn is_read_only(&self) -> bool {
-        true
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::read()
     }
 }
 
@@ -656,8 +657,8 @@ impl Tool for CronDeleteTool {
             )))
         }
     }
-    fn is_read_only(&self) -> bool {
-        false
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::write()
     }
 }
 

@@ -25,6 +25,7 @@ use serde::Deserialize;
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 const NAME: &str = "structured_output";
 const LABEL: &str = "Structured output";
@@ -169,9 +170,9 @@ impl Tool for StructuredOutputTool {
         }
     }
 
-    fn is_read_only(&self) -> bool {
+    fn effects(&self) -> ToolEffects {
         // Pure validation; no writes, no network.
-        true
+        ToolEffects::read()
     }
 }
 

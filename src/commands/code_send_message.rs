@@ -37,6 +37,7 @@ use serde::Deserialize;
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 use crate::commands::code_mailbox::{
     mailbox_dir_for, now_epoch_ms, short_uuid, write_message, MailMessage,
@@ -173,9 +174,9 @@ impl Tool for SendMessageTool {
         )))
     }
 
-    fn is_read_only(&self) -> bool {
+    fn effects(&self) -> ToolEffects {
         // Writes a JSON file to the recipient's mailbox.
-        false
+        ToolEffects::write()
     }
 }
 

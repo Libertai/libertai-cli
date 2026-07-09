@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 const NAME: &str = "team_task";
 const LABEL: &str = "TeamTask";
@@ -383,10 +384,10 @@ impl Tool for TeamTaskTool {
         }
     }
 
-    fn is_read_only(&self) -> bool {
+    fn effects(&self) -> ToolEffects {
         // `update`/`claim` write the JSONL list to disk, so this is
         // not safe to run in parallel with other write tools.
-        false
+        ToolEffects::write()
     }
 }
 

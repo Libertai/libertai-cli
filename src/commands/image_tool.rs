@@ -29,6 +29,7 @@ use serde_json::json;
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 use crate::client::{post_image, ImageRequest};
 use crate::commands::image::numbered_path;
@@ -249,12 +250,12 @@ impl Tool for ImageGenTool {
         .into())
     }
 
-    fn is_read_only(&self) -> bool {
+    fn effects(&self) -> ToolEffects {
         // Writes to disk under cwd. The factory registers this tool
         // outside the ApprovalTool wrapper (mirroring search/fetch), so
         // it's auto-trusted within a session — the file lands in the
         // workspace the user already opened.
-        false
+        ToolEffects::write()
     }
 }
 

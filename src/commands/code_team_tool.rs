@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 use crate::commands::code_factory::ModeFlag;
 use crate::commands::code_team::AgentRegistry;
@@ -247,9 +248,9 @@ impl Tool for SpawnTeamTool {
         .into())
     }
 
-    fn is_read_only(&self) -> bool {
+    fn effects(&self) -> ToolEffects {
         // Spawns background processes and writes to disk.
-        false
+        ToolEffects::write()
     }
 }
 

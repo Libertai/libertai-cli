@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use pi::model::{ContentBlock, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 use crate::commands::code_aux::{SmartApproval, SmartApprovalVerdict};
 use crate::commands::code_diff::{read_preview_file, EditJournal, JournalEntry};
@@ -251,6 +252,14 @@ impl StoredAllowRule {
     }
 }
 
+
+/// Effect-based replacement for the fork's old `Tool::is_read_only`:
+/// a tool is mutating if it declares write, append, or process effects.
+/// (Network-only tools count as read-only here, matching the previous
+/// boolean's semantics for fetch/search.)
+fn effects_are_mutating(effects: pi::tools::ToolEffects) -> bool {
+    effects.writes() || effects.appends() || effects.processes()
+}
 fn always_scope() -> String {
     "always".to_string()
 }
@@ -983,8 +992,8 @@ impl Tool for ApprovalTool {
     fn parameters(&self) -> serde_json::Value {
         self.inner.parameters()
     }
-    fn is_read_only(&self) -> bool {
-        self.inner.is_read_only()
+    fn effects(&self) -> ToolEffects {
+        self.inner.effects()
     }
 
     async fn execute(
@@ -1011,7 +1020,7 @@ impl Tool for ApprovalTool {
         // without a prompt. The agent sees a tool error, learns the
         // tool isn't available right now, and adapts. Read-only tools
         // pass straight through.
-        if matches!(self.mode.get(), Mode::Plan) && !self.inner.is_read_only() {
+        if matches!(self.mode.get(), Mode::Plan) && effects_are_mutating(self.inner.effects()) {
             return Ok(plan_denial_output(self.inner.name()).into());
         }
 
@@ -1023,7 +1032,7 @@ impl Tool for ApprovalTool {
         // sentinel file shows prior interactive consent); by the time
         // we reach here the mode is legitimately set, so we trust it.
         // Mirrors Codex's `AskForApproval::Never`.
-        if matches!(self.mode.get(), Mode::Bypass) && !self.inner.is_read_only() {
+        if matches!(self.mode.get(), Mode::Bypass) && effects_are_mutating(self.inner.effects()) {
             return with_policy_context(
                 self.execute_inner(tool_call_id, effective_input, on_update)
                     .await,
@@ -1233,7 +1242,7 @@ impl ApprovalTool {
         }
         let effective_input = policy_updated_input(&policy_decision, &tool_input);
 
-        if matches!(self.mode.get(), Mode::Plan) && !self.inner.is_read_only() {
+        if matches!(self.mode.get(), Mode::Plan) && effects_are_mutating(self.inner.effects()) {
             return Ok(plan_denial_output(self.inner.name()).into());
         }
 
@@ -1668,9 +1677,9 @@ mod tests {
             serde_json::json!({"type":"object"})
         }
 
-        fn is_read_only(&self) -> bool {
-            false
-        }
+        fn effects(&self) -> ToolEffects {
+        ToolEffects::write()
+    }
 
         async fn execute(
             &self,
@@ -1933,9 +1942,9 @@ mod tests {
         fn parameters(&self) -> serde_json::Value {
             serde_json::json!({"type":"object"})
         }
-        fn is_read_only(&self) -> bool {
-            false
-        }
+        fn effects(&self) -> ToolEffects {
+        ToolEffects::write()
+    }
         async fn execute(
             &self,
             _tool_call_id: &str,
@@ -2016,9 +2025,9 @@ mod tests {
             fn parameters(&self) -> serde_json::Value {
                 serde_json::json!({"type":"object"})
             }
-            fn is_read_only(&self) -> bool {
-                false
-            }
+            fn effects(&self) -> ToolEffects {
+        ToolEffects::write()
+    }
             async fn execute(
                 &self,
                 _tool_call_id: &str,

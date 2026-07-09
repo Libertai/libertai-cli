@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 
 use pi::model::{ContentBlock, ImageContent, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
+use pi::tools::ToolEffects;
 
 const READ_NAME: &str = "notebook_read";
 const EDIT_NAME: &str = "notebook_edit";
@@ -148,8 +149,8 @@ Use this instead of raw JSON reads when inspecting notebooks."
         Ok(notebook_output(&summary, &notebook, false))
     }
 
-    fn is_read_only(&self) -> bool {
-        true
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::read()
     }
 }
 
@@ -200,8 +201,8 @@ cells while preserving the rest of the notebook JSON."
         Ok(text_output(&result, false))
     }
 
-    fn is_read_only(&self) -> bool {
-        false
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::write()
     }
 }
 
@@ -274,8 +275,8 @@ then return a compact cell/output summary. This mutates notebook outputs and sho
         ))
     }
 
-    fn is_read_only(&self) -> bool {
-        false
+    fn effects(&self) -> ToolEffects {
+        ToolEffects::write()
     }
 }
 
