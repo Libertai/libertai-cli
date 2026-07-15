@@ -826,6 +826,14 @@ pub struct ApprovalModal {
     /// approval socket (Issue-1) — the teammate is blocked on its socket
     /// read + the responder writes the choice back over the connection.
     pub responder: ApprovalResponder,
+    /// (SELECT) Index of the highlighted choice row in the navigable option
+    /// list `[Allow, AllowSession, AlwaysAllow, Prefix, GrantRoot, Domain,
+    /// Deny]` (see `approval_choices()` in view.rs — same order the renderer
+    /// packs and the key handler maps back to `PromptChoice`). Moved by
+    /// Up/Down; Enter resolves it. Defaults to `0` (Allow). Letter keys
+    /// (`y/s/a/p/r/o/n`) still jump-straight to a choice regardless of the
+    /// cursor, so existing muscle memory keeps working.
+    pub selected: usize,
     /// (B3 Fix 3) First preview line shown, i.e. a top-anchored scroll
     /// offset into the wrapped preview. `0` shows the top; PageDown/Down
     /// increase it (revealing lower lines), PageUp/Up decrease it. Pure view
@@ -3075,6 +3083,7 @@ fn run_loop(
                             preview: req.preview,
                             always_rule: req.always_rule,
                             responder: ApprovalResponder::Remote(responder),
+                            selected: 0,
                             scroll: 0,
                             max_scroll: 0,
                         });
@@ -7572,17 +7581,39 @@ fn handle_approval_key(app: &mut App, key: KeyEvent, shared_abort: &SharedAbort)
         return None;
     }
 
-    // (B3 Fix 3) Preview scroll — PURE VIEW STATE. These keys do NOT
-    // `take()` the modal, resolve a choice, or touch the responder/phase
-    // (rounds 9-12 invariants); they only move the top-anchored `scroll`
-    // offset into the wrapped preview and redraw. Up/PageUp reveal earlier
-    // lines, Down/PageDown later ones; `scroll` is clamped to `max_scroll`
-    // (pinned by the last draw to the real scrollable range). None of these
-    // are choice keys (y/s/a/p/r/o/n/q/Esc), so they can't shadow the choice
-    // set — an unresolved modal stays up. Return None so the key never leaks
-    // past the modal.
+    // (SELECT + B3 Fix 3) Two kinds of view-state movement live here, BOTH
+    // pure view state — neither takes the modal, resolves a choice, or
+    // touches the responder/phase (rounds 9-12 invariants):
+    //   • Up/Down (no Shift) move the choice cursor `selected` through
+    //     `approval_choices()` (wrapping), so the `❯` arrow + reverse-video
+    //     row tracks the highlight. Enter (below) resolves it.
+    //   • Shift+Up/Shift+Down + PageUp/PageDown scroll the wrapped PREVIEW
+    //     (top-anchored `scroll` offset, clamped to `max_scroll` pinned by
+    //     the last draw). Shift frees Up/Down from the old "scroll preview"
+    //     role so the arrow keys drive the choice list instead.
+    // None of these are choice keys (y/s/a/p/r/o/n/q/Esc), so they can't
+    // shadow the choice set — an unresolved modal stays up. Return None so
+    // the key never leaks past the modal.
+    let choices = crate::commands::code_tui::view::approval_choices();
+    let nchoices = choices.len().max(1);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match key.code {
-        KeyCode::Down => {
+        KeyCode::Down if !shift => {
+            if let Some(a) = app.approval.as_mut() {
+                a.selected = (a.selected + 1) % nchoices;
+            }
+            app.set_dirty();
+            return None;
+        }
+        KeyCode::Up if !shift => {
+            if let Some(a) = app.approval.as_mut() {
+                a.selected = (a.selected + nchoices - 1) % nchoices;
+            }
+            app.set_dirty();
+            return None;
+        }
+        // Shift+Down / PageDown — scroll the preview down.
+        KeyCode::Down if shift => {
             if let Some(a) = app.approval.as_mut() {
                 a.scroll = a.scroll.saturating_add(1).min(a.max_scroll);
             }
@@ -7596,7 +7627,8 @@ fn handle_approval_key(app: &mut App, key: KeyEvent, shared_abort: &SharedAbort)
             app.set_dirty();
             return None;
         }
-        KeyCode::Up => {
+        // Shift+Up / PageUp — scroll the preview up.
+        KeyCode::Up if shift => {
             if let Some(a) = app.approval.as_mut() {
                 a.scroll = a.scroll.saturating_sub(1);
             }
@@ -7615,6 +7647,17 @@ fn handle_approval_key(app: &mut App, key: KeyEvent, shared_abort: &SharedAbort)
 
     let approval = app.approval.take()?;
     let choice = match key.code {
+        // (SELECT) Enter resolves the highlighted choice row. The cursor
+        // index maps to `PromptChoice` via `approval_choices()` — the same
+        // array the renderer indexes, so Enter always picks exactly what the
+        // `❯` arrow is on. Falls back to the catch-all (re-queue + no-op) if
+        // the index is somehow out of range.
+        KeyCode::Enter => {
+            choices
+                .get(approval.selected)
+                .map(|(_, _, c)| c.clone())
+                .unwrap_or(PromptChoice::Allow)
+        }
         KeyCode::Char('y') | KeyCode::Char('Y') => PromptChoice::Allow,
         KeyCode::Char('s') | KeyCode::Char('S') => PromptChoice::AllowSession,
         KeyCode::Char('a') | KeyCode::Char('A') => PromptChoice::AlwaysAllow,
@@ -8319,6 +8362,7 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
                     preview,
                     always_rule,
                     responder: ApprovalResponder::Local(responder),
+                    selected: 0,
                     scroll: 0,
                     max_scroll: 0,
                 });
@@ -11469,6 +11513,7 @@ task = "Do the thing"
             preview: "bash(echo hi)".to_string(),
             always_rule: "bash(echo *)".to_string(),
             responder: ApprovalResponder::Remote(responder),
+            selected: 0,
             scroll: 0,
             max_scroll: 0,
         }
@@ -11621,6 +11666,7 @@ task = "Do the thing"
             preview: "bash(echo hi)".to_string(),
             always_rule: "bash(echo *)".to_string(),
             responder: ApprovalResponder::Local(resp_tx),
+            selected: 0,
             scroll: 0,
             max_scroll: 0,
         });
@@ -11658,6 +11704,7 @@ task = "Do the thing"
             preview: "many\nlines\nof\npreview".to_string(),
             always_rule: "bash(*)".to_string(),
             responder: ApprovalResponder::Local(resp_tx),
+            selected: 0,
             scroll: 0,
             max_scroll: 3,
         });
@@ -11726,6 +11773,7 @@ task = "Do the thing"
             preview: "echo hello world".to_string(),
             always_rule: "bash(echo *)".to_string(),
             responder: ApprovalResponder::Local(resp_tx),
+            selected: 0,
             scroll: 0,
             max_scroll: 0,
         });
@@ -11802,6 +11850,7 @@ task = "Do the thing"
             preview: "echo hi".to_string(),
             always_rule: "bash(echo *)".to_string(),
             responder: ApprovalResponder::Local(resp_tx),
+            selected: 0,
             scroll: 0,
             max_scroll: 0,
         });
@@ -11836,6 +11885,7 @@ task = "Do the thing"
             preview,
             always_rule: "bash(*)".to_string(),
             responder: ApprovalResponder::Local(resp_tx),
+            selected: 0,
             scroll: 0,
             max_scroll: 0,
         });

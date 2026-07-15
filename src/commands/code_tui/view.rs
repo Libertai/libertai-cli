@@ -478,6 +478,27 @@ fn draw_footer(
     input::draw(frame, chunks[chunk_idx], app);
 }
 
+/// The approval choices in navigable order — the single source of truth for
+/// the renderer (the `❯` arrow + reverse-video row) AND the key handler
+/// (Up/Down moves `ApprovalModal::selected` through this list; Enter maps
+/// the index back to [`PromptChoice`]). The order matches the letter-key
+/// arms of [`handle_approval_key`] (`y/s/a/p/r/o/n`) so the cursor and the
+/// `[y]`/`[s]`/… labels never disagree. `(label, color, choice)`.
+pub(crate) fn approval_choices() -> &'static [(&'static str, ratatui::style::Color, crate::commands::code_approvals::PromptChoice)] {
+    use crate::commands::code_approvals::PromptChoice;
+    &[
+        ("[y] Allow", theme::SUCCESS, PromptChoice::Allow),
+        ("[s] Session", theme::WARNING, PromptChoice::AllowSession),
+        ("[a] Always", theme::ACCENT, PromptChoice::AlwaysAllow),
+        // (M4/#10) Per-call scope choices, dim so the primary y/s/a flow
+        // stays visually dominant.
+        ("[p] Prefix", theme::MUTED, PromptChoice::Prefix),
+        ("[r] Root", theme::MUTED, PromptChoice::GrantRoot),
+        ("[o] Domain", theme::MUTED, PromptChoice::Domain),
+        ("[n] Deny", theme::ERROR, PromptChoice::Deny),
+    ]
+}
+
 /// The approval-choice controls, one `(label, style-color)` per option.
 /// Kept as a function so the draw path and the option-line packer agree on
 /// the exact key set — every key here is a live arm of
@@ -487,17 +508,10 @@ fn draw_footer(
 /// even when the terminal is too narrow to fit every option on one row (B3
 /// Fix 2 — the old single line truncated at the pane width and hid deny).
 fn approval_option_tokens() -> Vec<(&'static str, ratatui::style::Color)> {
-    vec![
-        ("[y] Allow", theme::SUCCESS),
-        ("[s] Session", theme::WARNING),
-        ("[a] Always", theme::ACCENT),
-        // (M4/#10) Per-call scope choices, shown dim so the primary y/s/a/n
-        // flow stays visually dominant.
-        ("[p] Prefix", theme::MUTED),
-        ("[r] Root", theme::MUTED),
-        ("[o] Domain", theme::MUTED),
-        ("[n]/Esc Deny", theme::ERROR),
-    ]
+    approval_choices()
+        .iter()
+        .map(|(label, color, _)| (*label, *color))
+        .collect()
 }
 
 /// Pack the approval option tokens into as many rows as needed so every
@@ -536,7 +550,41 @@ fn pack_approval_options(width: usize) -> Vec<ratatui::text::Line<'static>> {
     lines
 }
 
-/// Draw the approval modal as a centered popup.
+/// (SELECT) Build the approval choices as a vertical navigable list — one
+/// row per choice — so Up/Down + Enter work like the ask modal. The
+/// highlighted row (`selected`) gets a `❯ ` prefix and full-row reverse-
+/// video (matching the slash palette's selection style); every other row
+/// gets a `  ` prefix so the labels align. The label color comes from
+/// [`approval_choices`]. Returns one [`Line`] per choice (so `option_rows`
+/// == choice count, never wraps), keeping the height budget exact.
+fn build_approval_choice_lines(selected: usize) -> Vec<ratatui::text::Line<'static>> {
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    let choices = approval_choices();
+    let selected = selected.min(choices.len().saturating_sub(1));
+    let sel_style = Style::default().add_modifier(Modifier::REVERSED);
+    choices
+        .iter()
+        .enumerate()
+        .map(|(i, (label, color, _))| {
+            if i == selected {
+                Line::from(vec![
+                    Span::styled("❯ ", Style::default().fg(theme::ACCENT)),
+                    Span::styled(*label, sel_style.fg(*color)),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(*label, Style::default().fg(*color)),
+                ])
+            }
+        })
+        .collect()
+}
+
+/// Draw the approval modal as a bottom-left-anchored popup (Claude Code
+/// style): pinned to the input gutter and 2 rows above the footer, rather
+/// than floating in the center of the screen.
 ///
 /// The modal is a single opaque box: `Clear` wipes the transcript behind it
 /// (B3 Fix 1) and a rounded, padded [`Block`] frames the content so nothing
@@ -556,9 +604,9 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    // Modal size: 70% width, max 80% height, centered. The block reserves 2
-    // columns for borders + 2 for horizontal padding, so content wraps to
-    // `modal_width - 4`.
+    // Modal size: 70% width, max 80% height, bottom-left-anchored (see the
+    // `modal_x`/`modal_y` placement below). The block reserves 2 columns for
+    // borders + 2 for horizontal padding, so content wraps to `modal_width - 4`.
     let modal_width = (area.width as f32 * 0.7) as u16;
     let max_modal_height = (area.height as f32 * 0.8) as u16;
     let content_width = modal_width.saturating_sub(4).max(1) as usize;
@@ -604,8 +652,14 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &mut App) {
     let more_below = total_preview.saturating_sub(scroll + visible_preview.len());
 
     let modal_height = (inner_height as u16).saturating_add(2);
-    let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
-    let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+    // Bottom-left anchor (Claude Code style): x at the input gutter
+    // (`area.x + 2`, under the `❯ ` prompt), y pinned to the bottom with a
+    // 2-row gap above the footer — mirroring the slash palette / mention
+    // popup instead of floating in the center of the screen. Clamp width so
+    // the box never overflows the right edge on narrow terminals.
+    let modal_width = modal_width.min(area.width.saturating_sub(2));
+    let modal_x = area.x + 2;
+    let modal_y = area.height.saturating_sub(modal_height).saturating_sub(2);
     let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
 
     // (B3 Fix 1) Clear the transcript behind the modal so it reads as one
@@ -726,7 +780,9 @@ fn tail_by_width(s: &str, budget: usize) -> String {
     s[start..].to_string()
 }
 
-/// Draw the ask-user modal as a centered popup.
+/// Draw the ask-user modal as a bottom-left-anchored popup (Claude Code
+/// style): pinned to the input gutter and 2 rows above the footer, rather
+/// than floating in the center of the screen.
 ///
 /// (B3 Fix 4) The question and each option are word-wrapped to the modal
 /// width — grown up to the 80%-height cap to fit — instead of being silently
@@ -749,6 +805,11 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
     // Content wraps to the inner width (borders consume 2 columns).
     let content_width = modal_width.saturating_sub(2).max(1) as usize;
     let max_modal_height = area.height.saturating_sub(2);
+    // Bottom-left anchor (Claude Code style): clamp the width so the box
+    // never overflows the right edge on narrow terminals; `modal_x`/`modal_y`
+    // are set per branch below to pin the box at the input gutter (x = 2)
+    // with a 2-row gap above the footer — mirroring the slash palette.
+    let modal_width = modal_width.min(area.width.saturating_sub(2));
 
     let q_style = Style::default().add_modifier(Modifier::BOLD);
     let label_style = Style::default().fg(theme::MUTED);
@@ -792,8 +853,10 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
         let modal_height = (content_rows as u16)
             .saturating_add(2)
             .min(max_modal_height.max(3));
-        let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
-        let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+        // Bottom-left anchor: x at the input gutter, y pinned with a
+        // 2-row gap above the footer — mirroring the slash palette.
+        let modal_x = area.x + 2;
+        let modal_y = area.height.saturating_sub(modal_height).saturating_sub(2);
         let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
 
         frame.render_widget(Clear, modal_area);
@@ -904,8 +967,10 @@ fn draw_ask_modal(frame: &mut Frame, area: Rect, app: &mut App) {
         let modal_height = (content_rows.min(u16::MAX as usize - 2) as u16)
             .saturating_add(2)
             .min(max_modal_height.max(3));
-        let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
-        let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+        // Bottom-left anchor: x at the input gutter, y pinned with a
+        // 2-row gap above the footer — mirroring the slash palette.
+        let modal_x = area.x + 2;
+        let modal_y = area.height.saturating_sub(modal_height).saturating_sub(2);
         let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
 
         frame.render_widget(Clear, modal_area);
@@ -1291,17 +1356,24 @@ fn draw_slash_palette(frame: &mut Frame, area: Rect, app: &App) {
 
     let entries = slash_palette_filtered(app);
 
-    // Palette geometry: 80% width, centered; bottom-anchored with a 2-row
-    // gap above the footer. Height is the entry count + 2 border rows, capped
-    // at 7 content rows (10 total with borders) so a long list never fills the
-    // screen. An empty filtered list still renders a bordered "no matches" box
-    // — the clamp floor of 1 keeps a content row for that hint (a bare
-    // `.min(7)` gave an empty list ZERO content rows, so the hint line was
-    // built but never drawn).
+    // Palette geometry: 80% width, left-anchored at the input gutter
+    // (`area.x + 2`, aligning with the `❯ ` prompt so the dropdown starts
+    // where the user typed `/`, not centered); bottom-anchored with a
+    // 2-row gap above the footer. Height is the entry count + 2 border rows,
+    // capped at 7 content rows (10 total with borders) so a long list never
+    // fills the screen. An empty filtered list still renders a bordered "no
+    // matches" box — the clamp floor of 1 keeps a content row for that hint
+    // (a bare `.min(7)` gave an empty list ZERO content rows, so the hint
+    // line was built but never drawn).
     let palette_width = ((area.width as f32) * 0.8) as u16;
     let visible_rows = entries.len().clamp(1, 7);
     let palette_height = visible_rows.saturating_add(2) as u16;
-    let palette_x = area.x + (area.width.saturating_sub(palette_width)) / 2;
+    // Left-anchor at the input gutter (the `❯ ` is 2 cols wide, matching the
+    // textarea's left edge) so the palette reads as a dropdown of the input
+    // line, not a centered modal. Clamp width so it never overflows the right
+    // edge on narrow terminals.
+    let palette_width = palette_width.min(area.width.saturating_sub(2));
+    let palette_x = area.x + 2;
     let palette_y = area.height.saturating_sub(palette_height).saturating_sub(2);
     let palette_area = Rect::new(palette_x, palette_y, palette_width, palette_height);
 
@@ -1402,7 +1474,10 @@ fn draw_mention_popup(frame: &mut Frame, area: Rect, app: &App) {
     // content row so the "(no matching files)" hint actually renders.
     let visible_rows = entries.len().clamp(1, 7);
     let popup_height = visible_rows.saturating_add(2) as u16;
-    let popup_x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    // Left-anchor at the input gutter to mirror the slash palette — the
+    // dropdown starts where the user typed `@`, not centered on screen.
+    let popup_width = popup_width.min(area.width.saturating_sub(2));
+    let popup_x = area.x + 2;
     let popup_y = area.height.saturating_sub(popup_height).saturating_sub(2);
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
 
