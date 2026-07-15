@@ -252,7 +252,6 @@ impl StoredAllowRule {
     }
 }
 
-
 /// Effect-based replacement for the fork's old `Tool::is_read_only`:
 /// a tool is mutating if it declares write, append, or process effects.
 /// (Network-only tools count as read-only here, matching the previous
@@ -1678,8 +1677,8 @@ mod tests {
         }
 
         fn effects(&self) -> ToolEffects {
-        ToolEffects::write()
-    }
+            ToolEffects::write()
+        }
 
         async fn execute(
             &self,
@@ -1943,8 +1942,8 @@ mod tests {
             serde_json::json!({"type":"object"})
         }
         fn effects(&self) -> ToolEffects {
-        ToolEffects::write()
-    }
+            ToolEffects::write()
+        }
         async fn execute(
             &self,
             _tool_call_id: &str,
@@ -2026,8 +2025,8 @@ mod tests {
                 serde_json::json!({"type":"object"})
             }
             fn effects(&self) -> ToolEffects {
-        ToolEffects::write()
-    }
+                ToolEffects::write()
+            }
             async fn execute(
                 &self,
                 _tool_call_id: &str,
