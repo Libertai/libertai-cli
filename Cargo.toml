@@ -51,7 +51,8 @@ clap_mangen = "0.3"
 # gethostname(2) wrapper works on minimal containers and Windows, unlike
 # shelling out to a `hostname` binary.
 gethostname = "1"
-reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls-native-roots"], default-features = false }
+# TLS backend selected per-platform in the [target.*] tables below.
+reqwest = { version = "0.12", features = ["json", "blocking"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -180,6 +181,15 @@ tempfile = "3"
 # both flags intact while turning off echo and line buffering.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# native-tls (SecureTransport/SChannel) trusts the OS keychain/store, so the
+# CLI works behind TLS-intercepting proxies (e.g. Zscaler); rustls on Linux
+# keeps OpenSSL out of the .deb.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 
 [dev-dependencies]
 # Black-box probes that spawn the `libertai` binary and assert on its

@@ -170,7 +170,14 @@ fn is_chat_model(id: &str) -> bool {
 }
 
 fn opencode_config_path() -> Result<PathBuf> {
-    let base = dirs::config_dir().ok_or_else(|| anyhow!("could not determine user config dir"))?;
+    // opencode reads its global config from $XDG_CONFIG_HOME/opencode (else
+    // ~/.config/opencode) on every platform, including macOS — not the
+    // Application Support dir that dirs::config_dir() returns there.
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
+        .ok_or_else(|| anyhow!("could not determine opencode config dir"))?;
     Ok(base.join("opencode").join("opencode.json"))
 }
 
