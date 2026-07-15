@@ -145,30 +145,6 @@ pub fn opencode(model: Option<String>, mut args: Vec<String>) -> Result<()> {
     exec_with_env("opencode", &args, env)
 }
 
-/// Heuristic filter for models that are plausibly usable as chat models in
-/// opencode. The `/v1/models` endpoint returns image and embedding models
-/// alongside chat ones, and opencode would happily try to send chat requests
-/// at them and fail confusingly. This filter errs on the side of including
-/// unknown models (chat is the majority case).
-fn is_chat_model(id: &str) -> bool {
-    let lower = id.to_ascii_lowercase();
-    const EXCLUDES: &[&str] = &[
-        "image",
-        "diffusion",
-        "sdxl",
-        "flux",
-        "dall-e",
-        "dalle",
-        "embed",
-        "embedding",
-        "whisper",
-        "tts",
-        "audio",
-        "rerank",
-    ];
-    !EXCLUDES.iter().any(|needle| lower.contains(needle))
-}
-
 fn opencode_config_path() -> Result<PathBuf> {
     // opencode reads its global config from $XDG_CONFIG_HOME/opencode (else
     // ~/.config/opencode) on every platform, including macOS — not the
@@ -199,6 +175,10 @@ fn sync_opencode_config(cfg: &Config) -> Result<(PathBuf, usize)> {
         json!({ "$schema": "https://opencode.ai/config.json" })
     };
 
+    // Real context windows / pricing / text-vs-non-text classification for the
+    // model entries. `None` (offline) degrades to id-only entries.
+    let catalog = crate::commands::model_catalog::load();
+
     // Fetch available models from the server. Fall back to the tier defaults
     // if the call fails (offline, stale key, transient 5xx) so `opencode`
     // still launches with *something* that works.
@@ -214,7 +194,7 @@ fn sync_opencode_config(cfg: &Config) -> Result<(PathBuf, usize)> {
             .data
             .into_iter()
             .map(|m| m.id)
-            .filter(|id| is_chat_model(id))
+            .filter(|id| crate::commands::model_catalog::opencode_keep(id, catalog.as_ref()))
             .collect(),
         Err(e) => {
             eprintln!(
@@ -234,10 +214,7 @@ fn sync_opencode_config(cfg: &Config) -> Result<(PathBuf, usize)> {
     for id in &ids {
         models.insert(
             id.clone(),
-            json!({
-                "name": id,
-                "limit": { "context": 200_000, "output": 16_384 }
-            }),
+            crate::commands::model_catalog::opencode_model_entry(id, catalog.as_ref()),
         );
     }
 
@@ -357,29 +334,3 @@ fn sync_aider_instructions() -> Result<PathBuf> {
 }
 
 const AIDER_INSTRUCTIONS: &str = include_str!("../skills_content/aider-instructions.md");
-
-#[cfg(test)]
-mod tests {
-    use super::is_chat_model;
-
-    #[test]
-    fn filters_image_models() {
-        assert!(!is_chat_model("z-image-turbo"));
-        assert!(!is_chat_model("stable-diffusion-xl"));
-        assert!(!is_chat_model("flux-schnell"));
-    }
-
-    #[test]
-    fn filters_embedding_and_audio() {
-        assert!(!is_chat_model("text-embedding-3-small"));
-        assert!(!is_chat_model("whisper-large-v3"));
-        assert!(!is_chat_model("tts-1"));
-    }
-
-    #[test]
-    fn keeps_chat_models() {
-        assert!(is_chat_model("qwen3.5-122b-a10b"));
-        assert!(is_chat_model("gemma-4-31b-it"));
-        assert!(is_chat_model("hermes-3-8b-tee"));
-    }
-}
