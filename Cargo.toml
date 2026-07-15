@@ -118,7 +118,7 @@ zeroize = { version = "1", features = ["derive"] }
 # NOTE: this rev requires the nightly toolchain pinned in rust-toolchain.toml
 # (asupersync 0.3.4 + fsqlite use nightly features).
 pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "3775aae0", default-features = false }
-asupersync = { version = "=0.3.4", default-features = false, features = ["tls-native-roots"] }
+asupersync = { version = "=0.3.9", default-features = false, features = ["tls-native-roots"] }
 # JavaScript workflow engine (M6 #15) — rquickjs embeds QuickJS as an
 # async-capable sandbox in which user workflow scripts call `agent()`,
 # `parallel()`, `pipeline()`, `phase()`, `log()`. pi already pulls
