@@ -2296,6 +2296,9 @@ mod tests {
     /// The depth gate refuses a workflow that would spawn phase agents at
     /// or above MAX_TASK_DEPTH. This mirrors TaskTool's gate.
     #[test]
+    // Asserts on MAX_TASK_DEPTH are constant by design — they guard the gate's
+    // arithmetic invariant, so they must fire if the const ever changes.
+    #[allow(clippy::assertions_on_constants)]
     fn depth_gate_arithmetic() {
         // parent_depth + 1 >= MAX_TASK_DEPTH → refuse.
         assert!(MAX_TASK_DEPTH <= 3);
