@@ -8877,8 +8877,8 @@ mod tests {
     #[test]
     fn paste_collapse_thresholds() {
         // 9 lines → verbatim; 10 lines → collapse.
-        let nine = vec!["x"; 9].join("\n");
-        let ten = vec!["x"; 10].join("\n");
+        let nine = ["x"; 9].join("\n");
+        let ten = ["x"; 10].join("\n");
         assert!(!paste_should_collapse(&nine));
         assert!(paste_should_collapse(&ten));
         // 999 chars → verbatim; 1000 chars → collapse.
@@ -8930,7 +8930,7 @@ mod tests {
         assert_eq!(app.textarea.lines(), &["a".to_string(), "b".to_string()]);
         assert!(app.pasted_blobs.is_empty());
         // Large paste becomes a placeholder + a stashed blob.
-        let big = vec!["line"; 12].join("\n");
+        let big = ["line"; 12].join("\n");
         apply_paste(&mut app, &big);
         assert_eq!(app.pasted_blobs.len(), 1);
         let joined = app.textarea.lines().join("\n");

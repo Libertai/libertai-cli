@@ -776,7 +776,7 @@ mod tests {
         let before = TERMINAL_PROMPT_CLAIMS.load(Ordering::SeqCst);
         let claim = TerminalPromptClaim::new();
         assert!(terminal_prompt_pending());
-        assert!(TERMINAL_PROMPT_CLAIMS.load(Ordering::SeqCst) >= before + 1);
+        assert!(TERMINAL_PROMPT_CLAIMS.load(Ordering::SeqCst) > before);
         drop(claim);
         assert!(TERMINAL_PROMPT_CLAIMS.load(Ordering::SeqCst) >= before);
     }

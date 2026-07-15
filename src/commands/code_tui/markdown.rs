@@ -2218,7 +2218,7 @@ mod tests {
         // `***`, `~~`, nested empty `** **`.
         for src in &["**", "*", "***", "~~", "** **", "* *", "``", "**``**"] {
             let lines = render(src, 80);
-            assert!(lines.len() >= 1, "renders >=1 line for {src:?}");
+            assert!(!lines.is_empty(), "renders >=1 line for {src:?}");
         }
     }
 

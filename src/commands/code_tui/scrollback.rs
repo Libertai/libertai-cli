@@ -570,7 +570,7 @@ mod tests {
         );
         // Explicitly: the over-wide tool line is counted as 1, not its
         // ceil-division (the HIGH-1 regression).
-        let old_tool_rows = ((tool_w + usable_width - 1) / usable_width).max(1);
+        let old_tool_rows = tool_w.div_ceil(usable_width).max(1);
         assert!(
             old_tool_rows > 1,
             "sanity: old model over-counts the tool line to {old_tool_rows} rows"
@@ -616,7 +616,7 @@ mod tests {
         let line = Line::from(Span::raw("x".repeat(61)));
         assert_eq!(visual_line_count(std::slice::from_ref(&line)), 1);
         // Sanity: this is the case the old ceil-division got wrong.
-        let old_count = ((61 + usable_width - 1) / usable_width).max(1);
+        let old_count = 61_usize.div_ceil(usable_width).max(1);
         assert_eq!(old_count, 4, "old model over-counted to 4, flat count is 1");
     }
 

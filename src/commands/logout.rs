@@ -176,16 +176,6 @@ fn purge_stale_backups(dir: &Path) -> Result<bool> {
     Ok(cleaned)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn secret_fields_include_refresh_token() {
-        assert!(SECRET_AUTH_FIELDS.contains(&"refresh_token"));
-    }
-}
-
 /// Replace a literal libertai `apiKey` in pi's models.json with the `env:`
 /// indirection. Leaves other providers — and any indirection the user set up
 /// themselves (`env:` / `file:` / `!cmd`) — untouched. Returns true when the
@@ -235,4 +225,14 @@ fn scrub_pi_models_json() -> Result<bool> {
         MODELS_JSON_API_KEY_REF
     );
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_fields_include_refresh_token() {
+        assert!(SECRET_AUTH_FIELDS.contains(&"refresh_token"));
+    }
 }

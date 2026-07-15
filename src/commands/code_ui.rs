@@ -4272,7 +4272,7 @@ fn skip_escape_sequence(bytes: &[u8], mut i: usize) -> usize {
             i
         }
         b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => (i + 1).min(bytes.len()),
-        0x40..=0x5f | 0x60..=0x7e => i,
+        0x40..=0x7e => i,
         _ => i,
     }
 }

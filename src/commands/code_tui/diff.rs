@@ -296,7 +296,7 @@ index 111..222 100644
 -removed line
 +added line
 ";
-        let lines = parse_diff(&diff);
+        let lines = parse_diff(diff);
         // diff --git / index / --- / +++ / @@ / context / removed / added /
         // counts-summary = 9 lines.
         assert_eq!(lines.len(), 9, "got {lines:?}");
@@ -345,7 +345,7 @@ diff --git a/x b/x
 +c
 -d
 ";
-        let lines = parse_diff(&diff);
+        let lines = parse_diff(diff);
         let last = lines.last().unwrap();
         assert_eq!(last.spans[0].content, "2 insertions / 2 deletions");
     }
@@ -390,7 +390,7 @@ diff --git a/foo.rs b/foo.rs
 -old line
 +let x = 1;
 ";
-        let lines = parse_diff(&diff);
+        let lines = parse_diff(diff);
         // find the added line (sign '+').
         let added = lines
             .iter()

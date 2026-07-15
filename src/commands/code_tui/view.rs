@@ -1775,7 +1775,7 @@ mod tests {
         let fl = compute_footer_layout(3, &queued, 4, 2, 1, true, term_height);
         assert!(fl.input_h >= 1, "input row must never collapse below 1");
         assert!(
-            fl.total() <= term_height - 1,
+            fl.total() < term_height,
             "footer total {} must leave the scrollback its Min(1) row (budget {})",
             fl.total(),
             term_height - 1
@@ -1792,7 +1792,7 @@ mod tests {
         let fl = compute_footer_layout(20, &queued, 20, 10, 6, true, term_height);
         assert!(fl.input_h >= 1, "input row is sacred");
         assert!(
-            fl.total() <= term_height - 1,
+            fl.total() < term_height,
             "total {} must fit budget {}",
             fl.total(),
             term_height - 1
