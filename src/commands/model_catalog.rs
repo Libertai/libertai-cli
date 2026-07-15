@@ -94,6 +94,10 @@ pub struct Pricing {
 pub struct TextPricing {
     pub price_per_million_input_tokens: f64,
     pub price_per_million_output_tokens: f64,
+    /// Discounted rate for input tokens served from prompt cache. Absent for
+    /// models that don't price cache reads separately.
+    #[serde(default)]
+    pub price_per_million_cached_input_tokens: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -172,6 +176,15 @@ impl Catalog {
             .iter()
             .find(|m| m.id == resolved)
             .filter(|m| m.text_capabilities().is_some() || m.text_pricing().is_some())
+    }
+
+    /// Whether the catalog lists this id at all (any modality), after alias
+    /// and `-thinking` resolution. Lets a caller tell a known non-text model
+    /// (drop it) apart from an id the catalog has never seen (fall back to a
+    /// name heuristic).
+    pub fn knows(&self, id: &str) -> bool {
+        let listed = |x: &str| self.models.iter().any(|m| m.id == self.resolve(x));
+        listed(id) || id.strip_suffix("-thinking").is_some_and(listed)
     }
 
     pub fn context_window(&self, id: &str) -> Option<u32> {
@@ -384,14 +397,14 @@ pub fn enrich_pi_model_entry(entry: &mut Map<String, Value>, catalog: &Catalog) 
     }
     if let Some(pricing) = model.text_pricing() {
         if !entry.contains_key("cost") {
-            // pi's ModelCost requires all four fields; LibertAI has no
-            // separate cache pricing, so cache reads/writes are billed 0.
+            // pi's ModelCost requires all four fields. LibertAI prices cache
+            // reads (discounted input) but not cache writes.
             entry.insert(
                 "cost".to_string(),
                 json!({
                     "input": pricing.price_per_million_input_tokens,
                     "output": pricing.price_per_million_output_tokens,
-                    "cacheRead": 0.0,
+                    "cacheRead": pricing.price_per_million_cached_input_tokens.unwrap_or(0.0),
                     "cacheWrite": 0.0,
                 }),
             );
@@ -412,6 +425,59 @@ pub fn enrich_pi_model_entry(entry: &mut Map<String, Value>, catalog: &Catalog) 
         }
     }
     changed
+}
+
+// ── opencode config integration ─────────────────────────────────────────────
+
+/// Context/output limits written when the catalog can't supply a real window.
+const OPENCODE_FALLBACK_CONTEXT: u32 = 200_000;
+const OPENCODE_FALLBACK_OUTPUT: u32 = 16_384;
+
+/// Whether a `/v1/models` id should appear as a chat model in opencode. Drops
+/// only models the catalog classifies as non-text (image, embedding, audio,
+/// search); keeps text models and any id the catalog doesn't list, so new or
+/// offline models still surface.
+pub fn opencode_keep(id: &str, catalog: Option<&Catalog>) -> bool {
+    match catalog {
+        Some(cat) if cat.knows(id) => cat.find_text(id).is_some(),
+        _ => true,
+    }
+}
+
+/// Build the opencode `provider.libertai.models[<id>]` entry, enriched from
+/// the catalog. `cost` values are USD per million tokens (opencode's
+/// models.dev convention). `reasoning` follows the id: LibertAI serves
+/// `<base>-thinking` as the reasoning variant, so a base id is not reasoning.
+pub fn opencode_model_entry(id: &str, catalog: Option<&Catalog>) -> Value {
+    let model = catalog.and_then(|c| c.find_text(id));
+
+    let context = model
+        .and_then(CatalogModel::text_capabilities)
+        .and_then(|c| c.context_window)
+        .unwrap_or(OPENCODE_FALLBACK_CONTEXT);
+
+    let mut entry = Map::new();
+    entry.insert("name".to_string(), Value::String(id.to_string()));
+    entry.insert(
+        "reasoning".to_string(),
+        Value::Bool(id.ends_with("-thinking")),
+    );
+    entry.insert(
+        "limit".to_string(),
+        json!({ "context": context, "output": OPENCODE_FALLBACK_OUTPUT }),
+    );
+    if let Some(p) = model.and_then(CatalogModel::text_pricing) {
+        entry.insert(
+            "cost".to_string(),
+            json!({
+                "input": p.price_per_million_input_tokens,
+                "output": p.price_per_million_output_tokens,
+                "cache_read": p.price_per_million_cached_input_tokens.unwrap_or(0.0),
+                "cache_write": 0.0,
+            }),
+        );
+    }
+    Value::Object(entry)
 }
 
 // ── Presentation helpers (shared by `libertai models`) ─────────────────────
@@ -535,6 +601,54 @@ mod tests {
             Some((0.25, 1.75))
         );
         assert!(cat.find_text("totally-unknown-thinking").is_none());
+    }
+
+    #[test]
+    fn opencode_keep_drops_only_known_non_text() {
+        let cat = fixture_catalog();
+        assert!(opencode_keep("qwen3.6-35b-a3b", Some(&cat)));
+        assert!(opencode_keep("qwen3.6-35b-a3b-thinking", Some(&cat)));
+        assert!(!opencode_keep("z-image-turbo", Some(&cat)));
+        assert!(!opencode_keep("bge-m3", Some(&cat)));
+        assert!(!opencode_keep("search/google", Some(&cat)));
+        // Unknown to the catalog, or no catalog at all: kept (err to inclusion).
+        assert!(opencode_keep("brand-new-model", Some(&cat)));
+        assert!(opencode_keep("bge-m3", None));
+    }
+
+    #[test]
+    fn opencode_entry_carries_cost_context_and_reasoning() {
+        let cat = fixture_catalog();
+        let e = opencode_model_entry("hermes-3-8b-tee", Some(&cat));
+        assert_eq!(e["name"], "hermes-3-8b-tee");
+        assert_eq!(e["reasoning"], false);
+        assert_eq!(e["limit"]["context"], 16_000);
+        assert_eq!(e["cost"]["input"], 0.15);
+        assert_eq!(e["cost"]["output"], 0.6);
+        assert_eq!(e["cost"]["cache_read"], 0.05);
+        assert_eq!(e["cost"]["cache_write"], 0.0);
+    }
+
+    #[test]
+    fn opencode_entry_reasoning_follows_thinking_suffix() {
+        let cat = fixture_catalog();
+        let thinking = opencode_model_entry("qwen3.6-35b-a3b-thinking", Some(&cat));
+        assert_eq!(thinking["reasoning"], true);
+        // Inherits the base model's window and pricing.
+        assert_eq!(thinking["limit"]["context"], 262_144);
+        assert_eq!(thinking["cost"]["input"], 0.15);
+        assert_eq!(
+            opencode_model_entry("qwen3.6-35b-a3b", Some(&cat))["reasoning"],
+            false
+        );
+    }
+
+    #[test]
+    fn opencode_entry_without_catalog_has_fallback_limits_no_cost() {
+        let e = opencode_model_entry("brand-new-model", None);
+        assert_eq!(e["limit"]["context"], 200_000);
+        assert_eq!(e["reasoning"], false);
+        assert!(e.get("cost").is_none());
     }
 
     #[test]

@@ -10,7 +10,8 @@
           "pricing": {
             "text": {
               "price_per_million_input_tokens": 0.15,
-              "price_per_million_output_tokens": 0.6
+              "price_per_million_output_tokens": 0.6,
+              "price_per_million_cached_input_tokens": 0.05
             }
           },
           "capabilities": {
