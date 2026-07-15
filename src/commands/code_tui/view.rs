@@ -484,7 +484,11 @@ fn draw_footer(
 /// the index back to [`PromptChoice`]). The order matches the letter-key
 /// arms of [`handle_approval_key`] (`y/s/a/p/r/o/n`) so the cursor and the
 /// `[y]`/`[s]`/… labels never disagree. `(label, color, choice)`.
-pub(crate) fn approval_choices() -> &'static [(&'static str, ratatui::style::Color, crate::commands::code_approvals::PromptChoice)] {
+pub(crate) fn approval_choices() -> &'static [(
+    &'static str,
+    ratatui::style::Color,
+    crate::commands::code_approvals::PromptChoice,
+)] {
     use crate::commands::code_approvals::PromptChoice;
     &[
         ("[y] Allow", theme::SUCCESS, PromptChoice::Allow),
@@ -495,7 +499,7 @@ pub(crate) fn approval_choices() -> &'static [(&'static str, ratatui::style::Col
         ("[p] Prefix", theme::MUTED, PromptChoice::Prefix),
         ("[r] Root", theme::MUTED, PromptChoice::GrantRoot),
         ("[o] Domain", theme::MUTED, PromptChoice::Domain),
-        ("[n] Deny", theme::ERROR, PromptChoice::Deny),
+        ("[n]/Esc Deny", theme::ERROR, PromptChoice::Deny),
     ]
 }
 

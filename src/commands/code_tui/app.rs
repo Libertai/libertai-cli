@@ -7652,12 +7652,10 @@ fn handle_approval_key(app: &mut App, key: KeyEvent, shared_abort: &SharedAbort)
         // array the renderer indexes, so Enter always picks exactly what the
         // `❯` arrow is on. Falls back to the catch-all (re-queue + no-op) if
         // the index is somehow out of range.
-        KeyCode::Enter => {
-            choices
-                .get(approval.selected)
-                .map(|(_, _, c)| c.clone())
-                .unwrap_or(PromptChoice::Allow)
-        }
+        KeyCode::Enter => choices
+            .get(approval.selected)
+            .map(|(_, _, c)| c.clone())
+            .unwrap_or(PromptChoice::Allow),
         KeyCode::Char('y') | KeyCode::Char('Y') => PromptChoice::Allow,
         KeyCode::Char('s') | KeyCode::Char('S') => PromptChoice::AllowSession,
         KeyCode::Char('a') | KeyCode::Char('A') => PromptChoice::AlwaysAllow,
@@ -11728,18 +11726,18 @@ task = "Do the thing"
             "PageDown clamps to max_scroll"
         );
 
-        // Up moves -1.
+        // Shift+Up moves -1 (plain Up/Down drive the choice cursor instead).
         handle_approval_key(
             &mut app,
-            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
             &shared_abort,
         );
         assert_eq!(app.approval.as_ref().unwrap().scroll, 2);
 
-        // Down moves +1.
+        // Shift+Down moves +1.
         handle_approval_key(
             &mut app,
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
             &shared_abort,
         );
         assert_eq!(app.approval.as_ref().unwrap().scroll, 3);

@@ -5042,16 +5042,24 @@ mod tests {
 
         let event_path = cwd.path().join("async-event.txt");
         let payload_path = cwd.path().join("async-payload.json");
-        for _ in 0..100 {
-            if event_path.exists() && payload_path.exists() {
+        // Poll on file *content*: the detached shell creates each file (via `>`
+        // / `cat >`) before it finishes writing, so an exists-only check races
+        // the write and reads a half-written file on a slow runner.
+        let mut event = String::new();
+        let mut payload = String::new();
+        for _ in 0..200 {
+            event = std::fs::read_to_string(&event_path).unwrap_or_default();
+            payload = std::fs::read_to_string(&payload_path).unwrap_or_default();
+            if event == "PostToolUse" && payload.contains("\"event\":\"PostToolUse\"") {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert_eq!(std::fs::read_to_string(event_path).unwrap(), "PostToolUse");
-        assert!(std::fs::read_to_string(payload_path)
-            .unwrap()
-            .contains("\"event\":\"PostToolUse\""));
+        assert_eq!(event, "PostToolUse");
+        assert!(
+            payload.contains("\"event\":\"PostToolUse\""),
+            "payload: {payload:?}"
+        );
     }
 
     #[test]
