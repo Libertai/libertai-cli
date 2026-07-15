@@ -219,13 +219,26 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
 
-      - name: Install cargo-deb
-        run: cargo install cargo-deb --locked
+      # cargo-deb packages the binary build-binaries already produced (same
+      # ubuntu-22.04 glibc); --no-build skips a second full release compile.
+      - name: Fetch the Linux release binary
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.check-version.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p target/release
+          gh release download "v$VERSION" --repo "$REPO" \
+            --pattern libertai-linux-x86_64 --dir target/release
+          mv target/release/libertai-linux-x86_64 target/release/libertai
+          chmod 755 target/release/libertai
 
       - name: Build .deb package
-        run: cargo deb -p libertai-cli
+        run: cargo deb --no-build -p libertai-cli
 
       - name: Upload .deb to GitHub Release
         env:
