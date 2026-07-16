@@ -5,7 +5,7 @@ use crate::cli::SkillsAction;
 use crate::commands::output::Styler;
 
 struct BundledSkill {
-    /// Directory name under `.claude/skills/`.
+    /// Directory name under the host's skills dir.
     name: &'static str,
     /// Rendered SKILL.md body (with YAML frontmatter).
     body: &'static str,
@@ -27,6 +27,9 @@ const BUNDLED: &[BundledSkill] = &[
 pub enum Host {
     /// `~/.claude/skills/<name>/SKILL.md`
     Claude,
+    /// `$XDG_CONFIG_HOME/opencode/skills/<name>/SKILL.md` (else
+    /// `~/.config/opencode/skills/`), or `.opencode/skills/` in project mode.
+    OpenCode,
 }
 
 pub fn run(action: SkillsAction) -> Result<()> {
@@ -100,16 +103,114 @@ pub fn install_if_missing(host: Host) -> Result<usize> {
 }
 
 fn skills_base(host: Host, project: bool) -> Result<PathBuf> {
-    let root: PathBuf = if project {
-        std::env::current_dir().context("determining current working directory")?
-    } else {
-        dirs::home_dir().ok_or_else(|| anyhow!("could not determine home directory"))?
-    };
-    Ok(match host {
-        Host::Claude => root.join(dot_claude_path()),
-    })
+    let cwd = std::env::current_dir().context("determining current working directory")?;
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("could not determine home directory"))?;
+    let xdg_config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    Ok(skills_dir(
+        host,
+        project,
+        &cwd,
+        &home,
+        xdg_config.as_deref(),
+    ))
 }
 
-fn dot_claude_path() -> &'static Path {
-    Path::new(".claude/skills")
+fn skills_dir(
+    host: Host,
+    project: bool,
+    cwd: &Path,
+    home: &Path,
+    xdg_config: Option<&Path>,
+) -> PathBuf {
+    match (host, project) {
+        (Host::Claude, true) => cwd.join(".claude/skills"),
+        (Host::Claude, false) => home.join(".claude/skills"),
+        (Host::OpenCode, true) => cwd.join(".opencode/skills"),
+        (Host::OpenCode, false) => {
+            // opencode resolves its config dir from $XDG_CONFIG_HOME (else
+            // ~/.config) on every platform, including macOS.
+            let base = xdg_config
+                .filter(|p| p.is_absolute())
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| home.join(".config"));
+            base.join("opencode").join("skills")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_global_skills_dir_is_home_dot_claude() {
+        let dir = skills_dir(
+            Host::Claude,
+            false,
+            Path::new("/cwd"),
+            Path::new("/home/u"),
+            None,
+        );
+        assert_eq!(dir, PathBuf::from("/home/u/.claude/skills"));
+    }
+
+    #[test]
+    fn claude_project_skills_dir_is_cwd_dot_claude() {
+        let dir = skills_dir(
+            Host::Claude,
+            true,
+            Path::new("/cwd"),
+            Path::new("/home/u"),
+            None,
+        );
+        assert_eq!(dir, PathBuf::from("/cwd/.claude/skills"));
+    }
+
+    #[test]
+    fn opencode_global_skills_dir_uses_xdg_config_home() {
+        let dir = skills_dir(
+            Host::OpenCode,
+            false,
+            Path::new("/cwd"),
+            Path::new("/home/u"),
+            Some(Path::new("/xdg")),
+        );
+        assert_eq!(dir, PathBuf::from("/xdg/opencode/skills"));
+    }
+
+    #[test]
+    fn opencode_global_skills_dir_falls_back_to_home_config() {
+        let dir = skills_dir(
+            Host::OpenCode,
+            false,
+            Path::new("/cwd"),
+            Path::new("/home/u"),
+            None,
+        );
+        assert_eq!(dir, PathBuf::from("/home/u/.config/opencode/skills"));
+    }
+
+    #[test]
+    fn opencode_global_skills_dir_ignores_relative_xdg() {
+        let dir = skills_dir(
+            Host::OpenCode,
+            false,
+            Path::new("/cwd"),
+            Path::new("/home/u"),
+            Some(Path::new("relative/xdg")),
+        );
+        assert_eq!(dir, PathBuf::from("/home/u/.config/opencode/skills"));
+    }
+
+    #[test]
+    fn opencode_project_skills_dir_is_cwd_dot_opencode() {
+        let dir = skills_dir(
+            Host::OpenCode,
+            true,
+            Path::new("/cwd"),
+            Path::new("/home/u"),
+            None,
+        );
+        assert_eq!(dir, PathBuf::from("/cwd/.opencode/skills"));
+    }
 }
