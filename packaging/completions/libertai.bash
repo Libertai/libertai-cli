@@ -439,13 +439,17 @@ _libertai() {
             return 0
             ;;
         libertai__subcmd__ask)
-            opts="-h -V --model --help --version <PROMPT>..."
+            opts="-h -V --model --image --help --version <PROMPT>..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --model)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --image)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

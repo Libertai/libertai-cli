@@ -155,6 +155,7 @@ _arguments "${_arguments_options[@]}" : \
 (ask)
 _arguments "${_arguments_options[@]}" : \
 '--model=[]:MODEL:_default' \
+'*--image=[Attach an image (repeatable)\: a local file (.png, .jpg, .jpeg, .gif, .webp — inlined as base64) or an http(s) URL (passed through for the server to fetch). Requires a vision model]:IMAGE:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 '-V[Print version]' \

@@ -2811,7 +2811,7 @@ fn sampling_chat_messages(
     {
         messages.push(ChatMessage {
             role: "system".to_string(),
-            content: system_prompt.to_string(),
+            content: system_prompt.to_string().into(),
         });
     }
     let source = params
@@ -2825,7 +2825,7 @@ fn sampling_chat_messages(
         };
         messages.push(ChatMessage {
             role: role.to_string(),
-            content: sampling_content_text(message.get("content").unwrap_or(message)),
+            content: sampling_content_text(message.get("content").unwrap_or(message)).into(),
         });
     }
     if messages.is_empty() {
@@ -3198,11 +3198,11 @@ fn prompt_hook_messages(prompt: &str, payload: &serde_json::Value) -> Vec<ChatMe
     vec![
         ChatMessage {
             role: "system".to_string(),
-            content: "You are running as a Claude Code-style hook handler. Return only the hook output. For PreToolUse decisions, return valid JSON using permissionDecision and optional permissionDecisionReason, updatedInput, and additionalContext fields.".to_string(),
+            content: "You are running as a Claude Code-style hook handler. Return only the hook output. For PreToolUse decisions, return valid JSON using permissionDecision and optional permissionDecisionReason, updatedInput, and additionalContext fields.".to_string().into(),
         },
         ChatMessage {
             role: "user".to_string(),
-            content,
+            content: content.into(),
         },
     ]
 }
@@ -3729,14 +3729,14 @@ mod tests {
         let messages = sampling_chat_messages(params.as_object().unwrap()).unwrap();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].role, "system");
-        assert_eq!(messages[0].content, "Follow project instructions.");
+        assert_eq!(messages[0].content.text(), "Follow project instructions.");
         assert_eq!(messages[1].role, "user");
         assert_eq!(
-            messages[1].content,
+            messages[1].content.text(),
             "hello\n[MCP sampling image content: image/png, 4 base64 bytes]"
         );
         assert_eq!(messages[2].role, "assistant");
-        assert_eq!(messages[2].content, "hi");
+        assert_eq!(messages[2].content.text(), "hi");
     }
 
     #[test]
@@ -5000,9 +5000,13 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(messages[0]
             .content
+            .text()
             .contains("Claude Code-style hook handler"));
-        assert!(messages[1].content.contains("Review this payload."));
-        assert!(messages[1].content.contains("\"toolName\": \"bash\""));
+        assert!(messages[1].content.text().contains("Review this payload."));
+        assert!(messages[1]
+            .content
+            .text()
+            .contains("\"toolName\": \"bash\""));
     }
 
     #[test]

@@ -52,7 +52,7 @@ pub fn run(model: Option<String>, system: Option<String>) -> Result<()> {
     if let Some(sys) = system {
         history.push(ChatMessage {
             role: "system".to_string(),
-            content: sys,
+            content: sys.into(),
         });
     }
 
@@ -221,17 +221,17 @@ fn handle_slash(
         "system" => {
             if arg.is_empty() {
                 match history.iter().find(|m| m.role == "system") {
-                    Some(m) => note(&format!("system prompt: {}", m.content), accents),
+                    Some(m) => note(&format!("system prompt: {}", m.content.text()), accents),
                     None => note("no system prompt set — /system <text> to set one", accents),
                 }
             } else {
                 match history.iter_mut().find(|m| m.role == "system") {
-                    Some(m) => m.content = arg.to_string(),
+                    Some(m) => m.content = arg.to_string().into(),
                     None => history.insert(
                         0,
                         ChatMessage {
                             role: "system".to_string(),
-                            content: arg.to_string(),
+                            content: arg.to_string().into(),
                         },
                     ),
                 }
@@ -373,7 +373,7 @@ fn send_turn(
 ) {
     history.push(ChatMessage {
         role: "user".to_string(),
-        content: user_text.to_string(),
+        content: user_text.to_string().into(),
     });
 
     let req = ChatRequest {
@@ -523,7 +523,7 @@ fn send_turn(
 
     history.push(ChatMessage {
         role: "assistant".to_string(),
-        content: assistant,
+        content: assistant.into(),
     });
 }
 

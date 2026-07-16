@@ -138,13 +138,15 @@ fn build_smart_approval_messages(
                 "or unrelated. ESCALATE when uncertain or when human context is needed. ",
                 "Do not add prose before the verdict."
             )
-            .to_string(),
+            .to_string()
+            .into(),
         },
         ChatMessage {
             role: "user".to_string(),
             content: format!(
                 "Tool: {tool_name}\nPreview:\n{preview}\n\nRaw JSON input:\n{input}\n\nVerdict:"
-            ),
+            )
+            .into(),
         },
     ]
 }
@@ -224,7 +226,7 @@ mod tests {
             &"p".repeat(SMART_APPROVAL_INPUT_MAX_CHARS + 100),
             &serde_json::json!({"command": "x".repeat(SMART_APPROVAL_INPUT_MAX_CHARS + 100)}),
         );
-        assert!(messages[1].content.contains("..."));
-        assert!(messages[1].content.len() < SMART_APPROVAL_INPUT_MAX_CHARS * 3);
+        assert!(messages[1].content.text().contains("..."));
+        assert!(messages[1].content.text().len() < SMART_APPROVAL_INPUT_MAX_CHARS * 3);
     }
 }
