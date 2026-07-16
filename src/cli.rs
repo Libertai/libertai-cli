@@ -52,6 +52,11 @@ pub enum Command {
         prompt: Vec<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Attach an image (repeatable): a local file (.png, .jpg, .jpeg,
+        /// .gif, .webp — inlined as base64) or an http(s) URL (passed
+        /// through for the server to fetch). Requires a vision model.
+        #[arg(long)]
+        image: Vec<String>,
     },
 
     /// Streaming chat REPL (Ctrl-D to exit).
@@ -504,7 +509,11 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Status { json } => crate::commands::status::run(json),
         Command::Keys { action } => crate::commands::keys::run(action),
         Command::Models { refresh, json } => crate::commands::models::run(refresh, json),
-        Command::Ask { prompt, model } => crate::commands::ask::run(prompt.join(" "), model),
+        Command::Ask {
+            prompt,
+            model,
+            image,
+        } => crate::commands::ask::run(prompt.join(" "), model, image),
         Command::Search {
             query,
             engines,

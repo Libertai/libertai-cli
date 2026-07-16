@@ -191,7 +191,65 @@ pub fn list_models(cfg: &Config) -> Result<ModelList> {
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    pub content: MessageContent,
+}
+
+/// OpenAI-compatible message content: plain text serializes as a bare JSON
+/// string (the historical wire shape — must not regress for text-only
+/// callers), multimodal content as an array of typed parts.
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    /// The textual portion: the whole string for `Text`, the concatenated
+    /// text parts for `Parts` (images contribute nothing).
+    pub fn text(&self) -> String {
+        match self {
+            MessageContent::Text(s) => s.clone(),
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    ContentPart::ImageUrl { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+}
+
+impl From<String> for MessageContent {
+    fn from(s: String) -> Self {
+        MessageContent::Text(s)
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrlPart },
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ImageUrlPart {
+    pub url: String,
+}
+
+impl ContentPart {
+    pub fn text(text: impl Into<String>) -> Self {
+        ContentPart::Text { text: text.into() }
+    }
+
+    pub fn image_url(url: impl Into<String>) -> Self {
+        ContentPart::ImageUrl {
+            image_url: ImageUrlPart { url: url.into() },
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -551,6 +609,53 @@ fn check_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_message_text_serializes_as_plain_string() {
+        // Text-only messages must keep the historical wire shape:
+        // "content": "<string>", not a one-element parts array.
+        let msg = ChatMessage {
+            role: "user".to_string(),
+            content: "hello".to_string().into(),
+        };
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v, serde_json::json!({"role": "user", "content": "hello"}));
+    }
+
+    #[test]
+    fn chat_message_with_images_serializes_as_openai_parts() {
+        let msg = ChatMessage {
+            role: "user".to_string(),
+            content: MessageContent::Parts(vec![
+                ContentPart::text("what is this?"),
+                ContentPart::image_url("data:image/png;base64,AAAA"),
+                ContentPart::image_url("https://example.com/cat.jpg"),
+            ]),
+        };
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is this?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/cat.jpg"}},
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn message_content_text_accessor_returns_inner_str() {
+        let text: MessageContent = "sys prompt".to_string().into();
+        assert_eq!(text.text(), "sys prompt");
+        let parts = MessageContent::Parts(vec![
+            ContentPart::text("caption"),
+            ContentPart::image_url("https://x/y.png"),
+        ]);
+        assert_eq!(parts.text(), "caption");
+    }
 
     #[test]
     fn error_class_found_through_context_layers() {

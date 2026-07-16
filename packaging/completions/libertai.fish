@@ -82,6 +82,7 @@ complete -c libertai -n "__fish_libertai_using_subcommand models" -l json -d 'Em
 complete -c libertai -n "__fish_libertai_using_subcommand models" -s h -l help -d 'Print help'
 complete -c libertai -n "__fish_libertai_using_subcommand models" -s V -l version -d 'Print version'
 complete -c libertai -n "__fish_libertai_using_subcommand ask" -l model -r
+complete -c libertai -n "__fish_libertai_using_subcommand ask" -l image -d 'Attach an image (repeatable): a local file (.png, .jpg, .jpeg, .gif, .webp — inlined as base64) or an http(s) URL (passed through for the server to fetch). Requires a vision model' -r
 complete -c libertai -n "__fish_libertai_using_subcommand ask" -s h -l help -d 'Print help'
 complete -c libertai -n "__fish_libertai_using_subcommand ask" -s V -l version -d 'Print version'
 complete -c libertai -n "__fish_libertai_using_subcommand chat" -l model -r

@@ -258,11 +258,11 @@ fn call_summarizer(
         messages: vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: system.to_string(),
+                content: system.to_string().into(),
             },
             ChatMessage {
                 role: "user".to_string(),
-                content: user.to_string(),
+                content: user.to_string().into(),
             },
         ],
         stream: Some(false),
