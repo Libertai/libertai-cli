@@ -125,9 +125,10 @@ pub fn opencode(model: Option<String>, mut args: Vec<String>) -> Result<()> {
         path.display()
     );
 
-    // opencode reads Claude-format skills from ~/.claude/skills/, so the same
-    // bundled skills (image, search, …) are picked up automatically.
-    match crate::commands::skills::install_if_missing(crate::commands::skills::Host::Claude) {
+    // Bundled skills (image, search, …) go to opencode's own global skill
+    // dir (~/.config/opencode/skills/) so launching opencode never touches
+    // the user's ~/.claude/ setup.
+    match crate::commands::skills::install_if_missing(crate::commands::skills::Host::OpenCode) {
         Ok(n) if n > 0 => eprintln!("opencode: installed {n} bundled skill(s)"),
         Ok(_) => {}
         Err(e) => eprintln!("opencode: could not install bundled skills: {e:#}"),

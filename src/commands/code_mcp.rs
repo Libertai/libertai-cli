@@ -709,7 +709,10 @@ mod tests {
         use std::net::{TcpListener, TcpStream};
 
         fn accept_with_timeout(listener: &TcpListener) -> TcpStream {
-            let deadline = Instant::now() + Duration::from_secs(5);
+            // Must exceed the client's per-step probe timeout so a slow CI
+            // runner exhausts the client first (probe error with
+            // diagnostics), not this harness thread (opaque join panic).
+            let deadline = Instant::now() + Duration::from_secs(60);
             loop {
                 match listener.accept() {
                     Ok((stream, _)) => return stream,
@@ -821,8 +824,9 @@ mod tests {
             )]),
             ..Config::default()
         };
-        let report = probe_configured_servers(&cfg, Duration::from_secs(2));
-        handle.join().unwrap();
+        // Per-step timeout: generous so loaded CI runners never trip it —
+        // the fake server replies instantly, so the happy path is unaffected.
+        let report = probe_configured_servers(&cfg, Duration::from_secs(30));
         assert_eq!(report.servers.len(), 1);
         let server = &report.servers[0];
         assert_eq!(
@@ -831,6 +835,7 @@ mod tests {
             "{:?}",
             server.diagnostics
         );
+        handle.join().unwrap();
         assert_eq!(server.transport, "legacy-sse");
         assert_eq!(server.tools, vec!["search"]);
         assert_eq!(server.resources, vec!["file:///tmp/a"]);
