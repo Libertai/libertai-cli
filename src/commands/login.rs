@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use dialoguer::console::Term;
 use dialoguer::Select;
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 
 use crate::client::{create_cli_api_key, exchange_code, list_models};
