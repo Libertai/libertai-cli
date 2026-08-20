@@ -88,6 +88,10 @@ sha2 = "0.11"
 sha3 = "0.12"
 rand = "0.10"
 tiny_http = "0.12"
+# Renders the browser sign-in URL as a terminal QR code so a phone (or another
+# device) can scan it — the remote-browser login path. Pure Rust, no heavy
+# transitive deps; default features only (the optional `image`/SVG output is off).
+qrcode = { version = "0.14", default-features = false }
 zeroize = { version = "1", features = ["derive"] }
 
 # `libertai code` — linked pi_agent_rust. MIT + OpenAI/Anthropic rider;

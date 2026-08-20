@@ -1,3 +1,5 @@
+use std::io::{IsTerminal, Write};
+
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use dialoguer::console::Term;
@@ -62,6 +64,7 @@ fn login_with_browser(cfg: &mut Config) -> Result<()> {
     browser_sso_login(cfg, "LibertAI CLI", |url| {
         eprintln!("Opening your browser to sign in…");
         eprintln!("If it doesn't open, visit:\n  {url}");
+        print_login_qr(url);
         let _ = open_url(url);
     })
 }
@@ -140,10 +143,16 @@ pub fn browser_sso_access_token(
 
     open(&authorize);
 
-    // Block until the browser hits the loopback callback (single request).
-    let (code, returned_state) = wait_for_callback(server)?;
-    if returned_state != state {
-        anyhow::bail!("login state mismatch — aborting (possible interference)");
+    // Wait for the one-time code from EITHER the loopback callback OR a code
+    // the user pastes by hand (remote-browser fallback). State is verified
+    // whenever it is known — always for the loopback path, and for a pasted
+    // full redirect URL; a bare pasted code carries none, and the PKCE
+    // verifier still guards the exchange.
+    let (code, returned_state) = collect_login_code(server)?;
+    if let Some(returned) = returned_state {
+        if returned != state {
+            anyhow::bail!("login state mismatch — aborting (possible interference)");
+        }
     }
 
     exchange_code(cfg, &code, &verifier).context("exchanging login code")
@@ -257,6 +266,130 @@ fn wait_for_callback(server: tiny_http::Server) -> Result<(String, String)> {
     }
 }
 
+/// Print a scannable QR code of the sign-in URL to stderr so the user can open
+/// it from a phone or another device — the remote-browser path. Only shown on
+/// an interactive terminal; a render failure (e.g. the URL is too long to
+/// encode) is silently skipped, since the printed URL is the real fallback.
+fn print_login_qr(url: &str) {
+    use qrcode::render::unicode::Dense1x2;
+    use qrcode::EcLevel;
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
+    // Error-correction level L (lowest redundancy) keeps the module count — and
+    // so the on-screen footprint — as small as the URL allows. A terminal QR is
+    // read from a clean, undamaged screen, so the extra recovery of higher
+    // levels buys nothing here. Dense1x2 packs two vertical modules per cell,
+    // the one mapping that renders each module square; the quiet zone (light
+    // border) is required for scanners to lock on.
+    let Ok(code) = qrcode::QrCode::with_error_correction_level(url.as_bytes(), EcLevel::L) else {
+        return;
+    };
+    let rendered = code
+        .render::<Dense1x2>()
+        .dark_color(Dense1x2::Light)
+        .light_color(Dense1x2::Dark)
+        .quiet_zone(true)
+        .build();
+    eprintln!("Or scan this QR code to sign in from your phone:");
+    eprintln!("{rendered}");
+}
+
+/// Wait for the login code from EITHER the loopback callback OR, in an
+/// interactive terminal, a code the user pastes by hand. Racing the two covers
+/// the remote-browser case: a browser on another machine can't reach this
+/// process's `127.0.0.1:<port>` loopback, so the redirect never arrives here —
+/// but the user can copy the `code` (or the whole redirect URL) out of the
+/// browser's address bar and paste it instead.
+///
+/// Returns the `code` plus the `state` when known (always for the loopback
+/// path; for the manual path only when the pasted text carried it). Whichever
+/// source produces input first wins; the loser is abandoned — the process is
+/// short-lived, so a still-blocked reader thread is harmless.
+fn collect_login_code(server: tiny_http::Server) -> Result<(String, Option<String>)> {
+    enum Msg {
+        Callback(Result<(String, String)>),
+        Manual(String),
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    let tx_cb = tx.clone();
+    std::thread::spawn(move || {
+        let _ = tx_cb.send(Msg::Callback(wait_for_callback(server)));
+    });
+
+    // Only offer the manual paste when stdin is an interactive terminal, so the
+    // desktop-app (GUI) caller and non-interactive test harness keep the plain
+    // loopback behaviour and never spawn a reader that blocks on stdin.
+    if std::io::stdin().is_terminal() {
+        eprintln!();
+        eprintln!("If your browser is on a different machine it can't reach this terminal's");
+        eprintln!("local callback. Sign in there, then paste the code from the address bar");
+        eprintln!("(the value after `code=`, or the whole redirect URL).");
+        eprint!("Enter the code: ");
+        let _ = std::io::stderr().flush();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).unwrap_or(0) > 0 {
+                let _ = tx.send(Msg::Manual(line));
+            }
+        });
+    } else {
+        drop(tx);
+    }
+
+    match rx.recv_timeout(std::time::Duration::from_secs(300)) {
+        Ok(Msg::Callback(res)) => res.map(|(code, state)| (code, Some(state))),
+        Ok(Msg::Manual(line)) => parse_manual_code(&line)
+            .ok_or_else(|| anyhow!("could not find a login code in the pasted text")),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            anyhow::bail!("timed out waiting for sign-in — no response after 5 minutes")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("sign-in aborted before a code was received")
+        }
+    }
+}
+
+/// Parse the code out of text the user pasted at the manual prompt. Accepts a
+/// bare code, a `code=…&state=…` query fragment, or a full redirect URL, and
+/// returns `(code, state?)`. Returns `None` when no `code` can be found.
+fn parse_manual_code(input: &str) -> Option<(String, Option<String>)> {
+    let s = input.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // A plain token with no URL/query structure is the code itself. Anything
+    // that looks like a URL or query string is parsed, and MUST yield a
+    // `code=` — a codeless redirect (e.g. an `error=` or state-only URL) is
+    // rejected rather than mistaken for a bare code.
+    let looks_structured =
+        s.contains("://") || s.contains('?') || s.contains("code=") || s.contains("state=");
+    if !looks_structured {
+        return Some((s.to_string(), None));
+    }
+    let url_str = if s.contains("://") {
+        s.to_string()
+    } else {
+        let query = s.rsplit('?').next().unwrap_or(s);
+        format!(
+            "http://127.0.0.1/?{}",
+            query.trim_start_matches(['?', '&'])
+        )
+    };
+    let url = url::Url::parse(&url_str).ok()?;
+    let mut code = None;
+    let mut state = None;
+    for (k, v) in url.query_pairs() {
+        match k.as_ref() {
+            "code" => code = Some(v.into_owned()),
+            "state" => state = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+    Some((code?, state))
+}
+
 fn login_with_api_key(cfg: &mut Config, term: &Term) -> Result<()> {
     eprint!("API key: ");
     let key = term.read_secure_line().context("reading api key")?;
@@ -309,5 +442,38 @@ pub(crate) fn open_url(url: &str) -> Result<()> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_manual_code;
+
+    #[test]
+    fn parses_a_full_redirect_url() {
+        let (code, state) =
+            parse_manual_code("http://127.0.0.1:54321/callback?code=abc123&state=xyz").unwrap();
+        assert_eq!(code, "abc123");
+        assert_eq!(state.as_deref(), Some("xyz"));
+    }
+
+    #[test]
+    fn parses_a_bare_query_fragment() {
+        let (code, state) = parse_manual_code("  code=abc123&state=xyz  ").unwrap();
+        assert_eq!(code, "abc123");
+        assert_eq!(state.as_deref(), Some("xyz"));
+    }
+
+    #[test]
+    fn treats_a_bare_token_as_the_code() {
+        let (code, state) = parse_manual_code("abc123").unwrap();
+        assert_eq!(code, "abc123");
+        assert_eq!(state, None);
+    }
+
+    #[test]
+    fn rejects_empty_or_codeless_input() {
+        assert!(parse_manual_code("   ").is_none());
+        assert!(parse_manual_code("http://127.0.0.1/callback?state=xyz").is_none());
     }
 }
