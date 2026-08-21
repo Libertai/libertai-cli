@@ -48,7 +48,8 @@ impl TerminalGuard {
     /// Construct a guard with no terminal modifications applied yet.
     ///
     /// `restore_mouse`: emit `DisableMouseCapture` on drop iff the caller
-    /// enabled mouse capture (`app.rs` yes; `agent_view.rs` no).
+    /// enabled mouse capture. Neither caller does today (both pass `false`);
+    /// the flag stays for a future caller that opts back into capture.
     pub(crate) fn new(restore_mouse: bool) -> Self {
         TerminalGuard {
             raw_mode: false,

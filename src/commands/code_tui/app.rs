@@ -319,8 +319,8 @@ pub struct App {
     /// into history and incoming agent output must NOT yank them back down.
     /// Mirrors the `follow` contract the AgentOverlay / DiffView /
     /// ToolOutputView overlays already document. Set false when the user
-    /// scrolls up (PageUp / wheel-up), re-armed to true when they scroll back
-    /// to the bottom (PageDown / wheel-down reaching 0) or on `/clear`.
+    /// scrolls up (PageUp), re-armed to true when they scroll back to the
+    /// bottom (PageDown reaching 0) or on `/clear`.
     pub follow: bool,
     /// Spinner frame index.
     pub spinner_idx: usize,
@@ -2938,7 +2938,7 @@ fn run_loop(
         if event::poll(tick)? {
             // An event arrived — the user is interacting. Even a no-op key
             // warrants a redraw (cheap, and harmless), so mark dirty up front
-            // for any keyboard/mouse/resize input. (handle_key may also mutate
+            // for any keyboard/resize/paste input. (handle_key may also mutate
             // app via slash commands / modals; those would set dirty too, but
             // the input itself is enough.)
             app.set_dirty();
