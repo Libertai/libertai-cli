@@ -372,10 +372,7 @@ fn parse_manual_code(input: &str) -> Option<(String, Option<String>)> {
         s.to_string()
     } else {
         let query = s.rsplit('?').next().unwrap_or(s);
-        format!(
-            "http://127.0.0.1/?{}",
-            query.trim_start_matches(['?', '&'])
-        )
+        format!("http://127.0.0.1/?{}", query.trim_start_matches(['?', '&']))
     };
     let url = url::Url::parse(&url_str).ok()?;
     let mut code = None;
