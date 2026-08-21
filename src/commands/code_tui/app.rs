@@ -2236,7 +2236,9 @@ pub fn run(
 
     // Set up terminal — guard created first so any early-return
     // between enable_raw_mode and the end of run_loop is cleaned up.
-    let mut guard = TerminalGuard::new(true);
+    // `restore_mouse = false`: we never enable mouse capture (see below), so
+    // the guard must not emit DisableMouseCapture on suspend/resume/Drop.
+    let mut guard = TerminalGuard::new(false);
 
     // Probe OSC-8 hyperlink capability once at startup (env-var heuristic;
     // see `markdown::probe_osc8_capability`). Terminals that mangle the
@@ -2248,11 +2250,11 @@ pub fn run(
     guard.raw_mode = true;
 
     let mut stdout = std::io::stdout();
-    crossterm::execute!(
-        stdout,
-        EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
-    )?;
+    // Deliberately do NOT enable mouse capture: it makes the terminal forward
+    // clicks/drags to us and suppresses the terminal's own text selection, so
+    // users can't select or copy transcript output. Scrolling stays on the
+    // keyboard (PageUp/PageDown), which is all the wheel ever did here.
+    crossterm::execute!(stdout, EnterAlternateScreen)?;
     guard.alt_screen = true;
 
     // (B4-KITTY) Opt into the kitty keyboard protocol where supported so
@@ -2973,25 +2975,6 @@ fn run_loop(
                                 open_external_editor(app, guard)?;
                             }
                         }
-                    }
-                }
-                Event::Mouse(mouse) => {
-                    use crossterm::event::MouseEventKind;
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => {
-                            // Scrolling up into history disarms auto-tail so
-                            // incoming agent output won't yank the view down.
-                            app.scroll = app.scroll.saturating_add(3);
-                            app.follow = false;
-                        }
-                        MouseEventKind::ScrollDown => {
-                            app.scroll = app.scroll.saturating_sub(3);
-                            // Reaching the bottom re-arms auto-tail.
-                            if app.scroll == 0 {
-                                app.follow = true;
-                            }
-                        }
-                        _ => {}
                     }
                 }
                 Event::Resize(_, _) => {
