@@ -5,10 +5,12 @@
 //! `EnterAlternateScreen`, build a `Terminal` — and need to undo all of that
 //! on every exit path, including panics. [`TerminalGuard`] owns that teardown.
 //!
-//! The two callers differ in exactly one respect: `app.rs` enables mouse
-//! capture during `run_loop` (so its guard must emit `DisableMouseCapture` on
-//! drop), while `agent_view.rs` does not. That difference is captured by the
-//! `restore_mouse` flag passed to [`TerminalGuard::new`].
+//! Neither caller enables mouse capture (that would suppress the terminal's
+//! own text selection, breaking copy-paste of transcript output). The
+//! `restore_mouse` flag passed to [`TerminalGuard::new`] therefore stays
+//! `false` for both; it remains so the guard can drive
+//! `DisableMouseCapture`/`EnableMouseCapture` symmetrically on suspend/resume
+//! and drop if a caller ever opts back into capture.
 
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,

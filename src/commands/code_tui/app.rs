@@ -2934,7 +2934,7 @@ fn run_loop(
             app.dirty = false;
         }
 
-        // Poll for events (keyboard, mouse, resize) with timeout.
+        // Poll for events (keyboard, resize, paste) with timeout.
         if event::poll(tick)? {
             // An event arrived — the user is interacting. Even a no-op key
             // warrants a redraw (cheap, and harmless), so mark dirty up front
@@ -3780,8 +3780,8 @@ fn handle_key(
 
 /// Open the input-bar contents in the user's external editor (Ctrl+O).
 ///
-/// Suspends the TUI (leaves alt screen + raw mode + mouse so the editor
-/// runs in cooked mode), spawns `$VISUAL`/`$EDITOR`/`vi` on a temp file
+/// Suspends the TUI (leaves alt screen + raw mode so the editor runs in
+/// cooked mode), spawns `$VISUAL`/`$EDITOR`/`vi` on a temp file
 /// seeded with the current textarea text, waits for it, then resumes the
 /// TUI and reloads the edited text. The temp file is held open for the
 /// duration of the editor (`NamedTempFile` deletes on drop, so it is
@@ -10296,7 +10296,7 @@ mod tests {
     }
 
     /// (Fix 2) PageUp disarms follow (scrolls into history); PageDown back to
-    /// the bottom re-arms it. Mirrors the mouse wheel up/down semantics.
+    /// the bottom re-arms it, mirroring the PageUp/PageDown scroll semantics.
     #[test]
     fn page_up_disarms_follow_page_down_rearms() {
         let mut app = test_app();
