@@ -5768,6 +5768,7 @@ const WIRED_COMMANDS: &[(&str, &[&str], &str)] = &[
     ("/plan", &[], "Toggle plan mode"),
     ("/model", &[], "Show or set the model"),
     ("/skills", &[], "List active skills"),
+    ("/plugin", &["/plugins"], "List installed plugins (manage via `libertai plugin`)"),
     ("/memory", &[], "Show project memory"),
     (
         "/review",
@@ -6060,6 +6061,23 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                 app.transcript.push(TranscriptEntry::System(format!(
                     "unknown /skills subcommand: {rest}  (try /skills list)",
                 )));
+            }
+            None
+        }
+        "/plugin" | "/plugins" => {
+            // Read-only view: list installed plugins. Management (add
+            // marketplace, install, enable/disable) has an interactive
+            // scan/trust gate, so it lives in the cooked-mode `libertai
+            // plugin …` subcommand rather than the TUI event loop.
+            if rest.is_empty() || rest == "list" || rest == "show" {
+                let text = code_slash_router::plugin_list_text();
+                app.transcript.push(TranscriptEntry::System(text));
+                app.transcript.push(TranscriptEntry::Blank);
+            } else {
+                app.transcript.push(TranscriptEntry::System(format!(
+                    "`/plugin {rest}` isn't available in the REPL — run `libertai plugin {rest}` in your shell.",
+                )));
+                app.transcript.push(TranscriptEntry::Blank);
             }
             None
         }
@@ -16637,7 +16655,7 @@ task = "Do the thing"
     #[test]
     fn slash_help_golden_snapshot() {
         let expected = "Commands: /exit /quit /help /clear /new /mode /permissions /plan /model \
-         /skills /memory /review /security-review /mention /ide /hotkeys /theme /vim /bug \
+         /skills /plugin /plugins /memory /review /security-review /mention /ide /hotkeys /theme /vim /bug \
          /hooks /mcp /forget /undo /notify /notifications /usage /cost /doctor /compact \
          /changelog /tree /diff /output /commit /pr_comments /pr-comments /copy /status /statusline \
          /statusline-command /output-style /history /queue /reload /team /agent /agents /workflows \

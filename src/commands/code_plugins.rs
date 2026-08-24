@@ -980,8 +980,8 @@ pub fn merge_plugin_mcp_servers(cfg: &mut Config) -> usize {
             continue;
         };
         for (name, server) in parsed.mcp_servers {
-            if !cfg.mcp_servers.contains_key(&name) {
-                cfg.mcp_servers.insert(name, server);
+            if let std::collections::hash_map::Entry::Vacant(slot) = cfg.mcp_servers.entry(name) {
+                slot.insert(server);
                 added += 1;
             }
         }

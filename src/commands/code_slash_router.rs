@@ -294,6 +294,28 @@ pub fn skills_list_text() -> String {
     }
 }
 
+/// Render installed plugins for the read-only `/plugin` REPL command.
+/// Management (add marketplace, install, enable/disable) lives in the
+/// cooked-mode `libertai plugin …` subcommand where the scan/trust prompts fit.
+pub fn plugin_list_text() -> String {
+    let cfg = crate::config::load().unwrap_or_default();
+    let mut out = String::new();
+    if cfg.plugins.installed.is_empty() {
+        out.push_str("plugins: none installed.\n");
+        out.push_str("Manage with: libertai plugin marketplace add <git-url>  ·  libertai plugin install <name>\n");
+        return out;
+    }
+    out.push_str("plugins\n");
+    for (key, p) in &cfg.plugins.installed {
+        let state = if p.enabled { "on" } else { "off" };
+        let trust = if p.trusted { ", trusted" } else { "" };
+        let version = p.version.as_deref().unwrap_or("-");
+        out.push_str(&format!("  - {key} [{state}{trust}] {version}\n"));
+    }
+    out.push_str("Manage with: libertai plugin …\n");
+    out
+}
+
 /// Render the current project memory state as text for `/memory show`,
 /// reusing `code_memory::memory_file_for` / `read_memory`.
 ///

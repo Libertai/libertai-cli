@@ -66,6 +66,7 @@ pub mod model_catalog;
 pub mod models;
 pub mod notebook_tool;
 pub mod output;
+pub mod plugin_cli;
 pub mod run;
 pub mod search;
 pub mod search_tool;
