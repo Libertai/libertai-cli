@@ -29,11 +29,38 @@ pub struct ExpansionContext {
 }
 
 pub fn discover(cwd: &Path) -> Vec<CustomCommand> {
-    discover_with_home(
+    let mut cmds = discover_with_home(
         cwd,
         dirs::home_dir().as_deref(),
         dirs::config_dir().as_deref(),
-    )
+    );
+    merge_plugin_commands(&mut cmds);
+    cmds
+}
+
+/// Add slash commands from enabled plugins' `commands/` dirs, filling gaps
+/// only — a plugin never overrides a user/project command of the same
+/// (namespace, name).
+fn merge_plugin_commands(cmds: &mut Vec<CustomCommand>) {
+    let cfg = crate::config::load().unwrap_or_default();
+    let dirs = crate::commands::code_plugins::enabled_component_dirs(&cfg, "commands");
+    if dirs.is_empty() {
+        return;
+    }
+    let mut seen: std::collections::BTreeSet<(Option<String>, String)> = cmds
+        .iter()
+        .map(|c| (c.namespace.clone(), c.name.clone()))
+        .collect();
+    let mut plugin_cmds = Vec::new();
+    for dir in &dirs {
+        scan_dir(dir, CommandSource::User, &mut plugin_cmds);
+    }
+    for cmd in plugin_cmds {
+        if seen.insert((cmd.namespace.clone(), cmd.name.clone())) {
+            cmds.push(cmd);
+        }
+    }
+    cmds.sort_by(|a, b| a.name.cmp(&b.name));
 }
 
 fn discover_with_home(

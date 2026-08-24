@@ -34,6 +34,10 @@ pub struct AgentDefinition {
 /// user definitions by name, matching custom slash command precedence.
 pub fn discover_agents(cwd: &Path) -> Result<Vec<AgentDefinition>> {
     let mut by_name = BTreeMap::<String, AgentDefinition>::new();
+    // Plugin agents load first so user and project definitions override them.
+    for dir in plugin_agent_dirs() {
+        load_dir(&dir, AgentSource::User(dir.clone()), &mut by_name)?;
+    }
     for dir in user_agent_dirs() {
         load_dir(&dir, AgentSource::User(dir.clone()), &mut by_name)?;
     }
@@ -41,6 +45,13 @@ pub fn discover_agents(cwd: &Path) -> Result<Vec<AgentDefinition>> {
         load_dir(&dir, AgentSource::Project(dir.clone()), &mut by_name)?;
     }
     Ok(by_name.into_values().collect())
+}
+
+/// Agent directories from enabled plugins (`<plugin>/agents`). Loaded before
+/// user/project dirs so a same-named user or project agent wins.
+fn plugin_agent_dirs() -> Vec<PathBuf> {
+    let cfg = crate::config::load().unwrap_or_default();
+    crate::commands::code_plugins::enabled_component_dirs(&cfg, "agents")
 }
 
 pub fn find_agent(cwd: &Path, name: &str) -> Result<Option<AgentDefinition>> {

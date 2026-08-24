@@ -43,11 +43,35 @@ pub fn builtin_styles() -> Vec<OutputStyle> {
 }
 
 pub fn load_styles(cwd: Option<&Path>) -> Vec<OutputStyle> {
-    load_styles_with_roots(
+    let mut styles = load_styles_with_roots(
         cwd,
         dirs::home_dir().as_deref(),
         dirs::config_dir().as_deref(),
-    )
+    );
+    merge_plugin_styles(&mut styles);
+    styles
+}
+
+/// Add output styles from enabled plugins' `output-styles/` dirs, filling
+/// gaps only — a plugin never overrides a builtin/user/project style by name.
+fn merge_plugin_styles(styles: &mut Vec<OutputStyle>) {
+    let cfg = crate::config::load().unwrap_or_default();
+    let dirs = crate::commands::code_plugins::enabled_component_dirs(&cfg, "output-styles");
+    if dirs.is_empty() {
+        return;
+    }
+    let mut existing: std::collections::BTreeSet<String> =
+        styles.iter().map(|s| s.name.clone()).collect();
+    let mut plugin_map: BTreeMap<String, OutputStyle> = BTreeMap::new();
+    for dir in &dirs {
+        load_dir(dir, &mut plugin_map);
+    }
+    for (name, style) in plugin_map {
+        if existing.insert(name) {
+            styles.push(style);
+        }
+    }
+    styles.sort_by(|a, b| a.name.cmp(&b.name));
 }
 
 fn load_styles_with_roots(

@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, InstalledPlugin, MarketplaceRef, ScannerConfig};
+use crate::config::{Config, InstalledPlugin, MarketplaceRef, McpServerConfig, ScannerConfig};
 
 /// The two manifest directories we honor, in discovery precedence order:
 /// the LibertAI superset first, the Claude-compatible format second.
@@ -949,6 +949,46 @@ pub fn run_applicable_scanners(
     results
 }
 
+/// The shape of a plugin's `.mcp.json` (`{ "mcpServers": { … } }`).
+#[derive(Deserialize)]
+struct PluginMcpFile {
+    #[serde(rename = "mcpServers", default)]
+    mcp_servers: std::collections::HashMap<String, McpServerConfig>,
+}
+
+/// Merge the MCP servers declared by enabled AND trusted plugins into
+/// `cfg.mcp_servers`, without overriding servers already configured by the
+/// user. Trust is required because an MCP server launches a process — the same
+/// gate that guards hooks. Returns how many servers were added. (Slice 1
+/// merges the config so `/mcp` can list/probe them; a live tool runtime is a
+/// separate phase.)
+pub fn merge_plugin_mcp_servers(cfg: &mut Config) -> usize {
+    let sources: Vec<PathBuf> = cfg
+        .plugins
+        .installed
+        .values()
+        .filter(|p| p.enabled && p.trusted)
+        .map(|p| PathBuf::from(&p.path))
+        .collect();
+    let mut added = 0;
+    for path in sources {
+        let mcp_path = path.join(".mcp.json");
+        let Ok(raw) = std::fs::read_to_string(&mcp_path) else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<PluginMcpFile>(&raw) else {
+            continue;
+        };
+        for (name, server) in parsed.mcp_servers {
+            if !cfg.mcp_servers.contains_key(&name) {
+                cfg.mcp_servers.insert(name, server);
+                added += 1;
+            }
+        }
+    }
+    added
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1130,5 +1170,35 @@ mod tests {
         assert!(p.ends_with("foo"));
         // A `..` source that escapes the marketplace root is rejected.
         assert!(resolve_relative_source(root, &plain, "../").is_err());
+    }
+
+    #[test]
+    fn merge_plugin_mcp_requires_trust() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{ "mcpServers": { "db": { "command": "npx", "args": ["server"] } } }"#,
+        )
+        .unwrap();
+        let mut cfg = crate::config::Config::default();
+        cfg.plugins.installed.insert(
+            "p@m".into(),
+            crate::config::InstalledPlugin {
+                marketplace: "m".into(),
+                path: dir.path().to_string_lossy().to_string(),
+                version: None,
+                sha: None,
+                format: "claude".into(),
+                enabled: true,
+                trusted: false,
+            },
+        );
+        // Enabled but not trusted → nothing merges.
+        assert_eq!(merge_plugin_mcp_servers(&mut cfg), 0);
+        assert!(cfg.mcp_servers.is_empty());
+        // Trusted → the server merges.
+        cfg.plugins.installed.get_mut("p@m").unwrap().trusted = true;
+        assert_eq!(merge_plugin_mcp_servers(&mut cfg), 1);
+        assert!(cfg.mcp_servers.contains_key("db"));
     }
 }
