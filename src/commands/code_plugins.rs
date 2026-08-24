@@ -16,8 +16,10 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::config::{Config, InstalledPlugin, MarketplaceRef, ScannerConfig};
 
 /// The two manifest directories we honor, in discovery precedence order:
 /// the LibertAI superset first, the Claude-compatible format second.
@@ -530,6 +532,423 @@ pub fn effective_scanners(cfg: &crate::config::Config) -> Vec<crate::config::Sca
     }
 }
 
+// ── Marketplace + install operations ─────────────────────────────────────────
+
+/// A marketplace that was just added, for display.
+#[derive(Debug, Clone)]
+pub struct AddedMarketplace {
+    pub name: String,
+    pub path: PathBuf,
+    pub sha: Option<String>,
+    pub plugins: Vec<MarketplacePlugin>,
+}
+
+/// A plugin fetched and audited but not yet committed to config, so the caller
+/// can show the audit and confirm (the `scan_on_install` / trust gate) first.
+#[derive(Debug, Clone)]
+pub struct StagedPlugin {
+    pub name: String,
+    pub marketplace: String,
+    pub path: PathBuf,
+    pub version: Option<String>,
+    pub sha: Option<String>,
+    pub format: ManifestFormat,
+    pub capabilities: CapabilityReport,
+}
+
+/// The outcome of running one external scanner over a staged plugin.
+#[derive(Debug, Clone)]
+pub struct ScanResult {
+    pub scanner: String,
+    /// False when the scanner binary wasn't installed (see `summary`).
+    pub ran: bool,
+    /// The scanner exited zero (no findings).
+    pub passed: bool,
+    pub summary: String,
+}
+
+/// Stable config key for an installed plugin: `"<plugin>@<marketplace>"`.
+#[must_use]
+pub fn install_key(plugin: &str, marketplace: &str) -> String {
+    format!("{plugin}@{marketplace}")
+}
+
+/// Whether a marketplace/plugin source string is a remote git URL (vs a local
+/// filesystem path).
+fn is_remote_source(s: &str) -> bool {
+    s.starts_with("http://")
+        || s.starts_with("https://")
+        || s.starts_with("git@")
+        || s.starts_with("ssh://")
+        || s.ends_with(".git")
+}
+
+/// Run `git` with `args` (optionally in `cwd`), returning trimmed stdout.
+fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
+    let mut cmd = std::process::Command::new("git");
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let out = cmd
+        .args(args)
+        .output()
+        .context("running git — is it installed and on PATH?")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Clone `url` into `dest` (replacing it), pinned to `sha` if given, else
+/// `git_ref`, else the default branch. Returns the checked-out commit SHA.
+fn clone_repo(url: &str, dest: &Path, git_ref: Option<&str>, sha: Option<&str>) -> Result<String> {
+    if dest.exists() {
+        std::fs::remove_dir_all(dest).with_context(|| format!("clearing {}", dest.display()))?;
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let dest_str = dest.to_string_lossy().to_string();
+    if let Some(sha) = sha {
+        run_git(&["clone", url, &dest_str], None)?;
+        run_git(&["checkout", sha], Some(dest))?;
+    } else if let Some(git_ref) = git_ref {
+        run_git(
+            &["clone", "--depth", "1", "--branch", git_ref, url, &dest_str],
+            None,
+        )?;
+    } else {
+        run_git(&["clone", "--depth", "1", url, &dest_str], None)?;
+    }
+    run_git(&["rev-parse", "HEAD"], Some(dest))
+}
+
+/// Recursively copy `src` into `dst`, skipping any `.git` directory.
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Add a marketplace from a git URL or local path: fetch it, read and validate
+/// its manifest, store it under `marketplaces_dir()/<name>`, and record it in
+/// `cfg` (caller persists). Adding a marketplace with an existing name replaces
+/// it, per the Claude Code spec.
+pub fn add_marketplace(cfg: &mut Config, source: &str) -> Result<AddedMarketplace> {
+    let base = crate::config::marketplaces_dir()?;
+    std::fs::create_dir_all(&base)?;
+    let staging = base.join(".staging");
+    let sha = if is_remote_source(source) {
+        Some(clone_repo(source, &staging, None, None)?)
+    } else {
+        let src = PathBuf::from(source);
+        anyhow::ensure!(src.is_dir(), "marketplace path not found: {source}");
+        if staging.exists() {
+            std::fs::remove_dir_all(&staging)?;
+        }
+        copy_dir_all(&src, &staging)?;
+        None
+    };
+
+    let result = (|| {
+        let (manifest, _fmt) = read_marketplace_manifest(&staging)?.ok_or_else(|| {
+            anyhow!("no .libertai-plugin/ or .claude-plugin/ marketplace.json found in {source}")
+        })?;
+        validate_marketplace_name(&manifest.name)?;
+        let dest = base.join(&manifest.name);
+        if dest.exists() {
+            std::fs::remove_dir_all(&dest)?;
+        }
+        std::fs::rename(&staging, &dest)
+            .with_context(|| format!("moving marketplace into {}", dest.display()))?;
+        cfg.plugins.marketplaces.insert(
+            manifest.name.clone(),
+            MarketplaceRef {
+                source: source.to_string(),
+                path: dest.to_string_lossy().to_string(),
+                sha: sha.clone(),
+            },
+        );
+        Ok(AddedMarketplace {
+            name: manifest.name,
+            path: dest,
+            sha,
+            plugins: manifest.plugins,
+        })
+    })();
+    // Best-effort cleanup of the staging dir on any failure.
+    if result.is_err() && staging.exists() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+/// The plugins listed by an added marketplace (re-read from its local copy).
+pub fn marketplace_plugins(cfg: &Config, marketplace: &str) -> Result<Vec<MarketplacePlugin>> {
+    let mref = cfg
+        .plugins
+        .marketplaces
+        .get(marketplace)
+        .ok_or_else(|| anyhow!("marketplace `{marketplace}` is not added"))?;
+    let (manifest, _fmt) = read_marketplace_manifest(Path::new(&mref.path))?
+        .ok_or_else(|| anyhow!("marketplace `{marketplace}` manifest missing — re-add it"))?;
+    Ok(manifest.plugins)
+}
+
+/// Remove an added marketplace and delete its local copy (caller persists).
+/// Installed plugins from it are left in place.
+pub fn remove_marketplace(cfg: &mut Config, name: &str) -> Result<()> {
+    let m = cfg
+        .plugins
+        .marketplaces
+        .remove(name)
+        .ok_or_else(|| anyhow!("marketplace `{name}` is not added"))?;
+    let path = PathBuf::from(&m.path);
+    if path.exists() {
+        let _ = std::fs::remove_dir_all(&path);
+    }
+    Ok(())
+}
+
+/// Resolve a relative-path plugin source to an absolute directory confined to
+/// the marketplace root (handles `./x`, `a/b`, and bare names under
+/// `metadata.pluginRoot`).
+fn resolve_relative_source(
+    marketplace_path: &Path,
+    manifest: &MarketplaceManifest,
+    rel: &str,
+) -> Result<PathBuf> {
+    let joined = if rel.starts_with("./") || rel.contains('/') {
+        marketplace_path.join(rel.trim_start_matches("./"))
+    } else {
+        let root = manifest
+            .metadata
+            .as_ref()
+            .and_then(|m| m.plugin_root.as_deref())
+            .unwrap_or(".");
+        marketplace_path
+            .join(root.trim_start_matches("./"))
+            .join(rel)
+    };
+    let canon = joined
+        .canonicalize()
+        .with_context(|| format!("resolving plugin source {}", joined.display()))?;
+    let root = marketplace_path.canonicalize()?;
+    anyhow::ensure!(
+        canon.starts_with(&root),
+        "plugin source escapes the marketplace directory: {}",
+        canon.display()
+    );
+    Ok(canon)
+}
+
+/// Materialize a plugin's files into `dest`, returning the pinned SHA for git
+/// sources. `git-subdir` and `archive` sources are not supported in slice 1.
+fn materialize_plugin(
+    marketplace_path: &Path,
+    manifest: &MarketplaceManifest,
+    entry: &MarketplacePlugin,
+    dest: &Path,
+) -> Result<Option<String>> {
+    match &entry.source {
+        PluginSource::Path(rel) => {
+            let base = resolve_relative_source(marketplace_path, manifest, rel)?;
+            if dest.exists() {
+                std::fs::remove_dir_all(dest)?;
+            }
+            copy_dir_all(&base, dest)?;
+            Ok(None)
+        }
+        PluginSource::Tagged(TaggedSource::Github { repo, git_ref, sha }) => {
+            let url = format!("https://github.com/{repo}.git");
+            Ok(Some(clone_repo(
+                &url,
+                dest,
+                git_ref.as_deref(),
+                sha.as_deref(),
+            )?))
+        }
+        PluginSource::Tagged(TaggedSource::Url { url, git_ref, sha }) => Ok(Some(clone_repo(
+            url,
+            dest,
+            git_ref.as_deref(),
+            sha.as_deref(),
+        )?)),
+        PluginSource::Tagged(TaggedSource::GitSubdir { .. }) => {
+            bail!("git-subdir plugin sources are not supported yet")
+        }
+        PluginSource::Tagged(TaggedSource::Archive { .. }) => {
+            bail!("archive plugin sources are not supported yet")
+        }
+    }
+}
+
+/// Fetch and audit a plugin from an added marketplace WITHOUT committing it to
+/// config, so the caller can present the capability report / scan and confirm.
+/// The files are materialized under `plugins_dir()/<marketplace>/<plugin>`.
+pub fn stage_plugin(cfg: &Config, marketplace: &str, plugin_name: &str) -> Result<StagedPlugin> {
+    let mref = cfg
+        .plugins
+        .marketplaces
+        .get(marketplace)
+        .ok_or_else(|| anyhow!("marketplace `{marketplace}` is not added"))?;
+    let mpath = PathBuf::from(&mref.path);
+    let (manifest, _fmt) = read_marketplace_manifest(&mpath)?
+        .ok_or_else(|| anyhow!("marketplace `{marketplace}` manifest missing — re-add it"))?;
+    let entry = manifest
+        .plugins
+        .iter()
+        .find(|p| p.name == plugin_name)
+        .ok_or_else(|| anyhow!("plugin `{plugin_name}` not found in marketplace `{marketplace}`"))?
+        .clone();
+
+    let dest = crate::config::plugins_dir()?
+        .join(marketplace)
+        .join(plugin_name);
+    let sha = materialize_plugin(&mpath, &manifest, &entry, &dest)?;
+    let (pmanifest, format) = read_plugin_manifest(&dest)?
+        .ok_or_else(|| anyhow!("plugin `{plugin_name}` has no plugin.json manifest"))?;
+    let capabilities = extract_capabilities(&dest)?;
+    Ok(StagedPlugin {
+        name: plugin_name.to_string(),
+        marketplace: marketplace.to_string(),
+        path: dest,
+        version: pmanifest.version.or(entry.version),
+        sha,
+        format,
+        capabilities,
+    })
+}
+
+/// Commit a staged plugin to config as installed + enabled (caller persists).
+/// `trusted` gates whether its hooks/MCP may run; `enabled` never implies it.
+pub fn finalize_install(cfg: &mut Config, staged: &StagedPlugin, trusted: bool) {
+    cfg.plugins.installed.insert(
+        install_key(&staged.name, &staged.marketplace),
+        InstalledPlugin {
+            marketplace: staged.marketplace.clone(),
+            path: staged.path.to_string_lossy().to_string(),
+            version: staged.version.clone(),
+            sha: staged.sha.clone(),
+            format: staged.format.as_str().to_string(),
+            enabled: true,
+            trusted,
+        },
+    );
+}
+
+/// Enable or disable an installed plugin by its `"<plugin>@<marketplace>"` key.
+pub fn set_enabled(cfg: &mut Config, key: &str, enabled: bool) -> Result<()> {
+    let p = cfg
+        .plugins
+        .installed
+        .get_mut(key)
+        .ok_or_else(|| anyhow!("plugin `{key}` is not installed"))?;
+    p.enabled = enabled;
+    Ok(())
+}
+
+/// Uninstall a plugin: drop its config entry and delete its files.
+pub fn uninstall(cfg: &mut Config, key: &str) -> Result<()> {
+    let p = cfg
+        .plugins
+        .installed
+        .remove(key)
+        .ok_or_else(|| anyhow!("plugin `{key}` is not installed"))?;
+    let path = PathBuf::from(&p.path);
+    if path.exists() {
+        let _ = std::fs::remove_dir_all(&path);
+    }
+    Ok(())
+}
+
+/// Whether an executable is resolvable on `PATH` (or as an explicit path).
+fn command_on_path(cmd: &str) -> bool {
+    if cmd.contains('/') {
+        return Path::new(cmd).is_file();
+    }
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file()))
+        .unwrap_or(false)
+}
+
+/// Run one external scanner over `target`. If the scanner binary isn't
+/// installed, returns `ran = false` with the install hint in `summary` instead
+/// of failing — scanners are advisory, never required.
+pub fn run_scanner(scanner: &ScannerConfig, target: &Path) -> Result<ScanResult> {
+    if !command_on_path(&scanner.command) {
+        let hint = scanner
+            .install_hint
+            .clone()
+            .unwrap_or_else(|| "no install hint provided".to_string());
+        return Ok(ScanResult {
+            scanner: scanner.name.clone(),
+            ran: false,
+            passed: false,
+            summary: format!("not installed — install with: {hint}"),
+        });
+    }
+    let target = target.to_string_lossy().to_string();
+    let args: Vec<String> = scanner
+        .args
+        .iter()
+        .map(|a| a.replace("{target}", &target))
+        .collect();
+    let out = std::process::Command::new(&scanner.command)
+        .args(&args)
+        .output()
+        .with_context(|| format!("running scanner {}", scanner.name))?;
+    let mut summary = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if summary.is_empty() {
+        summary = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    }
+    Ok(ScanResult {
+        scanner: scanner.name.clone(),
+        ran: true,
+        passed: out.status.success(),
+        summary,
+    })
+}
+
+/// Run every configured scanner whose `applies_to` matches the plugin's
+/// component surface over `path`.
+#[must_use]
+pub fn run_applicable_scanners(
+    cfg: &Config,
+    path: &Path,
+    report: &CapabilityReport,
+) -> Vec<ScanResult> {
+    let mut results = Vec::new();
+    for scanner in effective_scanners(cfg) {
+        let applies = scanner.applies_to.is_empty()
+            || scanner
+                .applies_to
+                .iter()
+                .any(|a| a == "all" || report.components.contains_key(a));
+        if applies {
+            if let Ok(result) = run_scanner(&scanner, path) {
+                results.push(result);
+            }
+        }
+    }
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,5 +1079,56 @@ mod tests {
         assert_eq!(scanners.len(), 1);
         assert_eq!(scanners[0].name, "skillspector");
         assert!(scanners[0].applies_to.contains(&"skills".to_string()));
+    }
+
+    #[test]
+    fn is_remote_source_classifies_urls_vs_paths() {
+        assert!(is_remote_source("https://github.com/x/y.git"));
+        assert!(is_remote_source("git@github.com:x/y.git"));
+        assert!(is_remote_source("ssh://host/x.git"));
+        assert!(!is_remote_source("./local/marketplace"));
+        assert!(!is_remote_source("/abs/path"));
+    }
+
+    #[test]
+    fn install_key_joins_plugin_and_marketplace() {
+        assert_eq!(
+            install_key("formatter", "acme-tools"),
+            "formatter@acme-tools"
+        );
+    }
+
+    #[test]
+    fn command_on_path_missing_returns_false() {
+        assert!(!command_on_path("definitely-not-a-real-binary-xyz123"));
+    }
+
+    #[test]
+    fn resolve_relative_source_paths_pluginroot_and_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("plugins").join("foo")).unwrap();
+        std::fs::create_dir_all(root.join("bar")).unwrap();
+        let with_root = MarketplaceManifest {
+            name: "m".into(),
+            owner: None,
+            metadata: Some(MarketplaceMetadata {
+                plugin_root: Some("./plugins".into()),
+            }),
+            plugins: vec![],
+        };
+        let plain = MarketplaceManifest {
+            name: "m".into(),
+            owner: None,
+            metadata: None,
+            plugins: vec![],
+        };
+
+        let p = resolve_relative_source(root, &plain, "./bar").unwrap();
+        assert!(p.ends_with("bar"));
+        let p = resolve_relative_source(root, &with_root, "foo").unwrap();
+        assert!(p.ends_with("foo"));
+        // A `..` source that escapes the marketplace root is rejected.
+        assert!(resolve_relative_source(root, &plain, "../").is_err());
     }
 }
