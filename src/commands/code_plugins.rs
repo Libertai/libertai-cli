@@ -1006,7 +1006,12 @@ fn expand_plugin_root(s: &str, root: &str) -> String {
 /// `{matcher, hooks:[…]}` groups), then each hook's `${CLAUDE_PLUGIN_ROOT}`
 /// placeholder is expanded to the plugin path and its `source` tagged
 /// `plugin:<key>` for provenance. Trust is required because these hooks run
-/// shell commands. Returns how many hooks were merged.
+/// shell commands.
+///
+/// Returns the number of hooks *merged* into the config — including any a
+/// plugin marked `enabled: false`, which are merged but stay inert at runtime.
+/// `installed` is a `BTreeMap`, so when several plugins target the same event
+/// their hooks accumulate in a stable, key-sorted order.
 pub fn merge_plugin_hooks(cfg: &mut Config) -> usize {
     let sources: Vec<(String, PathBuf)> = cfg
         .plugins
@@ -1375,5 +1380,9 @@ mod tests {
         }
         assert_eq!(merge_plugin_hooks(&mut cfg), 2);
         assert_eq!(cfg.hooks.pre_tool_use.len(), 2);
+        // `installed` is a BTreeMap, so hooks accumulate in stable key order
+        // ("p0@m" before "p1@m") and each carries its own provenance tag.
+        assert_eq!(cfg.hooks.pre_tool_use[0].source, "plugin:p0@m");
+        assert_eq!(cfg.hooks.pre_tool_use[1].source, "plugin:p1@m");
     }
 }
