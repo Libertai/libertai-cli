@@ -142,6 +142,234 @@ esac
     ;;
 esac
 ;;
+(plugin)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_libertai__subcmd__plugin_commands" \
+"*::: :->plugin" \
+&& ret=0
+
+    case $state in
+    (plugin)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-plugin-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(marketplace)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_libertai__subcmd__plugin__subcmd__marketplace_commands" \
+"*::: :->marketplace" \
+&& ret=0
+
+    case $state in
+    (marketplace)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-plugin-marketplace-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':source:_default' \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+&& ret=0
+;;
+(remove)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__plugin__subcmd__marketplace__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-plugin-marketplace-help-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(remove)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(install)
+_arguments "${_arguments_options[@]}" : \
+'--scan[Force the external security scan before installing]' \
+'(--scan)--no-scan[Skip the external security scan]' \
+'--trust[Trust the plugin'\''s hooks/MCP servers to run (no prompt)]' \
+'-y[Assume yes to prompts (non-interactive; never auto-trusts code)]' \
+'--yes[Assume yes to prompts (non-interactive; never auto-trusts code)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name -- Plugin name, optionally qualified as `name@marketplace`:_default' \
+&& ret=0
+;;
+(audit)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name -- Plugin name, optionally qualified as `name@marketplace`:_default' \
+&& ret=0
+;;
+(enable)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(disable)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(remove)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':name:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__plugin__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-plugin-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(marketplace)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__plugin__subcmd__help__subcmd__marketplace_commands" \
+"*::: :->marketplace" \
+&& ret=0
+
+    case $state in
+    (marketplace)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-plugin-help-marketplace-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(remove)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(install)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(audit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(enable)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(disable)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(remove)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
 (models)
 _arguments "${_arguments_options[@]}" : \
 '--refresh[Re-sync the persisted model catalog\: fetches \`/v1/models\` and merges any new models into pi'\''s \`models.json\` so they become selectable in \`libertai code\` (\`/model\`)]' \
@@ -793,6 +1021,74 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
+(plugin)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__help__subcmd__plugin_commands" \
+"*::: :->plugin" \
+&& ret=0
+
+    case $state in
+    (plugin)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-help-plugin-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(marketplace)
+_arguments "${_arguments_options[@]}" : \
+":: :_libertai__subcmd__help__subcmd__plugin__subcmd__marketplace_commands" \
+"*::: :->marketplace" \
+&& ret=0
+
+    case $state in
+    (marketplace)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:libertai-help-plugin-marketplace-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(remove)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(install)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(audit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(enable)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(disable)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(remove)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
 (models)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1010,6 +1306,7 @@ _libertai_commands() {
 'status:Show current auth state and defaults' \
 'usage:Show plan tier, allowance windows (5h + weekly), and prepaid credits' \
 'keys:Manage API keys' \
+'plugin:Manage plugins and marketplaces (Claude-Code compatible)' \
 'models:List available models' \
 'ask:One-shot prompt, non-streaming' \
 'chat:Streaming chat REPL (Ctrl-D to exit)' \
@@ -1155,6 +1452,7 @@ _libertai__subcmd__help_commands() {
 'status:Show current auth state and defaults' \
 'usage:Show plan tier, allowance windows (5h + weekly), and prepaid credits' \
 'keys:Manage API keys' \
+'plugin:Manage plugins and marketplaces (Claude-Code compatible)' \
 'models:List available models' \
 'ask:One-shot prompt, non-streaming' \
 'chat:Streaming chat REPL (Ctrl-D to exit)' \
@@ -1360,6 +1658,73 @@ _libertai__subcmd__help__subcmd__models_commands() {
 _libertai__subcmd__help__subcmd__opencode_commands() {
     local commands; commands=()
     _describe -t commands 'libertai help opencode commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__plugin_commands] )) ||
+_libertai__subcmd__help__subcmd__plugin_commands() {
+    local commands; commands=(
+'list:List installed plugins and their enabled/trusted state' \
+'marketplace:Manage plugin marketplaces' \
+'install:Install a plugin from an added marketplace (\`name\` or \`name@marketplace\`)' \
+'audit:Audit a plugin (capabilities + scan) without installing it' \
+'enable:Enable an installed plugin'\''s components' \
+'disable:Disable an installed plugin'\''s components' \
+'remove:Uninstall a plugin and delete its files' \
+    )
+    _describe -t commands 'libertai help plugin commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__plugin__subcmd__audit_commands] )) ||
+_libertai__subcmd__help__subcmd__plugin__subcmd__audit_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help plugin audit commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__plugin__subcmd__disable_commands] )) ||
+_libertai__subcmd__help__subcmd__plugin__subcmd__disable_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help plugin disable commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__plugin__subcmd__enable_commands] )) ||
+_libertai__subcmd__help__subcmd__plugin__subcmd__enable_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help plugin enable commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__plugin__subcmd__install_commands] )) ||
+_libertai__subcmd__help__subcmd__plugin__subcmd__install_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help plugin install commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__plugin__subcmd__list_commands] )) ||
+_libertai__subcmd__help__subcmd__plugin__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help plugin list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__plugin__subcmd__marketplace_commands] )) ||
+_libertai__subcmd__help__subcmd__plugin__subcmd__marketplace_commands() {
+    local commands; commands=(
+'add:Add a marketplace from a git URL or local path' \
+'list:List added marketplaces' \
+'remove:Remove an added marketplace' \
+    )
+    _describe -t commands 'libertai help plugin marketplace commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__plugin__subcmd__marketplace__subcmd__add_commands] )) ||
+_libertai__subcmd__help__subcmd__plugin__subcmd__marketplace__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help plugin marketplace add commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__plugin__subcmd__marketplace__subcmd__list_commands] )) ||
+_libertai__subcmd__help__subcmd__plugin__subcmd__marketplace__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help plugin marketplace list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__plugin__subcmd__marketplace__subcmd__remove_commands] )) ||
+_libertai__subcmd__help__subcmd__plugin__subcmd__marketplace__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help plugin marketplace remove commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__plugin__subcmd__remove_commands] )) ||
+_libertai__subcmd__help__subcmd__plugin__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help plugin remove commands' commands "$@"
 }
 (( $+functions[_libertai__subcmd__help__subcmd__run_commands] )) ||
 _libertai__subcmd__help__subcmd__run_commands() {
@@ -1629,6 +1994,178 @@ _libertai__subcmd__models_commands() {
 _libertai__subcmd__opencode_commands() {
     local commands; commands=()
     _describe -t commands 'libertai opencode commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin_commands] )) ||
+_libertai__subcmd__plugin_commands() {
+    local commands; commands=(
+'list:List installed plugins and their enabled/trusted state' \
+'marketplace:Manage plugin marketplaces' \
+'install:Install a plugin from an added marketplace (\`name\` or \`name@marketplace\`)' \
+'audit:Audit a plugin (capabilities + scan) without installing it' \
+'enable:Enable an installed plugin'\''s components' \
+'disable:Disable an installed plugin'\''s components' \
+'remove:Uninstall a plugin and delete its files' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai plugin commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__audit_commands] )) ||
+_libertai__subcmd__plugin__subcmd__audit_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin audit commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__disable_commands] )) ||
+_libertai__subcmd__plugin__subcmd__disable_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin disable commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__enable_commands] )) ||
+_libertai__subcmd__plugin__subcmd__enable_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin enable commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__help_commands] )) ||
+_libertai__subcmd__plugin__subcmd__help_commands() {
+    local commands; commands=(
+'list:List installed plugins and their enabled/trusted state' \
+'marketplace:Manage plugin marketplaces' \
+'install:Install a plugin from an added marketplace (\`name\` or \`name@marketplace\`)' \
+'audit:Audit a plugin (capabilities + scan) without installing it' \
+'enable:Enable an installed plugin'\''s components' \
+'disable:Disable an installed plugin'\''s components' \
+'remove:Uninstall a plugin and delete its files' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai plugin help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__help__subcmd__audit_commands] )) ||
+_libertai__subcmd__plugin__subcmd__help__subcmd__audit_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin help audit commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__help__subcmd__disable_commands] )) ||
+_libertai__subcmd__plugin__subcmd__help__subcmd__disable_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin help disable commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__help__subcmd__enable_commands] )) ||
+_libertai__subcmd__plugin__subcmd__help__subcmd__enable_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin help enable commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__help__subcmd__help_commands] )) ||
+_libertai__subcmd__plugin__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin help help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__help__subcmd__install_commands] )) ||
+_libertai__subcmd__plugin__subcmd__help__subcmd__install_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin help install commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__help__subcmd__list_commands] )) ||
+_libertai__subcmd__plugin__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin help list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__help__subcmd__marketplace_commands] )) ||
+_libertai__subcmd__plugin__subcmd__help__subcmd__marketplace_commands() {
+    local commands; commands=(
+'add:Add a marketplace from a git URL or local path' \
+'list:List added marketplaces' \
+'remove:Remove an added marketplace' \
+    )
+    _describe -t commands 'libertai plugin help marketplace commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__help__subcmd__marketplace__subcmd__add_commands] )) ||
+_libertai__subcmd__plugin__subcmd__help__subcmd__marketplace__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin help marketplace add commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__help__subcmd__marketplace__subcmd__list_commands] )) ||
+_libertai__subcmd__plugin__subcmd__help__subcmd__marketplace__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin help marketplace list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__help__subcmd__marketplace__subcmd__remove_commands] )) ||
+_libertai__subcmd__plugin__subcmd__help__subcmd__marketplace__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin help marketplace remove commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__help__subcmd__remove_commands] )) ||
+_libertai__subcmd__plugin__subcmd__help__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin help remove commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__install_commands] )) ||
+_libertai__subcmd__plugin__subcmd__install_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin install commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__list_commands] )) ||
+_libertai__subcmd__plugin__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__marketplace_commands] )) ||
+_libertai__subcmd__plugin__subcmd__marketplace_commands() {
+    local commands; commands=(
+'add:Add a marketplace from a git URL or local path' \
+'list:List added marketplaces' \
+'remove:Remove an added marketplace' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai plugin marketplace commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__marketplace__subcmd__add_commands] )) ||
+_libertai__subcmd__plugin__subcmd__marketplace__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin marketplace add commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__marketplace__subcmd__help_commands] )) ||
+_libertai__subcmd__plugin__subcmd__marketplace__subcmd__help_commands() {
+    local commands; commands=(
+'add:Add a marketplace from a git URL or local path' \
+'list:List added marketplaces' \
+'remove:Remove an added marketplace' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'libertai plugin marketplace help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__add_commands] )) ||
+_libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin marketplace help add commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__help_commands] )) ||
+_libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin marketplace help help commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__list_commands] )) ||
+_libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin marketplace help list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__remove_commands] )) ||
+_libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin marketplace help remove commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__marketplace__subcmd__list_commands] )) ||
+_libertai__subcmd__plugin__subcmd__marketplace__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin marketplace list commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__marketplace__subcmd__remove_commands] )) ||
+_libertai__subcmd__plugin__subcmd__marketplace__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin marketplace remove commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__remove_commands] )) ||
+_libertai__subcmd__plugin__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin remove commands' commands "$@"
 }
 (( $+functions[_libertai__subcmd__run_commands] )) ||
 _libertai__subcmd__run_commands() {

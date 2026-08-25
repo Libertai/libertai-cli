@@ -153,8 +153,119 @@ pub struct Config {
         skip_serializing_if = "HashMap::is_empty"
     )]
     pub mcp_servers: HashMap<String, McpServerConfig>,
+    #[serde(default, skip_serializing_if = "PluginsConfig::is_default")]
+    pub plugins: PluginsConfig,
     #[serde(default)]
     pub auth: Auth,
+}
+
+/// Persisted plugin state: added marketplaces, installed plugins, and the
+/// pre-install security-scan policy. Mirrors the `mcpServers` pattern — a
+/// `[plugins]` table in `config.toml`, omitted entirely when at defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginsConfig {
+    /// Added marketplaces, keyed by marketplace name (kebab-case).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub marketplaces: BTreeMap<String, MarketplaceRef>,
+    /// Installed plugins, keyed by `"<plugin>@<marketplace>"`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub installed: BTreeMap<String, InstalledPlugin>,
+    /// When to run external security scanners before install.
+    #[serde(default, skip_serializing_if = "ScanPolicy::is_default")]
+    pub scan_on_install: ScanPolicy,
+    /// External scanner registry. Empty means the built-in defaults
+    /// (e.g. Skillspector) are used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scanners: Vec<ScannerConfig>,
+}
+
+impl PluginsConfig {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.marketplaces.is_empty()
+            && self.installed.is_empty()
+            && self.scan_on_install.is_default()
+            && self.scanners.is_empty()
+    }
+}
+
+/// A marketplace the user has added: where it came from and the local clone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketplaceRef {
+    /// Source the marketplace was added from (git URL or local path).
+    pub source: String,
+    /// Local path of the cloned/copied marketplace checkout.
+    pub path: String,
+    /// Resolved commit SHA the local clone is pinned to (git sources only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+}
+
+/// An installed plugin: its origin, pinned version/commit, local path, and the
+/// separate `enabled` (loads its skills/agents/commands) and `trusted` (its
+/// hooks/MCP servers may run) flags.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstalledPlugin {
+    /// Marketplace this plugin was installed from.
+    pub marketplace: String,
+    /// Local path of the materialized plugin directory.
+    pub path: String,
+    /// Plugin version from its manifest, if declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Resolved commit SHA the plugin is pinned to (git sources only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    /// Manifest format the plugin was loaded from: `"libertai"` or `"claude"`.
+    #[serde(default)]
+    pub format: String,
+    /// Whether the plugin's skills/agents/commands/output-styles are active.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Whether the user reviewed the audit and trusts this plugin's
+    /// hooks/MCP servers to run. `enabled` never implies `trusted`.
+    #[serde(default)]
+    pub trusted: bool,
+}
+
+/// When to run external security scanners before installing a plugin.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScanPolicy {
+    /// Prompt the user each time (the default).
+    #[default]
+    Ask,
+    /// Always scan, without prompting.
+    Always,
+    /// Never scan.
+    Never,
+}
+
+impl ScanPolicy {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        matches!(self, ScanPolicy::Ask)
+    }
+}
+
+/// An external security scanner the audit pipeline can invoke on a plugin's
+/// local checkout before install (e.g. NVIDIA Skillspector).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScannerConfig {
+    /// Display name (e.g. `"skillspector"`).
+    pub name: String,
+    /// Executable to run.
+    pub command: String,
+    /// Arguments; the literal `{target}` is replaced with the scan path/URL.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// One-line install hint shown when `command` is not on `PATH`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_hint: Option<String>,
+    /// Component types this scanner understands: any of `skills`, `agents`,
+    /// `commands`, `hooks`, or `all`. Empty means `all`.
+    #[serde(default)]
+    pub applies_to: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1174,6 +1285,7 @@ impl Default for Config {
             status_line_command: String::new(),
             hooks: HooksConfig::default(),
             mcp_servers: HashMap::new(),
+            plugins: PluginsConfig::default(),
             auth: Auth::default(),
         }
     }
@@ -1193,6 +1305,18 @@ pub fn config_path() -> Result<PathBuf> {
 /// Returns `~/.config/libertai/allow-rules.toml`, respecting `$XDG_CONFIG_HOME`.
 pub fn allow_rules_path() -> Result<PathBuf> {
     Ok(libertai_config_dir()?.join("allow-rules.toml"))
+}
+
+/// Returns `~/.config/libertai/plugins`, where installed plugins are
+/// materialized (one subdirectory per `<marketplace>/<plugin>`).
+pub fn plugins_dir() -> Result<PathBuf> {
+    Ok(libertai_config_dir()?.join("plugins"))
+}
+
+/// Returns `~/.config/libertai/marketplaces`, where added marketplaces are
+/// cloned/copied (one subdirectory per marketplace name).
+pub fn marketplaces_dir() -> Result<PathBuf> {
+    Ok(libertai_config_dir()?.join("marketplaces"))
 }
 
 pub fn load() -> Result<Config> {

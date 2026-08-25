@@ -40,6 +40,12 @@ pub enum Command {
         action: KeysAction,
     },
 
+    /// Manage plugins and marketplaces (Claude-Code compatible).
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+
     /// List available models.
     Models {
         /// Re-sync the persisted model catalog: fetches `/v1/models` and
@@ -487,6 +493,55 @@ pub enum KeysAction {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum PluginAction {
+    /// List installed plugins and their enabled/trusted state.
+    List,
+    /// Manage plugin marketplaces.
+    Marketplace {
+        #[command(subcommand)]
+        action: MarketplaceAction,
+    },
+    /// Install a plugin from an added marketplace (`name` or `name@marketplace`).
+    Install {
+        /// Plugin name, optionally qualified as `name@marketplace`.
+        name: String,
+        /// Force the external security scan before installing.
+        #[arg(long)]
+        scan: bool,
+        /// Skip the external security scan.
+        #[arg(long, conflicts_with = "scan")]
+        no_scan: bool,
+        /// Trust the plugin's hooks/MCP servers to run (no prompt).
+        #[arg(long)]
+        trust: bool,
+        /// Assume yes to prompts (non-interactive; never auto-trusts code).
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Audit a plugin (capabilities + scan) without installing it.
+    Audit {
+        /// Plugin name, optionally qualified as `name@marketplace`.
+        name: String,
+    },
+    /// Enable an installed plugin's components.
+    Enable { name: String },
+    /// Disable an installed plugin's components.
+    Disable { name: String },
+    /// Uninstall a plugin and delete its files.
+    Remove { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MarketplaceAction {
+    /// Add a marketplace from a git URL or local path.
+    Add { source: String },
+    /// List added marketplaces.
+    List,
+    /// Remove an added marketplace.
+    Remove { name: String },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum SkillsAction {
     /// List the bundled skills this CLI knows how to install.
     List,
@@ -528,6 +583,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Status { json } => crate::commands::status::run(json),
         Command::Usage { json } => crate::commands::usage::run(json),
         Command::Keys { action } => crate::commands::keys::run(action),
+        Command::Plugin { action } => crate::commands::plugin_cli::run(action),
         Command::Models { refresh, json } => crate::commands::models::run(refresh, json),
         Command::Ask {
             prompt,
@@ -626,6 +682,7 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::Status { .. } => "status",
         Command::Usage { .. } => "usage",
         Command::Keys { .. } => "keys",
+        Command::Plugin { .. } => "plugin",
         Command::Models { .. } => "models",
         Command::Ask { .. } => "ask",
         Command::Chat { .. } => "chat",

@@ -233,12 +233,37 @@ pub fn set_skill_enabled(name: &str, enabled: bool) -> Result<()> {
 }
 
 fn collect_matching_skills(pillar: SkillPillar, cwd: Option<&Path>) -> Result<Vec<AgentSkill>> {
-    collect_matching_skills_with_roots(
+    let mut skills = collect_matching_skills_with_roots(
         pillar,
         cwd,
         dirs::home_dir().as_deref(),
         dirs::config_dir().as_deref(),
-    )
+    )?;
+    merge_plugin_skills(pillar, &mut skills)?;
+    Ok(skills)
+}
+
+/// Add skills from enabled plugins, filling gaps only — a plugin never
+/// overrides a builtin/user/project skill of the same name.
+fn merge_plugin_skills(pillar: SkillPillar, skills: &mut Vec<AgentSkill>) -> Result<()> {
+    let cfg = crate::config::load().unwrap_or_default();
+    let dirs = crate::commands::code_plugins::enabled_component_dirs(&cfg, "skills");
+    if dirs.is_empty() {
+        return Ok(());
+    }
+    let existing: BTreeSet<String> = skills.iter().map(|s| s.name.clone()).collect();
+    let mut plugin_skills = Vec::new();
+    for dir in &dirs {
+        load_skill_dir(dir, SkillSourceKind::User, pillar, &mut plugin_skills)?;
+    }
+    for skill in plugin_skills {
+        if !existing.contains(&skill.name) {
+            skills.push(skill);
+        }
+    }
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills.dedup_by(|a, b| a.name == b.name);
+    Ok(())
 }
 
 fn collect_matching_skills_with_roots(

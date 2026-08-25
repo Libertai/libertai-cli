@@ -79,6 +79,9 @@ _libertai() {
             libertai,opencode)
                 cmd="libertai__subcmd__opencode"
                 ;;
+            libertai,plugin)
+                cmd="libertai__subcmd__plugin"
+                ;;
             libertai,run)
                 cmd="libertai__subcmd__run"
                 ;;
@@ -190,6 +193,9 @@ _libertai() {
             libertai__subcmd__help,opencode)
                 cmd="libertai__subcmd__help__subcmd__opencode"
                 ;;
+            libertai__subcmd__help,plugin)
+                cmd="libertai__subcmd__help__subcmd__plugin"
+                ;;
             libertai__subcmd__help,run)
                 cmd="libertai__subcmd__help__subcmd__run"
                 ;;
@@ -243,6 +249,36 @@ _libertai() {
                 ;;
             libertai__subcmd__help__subcmd__keys,list)
                 cmd="libertai__subcmd__help__subcmd__keys__subcmd__list"
+                ;;
+            libertai__subcmd__help__subcmd__plugin,audit)
+                cmd="libertai__subcmd__help__subcmd__plugin__subcmd__audit"
+                ;;
+            libertai__subcmd__help__subcmd__plugin,disable)
+                cmd="libertai__subcmd__help__subcmd__plugin__subcmd__disable"
+                ;;
+            libertai__subcmd__help__subcmd__plugin,enable)
+                cmd="libertai__subcmd__help__subcmd__plugin__subcmd__enable"
+                ;;
+            libertai__subcmd__help__subcmd__plugin,install)
+                cmd="libertai__subcmd__help__subcmd__plugin__subcmd__install"
+                ;;
+            libertai__subcmd__help__subcmd__plugin,list)
+                cmd="libertai__subcmd__help__subcmd__plugin__subcmd__list"
+                ;;
+            libertai__subcmd__help__subcmd__plugin,marketplace)
+                cmd="libertai__subcmd__help__subcmd__plugin__subcmd__marketplace"
+                ;;
+            libertai__subcmd__help__subcmd__plugin,remove)
+                cmd="libertai__subcmd__help__subcmd__plugin__subcmd__remove"
+                ;;
+            libertai__subcmd__help__subcmd__plugin__subcmd__marketplace,add)
+                cmd="libertai__subcmd__help__subcmd__plugin__subcmd__marketplace__subcmd__add"
+                ;;
+            libertai__subcmd__help__subcmd__plugin__subcmd__marketplace,list)
+                cmd="libertai__subcmd__help__subcmd__plugin__subcmd__marketplace__subcmd__list"
+                ;;
+            libertai__subcmd__help__subcmd__plugin__subcmd__marketplace,remove)
+                cmd="libertai__subcmd__help__subcmd__plugin__subcmd__marketplace__subcmd__remove"
                 ;;
             libertai__subcmd__help__subcmd__sandbox,info)
                 cmd="libertai__subcmd__help__subcmd__sandbox__subcmd__info"
@@ -334,6 +370,87 @@ _libertai() {
             libertai__subcmd__keys__subcmd__help,list)
                 cmd="libertai__subcmd__keys__subcmd__help__subcmd__list"
                 ;;
+            libertai__subcmd__plugin,audit)
+                cmd="libertai__subcmd__plugin__subcmd__audit"
+                ;;
+            libertai__subcmd__plugin,disable)
+                cmd="libertai__subcmd__plugin__subcmd__disable"
+                ;;
+            libertai__subcmd__plugin,enable)
+                cmd="libertai__subcmd__plugin__subcmd__enable"
+                ;;
+            libertai__subcmd__plugin,help)
+                cmd="libertai__subcmd__plugin__subcmd__help"
+                ;;
+            libertai__subcmd__plugin,install)
+                cmd="libertai__subcmd__plugin__subcmd__install"
+                ;;
+            libertai__subcmd__plugin,list)
+                cmd="libertai__subcmd__plugin__subcmd__list"
+                ;;
+            libertai__subcmd__plugin,marketplace)
+                cmd="libertai__subcmd__plugin__subcmd__marketplace"
+                ;;
+            libertai__subcmd__plugin,remove)
+                cmd="libertai__subcmd__plugin__subcmd__remove"
+                ;;
+            libertai__subcmd__plugin__subcmd__help,audit)
+                cmd="libertai__subcmd__plugin__subcmd__help__subcmd__audit"
+                ;;
+            libertai__subcmd__plugin__subcmd__help,disable)
+                cmd="libertai__subcmd__plugin__subcmd__help__subcmd__disable"
+                ;;
+            libertai__subcmd__plugin__subcmd__help,enable)
+                cmd="libertai__subcmd__plugin__subcmd__help__subcmd__enable"
+                ;;
+            libertai__subcmd__plugin__subcmd__help,help)
+                cmd="libertai__subcmd__plugin__subcmd__help__subcmd__help"
+                ;;
+            libertai__subcmd__plugin__subcmd__help,install)
+                cmd="libertai__subcmd__plugin__subcmd__help__subcmd__install"
+                ;;
+            libertai__subcmd__plugin__subcmd__help,list)
+                cmd="libertai__subcmd__plugin__subcmd__help__subcmd__list"
+                ;;
+            libertai__subcmd__plugin__subcmd__help,marketplace)
+                cmd="libertai__subcmd__plugin__subcmd__help__subcmd__marketplace"
+                ;;
+            libertai__subcmd__plugin__subcmd__help,remove)
+                cmd="libertai__subcmd__plugin__subcmd__help__subcmd__remove"
+                ;;
+            libertai__subcmd__plugin__subcmd__help__subcmd__marketplace,add)
+                cmd="libertai__subcmd__plugin__subcmd__help__subcmd__marketplace__subcmd__add"
+                ;;
+            libertai__subcmd__plugin__subcmd__help__subcmd__marketplace,list)
+                cmd="libertai__subcmd__plugin__subcmd__help__subcmd__marketplace__subcmd__list"
+                ;;
+            libertai__subcmd__plugin__subcmd__help__subcmd__marketplace,remove)
+                cmd="libertai__subcmd__plugin__subcmd__help__subcmd__marketplace__subcmd__remove"
+                ;;
+            libertai__subcmd__plugin__subcmd__marketplace,add)
+                cmd="libertai__subcmd__plugin__subcmd__marketplace__subcmd__add"
+                ;;
+            libertai__subcmd__plugin__subcmd__marketplace,help)
+                cmd="libertai__subcmd__plugin__subcmd__marketplace__subcmd__help"
+                ;;
+            libertai__subcmd__plugin__subcmd__marketplace,list)
+                cmd="libertai__subcmd__plugin__subcmd__marketplace__subcmd__list"
+                ;;
+            libertai__subcmd__plugin__subcmd__marketplace,remove)
+                cmd="libertai__subcmd__plugin__subcmd__marketplace__subcmd__remove"
+                ;;
+            libertai__subcmd__plugin__subcmd__marketplace__subcmd__help,add)
+                cmd="libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__add"
+                ;;
+            libertai__subcmd__plugin__subcmd__marketplace__subcmd__help,help)
+                cmd="libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__help"
+                ;;
+            libertai__subcmd__plugin__subcmd__marketplace__subcmd__help,list)
+                cmd="libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__list"
+                ;;
+            libertai__subcmd__plugin__subcmd__marketplace__subcmd__help,remove)
+                cmd="libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__remove"
+                ;;
             libertai__subcmd__sandbox,help)
                 cmd="libertai__subcmd__sandbox__subcmd__help"
                 ;;
@@ -377,7 +494,7 @@ _libertai() {
 
     case "${cmd}" in
         libertai)
-            opts="-h -V --help --version login logout status usage keys models ask chat search fetch image run claude opencode aider claw hermes code agents mcp config skills sandbox import completions man help"
+            opts="-h -V --help --version login logout status usage keys plugin models ask chat search fetch image run claude opencode aider claw hermes code agents mcp config skills sandbox import completions man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -763,7 +880,7 @@ _libertai() {
             return 0
             ;;
         libertai__subcmd__help)
-            opts="login logout status usage keys models ask chat search fetch image run claude opencode aider claw hermes code agents mcp config skills sandbox import completions man help"
+            opts="login logout status usage keys plugin models ask chat search fetch image run claude opencode aider claw hermes code agents mcp config skills sandbox import completions man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1227,6 +1344,160 @@ _libertai() {
         libertai__subcmd__help__subcmd__opencode)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__help__subcmd__plugin)
+            opts="list marketplace install audit enable disable remove"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__help__subcmd__plugin__subcmd__audit)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__help__subcmd__plugin__subcmd__disable)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__help__subcmd__plugin__subcmd__enable)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__help__subcmd__plugin__subcmd__install)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__help__subcmd__plugin__subcmd__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__help__subcmd__plugin__subcmd__marketplace)
+            opts="add list remove"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__help__subcmd__plugin__subcmd__marketplace__subcmd__add)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__help__subcmd__plugin__subcmd__marketplace__subcmd__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__help__subcmd__plugin__subcmd__marketplace__subcmd__remove)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__help__subcmd__plugin__subcmd__remove)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -1923,6 +2194,398 @@ _libertai() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin)
+            opts="-h -V --help --version list marketplace install audit enable disable remove help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__audit)
+            opts="-h -V --help --version <NAME>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__disable)
+            opts="-h -V --help --version <NAME>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__enable)
+            opts="-h -V --help --version <NAME>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__help)
+            opts="list marketplace install audit enable disable remove help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__help__subcmd__audit)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__help__subcmd__disable)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__help__subcmd__enable)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__help__subcmd__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__help__subcmd__install)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__help__subcmd__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__help__subcmd__marketplace)
+            opts="add list remove"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__help__subcmd__marketplace__subcmd__add)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__help__subcmd__marketplace__subcmd__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__help__subcmd__marketplace__subcmd__remove)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__help__subcmd__remove)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__install)
+            opts="-y -h -V --scan --no-scan --trust --yes --help --version <NAME>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__list)
+            opts="-h -V --help --version"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__marketplace)
+            opts="-h -V --help --version add list remove help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__marketplace__subcmd__add)
+            opts="-h -V --help --version <SOURCE>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__marketplace__subcmd__help)
+            opts="add list remove help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__add)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__marketplace__subcmd__help__subcmd__remove)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 5 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__marketplace__subcmd__list)
+            opts="-h -V --help --version"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__marketplace__subcmd__remove)
+            opts="-h -V --help --version <NAME>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        libertai__subcmd__plugin__subcmd__remove)
+            opts="-h -V --help --version <NAME>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
                 *)
                     COMPREPLY=()
                     ;;
