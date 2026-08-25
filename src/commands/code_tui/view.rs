@@ -503,57 +503,6 @@ pub(crate) fn approval_choices() -> &'static [(
     ]
 }
 
-/// The approval-choice controls, one `(label, style-color)` per option.
-/// Kept as a function so the draw path and the option-line packer agree on
-/// the exact key set — every key here is a live arm of
-/// [`crate::commands::code_tui::app::handle_approval_key`]: `y`=Allow,
-/// `s`=Session, `a`=Always, `p`=Prefix, `r`=Root(GrantRoot), `o`=Domain,
-/// `n`/Esc=Deny. The deny option names Esc explicitly so it's discoverable
-/// even when the terminal is too narrow to fit every option on one row (B3
-/// Fix 2 — the old single line truncated at the pane width and hid deny).
-fn approval_option_tokens() -> Vec<(&'static str, ratatui::style::Color)> {
-    approval_choices()
-        .iter()
-        .map(|(label, color, _)| (*label, *color))
-        .collect()
-}
-
-/// Pack the approval option tokens into as many rows as needed so every
-/// option is always visible (B3 Fix 2). Tokens flow left-to-right separated
-/// by two spaces; a token that would overflow `width` starts a new row. A
-/// single token wider than `width` still gets its own row (Paragraph
-/// truncates it, but the option keys are short so this never bites).
-fn pack_approval_options(width: usize) -> Vec<ratatui::text::Line<'static>> {
-    use ratatui::style::Style;
-    use ratatui::text::{Line, Span};
-    const SEP: &str = "  ";
-    let sep_w = SEP.width();
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut cur: Vec<Span<'static>> = Vec::new();
-    let mut cur_w = 0usize;
-    for (label, color) in approval_option_tokens() {
-        let lw = label.width();
-        let add = if cur.is_empty() { lw } else { sep_w + lw };
-        if !cur.is_empty() && cur_w + add > width {
-            lines.push(Line::from(std::mem::take(&mut cur)));
-            cur_w = 0;
-        }
-        if !cur.is_empty() {
-            cur.push(Span::raw(SEP));
-            cur_w += sep_w;
-        }
-        cur.push(Span::styled(label, Style::default().fg(color)));
-        cur_w += lw;
-    }
-    if !cur.is_empty() {
-        lines.push(Line::from(cur));
-    }
-    if lines.is_empty() {
-        lines.push(Line::from(""));
-    }
-    lines
-}
-
 /// (SELECT) Build the approval choices as a vertical navigable list — one
 /// row per choice — so Up/Down + Enter work like the ask modal. The
 /// highlighted row (`selected`) gets a `❯ ` prefix and full-row reverse-
@@ -623,7 +572,7 @@ fn draw_approval_modal(frame: &mut Frame, area: Rect, app: &mut App) {
     // Option rows are wrapping-independent of height — compute them first so
     // the chrome budget knows how many rows they need (they're never clipped:
     // deny must always show).
-    let option_lines = pack_approval_options(content_width);
+    let option_lines = build_approval_choice_lines(approval.selected);
     let option_rows = option_lines.len();
 
     // Fixed chrome rows: tool (1) + "Preview:" label (1) + always_rule (1)
@@ -1806,46 +1755,47 @@ mod tests {
         );
     }
 
-    // ---- Fix 2: approval option wrapping ---------------------------------
+    // ---- Approval choice list (vertical, navigable) ----------------------
 
-    /// (Fix 2) At a narrow width the options wrap across rows and every
-    /// option — including the deny choice, which names Esc — stays visible.
+    /// The approval modal renders one row per choice (never wrapped), every
+    /// option present including the Esc-named deny, and the selected row gets
+    /// the `❯` cursor while the others are indented to align.
     #[test]
-    fn approval_options_wrap_and_keep_deny_visible() {
-        let narrow = pack_approval_options(40);
-        assert!(
-            narrow.len() > 1,
-            "narrow width must wrap options across rows, got {}",
-            narrow.len()
+    fn approval_choice_lines_one_row_each_with_cursor_on_selected() {
+        let choices = approval_choices();
+        let lines = build_approval_choice_lines(1);
+        assert_eq!(
+            lines.len(),
+            choices.len(),
+            "one row per choice, no wrapping"
         );
-        let joined: String = narrow
+
+        let joined: String = lines
             .iter()
             .flat_map(|l| l.spans.iter())
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(
-            joined.contains("Deny"),
-            "deny option must be present: {joined:?}"
-        );
-        assert!(
-            joined.contains("Esc"),
-            "Esc-to-deny must be named: {joined:?}"
-        );
-        for (i, l) in narrow.iter().enumerate() {
-            let w: usize = l.spans.iter().map(|s| s.content.width()).sum();
-            assert!(w <= 40, "row {i} width {w} must fit 40 cols");
-        }
-    }
-
-    /// (Fix 2) A wide terminal keeps all options on a single row.
-    #[test]
-    fn approval_options_single_row_when_wide() {
-        let wide = pack_approval_options(200);
-        assert_eq!(wide.len(), 1, "all options fit one row at width 200");
-        let joined: String = wide[0].spans.iter().map(|s| s.content.as_ref()).collect();
         for token in ["[y] Allow", "[s] Session", "[a] Always", "[n]/Esc Deny"] {
             assert!(joined.contains(token), "missing {token} in {joined:?}");
         }
+
+        let row =
+            |i: usize| -> String { lines[i].spans.iter().map(|s| s.content.as_ref()).collect() };
+        assert!(row(1).starts_with("❯ "), "selected row gets the cursor");
+        assert!(row(0).starts_with("  "), "unselected rows are indented");
+    }
+
+    /// An out-of-range `selected` is clamped rather than panicking.
+    #[test]
+    fn approval_choice_lines_clamp_selected() {
+        let lines = build_approval_choice_lines(usize::MAX);
+        let last = lines.len() - 1;
+        let last_row: String = lines[last]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(last_row.starts_with("❯ "), "cursor clamps to the last row");
     }
 
     // ---- Fix 4: ask modal wrap helpers -----------------------------------
