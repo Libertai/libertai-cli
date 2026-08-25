@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use k256::ecdsa::SigningKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -24,6 +24,11 @@ use crate::auth::wallet::{address_from_signing_key, personal_sign, recover_addre
 
 /// Path of the signature sidecar, relative to the plugin root.
 pub const SIGNATURE_REL: &str = ".libertai-plugin/signature.json";
+
+/// The only signing scheme we produce and accept. Verification is bound to
+/// this so a future scheme reusing the `r||s||v` layout can't slip through the
+/// EIP-191 recovery path.
+const ALGORITHM: &str = "eip191-secp256k1";
 
 /// The signature sidecar written into a signed plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,14 +103,27 @@ fn collect_file_hashes(root: &Path, dir: &Path, out: &mut Vec<(String, String)>)
         if entry.file_name() == ".git" {
             continue;
         }
+        let file_type = entry.file_type()?;
+        // Skip symlinks entirely. `file_type()` is lstat-like, so a symlink to
+        // a directory looks like a file here and would then be `std::fs::read`,
+        // which DOES follow the link — silently hashing content outside the
+        // plugin tree (e.g. /etc/passwd) and making the digest non-reproducible
+        // across machines. Real files inside the plugin are hashed directly on
+        // their own path, so nothing legitimate is lost. (Mirrors the symlink
+        // skip in code_task.rs snapshot copies.)
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if entry.file_type()?.is_dir() {
+        if file_type.is_dir() {
             collect_file_hashes(root, &path, out)?;
             continue;
         }
+        // The recursion only ever descends into `root`, so this can't fail —
+        // surface loudly (not a silently-wrong absolute path) if it ever does.
         let rel = path
             .strip_prefix(root)
-            .unwrap_or(&path)
+            .map_err(|_| anyhow!("walked path {} escaped the plugin root", path.display()))?
             .to_string_lossy()
             .replace('\\', "/");
         if rel == SIGNATURE_REL {
@@ -131,6 +149,12 @@ pub fn verify_plugin_signature(root: &Path, trusted: &[String]) -> SignatureStat
     let Ok(sig) = serde_json::from_str::<SignatureFile>(&raw) else {
         return SignatureStatus::Invalid("signature.json is malformed".to_string());
     };
+    if sig.algorithm != ALGORITHM {
+        return SignatureStatus::Invalid(format!(
+            "unsupported signature algorithm `{}`",
+            sig.algorithm
+        ));
+    }
     let digest = match plugin_digest(root) {
         Ok(d) => d,
         Err(e) => return SignatureStatus::Invalid(format!("cannot hash plugin: {e}")),
@@ -161,7 +185,7 @@ pub fn verify_plugin_signature(root: &Path, trusted: &[String]) -> SignatureStat
 pub fn sign_plugin(root: &Path, sk: &SigningKey) -> Result<SignatureFile> {
     let digest = plugin_digest(root)?;
     let file = SignatureFile {
-        algorithm: "eip191-secp256k1".to_string(),
+        algorithm: ALGORITHM.to_string(),
         address: address_from_signing_key(sk),
         signature: personal_sign(sk, &digest)?,
         digest,
@@ -250,5 +274,72 @@ mod tests {
         // Adding the signature file must not change the digest.
         let after = plugin_digest(dir.path()).unwrap();
         assert_eq!(before, after);
+    }
+
+    /// Rewrite the plugin's `signature.json` after signing, applying `mutate`.
+    fn tamper_signature(root: &Path, mutate: impl FnOnce(&mut SignatureFile)) {
+        let p = root.join(".libertai-plugin").join("signature.json");
+        let mut sig: SignatureFile =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        mutate(&mut sig);
+        std::fs::write(&p, serde_json::to_string(&sig).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn malformed_signature_json_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        write_plugin(dir.path());
+        std::fs::create_dir_all(dir.path().join(".libertai-plugin")).unwrap();
+        std::fs::write(
+            dir.path().join(".libertai-plugin").join("signature.json"),
+            "{}",
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_plugin_signature(dir.path(), &[]),
+            SignatureStatus::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn declared_address_mismatch_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        write_plugin(dir.path());
+        sign_plugin(dir.path(), &test_key()).unwrap();
+        tamper_signature(dir.path(), |sig| {
+            sig.address = "0x0000000000000000000000000000000000000000".to_string();
+        });
+        assert!(matches!(
+            verify_plugin_signature(dir.path(), &[]),
+            SignatureStatus::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn unknown_algorithm_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        write_plugin(dir.path());
+        sign_plugin(dir.path(), &test_key()).unwrap();
+        tamper_signature(dir.path(), |sig| sig.algorithm = "ed25519".to_string());
+        assert!(matches!(
+            verify_plugin_signature(dir.path(), &[]),
+            SignatureStatus::Invalid(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_is_excluded_from_digest() {
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("secret"), "SECRET").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        write_plugin(dir.path());
+        let before = plugin_digest(dir.path()).unwrap();
+        // A symlink pointing outside the plugin must not be followed into the
+        // digest (would otherwise hash external content, non-reproducibly).
+        std::os::unix::fs::symlink(external.path().join("secret"), dir.path().join("evil-link"))
+            .unwrap();
+        let after = plugin_digest(dir.path()).unwrap();
+        assert_eq!(before, after, "a symlink must not change the digest");
     }
 }

@@ -179,7 +179,7 @@ pub struct PluginsConfig {
     pub scanners: Vec<ScannerConfig>,
     /// Refuse to install a plugin whose content signature is missing or
     /// invalid (org policy). Off by default.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub require_signed: bool,
     /// `0x` publisher addresses whose valid signatures mark a plugin as a
     /// "verified publisher" rather than merely "signed".
