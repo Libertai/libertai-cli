@@ -963,21 +963,25 @@ struct PluginMcpFile {
 /// merges the config so `/mcp` can list/probe them; a live tool runtime is a
 /// separate phase.)
 pub fn merge_plugin_mcp_servers(cfg: &mut Config) -> usize {
-    let sources: Vec<PathBuf> = cfg
+    let sources: Vec<(String, PathBuf)> = cfg
         .plugins
         .installed
-        .values()
-        .filter(|p| p.enabled && p.trusted)
-        .map(|p| PathBuf::from(&p.path))
+        .iter()
+        .filter(|(_, p)| p.enabled && p.trusted)
+        .map(|(k, p)| (k.clone(), PathBuf::from(&p.path)))
         .collect();
     let mut added = 0;
-    for path in sources {
+    for (key, path) in sources {
         let mcp_path = path.join(".mcp.json");
         let Ok(raw) = std::fs::read_to_string(&mcp_path) else {
             continue;
         };
-        let Ok(parsed) = serde_json::from_str::<PluginMcpFile>(&raw) else {
-            continue;
+        let parsed = match serde_json::from_str::<PluginMcpFile>(&raw) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                eprintln!("warning: plugin `{key}` has malformed .mcp.json ({e}); skipping its MCP servers");
+                continue;
+            }
         };
         for (name, server) in parsed.mcp_servers {
             if let std::collections::hash_map::Entry::Vacant(slot) = cfg.mcp_servers.entry(name) {
@@ -1012,19 +1016,33 @@ pub fn merge_plugin_hooks(cfg: &mut Config) -> usize {
         .map(|(k, p)| (k.clone(), PathBuf::from(&p.path)))
         .collect();
     let mut added = 0;
+    // Both formats can ship hooks — `.libertai-plugin/` is a superset of the
+    // Claude format — so this intentionally does not filter on `p.format`.
     for (key, path) in sources {
         let hooks_path = path.join("hooks").join("hooks.json");
+        // A missing hooks.json is normal (most plugins have none) — stay quiet.
+        // A present-but-broken one is a trusted plugin whose hooks silently
+        // won't fire, so warn to save the user a debugging session.
         let Ok(raw) = std::fs::read_to_string(&hooks_path) else {
             continue;
         };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            continue;
+        let value = match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(value) => value,
+            Err(e) => {
+                eprintln!(
+                    "warning: plugin `{key}` has malformed hooks.json ({e}); skipping its hooks"
+                );
+                continue;
+            }
         };
         // `hooks.json` may be a bare event map or wrapped in `{ "hooks": {…} }`.
         let hooks_value = value.get("hooks").cloned().unwrap_or(value);
-        let Ok(mut hooks) = serde_json::from_value::<crate::config::HooksConfig>(hooks_value)
-        else {
-            continue;
+        let mut hooks = match serde_json::from_value::<crate::config::HooksConfig>(hooks_value) {
+            Ok(hooks) => hooks,
+            Err(e) => {
+                eprintln!("warning: plugin `{key}` hooks.json is not a valid hooks config ({e}); skipping its hooks");
+                continue;
+            }
         };
         let root = path.to_string_lossy().to_string();
         for vec in hooks.event_vecs_mut() {
@@ -1294,5 +1312,68 @@ mod tests {
         assert_eq!(hook.command, format!("{root}/scan.sh"));
         assert_eq!(hook.matcher, "Bash");
         assert_eq!(hook.source, "plugin:p@m");
+    }
+
+    #[test]
+    fn merge_plugin_hooks_wrapper_alias_and_args() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("hooks")).unwrap();
+        // `{ "hooks": {…} }` wrapper, the ${LIBERTAI_PLUGIN_ROOT} alias, and
+        // args expansion. A libertai-format plugin declaring hooks is valid
+        // (the format is a superset), so it merges too.
+        std::fs::write(
+            dir.path().join("hooks").join("hooks.json"),
+            r#"{ "hooks": { "PostToolUse": [ { "hooks": [ {
+                 "type": "command", "command": "node",
+                 "args": ["${LIBERTAI_PLUGIN_ROOT}/post.js"] } ] } ] } }"#,
+        )
+        .unwrap();
+        let mut cfg = crate::config::Config::default();
+        let root = dir.path().to_string_lossy().to_string();
+        cfg.plugins.installed.insert(
+            "p@m".into(),
+            crate::config::InstalledPlugin {
+                marketplace: "m".into(),
+                path: root.clone(),
+                version: None,
+                sha: None,
+                format: "libertai".into(),
+                enabled: true,
+                trusted: true,
+            },
+        );
+        assert_eq!(merge_plugin_hooks(&mut cfg), 1);
+        let hook = &cfg.hooks.post_tool_use[0];
+        assert_eq!(hook.command, "node");
+        assert_eq!(hook.args, vec![format!("{root}/post.js")]);
+        assert_eq!(hook.source, "plugin:p@m");
+    }
+
+    #[test]
+    fn merge_plugin_hooks_from_multiple_plugins() {
+        let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+        let mut cfg = crate::config::Config::default();
+        for (i, dir) in dirs.iter().enumerate() {
+            std::fs::create_dir_all(dir.path().join("hooks")).unwrap();
+            std::fs::write(
+                dir.path().join("hooks").join("hooks.json"),
+                r#"{ "PreToolUse": [ { "hooks": [ { "type": "command", "command": "x" } ] } ] }"#,
+            )
+            .unwrap();
+            cfg.plugins.installed.insert(
+                format!("p{i}@m"),
+                crate::config::InstalledPlugin {
+                    marketplace: "m".into(),
+                    path: dir.path().to_string_lossy().to_string(),
+                    version: None,
+                    sha: None,
+                    format: "claude".into(),
+                    enabled: true,
+                    trusted: true,
+                },
+            );
+        }
+        assert_eq!(merge_plugin_hooks(&mut cfg), 2);
+        assert_eq!(cfg.hooks.pre_tool_use.len(), 2);
     }
 }

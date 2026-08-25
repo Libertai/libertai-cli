@@ -689,7 +689,16 @@ impl HooksConfig {
     /// Append all of `other`'s hooks onto this config, event by event.
     pub fn extend(&mut self, other: HooksConfig) {
         let mut dst = self.event_vecs_mut();
-        for (d, s) in dst.iter_mut().zip(other.into_event_vecs()) {
+        let src = other.into_event_vecs();
+        // event_vecs_mut / into_event_vecs must enumerate the same events in
+        // the same order; the zip below would silently drop hooks if a future
+        // field addition updated only one of them.
+        debug_assert_eq!(
+            dst.len(),
+            src.len(),
+            "hook event vecs out of sync — update event_vecs_mut and into_event_vecs together"
+        );
+        for (d, s) in dst.iter_mut().zip(src) {
             d.extend(s);
         }
     }
