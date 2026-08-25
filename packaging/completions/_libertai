@@ -294,6 +294,16 @@ _arguments "${_arguments_options[@]}" : \
 ':name:_default' \
 && ret=0
 ;;
+(sign)
+_arguments "${_arguments_options[@]}" : \
+'--key=[Signing key hex (with or without 0x); else \$LIBERTAI_SIGNING_KEY]:KEY:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+':path -- Path to the plugin directory to sign:_default' \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 ":: :_libertai__subcmd__plugin__subcmd__help_commands" \
@@ -355,6 +365,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (remove)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(sign)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1085,6 +1099,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(sign)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
         esac
     ;;
 esac
@@ -1669,6 +1687,7 @@ _libertai__subcmd__help__subcmd__plugin_commands() {
 'enable:Enable an installed plugin'\''s components' \
 'disable:Disable an installed plugin'\''s components' \
 'remove:Uninstall a plugin and delete its files' \
+'sign:Sign a plugin directory in place (writes .libertai-plugin/signature.json)' \
     )
     _describe -t commands 'libertai help plugin commands' commands "$@"
 }
@@ -1725,6 +1744,11 @@ _libertai__subcmd__help__subcmd__plugin__subcmd__marketplace__subcmd__remove_com
 _libertai__subcmd__help__subcmd__plugin__subcmd__remove_commands() {
     local commands; commands=()
     _describe -t commands 'libertai help plugin remove commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__help__subcmd__plugin__subcmd__sign_commands] )) ||
+_libertai__subcmd__help__subcmd__plugin__subcmd__sign_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai help plugin sign commands' commands "$@"
 }
 (( $+functions[_libertai__subcmd__help__subcmd__run_commands] )) ||
 _libertai__subcmd__help__subcmd__run_commands() {
@@ -2005,6 +2029,7 @@ _libertai__subcmd__plugin_commands() {
 'enable:Enable an installed plugin'\''s components' \
 'disable:Disable an installed plugin'\''s components' \
 'remove:Uninstall a plugin and delete its files' \
+'sign:Sign a plugin directory in place (writes .libertai-plugin/signature.json)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'libertai plugin commands' commands "$@"
@@ -2034,6 +2059,7 @@ _libertai__subcmd__plugin__subcmd__help_commands() {
 'enable:Enable an installed plugin'\''s components' \
 'disable:Disable an installed plugin'\''s components' \
 'remove:Uninstall a plugin and delete its files' \
+'sign:Sign a plugin directory in place (writes .libertai-plugin/signature.json)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'libertai plugin help commands' commands "$@"
@@ -2096,6 +2122,11 @@ _libertai__subcmd__plugin__subcmd__help__subcmd__marketplace__subcmd__remove_com
 _libertai__subcmd__plugin__subcmd__help__subcmd__remove_commands() {
     local commands; commands=()
     _describe -t commands 'libertai plugin help remove commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__help__subcmd__sign_commands] )) ||
+_libertai__subcmd__plugin__subcmd__help__subcmd__sign_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin help sign commands' commands "$@"
 }
 (( $+functions[_libertai__subcmd__plugin__subcmd__install_commands] )) ||
 _libertai__subcmd__plugin__subcmd__install_commands() {
@@ -2166,6 +2197,11 @@ _libertai__subcmd__plugin__subcmd__marketplace__subcmd__remove_commands() {
 _libertai__subcmd__plugin__subcmd__remove_commands() {
     local commands; commands=()
     _describe -t commands 'libertai plugin remove commands' commands "$@"
+}
+(( $+functions[_libertai__subcmd__plugin__subcmd__sign_commands] )) ||
+_libertai__subcmd__plugin__subcmd__sign_commands() {
+    local commands; commands=()
+    _describe -t commands 'libertai plugin sign commands' commands "$@"
 }
 (( $+functions[_libertai__subcmd__run_commands] )) ||
 _libertai__subcmd__run_commands() {

@@ -554,6 +554,7 @@ pub struct StagedPlugin {
     pub sha: Option<String>,
     pub format: ManifestFormat,
     pub capabilities: CapabilityReport,
+    pub signature: crate::commands::code_plugin_sign::SignatureStatus,
 }
 
 /// The outcome of running one external scanner over a staged plugin.
@@ -824,6 +825,10 @@ pub fn stage_plugin(cfg: &Config, marketplace: &str, plugin_name: &str) -> Resul
     let (pmanifest, format) = read_plugin_manifest(&dest)?
         .ok_or_else(|| anyhow!("plugin `{plugin_name}` has no plugin.json manifest"))?;
     let capabilities = extract_capabilities(&dest)?;
+    let signature = crate::commands::code_plugin_sign::verify_plugin_signature(
+        &dest,
+        &cfg.plugins.trusted_publishers,
+    );
     Ok(StagedPlugin {
         name: plugin_name.to_string(),
         marketplace: marketplace.to_string(),
@@ -832,6 +837,7 @@ pub fn stage_plugin(cfg: &Config, marketplace: &str, plugin_name: &str) -> Resul
         sha,
         format,
         capabilities,
+        signature,
     })
 }
 
