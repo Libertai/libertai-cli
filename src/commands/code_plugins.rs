@@ -989,6 +989,62 @@ pub fn merge_plugin_mcp_servers(cfg: &mut Config) -> usize {
     added
 }
 
+/// Expand the plugin-root placeholders (`${CLAUDE_PLUGIN_ROOT}` and the
+/// LibertAI alias) in a hook string to the plugin's install path.
+fn expand_plugin_root(s: &str, root: &str) -> String {
+    s.replace("${CLAUDE_PLUGIN_ROOT}", root)
+        .replace("${LIBERTAI_PLUGIN_ROOT}", root)
+}
+
+/// Merge the hooks declared by enabled AND trusted plugins into `cfg.hooks`.
+/// A plugin's `hooks/hooks.json` is parsed by the same `HooksConfig`
+/// deserializer as the user's config (it already accepts Claude's nested
+/// `{matcher, hooks:[…]}` groups), then each hook's `${CLAUDE_PLUGIN_ROOT}`
+/// placeholder is expanded to the plugin path and its `source` tagged
+/// `plugin:<key>` for provenance. Trust is required because these hooks run
+/// shell commands. Returns how many hooks were merged.
+pub fn merge_plugin_hooks(cfg: &mut Config) -> usize {
+    let sources: Vec<(String, PathBuf)> = cfg
+        .plugins
+        .installed
+        .iter()
+        .filter(|(_, p)| p.enabled && p.trusted)
+        .map(|(k, p)| (k.clone(), PathBuf::from(&p.path)))
+        .collect();
+    let mut added = 0;
+    for (key, path) in sources {
+        let hooks_path = path.join("hooks").join("hooks.json");
+        let Ok(raw) = std::fs::read_to_string(&hooks_path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        // `hooks.json` may be a bare event map or wrapped in `{ "hooks": {…} }`.
+        let hooks_value = value.get("hooks").cloned().unwrap_or(value);
+        let Ok(mut hooks) = serde_json::from_value::<crate::config::HooksConfig>(hooks_value)
+        else {
+            continue;
+        };
+        let root = path.to_string_lossy().to_string();
+        for vec in hooks.event_vecs_mut() {
+            for hook in vec.iter_mut() {
+                hook.command = expand_plugin_root(&hook.command, &root);
+                for arg in &mut hook.args {
+                    *arg = expand_plugin_root(arg, &root);
+                }
+                hook.prompt = expand_plugin_root(&hook.prompt, &root);
+                if hook.source.trim().is_empty() {
+                    hook.source = format!("plugin:{key}");
+                }
+                added += 1;
+            }
+        }
+        cfg.hooks.extend(hooks);
+    }
+    added
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1200,5 +1256,43 @@ mod tests {
         cfg.plugins.installed.get_mut("p@m").unwrap().trusted = true;
         assert_eq!(merge_plugin_mcp_servers(&mut cfg), 1);
         assert!(cfg.mcp_servers.contains_key("db"));
+    }
+
+    #[test]
+    fn merge_plugin_hooks_requires_trust_and_expands_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("hooks")).unwrap();
+        std::fs::write(
+            dir.path().join("hooks").join("hooks.json"),
+            r#"{ "PreToolUse": [ { "matcher": "Bash",
+                 "hooks": [ { "type": "command",
+                              "command": "${CLAUDE_PLUGIN_ROOT}/scan.sh" } ] } ] }"#,
+        )
+        .unwrap();
+        let mut cfg = crate::config::Config::default();
+        let root = dir.path().to_string_lossy().to_string();
+        cfg.plugins.installed.insert(
+            "p@m".into(),
+            crate::config::InstalledPlugin {
+                marketplace: "m".into(),
+                path: root.clone(),
+                version: None,
+                sha: None,
+                format: "claude".into(),
+                enabled: true,
+                trusted: false,
+            },
+        );
+        // Enabled but not trusted → nothing merges (hooks execute code).
+        assert_eq!(merge_plugin_hooks(&mut cfg), 0);
+        assert!(cfg.hooks.pre_tool_use.is_empty());
+        // Trusted → the hook merges, root expanded, source tagged.
+        cfg.plugins.installed.get_mut("p@m").unwrap().trusted = true;
+        assert_eq!(merge_plugin_hooks(&mut cfg), 1);
+        assert_eq!(cfg.hooks.pre_tool_use.len(), 1);
+        let hook = &cfg.hooks.pre_tool_use[0];
+        assert_eq!(hook.command, format!("{root}/scan.sh"));
+        assert_eq!(hook.matcher, "Bash");
+        assert_eq!(hook.source, "plugin:p@m");
     }
 }
