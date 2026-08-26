@@ -1,0 +1,5 @@
+# Keep shell-parsed config files LF on every platform so CI sed/read steps
+# never capture a stray CR (see release.yml toolchain steps).
+* text=auto eol=lf
+*.png binary
+*.deb binary

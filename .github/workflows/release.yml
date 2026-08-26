@@ -36,7 +36,7 @@ jobs:
       - name: Install pinned Rust toolchain
         shell: bash
         run: |
-          TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)
+          TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml | tr -d '\r')
           echo "Pinned toolchain: $TOOLCHAIN"
           rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt --component clippy
           rustup default "$TOOLCHAIN"
@@ -181,7 +181,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)
+          TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml | tr -d '\r')
           echo "Pinned toolchain: $TOOLCHAIN, target: $TARGET"
           rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt --component clippy
           rustup default "$TOOLCHAIN"
@@ -269,7 +269,7 @@ jobs:
       - name: Install pinned Rust toolchain
         shell: bash
         run: |
-          TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)
+          TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml | tr -d '\r')
           echo "Pinned toolchain: $TOOLCHAIN"
           rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt --component clippy
           rustup default "$TOOLCHAIN"
@@ -492,7 +492,7 @@ jobs:
       - name: Install pinned Rust toolchain
         shell: bash
         run: |
-          TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)
+          TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml | tr -d '\r')
           echo "Pinned toolchain: $TOOLCHAIN"
           rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt --component clippy
           rustup default "$TOOLCHAIN"
