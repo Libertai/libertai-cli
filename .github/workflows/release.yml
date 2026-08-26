@@ -30,7 +30,16 @@ jobs:
         if: runner.os == 'Windows'
         run: git config --global core.longpaths true
 
-      - uses: dtolnay/rust-toolchain@stable
+      # rust-toolchain.toml pins a specific nightly, which rustup honours for
+      # every cargo invocation. Installing `stable` here would be silently
+      # overridden, so install the pinned toolchain itself.
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "Pinned toolchain: $TOOLCHAIN"
+          rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup default "$TOOLCHAIN"
 
       - uses: Swatinem/rust-cache@v2
 
@@ -42,7 +51,8 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test --verbose --test config_roundtrip -- --test-threads=1
 
-  # 2. Verify the tag version matches Cargo.toml and classify prerelease.
+  # 2. Verify the tag version matches Cargo.toml, that the tag sits on the
+  #    default branch, and classify prerelease.
   check-version:
     name: Check Version Consistency
     runs-on: ubuntu-latest
@@ -50,7 +60,29 @@ jobs:
       version: ${{ steps.get-version.outputs.version }}
       is-prerelease: ${{ steps.get-version.outputs.is-prerelease }}
     steps:
+      # Full history so we can prove the tagged commit is on the default
+      # branch. Releases v0.4.2..v0.4.5 were cut from a side branch that was
+      # later deleted, leaving those tags unreachable from master and the
+      # version on master (0.4.1) lower than the published one. Fail loudly
+      # instead of repeating that.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify the tag is on the default branch
+        if: github.event_name == 'push'
+        env:
+          GIT_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          TAG="${GIT_REF#refs/tags/}"
+          git fetch --no-tags origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          TAG_SHA=$(git rev-list -n 1 "$TAG")
+          if ! git merge-base --is-ancestor "$TAG_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::tag $TAG ($TAG_SHA) is not an ancestor of origin/$DEFAULT_BRANCH. Merge the release commit to $DEFAULT_BRANCH and re-tag there."
+            exit 1
+          fi
+          echo "$TAG is on $DEFAULT_BRANCH ($TAG_SHA)"
 
       - id: get-version
         env:
@@ -138,9 +170,23 @@ jobs:
         if: runner.os == 'Windows'
         run: git config --global core.longpaths true
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      # rust-toolchain.toml pins a specific nightly, which rustup honours for
+      # every cargo invocation. `dtolnay/rust-toolchain@stable` with `targets:`
+      # would add the std for the target to *stable*, not to the nightly cargo
+      # actually runs — cross-builds (notably x86_64-apple-darwin on the arm64
+      # macos runner) then fail with a missing-std error. Install the target
+      # against the pinned toolchain instead.
+      - name: Install pinned Rust toolchain with target
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "Pinned toolchain: $TOOLCHAIN, target: $TARGET"
+          rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup default "$TOOLCHAIN"
+          rustup target add --toolchain "$TOOLCHAIN" "$TARGET"
+          rustup target list --toolchain "$TOOLCHAIN" --installed
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -217,7 +263,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      # rust-toolchain.toml pins a specific nightly, which rustup honours for
+      # every cargo invocation. Installing `stable` here would be silently
+      # overridden, so install the pinned toolchain itself.
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "Pinned toolchain: $TOOLCHAIN"
+          rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup default "$TOOLCHAIN"
 
       - uses: taiki-e/install-action@v2
         with:
@@ -431,7 +486,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      # rust-toolchain.toml pins a specific nightly, which rustup honours for
+      # every cargo invocation. Installing `stable` here would be silently
+      # overridden, so install the pinned toolchain itself.
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          TOOLCHAIN=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "Pinned toolchain: $TOOLCHAIN"
+          rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup default "$TOOLCHAIN"
 
       - name: Publish libertai-cli
         id: publish_crate
