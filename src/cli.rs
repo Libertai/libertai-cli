@@ -529,6 +529,14 @@ pub enum PluginAction {
     Disable { name: String },
     /// Uninstall a plugin and delete its files.
     Remove { name: String },
+    /// Sign a plugin directory in place (writes .libertai-plugin/signature.json).
+    Sign {
+        /// Path to the plugin directory to sign.
+        path: String,
+        /// Signing key hex (with or without 0x); else $LIBERTAI_SIGNING_KEY.
+        #[arg(long)]
+        key: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

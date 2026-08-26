@@ -7,6 +7,7 @@
 use anyhow::{bail, Result};
 
 use crate::cli::{MarketplaceAction, PluginAction};
+use crate::commands::code_plugin_sign;
 use crate::commands::code_plugins::{self, StagedPlugin};
 use crate::config;
 
@@ -29,7 +30,26 @@ pub fn run(action: PluginAction) -> Result<()> {
         PluginAction::Enable { name } => set_enabled(&mut cfg, &name, true),
         PluginAction::Disable { name } => set_enabled(&mut cfg, &name, false),
         PluginAction::Remove { name } => remove(&mut cfg, &name),
+        PluginAction::Sign { path, key } => sign(&path, key),
     }
+}
+
+/// Sign a plugin directory in place with the author's wallet key.
+fn sign(path: &str, key: Option<String>) -> Result<()> {
+    let root = std::path::Path::new(path);
+    anyhow::ensure!(root.is_dir(), "not a directory: {path}");
+    let key_hex = key
+        .or_else(|| std::env::var("LIBERTAI_SIGNING_KEY").ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!("no signing key — pass --key <hex> or set LIBERTAI_SIGNING_KEY")
+        })?;
+    let sk = crate::auth::wallet::signing_key_from_hex(&key_hex)?;
+    let file = code_plugin_sign::sign_plugin(root, &sk)?;
+    eprintln!("Signed {path}");
+    eprintln!("  address: {}", file.address);
+    eprintln!("  digest:  {}", file.digest);
+    eprintln!("Wrote {}", code_plugin_sign::SIGNATURE_REL);
+    Ok(())
 }
 
 fn marketplace(cfg: &mut config::Config, action: MarketplaceAction) -> Result<()> {
@@ -83,6 +103,14 @@ fn install(
     eprintln!("Fetching {plugin} from {marketplace} …");
     let staged = code_plugins::stage_plugin(cfg, &marketplace, &plugin)?;
     print_capabilities(&staged);
+
+    // Org policy: refuse unsigned/invalid plugins when require_signed is set.
+    if cfg.plugins.require_signed && !staged.signature.is_valid() {
+        bail!(
+            "plugins.require_signed is set but {plugin}@{marketplace} is {} — refusing to install",
+            staged.signature.label()
+        );
+    }
 
     if should_scan(cfg, scan_flag, no_scan, yes)? {
         run_scan(cfg, &staged);
@@ -234,6 +262,7 @@ fn print_capabilities(staged: &StagedPlugin) {
     if let Some(sha) = &staged.sha {
         eprintln!("  pinned:  {}", short_sha(sha));
     }
+    eprintln!("  signature: {}", staged.signature.label());
     if !c.components.is_empty() {
         let parts: Vec<String> = c
             .components

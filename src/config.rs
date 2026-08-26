@@ -177,6 +177,14 @@ pub struct PluginsConfig {
     /// (e.g. Skillspector) are used.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scanners: Vec<ScannerConfig>,
+    /// Refuse to install a plugin whose content signature is missing or
+    /// invalid (org policy). Off by default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub require_signed: bool,
+    /// `0x` publisher addresses whose valid signatures mark a plugin as a
+    /// "verified publisher" rather than merely "signed".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_publishers: Vec<String>,
 }
 
 impl PluginsConfig {
@@ -186,6 +194,8 @@ impl PluginsConfig {
             && self.installed.is_empty()
             && self.scan_on_install.is_default()
             && self.scanners.is_empty()
+            && !self.require_signed
+            && self.trusted_publishers.is_empty()
     }
 }
 
