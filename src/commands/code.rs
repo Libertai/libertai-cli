@@ -50,7 +50,14 @@ pub fn run(
     args: Vec<String>,
     dangerously_skip_permissions: bool,
 ) -> Result<()> {
-    let cfg = config::load()?;
+    let mut cfg = config::load()?;
+    // Activate trusted plugins: merge each enabled AND trusted plugin's
+    // hooks/hooks.json and .mcp.json into the effective config before the
+    // session reads them. Trust gates code execution — `enabled` alone never
+    // merges hooks or MCP servers. (`${CLAUDE_PLUGIN_ROOT}` is expanded to the
+    // plugin path during the hook merge.)
+    let _plugin_hooks = crate::commands::code_plugins::merge_plugin_hooks(&mut cfg);
+    let _plugin_mcp = crate::commands::code_plugins::merge_plugin_mcp_servers(&mut cfg);
     // (WF-G) Offline workflow-engine selftest: run the script through the
     // real QuickJS engine (no LLM, no session, no terminal) and exit.
     // Probe-suite hook — see code_workflow::run_selftest.

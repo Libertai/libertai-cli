@@ -648,6 +648,71 @@ impl<'de> Deserialize<'de> for HooksConfig {
 }
 
 impl HooksConfig {
+    /// Mutable references to every event's hook vec, in a fixed order, so
+    /// callers can iterate all events uniformly (e.g. to expand plugin-root
+    /// variables) without naming each field.
+    #[must_use]
+    pub fn event_vecs_mut(&mut self) -> Vec<&mut Vec<HookCommandConfig>> {
+        vec![
+            &mut self.user_prompt_submit,
+            &mut self.pre_tool_use,
+            &mut self.post_tool_use,
+            &mut self.post_tool_use_failure,
+            &mut self.post_tool_batch,
+            &mut self.subagent_start,
+            &mut self.subagent_stop,
+            &mut self.pre_compact,
+            &mut self.post_compact,
+            &mut self.session_start,
+            &mut self.stop,
+            &mut self.session_end,
+            &mut self.notification,
+            &mut self.teammate_spawn,
+            &mut self.task_complete,
+            &mut self.team_complete,
+        ]
+    }
+
+    /// Owned per-event hook vecs, in the same order as [`Self::event_vecs_mut`].
+    #[must_use]
+    pub fn into_event_vecs(self) -> Vec<Vec<HookCommandConfig>> {
+        vec![
+            self.user_prompt_submit,
+            self.pre_tool_use,
+            self.post_tool_use,
+            self.post_tool_use_failure,
+            self.post_tool_batch,
+            self.subagent_start,
+            self.subagent_stop,
+            self.pre_compact,
+            self.post_compact,
+            self.session_start,
+            self.stop,
+            self.session_end,
+            self.notification,
+            self.teammate_spawn,
+            self.task_complete,
+            self.team_complete,
+        ]
+    }
+
+    /// Append all of `other`'s hooks onto this config, event by event.
+    pub fn extend(&mut self, other: HooksConfig) {
+        let mut dst = self.event_vecs_mut();
+        let src = other.into_event_vecs();
+        // event_vecs_mut / into_event_vecs must enumerate the same events in
+        // the same order; the zip below would silently drop hooks if a future
+        // field addition updated only one of them.
+        debug_assert_eq!(
+            dst.len(),
+            src.len(),
+            "hook event vecs out of sync — update event_vecs_mut and into_event_vecs together"
+        );
+        for (d, s) in dst.iter_mut().zip(src) {
+            d.extend(s);
+        }
+    }
+
     fn is_default(&self) -> bool {
         self.user_prompt_submit.is_empty()
             && self.pre_tool_use.is_empty()
