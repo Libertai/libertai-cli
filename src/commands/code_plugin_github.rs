@@ -66,6 +66,9 @@ impl GithubVerification {
 /// `GITHUB_TOKEN`/`GH_TOKEN` for higher rate limits and private repos.
 #[must_use]
 pub fn verify_github_commit(repo: &str, sha: &str) -> GithubVerification {
+    // `repo` comes from the trusted marketplace manifest and `sha` is a hex
+    // commit id from `git rev-parse HEAD` (not arbitrary user input), so
+    // direct interpolation is safe — same trust posture as `materialize_plugin`.
     let url = format!("https://api.github.com/repos/{repo}/commits/{sha}");
     let client = match reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(3))
@@ -134,7 +137,8 @@ pub fn github_repo_from_url(url: &str) -> Option<String> {
         .strip_prefix("https://github.com/")
         .or_else(|| url.strip_prefix("http://github.com/"))
         .or_else(|| url.strip_prefix("git@github.com:"))
-        .or_else(|| url.strip_prefix("ssh://git@github.com/"))?;
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| url.strip_prefix("ssh://github.com/"))?;
     let rest = rest.trim_end_matches('/').trim_end_matches(".git");
     let mut parts = rest.split('/');
     let owner = parts.next().filter(|s| !s.is_empty())?;
@@ -166,6 +170,23 @@ mod tests {
     }
 
     #[test]
+    fn verified_without_login_labels_by_reason() {
+        // GitHub's `author` is null when the committer email matches no account.
+        let json = serde_json::json!({
+            "commit": { "verification": { "verified": true, "reason": "valid" } },
+            "author": serde_json::Value::Null
+        });
+        let status = parse_commit_verification(&json);
+        assert!(matches!(
+            status,
+            GithubVerification::Verified { login: None, .. }
+        ));
+        let label = status.label();
+        assert!(label.contains("verified via GitHub"), "{label}");
+        assert!(label.contains("valid"), "{label}");
+    }
+
+    #[test]
     fn parses_unverified_commit() {
         let json = serde_json::json!({
             "commit": { "verification": { "verified": false, "reason": "unsigned" } },
@@ -194,6 +215,10 @@ mod tests {
         );
         assert_eq!(
             github_repo_from_url("git@github.com:owner/repo"),
+            Some("owner/repo".to_string())
+        );
+        assert_eq!(
+            github_repo_from_url("ssh://github.com/owner/repo.git"),
             Some("owner/repo".to_string())
         );
         assert_eq!(
