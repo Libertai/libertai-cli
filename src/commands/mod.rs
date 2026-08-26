@@ -28,6 +28,7 @@ pub mod code_models;
 pub mod code_notification;
 pub mod code_output_style;
 pub mod code_path_safety;
+pub mod code_plugin_github;
 pub mod code_plugin_sign;
 pub mod code_plugins;
 pub mod code_pr_comments;

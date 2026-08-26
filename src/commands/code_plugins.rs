@@ -555,6 +555,7 @@ pub struct StagedPlugin {
     pub format: ManifestFormat,
     pub capabilities: CapabilityReport,
     pub signature: crate::commands::code_plugin_sign::SignatureStatus,
+    pub github: crate::commands::code_plugin_github::GithubVerification,
 }
 
 /// The outcome of running one external scanner over a staged plugin.
@@ -829,6 +830,7 @@ pub fn stage_plugin(cfg: &Config, marketplace: &str, plugin_name: &str) -> Resul
         &dest,
         &cfg.plugins.trusted_publishers,
     );
+    let github = github_verification(&entry.source, sha.as_deref());
     Ok(StagedPlugin {
         name: plugin_name.to_string(),
         marketplace: marketplace.to_string(),
@@ -838,7 +840,33 @@ pub fn stage_plugin(cfg: &Config, marketplace: &str, plugin_name: &str) -> Resul
         format,
         capabilities,
         signature,
+        github,
     })
+}
+
+/// GitHub commit verification for a plugin source, when it is a GitHub repo
+/// pinned to a resolved commit SHA. Every other source is `NotApplicable`.
+fn github_verification(
+    source: &PluginSource,
+    sha: Option<&str>,
+) -> crate::commands::code_plugin_github::GithubVerification {
+    use crate::commands::code_plugin_github::{
+        github_repo_from_url, verify_github_commit, GithubVerification,
+    };
+    let Some(sha) = sha else {
+        return GithubVerification::NotApplicable;
+    };
+    let repo = match source {
+        PluginSource::Tagged(TaggedSource::Github { repo, .. }) => Some(repo.clone()),
+        PluginSource::Tagged(TaggedSource::Url { url, .. }) => github_repo_from_url(url),
+        // TODO: when GitSubdir sources are implemented in materialize_plugin,
+        // resolve its `url` here via github_repo_from_url too.
+        _ => None,
+    };
+    match repo {
+        Some(repo) => verify_github_commit(&repo, sha),
+        None => GithubVerification::NotApplicable,
+    }
 }
 
 /// Commit a staged plugin to config as installed + enabled (caller persists).
@@ -1390,5 +1418,37 @@ mod tests {
         // ("p0@m" before "p1@m") and each carries its own provenance tag.
         assert_eq!(cfg.hooks.pre_tool_use[0].source, "plugin:p0@m");
         assert_eq!(cfg.hooks.pre_tool_use[1].source, "plugin:p1@m");
+    }
+
+    #[test]
+    fn github_verification_dispatch_non_network_branches() {
+        use crate::commands::code_plugin_github::GithubVerification;
+        let github = |repo: &str| {
+            PluginSource::Tagged(TaggedSource::Github {
+                repo: repo.to_string(),
+                git_ref: None,
+                sha: None,
+            })
+        };
+        // No resolved SHA → NotApplicable regardless of source type.
+        assert_eq!(
+            github_verification(&github("o/r"), None),
+            GithubVerification::NotApplicable
+        );
+        // A relative-path source is never a GitHub commit.
+        assert_eq!(
+            github_verification(&PluginSource::Path("x".to_string()), Some("abc123")),
+            GithubVerification::NotApplicable
+        );
+        // A non-GitHub url source resolves to no repo → NotApplicable (no net).
+        let gitlab = PluginSource::Tagged(TaggedSource::Url {
+            url: "https://gitlab.com/o/r.git".to_string(),
+            git_ref: None,
+            sha: None,
+        });
+        assert_eq!(
+            github_verification(&gitlab, Some("abc123")),
+            GithubVerification::NotApplicable
+        );
     }
 }

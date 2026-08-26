@@ -7,6 +7,7 @@
 use anyhow::{bail, Result};
 
 use crate::cli::{MarketplaceAction, PluginAction};
+use crate::commands::code_plugin_github;
 use crate::commands::code_plugin_sign;
 use crate::commands::code_plugins::{self, StagedPlugin};
 use crate::config;
@@ -91,6 +92,17 @@ fn marketplace(cfg: &mut config::Config, action: MarketplaceAction) -> Result<()
     }
 }
 
+/// Whether install may proceed under the `require_signed` policy: an unset
+/// policy always allows; otherwise a valid wallet signature OR a
+/// GitHub-verified commit satisfies it (either anchors provenance).
+fn passes_trust_gate(
+    require_signed: bool,
+    signature: &code_plugin_sign::SignatureStatus,
+    github: &code_plugin_github::GithubVerification,
+) -> bool {
+    !require_signed || signature.is_valid() || github.is_verified()
+}
+
 fn install(
     cfg: &mut config::Config,
     name: &str,
@@ -104,11 +116,18 @@ fn install(
     let staged = code_plugins::stage_plugin(cfg, &marketplace, &plugin)?;
     print_capabilities(&staged);
 
-    // Org policy: refuse unsigned/invalid plugins when require_signed is set.
-    if cfg.plugins.require_signed && !staged.signature.is_valid() {
+    // Org policy: require a trust anchor. A valid wallet signature OR a
+    // GitHub-verified pinned commit satisfies it (either proves provenance).
+    if !passes_trust_gate(
+        cfg.plugins.require_signed,
+        &staged.signature,
+        &staged.github,
+    ) {
         bail!(
-            "plugins.require_signed is set but {plugin}@{marketplace} is {} — refusing to install",
-            staged.signature.label()
+            "plugins.require_signed is set but {plugin}@{marketplace} is unverified \
+             (signature: {}; github: {}) — refusing to install",
+            staged.signature.label(),
+            staged.github.label()
         );
     }
 
@@ -263,6 +282,9 @@ fn print_capabilities(staged: &StagedPlugin) {
         eprintln!("  pinned:  {}", short_sha(sha));
     }
     eprintln!("  signature: {}", staged.signature.label());
+    if staged.github != code_plugin_github::GithubVerification::NotApplicable {
+        eprintln!("  github:    {}", staged.github.label());
+    }
     if !c.components.is_empty() {
         let parts: Vec<String> = c
             .components
@@ -346,5 +368,32 @@ fn resolve_installed_key(cfg: &config::Config, name: &str) -> Result<String> {
         [] => bail!("plugin `{name}` is not installed"),
         [key] => Ok(key.clone()),
         _ => bail!("`{name}` matches multiple installs — qualify it as name@marketplace"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::code_plugin_github::GithubVerification;
+    use crate::commands::code_plugin_sign::SignatureStatus;
+
+    #[test]
+    fn trust_gate_accepts_either_anchor() {
+        let signed = SignatureStatus::Signed("0x1".to_string());
+        let unsigned = SignatureStatus::Unsigned;
+        let verified = GithubVerification::Verified {
+            login: None,
+            reason: "valid".to_string(),
+        };
+        let na = GithubVerification::NotApplicable;
+
+        // Policy off → always allowed, even with no anchor.
+        assert!(passes_trust_gate(false, &unsigned, &na));
+        // Policy on, valid wallet signature → allowed.
+        assert!(passes_trust_gate(true, &signed, &na));
+        // Policy on, GitHub-verified (no signature) → allowed.
+        assert!(passes_trust_gate(true, &unsigned, &verified));
+        // Policy on, neither anchor → blocked.
+        assert!(!passes_trust_gate(true, &unsigned, &na));
     }
 }
