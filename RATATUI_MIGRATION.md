@@ -1,5 +1,17 @@
 # Ratatui Migration Plan
 
+> **Status: done — kept as a design record, not a live description.**
+> The migration shipped; the TUI lives in `src/commands/code_tui/`
+> (`app.rs`, `view.rs`, `scrollback.rs`, `footer.rs`, `input.rs`,
+> `input_layout.rs`, `agents_panel.rs`, `approvals.rs`, `markdown.rs`,
+> `diff.rs`, `highlight.rs`, `terminal.rs`, `theme.rs`, `wrap.rs`,
+> `workflow_panel.rs`, `agent_view.rs`). Where this file says
+> `code_agent_view.rs`, the file is now `code_tui/agent_view.rs`.
+> The dependency list below is also stale: the crate actually uses
+> `ratatui 0.30` + `tui-textarea-2 0.12`; `ratatui-markdown` and
+> `tui-scrollbar` were never adopted (markdown and the scrollbar are
+> rendered in-tree by `code_tui/markdown.rs` and `code_tui/scrollback.rs`).
+
 ## Design Read
 
 Developer tool REPL for engineers, with a clean, dense, modern language.
