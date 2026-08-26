@@ -69,6 +69,12 @@ pub fn verify_github_commit(repo: &str, sha: &str) -> GithubVerification {
     // `repo` comes from the trusted marketplace manifest and `sha` is a hex
     // commit id from `git rev-parse HEAD` (not arbitrary user input), so
     // direct interpolation is safe — same trust posture as `materialize_plugin`.
+    // Defense-in-depth: still reject anything that isn't a plain `owner/name`,
+    // so a malicious manifest can't inject path segments (e.g. `../../…`) into
+    // the API URL regardless of how the HTTP client normalizes paths.
+    if !is_plain_repo(repo) {
+        return GithubVerification::Unknown(format!("invalid repo `{repo}`"));
+    }
     let url = format!("https://api.github.com/repos/{repo}/commits/{sha}");
     let client = match reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(3))
@@ -129,6 +135,24 @@ fn parse_commit_verification(value: &serde_json::Value) -> GithubVerification {
     }
 }
 
+/// A plain `owner/name` repo: exactly one `/`, each segment non-empty, not `.`
+/// or `..`, and only `[A-Za-z0-9._-]` — so it can never inject extra path
+/// segments into the API URL.
+fn is_plain_repo(repo: &str) -> bool {
+    let mut parts = repo.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s != "."
+            && s != ".."
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    };
+    ok(owner) && ok(name)
+}
+
 /// Parse `owner/name` out of a git URL when it points at **github.com**; used
 /// to extend GitHub verification to `url`-type sources, not only `github` ones.
 /// GitHub Enterprise hosts (e.g. `github.company.com`) are intentionally not
@@ -141,7 +165,7 @@ pub fn github_repo_from_url(url: &str) -> Option<String> {
         .or_else(|| url.strip_prefix("git@github.com:"))
         .or_else(|| url.strip_prefix("ssh://git@github.com/"))
         .or_else(|| url.strip_prefix("ssh://github.com/"))?;
-    // Strip a trailing slash, then exactly one `.git` suffix (strip_suffix,
+    // Strip trailing slashes, then exactly one `.git` suffix (strip_suffix,
     // not trim_end_matches, so a repo legitimately named `git` is preserved).
     let rest = rest.trim_end_matches('/');
     let rest = rest.strip_suffix(".git").unwrap_or(rest);
@@ -209,6 +233,27 @@ mod tests {
         assert!(matches!(
             parse_commit_verification(&json),
             GithubVerification::Unverified(_)
+        ));
+    }
+
+    #[test]
+    fn is_plain_repo_rejects_path_injection() {
+        assert!(is_plain_repo("owner/repo"));
+        assert!(is_plain_repo("o.w-n_er/re.po-1"));
+        assert!(!is_plain_repo("../../api/v3/x"));
+        assert!(!is_plain_repo("owner/.."));
+        assert!(!is_plain_repo("owner"));
+        assert!(!is_plain_repo("owner/repo/extra"));
+        assert!(!is_plain_repo("owner/re po"));
+        assert!(!is_plain_repo(""));
+    }
+
+    #[test]
+    fn verify_rejects_non_plain_repo_without_network() {
+        // A malicious repo string never reaches the network — mapped to Unknown.
+        assert!(matches!(
+            verify_github_commit("../../evil", "deadbeef"),
+            GithubVerification::Unknown(_)
         ));
     }
 

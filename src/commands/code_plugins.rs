@@ -859,6 +859,8 @@ fn github_verification(
     let repo = match source {
         PluginSource::Tagged(TaggedSource::Github { repo, .. }) => Some(repo.clone()),
         PluginSource::Tagged(TaggedSource::Url { url, .. }) => github_repo_from_url(url),
+        // TODO: when GitSubdir sources are implemented in materialize_plugin,
+        // resolve its `url` here via github_repo_from_url too.
         _ => None,
     };
     match repo {
