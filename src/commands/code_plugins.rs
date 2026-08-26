@@ -555,6 +555,7 @@ pub struct StagedPlugin {
     pub format: ManifestFormat,
     pub capabilities: CapabilityReport,
     pub signature: crate::commands::code_plugin_sign::SignatureStatus,
+    pub github: crate::commands::code_plugin_github::GithubVerification,
 }
 
 /// The outcome of running one external scanner over a staged plugin.
@@ -829,6 +830,7 @@ pub fn stage_plugin(cfg: &Config, marketplace: &str, plugin_name: &str) -> Resul
         &dest,
         &cfg.plugins.trusted_publishers,
     );
+    let github = github_verification(&entry.source, sha.as_deref());
     Ok(StagedPlugin {
         name: plugin_name.to_string(),
         marketplace: marketplace.to_string(),
@@ -838,7 +840,31 @@ pub fn stage_plugin(cfg: &Config, marketplace: &str, plugin_name: &str) -> Resul
         format,
         capabilities,
         signature,
+        github,
     })
+}
+
+/// GitHub commit verification for a plugin source, when it is a GitHub repo
+/// pinned to a resolved commit SHA. Every other source is `NotApplicable`.
+fn github_verification(
+    source: &PluginSource,
+    sha: Option<&str>,
+) -> crate::commands::code_plugin_github::GithubVerification {
+    use crate::commands::code_plugin_github::{
+        github_repo_from_url, verify_github_commit, GithubVerification,
+    };
+    let Some(sha) = sha else {
+        return GithubVerification::NotApplicable;
+    };
+    let repo = match source {
+        PluginSource::Tagged(TaggedSource::Github { repo, .. }) => Some(repo.clone()),
+        PluginSource::Tagged(TaggedSource::Url { url, .. }) => github_repo_from_url(url),
+        _ => None,
+    };
+    match repo {
+        Some(repo) => verify_github_commit(&repo, sha),
+        None => GithubVerification::NotApplicable,
+    }
 }
 
 /// Commit a staged plugin to config as installed + enabled (caller persists).

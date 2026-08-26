@@ -7,6 +7,7 @@
 use anyhow::{bail, Result};
 
 use crate::cli::{MarketplaceAction, PluginAction};
+use crate::commands::code_plugin_github;
 use crate::commands::code_plugin_sign;
 use crate::commands::code_plugins::{self, StagedPlugin};
 use crate::config;
@@ -104,11 +105,14 @@ fn install(
     let staged = code_plugins::stage_plugin(cfg, &marketplace, &plugin)?;
     print_capabilities(&staged);
 
-    // Org policy: refuse unsigned/invalid plugins when require_signed is set.
-    if cfg.plugins.require_signed && !staged.signature.is_valid() {
+    // Org policy: require a trust anchor. A valid wallet signature OR a
+    // GitHub-verified pinned commit satisfies it (either proves provenance).
+    if cfg.plugins.require_signed && !staged.signature.is_valid() && !staged.github.is_verified() {
         bail!(
-            "plugins.require_signed is set but {plugin}@{marketplace} is {} — refusing to install",
-            staged.signature.label()
+            "plugins.require_signed is set but {plugin}@{marketplace} is unverified \
+             (signature: {}; github: {}) — refusing to install",
+            staged.signature.label(),
+            staged.github.label()
         );
     }
 
@@ -263,6 +267,9 @@ fn print_capabilities(staged: &StagedPlugin) {
         eprintln!("  pinned:  {}", short_sha(sha));
     }
     eprintln!("  signature: {}", staged.signature.label());
+    if staged.github != code_plugin_github::GithubVerification::NotApplicable {
+        eprintln!("  github:    {}", staged.github.label());
+    }
     if !c.components.is_empty() {
         let parts: Vec<String> = c
             .components
