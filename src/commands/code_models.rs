@@ -227,12 +227,14 @@ mod tests {
     /// `env:` indirection to disk, yet pi's `ModelRegistry::load` (running in
     /// this same process) must resolve it back to the real key in memory.
     ///
-    /// Mutates process env (`PI_CODING_AGENT_DIR`, `LIBERTAI_API_KEY`) — this
-    /// is the module's only test, and nothing else in the lib test binary
-    /// reads `PI_CODING_AGENT_DIR` (same isolation argument as the
-    /// `claude_code_import` tests that set `PI_HOME`).
+    /// Mutates process env (`PI_CODING_AGENT_DIR`, `LIBERTAI_API_KEY`), which
+    /// is process-global rather than per-thread. `code_acp`'s options test
+    /// sets the same variables, so both must hold `test_env::lock()` for their
+    /// whole body — without it the two race and fail in either direction
+    /// whenever the harness runs them on separate threads.
     #[test]
     fn registered_provider_resolves_key_in_memory_only() {
+        let _env = crate::test_env::lock();
         const KEY: &str = "LTAI_sk_unit_probe_inmemory_0000000000";
         let pi_dir = tempfile::tempdir().expect("pi tempdir");
         std::env::set_var("PI_CODING_AGENT_DIR", pi_dir.path());

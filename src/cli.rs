@@ -242,7 +242,7 @@ pub enum Command {
         /// `--ask-for-approval never` / Claude Code's
         /// `--dangerously-skip-permissions`. DANGEROUS: the model can run
         /// arbitrary commands and rewrite files with no gate. Pair with
-        /// `--sandbox=strict` (once shipped) or only use against a repo
+        /// `--sandbox=strict` (Linux) or only use against a repo
         /// you control. Refused in `--print`/`--bg` and by background
         /// teammates unless you have first accepted the risk in an
         /// interactive session (a consent sentinel is written then).

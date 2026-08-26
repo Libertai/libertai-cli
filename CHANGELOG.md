@@ -15,17 +15,20 @@ behaviour changes.
   --acp`) serves the coding agent to an editor over line-delimited JSON-RPC
   2.0 on stdio, reaching Zed and the JetBrains IDEs. The session is built
   from the same LibertAI auth, provider registration and model resolution as
-  a normal `libertai code` run, so editor-side inference goes to LibertAI's
-  TEE-backed endpoint; tool approvals travel over the protocol as
-  `session/request_permission` and the editor's model picker is wired to the
-  full LibertAI catalog via `session/set_model`. Setup instructions for both
-  editors are in the README.
+  a normal `libertai code` run, so an editor session starts on LibertAI's
+  confidential (TEE-backed) inference; tool approvals travel over the protocol
+  as `session/request_permission`, and the model can be changed mid-session
+  via `session/set_model`. The editor's picker lists every model in pi's
+  registry, not only LibertAI's, so selecting another configured provider
+  routes that session away from LibertAI. ACP sessions are in-memory only:
+  they do not appear in `--list-sessions` and cannot be resumed. Setup
+  instructions for both editors are in the README.
 - **Stdout discipline for stdio-protocol commands** — the startup update
   check is now skipped outright for `libertai mcp` and `libertai code --acp`
   (`cli::is_stdio_protocol_command`), so nothing can put a non-protocol byte
   on the wire. Covered by `tests/probes_acp.rs`, which spawns the real binary,
   runs an `initialize` + `session/new` handshake, and asserts stdout is
-  byte-clean JSON-RPC — including with the update banner armed.
+  byte-clean JSON-RPC.
 
 ## [0.5.0] - 2026-08-26
 

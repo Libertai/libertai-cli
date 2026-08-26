@@ -250,8 +250,16 @@ fn acp_handshake_completes_over_clean_stdout() {
 }
 
 /// Same handshake with the update check armed: a cached "999.0.0 is
-/// available" notice that would print a banner on a normal subcommand must
-/// not put a single byte on the ACP wire.
+/// available" notice that would print a banner on a normal *interactive*
+/// subcommand must not put a single byte on the ACP wire.
+///
+/// Scope, honestly: this asserts the end-to-end invariant (stdout stays
+/// byte-clean), but it does not isolate `is_stdio_protocol_command`. The probe
+/// captures stdout through a pipe, and `update_check` already returns early
+/// when `stdout().is_terminal()` is false (`src/update_check.rs:71`), so the
+/// banner is suppressed here by that check whether or not the ACP guard
+/// exists. Isolating the guard would need a PTY-backed stdout; until then,
+/// treat a pass as "the wire is clean", not as "the guard works".
 #[test]
 fn acp_stdout_stays_clean_when_an_update_check_would_fire() {
     let env = AcpEnv::new();

@@ -250,12 +250,22 @@ It reaches:
 - Anything else that speaks ACP — the protocol is client-agnostic.
 
 The session is a full `libertai code` session: the same tools, the same
-LibertAI provider registration, the same model as `libertai code` (config's
-`default_code_model`, or `--model`/`--provider`), so the editor's inference
-runs on LibertAI's TEE-backed endpoint. Tool approvals travel over the
-protocol as `session/request_permission` requests and are answered in the
-editor. The editor's model picker is wired to the full LibertAI catalog —
-switching model mid-session goes through ACP's `session/set_model`.
+LibertAI provider registration, and the same default model as `libertai code`
+(config's `default_code_model`, or `--model`/`--provider`), so an editor
+session starts on LibertAI's confidential (TEE-backed) inference. Tool
+approvals travel over the protocol as `session/request_permission` requests
+and are answered in the editor.
+
+The editor's model picker lists **every model registered in pi's registry**,
+not just LibertAI's — if you have other providers configured, they appear
+there too, and picking one routes that session to that provider rather than
+to LibertAI. Switching model mid-session goes through ACP's
+`session/set_model`. Run `libertai models --refresh` to pull new LibertAI
+models into the registry so they show up in the picker.
+
+ACP sessions are held in memory and are not written to pi's session store, so
+they do not appear in `libertai code --list-sessions` and cannot be resumed
+with `--continue` / `--resume`. The editor owns session lifetime here.
 
 Do not run `--acp` by hand: stdout is the protocol wire and carries JSON-RPC
 frames only (diagnostics and warnings go to stderr). It conflicts with

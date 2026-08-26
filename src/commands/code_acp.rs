@@ -168,8 +168,12 @@ mod tests {
     /// libertai, build the options, and confirm pi's own `session/new` model
     /// preference (`config.default_provider` / `default_model`) points at the
     /// LibertAI entry with a resolvable endpoint.
+    ///
+    /// Shares `test_env::lock()` with `code_models`'s registration test: both
+    /// set `PI_CODING_AGENT_DIR` / `LIBERTAI_API_KEY`, which are process-wide.
     #[test]
     fn acp_options_default_to_the_libertai_provider_and_model() {
+        let _env = crate::test_env::lock();
         const KEY: &str = "LTAI_sk_unit_probe_acp_00000000000000";
         let pi_dir = tempfile::tempdir().expect("pi tempdir");
         std::env::set_var("PI_CODING_AGENT_DIR", pi_dir.path());
