@@ -19,6 +19,26 @@ interactive UI.
 
 ### Added
 
+#### Plugins
+
+- **`libertai plugin`** — install and manage plugins in the Claude-Code-compatible
+  plugin format, from marketplaces you add yourself (git URL or local path).
+  Subcommands: `marketplace add|list|remove`, `list`, `audit`, `install`,
+  `enable`, `disable`, `remove`, `sign`.
+- Plugins can contribute slash commands, agents, skills, hooks and MCP servers;
+  enabled plugins are loaded into the extension registries at startup.
+- **Trust is explicit.** Executable components (hooks, MCP servers) do not run
+  until trusted. `install` reports requested capabilities and prompts before
+  activating them; `audit` produces the same report without installing. `--yes`
+  answers non-code prompts non-interactively and never auto-trusts code;
+  `--trust` is the explicit opt-in. `--scan` / `--no-scan` control the external
+  security scan.
+- **Publisher identity** — `libertai plugin sign` signs a plugin directory in
+  place; plugin digests are symlink-safe, and for GitHub-hosted marketplaces a
+  verified commit acts as an additional identity anchor, so installs can require
+  a verified publisher rather than trusting a name.
+- `/plugin` (alias `/plugins`) in the REPL lists installed plugins.
+
 #### Workflow engine
 
 - **JavaScript workflow engine** for `libertai code` — workflows run in an

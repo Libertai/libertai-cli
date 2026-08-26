@@ -354,6 +354,7 @@ compaction checkpoint. It prints the path — open it with
 | `libertai mcp` | Run an MCP server over stdio exposing `web_search` + `fetch_page` — see [MCP server](#mcp-server). |
 | `libertai config show\|path\|set\|unset` | Inspect or edit `~/.config/libertai/config.toml`. |
 | `libertai skills list\|install\|uninstall` | Manage the bundled skills that teach *third-party* agents to call `libertai`. |
+| `libertai plugin …` | Install and manage plugins from marketplaces (Claude-Code-compatible format) — see [Plugins](#plugins). |
 | `libertai completions <shell>` | Print a bash/zsh/fish/… completion script to stdout. |
 | `libertai run -- <cmd>` | Exec any command with LibertAI env vars injected. |
 | `libertai claude\|opencode\|aider\|claw\|hermes [args]` | Launch someone else's agent against LibertAI — see [below](#running-other-agents-on-libertai). |
@@ -444,6 +445,37 @@ libertai skills install              # force-refresh into ~/.claude/skills/
 libertai skills install --project    # into ./.claude/skills/ for this repo
 libertai skills uninstall
 ```
+
+## Plugins
+
+`libertai code` loads plugins in the Claude-Code-compatible plugin format.
+A plugin can contribute slash commands, agents, skills, hooks and MCP servers.
+Plugins come from *marketplaces* — git repos or local directories you add
+yourself; nothing is enabled by default.
+
+```sh
+libertai plugin marketplace add <url-or-path>   # register a source
+libertai plugin list                            # installed plugins + state
+libertai plugin audit <name>                    # capabilities + scan, no install
+libertai plugin install <name>[@marketplace]    # install (prompts before trusting code)
+libertai plugin enable|disable <name>
+libertai plugin remove <name>
+```
+
+Plugin code does not run until you trust it. `install` reports the
+capabilities a plugin requests and prompts before activating anything that
+executes — its hooks and MCP servers. `--trust` skips that prompt and
+`--yes` answers the non-code prompts non-interactively; `--yes` alone never
+auto-trusts executable components. `audit` shows the same report without
+installing, and `--scan` / `--no-scan` control the external security scan.
+
+Publishers can sign a plugin directory with `libertai plugin sign <path>`
+(key from the argument or `$LIBERTAI_SIGNING_KEY`). Signatures and, where a
+marketplace is hosted on GitHub, verified-commit metadata act as identity
+anchors, so you can require signed plugins rather than trusting a name.
+
+Inside the REPL, `/plugin` (alias `/plugins`) lists installed plugins;
+managing them is done from the `libertai plugin` CLI.
 
 ## MCP server
 
