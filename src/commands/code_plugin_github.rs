@@ -129,8 +129,10 @@ fn parse_commit_verification(value: &serde_json::Value) -> GithubVerification {
     }
 }
 
-/// Parse `owner/name` out of a git URL when it points at github.com; used to
-/// extend GitHub verification to `url`-type sources, not only `github` ones.
+/// Parse `owner/name` out of a git URL when it points at **github.com**; used
+/// to extend GitHub verification to `url`-type sources, not only `github` ones.
+/// GitHub Enterprise hosts (e.g. `github.company.com`) are intentionally not
+/// matched — verification targets the public `api.github.com` only.
 #[must_use]
 pub fn github_repo_from_url(url: &str) -> Option<String> {
     let rest = url
@@ -139,7 +141,10 @@ pub fn github_repo_from_url(url: &str) -> Option<String> {
         .or_else(|| url.strip_prefix("git@github.com:"))
         .or_else(|| url.strip_prefix("ssh://git@github.com/"))
         .or_else(|| url.strip_prefix("ssh://github.com/"))?;
-    let rest = rest.trim_end_matches('/').trim_end_matches(".git");
+    // Strip a trailing slash, then exactly one `.git` suffix (strip_suffix,
+    // not trim_end_matches, so a repo legitimately named `git` is preserved).
+    let rest = rest.trim_end_matches('/');
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
     let mut parts = rest.split('/');
     let owner = parts.next().filter(|s| !s.is_empty())?;
     let name = parts.next().filter(|s| !s.is_empty())?;
@@ -205,6 +210,29 @@ mod tests {
             parse_commit_verification(&json),
             GithubVerification::Unverified(_)
         ));
+    }
+
+    #[test]
+    fn label_covers_all_variants() {
+        assert_eq!(GithubVerification::NotApplicable.label(), "n/a");
+        assert!(GithubVerification::Unknown("rate limited".to_string())
+            .label()
+            .contains("unknown"));
+        assert!(GithubVerification::Unverified("unsigned".to_string())
+            .label()
+            .contains("not verified"));
+    }
+
+    #[test]
+    fn repo_named_git_is_preserved() {
+        assert_eq!(
+            github_repo_from_url("https://github.com/owner/git"),
+            Some("owner/git".to_string())
+        );
+        assert_eq!(
+            github_repo_from_url("https://github.com/owner/git.git"),
+            Some("owner/git".to_string())
+        );
     }
 
     #[test]
