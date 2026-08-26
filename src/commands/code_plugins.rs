@@ -1419,4 +1419,36 @@ mod tests {
         assert_eq!(cfg.hooks.pre_tool_use[0].source, "plugin:p0@m");
         assert_eq!(cfg.hooks.pre_tool_use[1].source, "plugin:p1@m");
     }
+
+    #[test]
+    fn github_verification_dispatch_non_network_branches() {
+        use crate::commands::code_plugin_github::GithubVerification;
+        let github = |repo: &str| {
+            PluginSource::Tagged(TaggedSource::Github {
+                repo: repo.to_string(),
+                git_ref: None,
+                sha: None,
+            })
+        };
+        // No resolved SHA → NotApplicable regardless of source type.
+        assert_eq!(
+            github_verification(&github("o/r"), None),
+            GithubVerification::NotApplicable
+        );
+        // A relative-path source is never a GitHub commit.
+        assert_eq!(
+            github_verification(&PluginSource::Path("x".to_string()), Some("abc123")),
+            GithubVerification::NotApplicable
+        );
+        // A non-GitHub url source resolves to no repo → NotApplicable (no net).
+        let gitlab = PluginSource::Tagged(TaggedSource::Url {
+            url: "https://gitlab.com/o/r.git".to_string(),
+            git_ref: None,
+            sha: None,
+        });
+        assert_eq!(
+            github_verification(&gitlab, Some("abc123")),
+            GithubVerification::NotApplicable
+        );
+    }
 }
