@@ -7,9 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/) with 0.x
 semantics: the minor number moves for feature batches and user-visible
 behaviour changes.
 
-## [Unreleased]
+## [0.5.0] - 2026-08-26
+
+First release cut from `master` since v0.4.1. Releases v0.4.2 through v0.4.5
+were tagged on a side branch that has since been deleted; every substantive fix
+from that line (per-platform native TLS, the OpenCode config path, the
+catalog-driven OpenCode model list, the OpenCode skills directory, and
+`ask --image`) is included here. This is a minor bump rather than a patch bump
+because it adds two top-level subcommands (`usage` and `plugin`), an editor
+integration over ACP, a scripting engine, and a rewritten interactive UI.
 
 ### Added
+
+#### Editor integration (ACP)
 
 - **Agent Client Protocol (ACP) mode** — `libertai code --acp` (also `lcode
   --acp`) serves the coding agent to an editor over line-delimited JSON-RPC
@@ -29,18 +39,6 @@ behaviour changes.
   on the wire. Covered by `tests/probes_acp.rs`, which spawns the real binary,
   runs an `initialize` + `session/new` handshake, and asserts stdout is
   byte-clean JSON-RPC.
-
-## [0.5.0] - 2026-08-26
-
-First release cut from `master` since v0.4.1. Releases v0.4.2 through v0.4.5
-were tagged on a side branch that has since been deleted; every substantive fix
-from that line (per-platform native TLS, the OpenCode config path, the
-catalog-driven OpenCode model list, the OpenCode skills directory, and
-`ask --image`) is included here. This is a minor bump rather than a patch bump
-because it adds a new top-level subcommand, a scripting engine, and a rewritten
-interactive UI.
-
-### Added
 
 #### Plugins
 
