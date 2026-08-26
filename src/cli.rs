@@ -286,6 +286,19 @@ pub enum Command {
         /// Teammate name within the team. Paired with `--team`.
         #[arg(long, value_name = "NAME", requires = "team")]
         teammate: Option<String>,
+        /// Speak the Agent Client Protocol (ACP) on stdin/stdout instead
+        /// of starting a terminal session, so an editor can drive the
+        /// agent. ACP is Zed's editor↔agent standard (also supported by
+        /// the JetBrains IDEs); it is line-delimited JSON-RPC 2.0, so
+        /// stdout carries protocol frames and nothing else — logs and
+        /// warnings go to stderr. Not for interactive use: point your
+        /// editor at `libertai code --acp`. See the README for Zed and
+        /// JetBrains setup.
+        #[arg(
+            long,
+            conflicts_with_all = ["print", "bg", "list_sessions", "plan", "resume", "continue_recent"]
+        )]
+        acp: bool,
         /// Initial prompt. When given, runs a single one-shot turn and
         /// exits (tool approvals still prompt on the terminal unless
         /// `--print` is also set). Without a prompt and without
@@ -582,8 +595,15 @@ pub enum ConfigAction {
 
 pub fn dispatch(cli: Cli) -> Result<()> {
     let subcommand = command_name(&cli.command);
-    if let Ok(cfg) = crate::config::load() {
-        crate::update_check::maybe_notify(&cfg, subcommand);
+    // Stdio-protocol commands own stdout byte-for-byte: any banner, even a
+    // stderr one whose background refresh thread could later misbehave, is
+    // skipped outright. `should_check` already excludes these by name, but
+    // the check is cheap and the failure mode (a dead JSON-RPC handshake)
+    // is silent and confusing, so it is asserted here too.
+    if !is_stdio_protocol_command(&cli.command) {
+        if let Ok(cfg) = crate::config::load() {
+            crate::update_check::maybe_notify(&cfg, subcommand);
+        }
     }
     match cli.command {
         Command::Login => crate::commands::login::run(),
@@ -644,28 +664,34 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             agent,
             team,
             teammate,
+            acp,
             args,
             dangerously_skip_permissions,
-        } => crate::commands::code::run(
-            model,
-            provider,
-            plan,
-            mode,
-            resume,
-            continue_recent,
-            list_sessions,
-            all,
-            json,
-            sandbox,
-            print,
-            bg,
-            name,
-            agent,
-            team,
-            teammate,
-            args,
-            dangerously_skip_permissions,
-        ),
+        } => {
+            if acp {
+                return crate::commands::code_acp::run(model, provider);
+            }
+            crate::commands::code::run(
+                model,
+                provider,
+                plan,
+                mode,
+                resume,
+                continue_recent,
+                list_sessions,
+                all,
+                json,
+                sandbox,
+                print,
+                bg,
+                name,
+                agent,
+                team,
+                teammate,
+                args,
+                dangerously_skip_permissions,
+            )
+        }
         Command::Agents {
             cwd,
             json,
@@ -681,6 +707,14 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Completions { shell } => crate::commands::completions::run(shell),
         Command::Man => crate::commands::completions::man(),
     }
+}
+
+/// True for commands whose stdout is a machine protocol rather than human
+/// output: `libertai mcp` (MCP over stdio) and `libertai code --acp` (ACP
+/// over stdio). Nothing may write to stdout on these paths except the
+/// protocol itself.
+pub fn is_stdio_protocol_command(cmd: &Command) -> bool {
+    matches!(cmd, Command::Mcp) || matches!(cmd, Command::Code { acp: true, .. })
 }
 
 fn command_name(cmd: &Command) -> &'static str {

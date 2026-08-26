@@ -5,6 +5,7 @@ pub mod chat_render;
 pub mod claude_code_import;
 pub mod claude_code_import_cli;
 pub mod code;
+pub mod code_acp;
 pub mod code_agents;
 pub mod code_approval_ipc;
 pub mod code_approvals;

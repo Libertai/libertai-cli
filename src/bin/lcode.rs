@@ -54,6 +54,10 @@ struct LcodeCli {
     /// Skip ALL tool approvals (DANGEROUS). See `libertai code --help`.
     #[arg(long, env = "LIBERTAI_DANGEROUSLY_SKIP_PERMISSIONS")]
     dangerously_skip_permissions: bool,
+    /// Speak the Agent Client Protocol on stdin/stdout for an editor
+    /// (Zed, JetBrains). See `libertai code --help` and the README.
+    #[arg(long, conflicts_with_all = ["print", "list_sessions", "plan", "resume", "continue_recent"])]
+    acp: bool,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -78,6 +82,7 @@ fn main() {
             agent: None,
             team: None,
             teammate: None,
+            acp: parsed.acp,
             args: parsed.args,
             dangerously_skip_permissions: parsed.dangerously_skip_permissions,
         },

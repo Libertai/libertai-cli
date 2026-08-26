@@ -230,6 +230,96 @@ can probe servers for live diagnostics.
 (This is separate from `libertai mcp`, which makes *this* CLI an MCP server —
 see [MCP server](#mcp-server).)
 
+### Editors: ACP (Zed, JetBrains)
+
+`libertai code --acp` turns the agent into an [Agent Client
+Protocol](https://agentclientprotocol.com) server, so an editor drives it
+instead of a terminal. ACP is Zed's editor↔agent standard: the editor spawns
+the agent as a subprocess and speaks line-delimited JSON-RPC 2.0 over
+stdin/stdout, then renders the turn natively — streamed assistant text, a
+live tool-call list, inline diffs, and permission prompts in the editor's own
+UI rather than in a TUI.
+
+It reaches:
+
+- **Zed** — ACP is native (headline feature of Zed 1.0); external agents are
+  declared in `settings.json` and appear in the agent panel's picker.
+- **JetBrains IDEs** (IntelliJ IDEA, PyCharm, GoLand, WebStorm, …) — ACP
+  support shipped in the AI Assistant plugin in December 2025, with the same
+  registry of agents as Zed.
+- Anything else that speaks ACP — the protocol is client-agnostic.
+
+The session is a full `libertai code` session: the same tools, the same
+LibertAI provider registration, the same model as `libertai code` (config's
+`default_code_model`, or `--model`/`--provider`), so the editor's inference
+runs on LibertAI's TEE-backed endpoint. Tool approvals travel over the
+protocol as `session/request_permission` requests and are answered in the
+editor. The editor's model picker is wired to the full LibertAI catalog —
+switching model mid-session goes through ACP's `session/set_model`.
+
+Do not run `--acp` by hand: stdout is the protocol wire and carries JSON-RPC
+frames only (diagnostics and warnings go to stderr). It conflicts with
+`--print`, `--bg`, `--plan`, `--resume`, `--continue` and `--list-sessions`.
+
+#### Zed
+
+Add the agent to Zed's `settings.json` (`zed: open settings`):
+
+```json
+{
+  "agent_servers": {
+    "LibertAI": {
+      "command": "libertai",
+      "args": ["code", "--acp"]
+    }
+  }
+}
+```
+
+Open the agent panel (`cmd-?` / `ctrl-?`), pick **LibertAI** from the `+`
+menu, and start a thread. Zed launches the process in the project root, which
+becomes the session's working directory.
+
+If `libertai` is not on Zed's `PATH` (a GUI launch does not always inherit a
+shell profile), use the absolute path — `which libertai` — as `command`.
+
+#### JetBrains
+
+In **Settings → Tools → AI Assistant → Agents** (the exact path moves between
+releases; look for the external/ACP agents list), add an agent with:
+
+- **Command**: `libertai` (or its absolute path, from `which libertai`)
+- **Arguments**: `code --acp`
+
+Some builds take a single JSON block in the same shape as Zed's:
+
+```json
+{
+  "agent_servers": {
+    "LibertAI": {
+      "command": "libertai",
+      "args": ["code", "--acp"]
+    }
+  }
+}
+```
+
+Then select **LibertAI** in the AI Assistant chat's agent picker.
+
+#### Troubleshooting
+
+Log in first — `libertai login`. Without a key the process exits immediately
+with an error on stderr, which most editors surface as "the agent server
+exited". You can reproduce the handshake by hand:
+
+```sh
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}' \
+  | libertai code --acp
+```
+
+A single line of JSON back means the wire is healthy. Anything printed before
+it is a bug — please report it.
+
 ### Delegation: subagents, teams, workflows
 
 - **`task`** runs a focused subtask in an isolated child session. Read-only
@@ -335,8 +425,9 @@ compaction checkpoint. It prints the path — open it with
 
 | Command | Description |
 | --- | --- |
-| `libertai code [prompt]` | **The coding agent.** No prompt → interactive TUI; a prompt → one-shot turn. `--model`, `--provider`, `--plan`, `--mode`, `--resume`, `--continue`, `--list-sessions [--all] [--json]`, `--sandbox`, `--print/-p`, `--bg`, `--name`, `--agent`, `--team`/`--teammate`, `--dangerously-skip-permissions`. |
+| `libertai code [prompt]` | **The coding agent.** No prompt → interactive TUI; a prompt → one-shot turn. `--model`, `--provider`, `--plan`, `--mode`, `--resume`, `--continue`, `--list-sessions [--all] [--json]`, `--sandbox`, `--print/-p`, `--bg`, `--name`, `--agent`, `--team`/`--teammate`, `--dangerously-skip-permissions`, `--acp`. |
 | `lcode [prompt]` | Alias binary for `libertai code` (Cargo installs only). Covers all of the above except `--bg`/`--name`/`--agent`/`--team`/`--teammate`. |
+| `libertai code --acp` | Serve the agent to an editor over the Agent Client Protocol (Zed, JetBrains) — JSON-RPC 2.0 on stdio. See [Editors: ACP](#editors-acp-zed-jetbrains). |
 | `libertai agents` | Dashboard for background agent sessions and teams. `--cwd`, `--json`, `--model`, `--permission-mode`, `--agent`. |
 | `libertai sandbox info` | Print the resolved strict-sandbox profile for this host. `--json`. |
 | `libertai import claude-code list\|show\|summarize\|import` | Bring a Claude Code transcript into a resumable LibertAI session. |
