@@ -319,8 +319,8 @@ pub struct App {
     /// into history and incoming agent output must NOT yank them back down.
     /// Mirrors the `follow` contract the AgentOverlay / DiffView /
     /// ToolOutputView overlays already document. Set false when the user
-    /// scrolls up (PageUp / wheel-up), re-armed to true when they scroll back
-    /// to the bottom (PageDown / wheel-down reaching 0) or on `/clear`.
+    /// scrolls up (PageUp), re-armed to true when they scroll back to the
+    /// bottom (PageDown reaching 0) or on `/clear`.
     pub follow: bool,
     /// Spinner frame index.
     pub spinner_idx: usize,
@@ -2236,7 +2236,9 @@ pub fn run(
 
     // Set up terminal — guard created first so any early-return
     // between enable_raw_mode and the end of run_loop is cleaned up.
-    let mut guard = TerminalGuard::new(true);
+    // `restore_mouse = false`: we never enable mouse capture (see below), so
+    // the guard must not emit DisableMouseCapture on suspend/resume/Drop.
+    let mut guard = TerminalGuard::new(false);
 
     // Probe OSC-8 hyperlink capability once at startup (env-var heuristic;
     // see `markdown::probe_osc8_capability`). Terminals that mangle the
@@ -2248,11 +2250,11 @@ pub fn run(
     guard.raw_mode = true;
 
     let mut stdout = std::io::stdout();
-    crossterm::execute!(
-        stdout,
-        EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
-    )?;
+    // Deliberately do NOT enable mouse capture: it makes the terminal forward
+    // clicks/drags to us and suppresses the terminal's own text selection, so
+    // users can't select or copy transcript output. Scrolling stays on the
+    // keyboard (PageUp/PageDown), which is all the wheel ever did here.
+    crossterm::execute!(stdout, EnterAlternateScreen)?;
     guard.alt_screen = true;
 
     // (B4-KITTY) Opt into the kitty keyboard protocol where supported so
@@ -2932,11 +2934,11 @@ fn run_loop(
             app.dirty = false;
         }
 
-        // Poll for events (keyboard, mouse, resize) with timeout.
+        // Poll for events (keyboard, resize, paste) with timeout.
         if event::poll(tick)? {
             // An event arrived — the user is interacting. Even a no-op key
             // warrants a redraw (cheap, and harmless), so mark dirty up front
-            // for any keyboard/mouse/resize input. (handle_key may also mutate
+            // for any keyboard/resize/paste input. (handle_key may also mutate
             // app via slash commands / modals; those would set dirty too, but
             // the input itself is enough.)
             app.set_dirty();
@@ -2973,25 +2975,6 @@ fn run_loop(
                                 open_external_editor(app, guard)?;
                             }
                         }
-                    }
-                }
-                Event::Mouse(mouse) => {
-                    use crossterm::event::MouseEventKind;
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => {
-                            // Scrolling up into history disarms auto-tail so
-                            // incoming agent output won't yank the view down.
-                            app.scroll = app.scroll.saturating_add(3);
-                            app.follow = false;
-                        }
-                        MouseEventKind::ScrollDown => {
-                            app.scroll = app.scroll.saturating_sub(3);
-                            // Reaching the bottom re-arms auto-tail.
-                            if app.scroll == 0 {
-                                app.follow = true;
-                            }
-                        }
-                        _ => {}
                     }
                 }
                 Event::Resize(_, _) => {
@@ -3797,8 +3780,8 @@ fn handle_key(
 
 /// Open the input-bar contents in the user's external editor (Ctrl+O).
 ///
-/// Suspends the TUI (leaves alt screen + raw mode + mouse so the editor
-/// runs in cooked mode), spawns `$VISUAL`/`$EDITOR`/`vi` on a temp file
+/// Suspends the TUI (leaves alt screen + raw mode so the editor runs in
+/// cooked mode), spawns `$VISUAL`/`$EDITOR`/`vi` on a temp file
 /// seeded with the current textarea text, waits for it, then resumes the
 /// TUI and reloads the edited text. The temp file is held open for the
 /// duration of the editor (`NamedTempFile` deletes on drop, so it is
@@ -10331,7 +10314,7 @@ mod tests {
     }
 
     /// (Fix 2) PageUp disarms follow (scrolls into history); PageDown back to
-    /// the bottom re-arms it. Mirrors the mouse wheel up/down semantics.
+    /// the bottom re-arms it, mirroring the PageUp/PageDown scroll semantics.
     #[test]
     fn page_up_disarms_follow_page_down_rearms() {
         let mut app = test_app();
