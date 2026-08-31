@@ -31,6 +31,7 @@ use crate::commands::code_hooks::{
     SessionHookGuard,
 };
 use crate::commands::code_identity_prompt;
+use crate::commands::code_mcp;
 use crate::commands::code_mode_prompt;
 use crate::commands::code_pr_comments;
 use crate::commands::code_session::{
@@ -2113,6 +2114,35 @@ fn spawn_background(
                                         ),
                                         Err(e) => format!("commit failed: {e:#}"),
                                     }
+                                }
+                            }
+                            // `/mcp probe [--save]` — live-discover each MCP
+                            // server's tools/resources/prompts (BLOCKING network
+                            // + child processes). Reload config from disk (like
+                            // the `/mcp json` arm) so `--save` merges into the
+                            // on-disk truth, not this thread's stale Arc.
+                            BgCommand::McpProbe { save } => {
+                                let mut disk_cfg = crate::config::load()
+                                    .unwrap_or_else(|_| cfg.as_ref().clone());
+                                let report = code_mcp::probe_configured_servers(
+                                    &disk_cfg,
+                                    std::time::Duration::from_secs(10),
+                                );
+                                if save {
+                                    let outcome = code_mcp::merge_probe_into_config(
+                                        &mut disk_cfg,
+                                        &report,
+                                    );
+                                    match crate::config::save(&disk_cfg) {
+                                        Ok(()) => code_mcp::render_probe_save_summary(
+                                            &report, &outcome,
+                                        ),
+                                        Err(e) => format!(
+                                            "probe succeeded but saving config failed: {e:#}"
+                                        ),
+                                    }
+                                } else {
+                                    code_mcp::render_probe_report(&report)
                                 }
                             }
                         };
@@ -6378,15 +6408,27 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     app.transcript
                         .push(TranscriptEntry::System(code_slash_router::mcp_open_text()));
                 }
-                code_ui::McpCommand::Probe | code_ui::McpCommand::ProbeSave => {
+                code_ui::McpCommand::Probe => {
+                    // Live discovery is BLOCKING (network + child processes) —
+                    // run it on the bg thread; the report rides back as a
+                    // CommandResult system line.
+                    app.transcript
+                        .push(TranscriptEntry::System("Probing MCP servers…".to_string()));
+                    let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::McpProbe { save: false }));
+                }
+                code_ui::McpCommand::ProbeSave => {
                     app.transcript.push(TranscriptEntry::System(
-                        "/mcp probe not yet supported in TUI".to_string(),
+                        "Probing MCP servers and saving the catalog…".to_string(),
                     ));
+                    let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::McpProbe { save: true }));
                 }
                 code_ui::McpCommand::Reset => {
-                    app.transcript.push(TranscriptEntry::System(
-                        "/mcp reset not yet supported in TUI".to_string(),
-                    ));
+                    // Draining the in-process client caches is cheap (no
+                    // network), so do it inline on the main thread.
+                    let dropped = crate::commands::code_hooks::reset_mcp_cli_sessions();
+                    app.transcript.push(TranscriptEntry::System(format!(
+                        "Reset {dropped} cached MCP session(s)."
+                    )));
                 }
                 code_ui::McpCommand::Usage => {
                     app.transcript

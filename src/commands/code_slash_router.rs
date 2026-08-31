@@ -192,6 +192,17 @@ pub enum BgCommand {
         /// (stage the entire working tree).
         add_all: bool,
     },
+    /// `/mcp probe [--save]` — connect each configured MCP server, run a live
+    /// `initialize` + `tools/list`/`resources/list`/`prompts/list`, and render
+    /// the discovered catalog. Blocking network/process I/O, so it MUST run on
+    /// the bg thread. When `save` is true, the discovered catalog is merged
+    /// into `cfg.mcp_servers[]` and persisted (`config::save`) so the model
+    /// sees the named tools next session. The result text rides back as a
+    /// `CommandResult` system line.
+    McpProbe {
+        /// Persist the discovered catalog into config (`/mcp probe --save`).
+        save: bool,
+    },
 }
 
 /// Result of a non-printing shell-escape run, for the TUI to render as
