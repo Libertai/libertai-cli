@@ -1268,7 +1268,7 @@ mod tests {
                     2 => {
                         assert!(request.contains("\"method\":\"tools/list\""));
                         Some(
-                            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"search\"}]}}\n\n",
+                            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"search\",\"description\":\"Search the web\",\"inputSchema\":{\"type\":\"object\"}}]}}\n\n",
                         )
                     }
                     3 => {
@@ -1319,5 +1319,12 @@ mod tests {
         assert_eq!(server.tools, vec!["search"]);
         assert_eq!(server.resources, vec!["file:///tmp/a"]);
         assert_eq!(server.prompts, vec!["review"]);
+        // Full objects captured end-to-end through the real SSE transport.
+        assert_eq!(server.tools_full.len(), 1);
+        assert_eq!(server.tools_full[0].description, "Search the web");
+        assert_eq!(
+            server.tools_full[0].input_schema.as_ref().unwrap()["type"],
+            "object"
+        );
     }
 }
