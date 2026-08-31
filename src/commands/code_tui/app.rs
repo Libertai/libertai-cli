@@ -12,7 +12,7 @@ use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
 use pi::model::{AssistantMessageEvent, StopReason};
 use pi::sdk::{create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle};
 use ratatui::backend::CrosstermBackend;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::Terminal;
 use tui_textarea::TextArea;
 
@@ -2404,10 +2404,14 @@ pub fn run(
         queued: Vec::new(),
         textarea: {
             let mut ta = TextArea::default();
-            ta.set_cursor_style(Style::default().bg(Color::Cyan));
+            ta.set_cursor_style(
+                ratatui::style::Style::default().bg(crate::commands::code_tui::theme::ACCENT),
+            );
             ta.set_cursor_line_style(Style::default());
             ta.set_placeholder_text("type your message…");
-            ta.set_placeholder_style(Style::default().fg(Color::DarkGray));
+            ta.set_placeholder_style(
+                ratatui::style::Style::default().fg(crate::commands::code_tui::theme::MUTED),
+            );
             ta
         },
         input_scroll: 0,
@@ -3880,10 +3884,14 @@ fn set_textarea_text(ta: &mut TextArea<'static>, text: &str) {
 
 /// Reapply our styling to a fresh textarea.
 fn reset_textarea_style(ta: &mut TextArea<'static>) {
-    ta.set_cursor_style(Style::default().bg(Color::Cyan));
+    ta.set_cursor_style(
+        ratatui::style::Style::default().bg(crate::commands::code_tui::theme::ACCENT),
+    );
     ta.set_cursor_line_style(Style::default());
     ta.set_placeholder_text("type your message…");
-    ta.set_placeholder_style(Style::default().fg(Color::DarkGray));
+    ta.set_placeholder_style(
+        ratatui::style::Style::default().fg(crate::commands::code_tui::theme::MUTED),
+    );
 }
 
 /// Handle a `!`/`!!` shell escape on the main thread, synchronously.
