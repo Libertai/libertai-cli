@@ -21,6 +21,7 @@ use anyhow::Context;
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
 use crate::commands::code_context_tool;
 use crate::commands::code_cron;
+use crate::commands::code_retry;
 use crate::commands::code_diff::EditJournal;
 // (M6/#15) Workflow engine — registry threaded through the tool factory +
 // the `/workflows` viewer reads it.
@@ -1487,6 +1488,7 @@ fn spawn_background(
                         *shared_abort
                             .lock()
                             .unwrap_or_else(|e| e.into_inner()) = Some(abort_handle);
+                        let abort_signal = Arc::new(abort_signal);
 
                         // Expand inline `@path` mentions into appended file
                         // attachments BEFORE guidance/hooks/style so
@@ -1544,101 +1546,151 @@ fn spawn_background(
                         // `Option<Instant>` (None until Start); `compact_reason`
                         // is the reason string captured at Start (defaults to
                         // "auto" if End arrives without a Start — defensive).
-                        let compact_start = std::sync::Mutex::new(None::<Instant>);
-                        let compact_reason = std::sync::Mutex::new(String::new());
-                        let result = handle
-                            .prompt_with_abort(
-                                prompt,
-                                abort_signal,
-                                move |event: AgentEvent| {
-                                    run_post_tool_hooks(hook_cfg.as_ref(), &event);
-                                    run_tool_start_hooks(hook_cfg.as_ref(), &event);
-                                    match &event {
-                                        AgentEvent::AutoCompactionStart { reason } => {
-                                            *compact_start.lock().unwrap() = Some(Instant::now());
-                                            *compact_reason.lock().unwrap() = reason.clone();
-                                            run_pre_compact_hooks(hook_cfg.as_ref(), reason);
-                                            // Fall through to translate_event so the
-                                            // advisory "compacting: {reason}" line
-                                            // still surfaces (it reads Start).
-                                            if let Some(msg) = translate_event(&event) {
-                                                let _ = tx.send(msg);
-                                            }
-                                        }
-                                        AgentEvent::AutoCompactionEnd {
-                                            aborted,
-                                            error_message,
-                                            result,
-                                            ..
-                                        } => {
-                                            // `tokens_before` is the pre-compaction
-                                            // occupancy; pi's `result` blob carries it
-                                            // as `tokensBefore` (camelCase). After the
-                                            // pi P3 rev bump it also carries
-                                            // `tokensAfter` (post-compaction occupancy,
-                                            // measured after appending the summary) +
-                                            // `durationMs` (pi's wall-clock) + `trigger`
-                                            // ("threshold"/"manual"). The TUI-side
-                                            // Start→End timer is the fallback for the
-                                            // background-worker path (durationMs=0).
-                                            let tui_duration_ms = compact_start
-                                                .lock()
-                                                .unwrap()
-                                                .take()
-                                                .map(|s| s.elapsed().as_millis() as u64)
-                                                .unwrap_or(0);
-                                            let tokens_after = result
-                                                .as_ref()
-                                                .and_then(|r| r.get("tokensAfter"))
-                                                .and_then(|v| v.as_u64());
-                                            let pi_duration_ms = result
-                                                .as_ref()
-                                                .and_then(|r| r.get("durationMs"))
-                                                .and_then(|v| v.as_u64())
-                                                .filter(|&d| d > 0);
-                                            let duration_ms =
-                                                pi_duration_ms.unwrap_or(tui_duration_ms);
-                                            let reason = {
-                                                let r = compact_reason.lock().unwrap();
-                                                if r.is_empty() {
-                                                    "auto".to_string()
-                                                } else {
-                                                    r.clone()
-                                                }
-                                            };
-                                            let tokens_before = result
-                                                .as_ref()
-                                                .and_then(|r| r.get("tokensBefore"))
-                                                .and_then(|v| v.as_u64());
-                                            run_post_compact_hooks(
-                                                hook_cfg.as_ref(),
-                                                &reason,
-                                                tokens_before,
-                                                tokens_after,
-                                                duration_ms,
-                                                *aborted,
-                                            );
-                                            let summary = format_compaction_summary(
-                                                result.as_ref(),
-                                                *aborted,
-                                                error_message.as_deref(),
-                                                tokens_before,
-                                                duration_ms,
-                                            );
-                                            let _ = tx.send(AgentMsg::System(summary));
-                                            // Early-return: the summary line replaces
-                                            // translate_event's bare "compaction
-                                            // complete" arm for this path.
-                                            return;
-                                        }
-                                        _ => {}
-                                    }
+                        let compact_start = std::sync::Arc::new(std::sync::Mutex::new(None::<Instant>));
+                        let compact_reason = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+                        let event_tx = tx.clone();
+                        let event_hook_cfg = Arc::clone(&hook_cfg);
+                        let mut retry_loop = code_retry::RetryLoop::with_default_limit();
+                        let mut first_attempt = true;
+                        let event_handler = move |event: AgentEvent| {
+                            run_post_tool_hooks(event_hook_cfg.as_ref(), &event);
+                            run_tool_start_hooks(event_hook_cfg.as_ref(), &event);
+                            match &event {
+                                AgentEvent::AutoCompactionStart { reason } => {
+                                    *compact_start.lock().unwrap() = Some(Instant::now());
+                                    *compact_reason.lock().unwrap() = reason.clone();
+                                    run_pre_compact_hooks(event_hook_cfg.as_ref(), reason);
+                                    // Fall through to translate_event so the
+                                    // advisory "compacting: {reason}" line
+                                    // still surfaces (it reads Start).
                                     if let Some(msg) = translate_event(&event) {
                                         let _ = tx.send(msg);
                                     }
-                                },
-                            )
-                            .await;
+                                }
+                                AgentEvent::AutoCompactionEnd {
+                                    aborted,
+                                    error_message,
+                                    result,
+                                    ..
+                                } => {
+                                    // `tokens_before` is the pre-compaction
+                                    // occupancy; pi's `result` blob carries it
+                                    // as `tokensBefore` (camelCase). After the
+                                    // pi P3 rev bump it also carries
+                                    // `tokensAfter` (post-compaction occupancy,
+                                    // measured after appending the summary) +
+                                    // `durationMs` (pi's wall-clock) + `trigger`
+                                    // ("threshold"/"manual"). The TUI-side
+                                    // Start→End timer is the fallback for the
+                                    // background-worker path (durationMs=0).
+                                    let tui_duration_ms = compact_start
+                                        .lock()
+                                        .unwrap()
+                                        .take()
+                                        .map(|s| s.elapsed().as_millis() as u64)
+                                        .unwrap_or(0);
+                                    let tokens_after = result
+                                        .as_ref()
+                                        .and_then(|r| r.get("tokensAfter"))
+                                        .and_then(|v| v.as_u64());
+                                    let pi_duration_ms = result
+                                        .as_ref()
+                                        .and_then(|r| r.get("durationMs"))
+                                        .and_then(|v| v.as_u64())
+                                        .filter(|&d| d > 0);
+                                    let duration_ms =
+                                        pi_duration_ms.unwrap_or(tui_duration_ms);
+                                    let reason = {
+                                        let r = compact_reason.lock().unwrap();
+                                        if r.is_empty() {
+                                            "auto".to_string()
+                                        } else {
+                                            r.clone()
+                                        }
+                                    };
+                                    let tokens_before = result
+                                        .as_ref()
+                                        .and_then(|r| r.get("tokensBefore"))
+                                        .and_then(|v| v.as_u64());
+                                    run_post_compact_hooks(
+                                        event_hook_cfg.as_ref(),
+                                        &reason,
+                                        tokens_before,
+                                        tokens_after,
+                                        duration_ms,
+                                        *aborted,
+                                    );
+                                    let summary = format_compaction_summary(
+                                        result.as_ref(),
+                                        *aborted,
+                                        error_message.as_deref(),
+                                        tokens_before,
+                                        duration_ms,
+                                    );
+                                    let _ = event_tx.send(AgentMsg::System(summary));
+                                    // Early-return: the summary line replaces
+                                    // translate_event's bare "compaction
+                                    // complete" arm for this path.
+                                    return;
+                                }
+                                _ => {}
+                            }
+                            if let Some(msg) = translate_event(&event) {
+                                let _ = event_tx.send(msg);
+                            }
+                        };
+
+                        // Auto-retry loop: pi's in-process SDK fails fast on
+                        // transient provider errors (429/5xx/connection
+                        // resets); retry them here, resuming the turn from
+                        // the last completed state after stripping the
+                        // failed request's partial output (pi#125 pattern —
+                        // no tool re-execution, no re-billing).
+                        let result = loop {
+                            let result = if first_attempt {
+                                handle
+                                    .prompt_with_abort(
+                                        prompt.clone(),
+                                        (*abort_signal).clone(),
+                                        event_handler.clone(),
+                                    )
+                                    .await
+                            } else {
+                                // Resume path: the user message is already
+                                // in the session; re-issues only the failed
+                                // provider request (pi_agent_rust#125).
+                                handle
+                                    .continue_turn_with_abort(
+                                        (*abort_signal).clone(),
+                                        event_handler.clone(),
+                                    )
+                                    .await
+                            };
+                            first_attempt = false;
+                            let Err(err) = result else {
+                                break Ok(result.expect("checked"));
+                            };
+                            // Decide whether to retry; wait with backoff.
+                            let Some(delay_ms) = retry_loop.next_retry(&err) else {
+                                break Err(err);
+                            };
+                            let _ = agent_tx.send(AgentMsg::System(format!(
+                                "retry {}/{}: {} (waiting {}ms)",
+                                retry_loop.attempt(),
+                                code_retry::DEFAULT_MAX_RETRIES,
+                                err,
+                                delay_ms
+                            )));
+                            if !code_retry::abortable_sleep_ms(delay_ms, || false) {
+                                break Err(err);
+                            }
+                            // Strip the failed request's partial output so
+                            // the resume streams from a clean tail.
+                            let _ = handle
+                                .session_mut()
+                                .revert_incomplete_response()
+                                .await;
+                        };
 
                         *shared_abort
                             .lock()

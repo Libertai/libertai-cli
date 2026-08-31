@@ -27,6 +27,7 @@ pub mod code_memory;
 pub mod code_mode_prompt;
 pub mod code_models;
 pub mod code_notification;
+pub mod code_retry;
 pub mod code_output_style;
 pub mod code_path_safety;
 pub mod code_plugin_github;
