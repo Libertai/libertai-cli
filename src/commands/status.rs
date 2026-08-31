@@ -38,6 +38,7 @@ fn print_json(cfg: &Config) -> Result<()> {
             "launcher": {
                 "opus": cfg.launcher_defaults.opus_model,
                 "sonnet": cfg.launcher_defaults.sonnet_model,
+                "fable": cfg.launcher_defaults.fable_model,
                 "haiku": cfg.launcher_defaults.haiku_model,
             },
         },
@@ -154,6 +155,11 @@ fn print_human(cfg: &Config) {
         "    {:<20} {}",
         st.dimmed("sonnet:"),
         cfg.launcher_defaults.sonnet_model
+    );
+    println!(
+        "    {:<20} {}",
+        st.dimmed("fable:"),
+        cfg.launcher_defaults.fable_model
     );
     println!(
         "    {:<20} {}",

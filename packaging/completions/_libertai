@@ -470,6 +470,7 @@ _arguments "${_arguments_options[@]}" : \
 '--model=[Override all three model tiers at once]:MODEL:_default' \
 '--opus=[]:OPUS:_default' \
 '--sonnet=[]:SONNET:_default' \
+'--fable=[]:FABLE:_default' \
 '--haiku=[]:HAIKU:_default' \
 '-h[Print help]' \
 '--help[Print help]' \

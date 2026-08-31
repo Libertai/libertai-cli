@@ -1105,7 +1105,6 @@ fn strip_all_osc8_labels(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Color;
     use std::sync::Mutex;
 
     // The OSC-8 capability flag (`OSC8_ENABLED`) and the `LIBERTAI_OSC8` env

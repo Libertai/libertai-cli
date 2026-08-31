@@ -15,19 +15,22 @@ pub const DEFAULT_SEARCH_BASE: &str = "https://search.libertai.io";
 pub const MODEL_CATALOG_AGGREGATE_ADDRESS: &str = "0xe1F7220D201C64871Cefb25320a8a588393eE508";
 pub const DEFAULT_MODEL_CATALOG_URL: &str =
     "https://api2.aleph.im/api/v0/aggregates/0xe1F7220D201C64871Cefb25320a8a588393eE508.json?keys=LTAI_PRICING";
-pub const DEFAULT_CHAT_MODEL: &str = "glm-5.2";
+pub const DEFAULT_CHAT_MODEL: &str = "glm-5.3-flash";
 // `libertai code` runs on the OpenAI-completions path, where the
 // `-thinking` variant is available — use it so the coding agent reasons
 // before acting. The thinking id is served by `/v1/models` and
 // auto-seeded into pi's catalog by `ensure_libertai_registered`.
-pub const DEFAULT_CODE_MODEL: &str = "glm-5.2-thinking";
+pub const DEFAULT_CODE_MODEL: &str = "glm-5.3-thinking";
 pub const DEFAULT_CODE_PROVIDER: &str = "libertai";
 pub const DEFAULT_IMAGE_MODEL: &str = "z-image-turbo";
-pub const DEFAULT_OPUS_MODEL: &str = "glm-5.2";
+pub const DEFAULT_OPUS_MODEL: &str = "glm-5.3";
 // Backs the launcher `sonnet` alias and the smart-approval ("fast")
 // model. The Claude-alias launchers speak the Anthropic API, which has
 // no `-thinking` variant, so this stays the plain model.
-pub const DEFAULT_FAST_MODEL: &str = "glm-5.2";
+pub const DEFAULT_FAST_MODEL: &str = "glm-5.3-flash";
+// The launcher `fable` alias — a heavyweight tier alongside opus, with
+// the same reasoning-class model behind it.
+pub const DEFAULT_FABLE_MODEL: &str = "glm-5.3";
 // The launcher `haiku` alias keeps a small, cheap model for the
 // fast/cheap Claude tier.
 pub const DEFAULT_HAIKU_MODEL: &str = "qwen3.6-35b-a3b";
@@ -291,6 +294,11 @@ pub struct LauncherDefaults {
     )]
     pub sonnet_model: String,
     #[serde(
+        default = "default_fable_model_s",
+        skip_serializing_if = "is_default_fable_model"
+    )]
+    pub fable_model: String,
+    #[serde(
         default = "default_haiku_model_s",
         skip_serializing_if = "is_default_haiku_model"
     )]
@@ -301,6 +309,7 @@ impl LauncherDefaults {
     fn is_default(&self) -> bool {
         is_default_opus_model(&self.opus_model)
             && is_default_sonnet_model(&self.sonnet_model)
+            && is_default_fable_model(&self.fable_model)
             && is_default_haiku_model(&self.haiku_model)
     }
 }
@@ -331,6 +340,9 @@ fn is_default_opus_model(s: &str) -> bool {
 }
 fn is_default_sonnet_model(s: &str) -> bool {
     s == DEFAULT_FAST_MODEL
+}
+fn is_default_fable_model(s: &str) -> bool {
+    s == DEFAULT_FABLE_MODEL
 }
 fn is_default_haiku_model(s: &str) -> bool {
     s == DEFAULT_HAIKU_MODEL
@@ -368,6 +380,7 @@ impl Default for LauncherDefaults {
         Self {
             opus_model: DEFAULT_OPUS_MODEL.into(),
             sonnet_model: DEFAULT_FAST_MODEL.into(),
+            fable_model: DEFAULT_FABLE_MODEL.into(),
             haiku_model: DEFAULT_HAIKU_MODEL.into(),
         }
     }
@@ -1304,6 +1317,9 @@ fn default_opus_model_s() -> String {
 }
 fn default_fast_model_s() -> String {
     DEFAULT_FAST_MODEL.into()
+}
+fn default_fable_model_s() -> String {
+    DEFAULT_FABLE_MODEL.into()
 }
 fn default_haiku_model_s() -> String {
     DEFAULT_HAIKU_MODEL.into()
