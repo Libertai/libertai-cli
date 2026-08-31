@@ -12919,8 +12919,8 @@ task = "Do the thing"
 
         let buffer = terminal.backend().buffer();
         // Find the first non-empty cell carrying the error text and assert its
-        // foreground is Red (theme::error()).
-        let red = ratatui::style::Color::Red;
+        // foreground is the theme error color.
+        let red = crate::commands::code_tui::theme::ERROR;
         let mut saw_red = false;
         for y in 0..3 {
             for x in 0..40 {
