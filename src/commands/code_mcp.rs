@@ -32,15 +32,12 @@ pub struct McpServerProbe {
     pub name: String,
     pub transport: String,
     pub status: McpProbeStatus,
-    /// Discovered tool names (kept for the human report header).
-    pub tools: Vec<String>,
-    pub resources: Vec<String>,
-    pub prompts: Vec<String>,
-    /// Full discovered objects (name + description + schema/args), used by
-    /// `/mcp probe --save` to populate the persisted config catalog.
-    pub tools_full: Vec<McpDiscoveredTool>,
-    pub resources_full: Vec<McpDiscoveredResource>,
-    pub prompts_full: Vec<McpDiscoveredPrompt>,
+    /// Full discovered objects (name + description + schema/args) — the single
+    /// representation, used both for the human report and to populate the
+    /// persisted config catalog on `/mcp probe --save`.
+    pub tools: Vec<McpDiscoveredTool>,
+    pub resources: Vec<McpDiscoveredResource>,
+    pub prompts: Vec<McpDiscoveredPrompt>,
     pub diagnostics: Vec<String>,
 }
 
@@ -126,12 +123,9 @@ fn probe_server(name: &str, server: &McpServerConfig, timeout: Duration) -> McpS
             } else {
                 McpProbeStatus::Warning
             };
-            inventory.tools.sort();
-            inventory.resources.sort();
-            inventory.prompts.sort();
-            inventory.tools_full.sort_by(|a, b| a.name.cmp(&b.name));
-            inventory.resources_full.sort_by(|a, b| a.uri.cmp(&b.uri));
-            inventory.prompts_full.sort_by(|a, b| a.name.cmp(&b.name));
+            inventory.tools.sort_by(|a, b| a.name.cmp(&b.name));
+            inventory.resources.sort_by(|a, b| a.uri.cmp(&b.uri));
+            inventory.prompts.sort_by(|a, b| a.name.cmp(&b.name));
             McpServerProbe {
                 name: name.to_string(),
                 transport,
@@ -139,9 +133,6 @@ fn probe_server(name: &str, server: &McpServerConfig, timeout: Duration) -> McpS
                 tools: inventory.tools,
                 resources: inventory.resources,
                 prompts: inventory.prompts,
-                tools_full: inventory.tools_full,
-                resources_full: inventory.resources_full,
-                prompts_full: inventory.prompts_full,
                 diagnostics: inventory.diagnostics,
             }
         }
@@ -152,9 +143,6 @@ fn probe_server(name: &str, server: &McpServerConfig, timeout: Duration) -> McpS
             tools: Vec::new(),
             resources: Vec::new(),
             prompts: Vec::new(),
-            tools_full: Vec::new(),
-            resources_full: Vec::new(),
-            prompts_full: Vec::new(),
             diagnostics: vec![error],
         },
     }
@@ -174,12 +162,9 @@ fn mcp_transport_label(server: &McpServerConfig) -> String {
 
 #[derive(Debug, Default)]
 struct McpInventory {
-    tools: Vec<String>,
-    resources: Vec<String>,
-    prompts: Vec<String>,
-    tools_full: Vec<McpDiscoveredTool>,
-    resources_full: Vec<McpDiscoveredResource>,
-    prompts_full: Vec<McpDiscoveredPrompt>,
+    tools: Vec<McpDiscoveredTool>,
+    resources: Vec<McpDiscoveredResource>,
+    prompts: Vec<McpDiscoveredPrompt>,
     diagnostics: Vec<String>,
 }
 
@@ -521,40 +506,27 @@ fn resolve_mcp_sse_endpoint(base_url: &str, endpoint: &str) -> Result<String, St
 }
 
 impl McpInventory {
+    // NOTE: only the first page of each list is read — a server that paginates
+    // via `nextCursor` yields a partial catalog. `--save` persists whatever was
+    // discovered; following `nextCursor` across all three transports is a
+    // deliberate follow-up.
     fn extend(&mut self, key: &str, result: &serde_json::Value) {
         let Some(items) = result.get(key).and_then(serde_json::Value::as_array) else {
             return;
         };
-        // Names (existing behaviour — kept for the report header) …
-        let names = items.iter().filter_map(mcp_inventory_item_label);
-        match key {
-            "tools" => self.tools.extend(names),
-            "resources" => self.resources.extend(names),
-            "prompts" => self.prompts.extend(names),
-            _ => {}
-        }
-        // … and the full objects (for `--save` into the config catalog).
         match key {
             "tools" => self
-                .tools_full
+                .tools
                 .extend(items.iter().filter_map(parse_discovered_tool)),
             "resources" => self
-                .resources_full
+                .resources
                 .extend(items.iter().filter_map(parse_discovered_resource)),
             "prompts" => self
-                .prompts_full
+                .prompts
                 .extend(items.iter().filter_map(parse_discovered_prompt)),
             _ => {}
         }
     }
-}
-
-fn mcp_inventory_item_label(value: &serde_json::Value) -> Option<String> {
-    value
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| value.get("uri").and_then(serde_json::Value::as_str))
-        .map(str::to_string)
 }
 
 fn json_str(value: &serde_json::Value, key: &str) -> String {
@@ -567,10 +539,15 @@ fn json_str(value: &serde_json::Value, key: &str) -> String {
 
 fn parse_discovered_tool(value: &serde_json::Value) -> Option<McpDiscoveredTool> {
     let name = value.get("name").and_then(serde_json::Value::as_str)?;
+    // Normalize a top-level `"inputSchema": null` to `None` — TOML has no null,
+    // so a `Some(Value::Null)` would make `config::save` fail on `--save`.
+    // (A schema with *nested* JSON nulls can still trip save; that surfaces as
+    // an error rather than silent loss.)
+    let input_schema = value.get("inputSchema").filter(|v| !v.is_null()).cloned();
     Some(McpDiscoveredTool {
         name: name.to_string(),
         description: json_str(value, "description"),
-        input_schema: value.get("inputSchema").cloned(),
+        input_schema,
     })
 }
 
@@ -820,17 +797,17 @@ pub fn render_probe_report(report: &McpProbeReport) -> String {
             server.transport,
             server.status.label()
         ));
-        for tool in &server.tools_full {
+        for tool in &server.tools {
             out.push_str(&format!(
                 "  tool {}{}\n",
                 tool.name,
                 summarize_desc(&tool.description)
             ));
         }
-        for res in &server.resources_full {
+        for res in &server.resources {
             out.push_str(&format!("  resource {}\n", res.uri));
         }
-        for prompt in &server.prompts_full {
+        for prompt in &server.prompts {
             out.push_str(&format!("  prompt {}\n", prompt.name));
         }
         for diag in &server.diagnostics {
@@ -857,7 +834,15 @@ pub fn render_probe_save_summary(report: &McpProbeReport, outcome: &MergeOutcome
     for name in &outcome.skipped_error {
         out.push_str(&format!("{name}: probe failed — catalog left unchanged\n"));
     }
-    let _ = report;
+    // Surface any per-server warnings (partial list, a failed sub-list) so the
+    // user knows the saved catalog may be incomplete.
+    for server in &report.servers {
+        if server.status == McpProbeStatus::Warning {
+            for diag in &server.diagnostics {
+                out.push_str(&format!("{}: warning — {diag}\n", server.name));
+            }
+        }
+    }
     out.push_str(
         "Saved to config. New tools take effect next session; /mcp reset drops cached connections.\n",
     );
@@ -898,9 +883,9 @@ pub fn merge_probe_into_config(cfg: &mut Config, report: &McpProbeReport) -> Mer
             continue;
         };
         let mut counts = ServerMergeCounts::default();
-        merge_tools(&mut entry.tools, &server.tools_full, &mut counts);
-        merge_resources(&mut entry.resources, &server.resources_full, &mut counts);
-        merge_prompts(&mut entry.prompts, &server.prompts_full, &mut counts);
+        merge_tools(&mut entry.tools, &server.tools, &mut counts);
+        merge_resources(&mut entry.resources, &server.resources, &mut counts);
+        merge_prompts(&mut entry.prompts, &server.prompts, &mut counts);
         outcome.merged.push((server.name.clone(), counts));
     }
     outcome
@@ -1003,14 +988,18 @@ mod tests {
             "tools",
             &json!({"tools":[{"name":"search"},{"name":"read"}]}),
         );
+        // A resource item missing `uri` is skipped (uri is the required key).
         inventory.extend(
             "resources",
             &json!({"resources":[{"uri":"file:///tmp/a"},{"name":"docs"}]}),
         );
         inventory.extend("prompts", &json!({"prompts":[{"name":"review"}]}));
-        assert_eq!(inventory.tools, vec!["search", "read"]);
-        assert_eq!(inventory.resources, vec!["file:///tmp/a", "docs"]);
-        assert_eq!(inventory.prompts, vec!["review"]);
+        let tool_names: Vec<_> = inventory.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(tool_names, vec!["search", "read"]);
+        let res_uris: Vec<_> = inventory.resources.iter().map(|r| r.uri.as_str()).collect();
+        assert_eq!(res_uris, vec!["file:///tmp/a"]);
+        let prompt_names: Vec<_> = inventory.prompts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(prompt_names, vec!["review"]);
     }
 
     #[test]
@@ -1024,11 +1013,8 @@ mod tests {
                 "inputSchema":{"type":"object","required":["query"]}
             }]}),
         );
-        // Names unchanged …
-        assert_eq!(inventory.tools, vec!["search"]);
-        // … and the full object captured.
-        assert_eq!(inventory.tools_full.len(), 1);
-        let tool = &inventory.tools_full[0];
+        assert_eq!(inventory.tools.len(), 1);
+        let tool = &inventory.tools[0];
         assert_eq!(tool.name, "search");
         assert_eq!(tool.description, "Search the web");
         assert_eq!(
@@ -1056,12 +1042,9 @@ mod tests {
                 name: "srv".to_string(),
                 transport: "stdio".to_string(),
                 status,
-                tools: tools.iter().map(|t| t.name.clone()).collect(),
+                tools,
                 resources: vec![],
                 prompts: vec![],
-                tools_full: tools,
-                resources_full: vec![],
-                prompts_full: vec![],
                 diagnostics: vec![],
             }],
         }
@@ -1073,6 +1056,17 @@ mod tests {
             description: desc.to_string(),
             input_schema: Some(json!({"type":"object"})),
         }
+    }
+
+    #[test]
+    fn null_input_schema_normalizes_to_none() {
+        let mut inventory = McpInventory::default();
+        inventory.extend("tools", &json!({"tools":[{"name":"a","inputSchema":null}]}));
+        assert_eq!(inventory.tools.len(), 1);
+        assert!(
+            inventory.tools[0].input_schema.is_none(),
+            "a null inputSchema must become None so TOML save can't fail on it"
+        );
     }
 
     #[test]
@@ -1316,15 +1310,17 @@ mod tests {
         );
         handle.join().unwrap();
         assert_eq!(server.transport, "legacy-sse");
-        assert_eq!(server.tools, vec!["search"]);
-        assert_eq!(server.resources, vec!["file:///tmp/a"]);
-        assert_eq!(server.prompts, vec!["review"]);
         // Full objects captured end-to-end through the real SSE transport.
-        assert_eq!(server.tools_full.len(), 1);
-        assert_eq!(server.tools_full[0].description, "Search the web");
+        assert_eq!(server.tools.len(), 1);
+        assert_eq!(server.tools[0].name, "search");
+        assert_eq!(server.tools[0].description, "Search the web");
         assert_eq!(
-            server.tools_full[0].input_schema.as_ref().unwrap()["type"],
+            server.tools[0].input_schema.as_ref().unwrap()["type"],
             "object"
         );
+        assert_eq!(server.resources.len(), 1);
+        assert_eq!(server.resources[0].uri, "file:///tmp/a");
+        assert_eq!(server.prompts.len(), 1);
+        assert_eq!(server.prompts[0].name, "review");
     }
 }

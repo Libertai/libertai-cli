@@ -2118,30 +2118,49 @@ fn spawn_background(
                             }
                             // `/mcp probe [--save]` — live-discover each MCP
                             // server's tools/resources/prompts (BLOCKING network
-                            // + child processes). Reload config from disk (like
-                            // the `/mcp json` arm) so `--save` merges into the
-                            // on-disk truth, not this thread's stale Arc.
+                            // + child processes). Reload config from disk so
+                            // `--save` merges into the on-disk truth, not this
+                            // thread's stale Arc.
                             BgCommand::McpProbe { save } => {
-                                let mut disk_cfg = crate::config::load()
-                                    .unwrap_or_else(|_| cfg.as_ref().clone());
-                                let report = code_mcp::probe_configured_servers(
-                                    &disk_cfg,
-                                    std::time::Duration::from_secs(10),
-                                );
+                                // `--save` is MUTATING: a load failure (TOML
+                                // error from an in-flight hand edit, permissions,
+                                // enforce_https_bases rejection) must ABORT, not
+                                // fall back to the in-memory snapshot and then
+                                // overwrite the on-disk config. The read-only
+                                // (non-save) path may fall back safely.
+                                let loaded = crate::config::load();
                                 if save {
-                                    let outcome = code_mcp::merge_probe_into_config(
-                                        &mut disk_cfg,
-                                        &report,
-                                    );
-                                    match crate::config::save(&disk_cfg) {
-                                        Ok(()) => code_mcp::render_probe_save_summary(
-                                            &report, &outcome,
-                                        ),
+                                    match loaded {
+                                        Ok(mut disk_cfg) => {
+                                            let report = code_mcp::probe_configured_servers(
+                                                &disk_cfg,
+                                                std::time::Duration::from_secs(10),
+                                            );
+                                            let outcome = code_mcp::merge_probe_into_config(
+                                                &mut disk_cfg,
+                                                &report,
+                                            );
+                                            match crate::config::save(&disk_cfg) {
+                                                Ok(()) => code_mcp::render_probe_save_summary(
+                                                    &report, &outcome,
+                                                ),
+                                                Err(e) => format!(
+                                                    "probe --save: saving config failed: {e:#}"
+                                                ),
+                                            }
+                                        }
                                         Err(e) => format!(
-                                            "probe succeeded but saving config failed: {e:#}"
+                                            "probe --save: could not load config (aborting to \
+                                             avoid overwriting it): {e:#}"
                                         ),
                                     }
                                 } else {
+                                    let disk_cfg =
+                                        loaded.unwrap_or_else(|_| cfg.as_ref().clone());
+                                    let report = code_mcp::probe_configured_servers(
+                                        &disk_cfg,
+                                        std::time::Duration::from_secs(10),
+                                    );
                                     code_mcp::render_probe_report(&report)
                                 }
                             }
@@ -16153,6 +16172,71 @@ task = "Do the thing"
         assert!(
             system_lines(&app).iter().any(|s| s.contains("diff")),
             "/diff should push a 'diff…' placeholder, got: {:?}",
+            system_lines(&app)
+        );
+    }
+
+    // `/mcp probe` routes `Cmd::RunReadOnly(BgCommand::McpProbe { save: false })`
+    // (blocking discovery on the bg thread), pushing a "Probing…" placeholder,
+    // and returns no action.
+    #[test]
+    fn slash_mcp_probe_routes_bg_command_without_save() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/mcp probe", &cmd_tx);
+
+        assert!(action.is_none(), "/mcp probe must not return an action");
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::McpProbe { save })) => {
+                assert!(!save, "/mcp probe must route save:false");
+            }
+            other => panic!("expected RunReadOnly(McpProbe), got {other:?}"),
+        }
+        assert!(
+            system_lines(&app).iter().any(|s| s.contains("Probing MCP")),
+            "expected a Probing placeholder, got: {:?}",
+            system_lines(&app)
+        );
+    }
+
+    // `/mcp probe --save` routes the same command with `save: true`.
+    #[test]
+    fn slash_mcp_probe_save_routes_bg_command_with_save() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/mcp probe --save", &cmd_tx);
+
+        assert!(
+            action.is_none(),
+            "/mcp probe --save must not return an action"
+        );
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::McpProbe { save })) => {
+                assert!(save, "/mcp probe --save must route save:true");
+            }
+            other => panic!("expected RunReadOnly(McpProbe {{ save:true }}), got {other:?}"),
+        }
+    }
+
+    // `/mcp reset` runs INLINE (no bg command — draining the in-process client
+    // caches is cheap), pushes a "Reset N…" system line, and returns no action.
+    #[test]
+    fn slash_mcp_reset_runs_inline_no_bg_command() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/mcp reset", &cmd_tx);
+
+        assert!(action.is_none(), "/mcp reset must not return an action");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "/mcp reset must not send a bg command (runs inline)"
+        );
+        assert!(
+            system_lines(&app).iter().any(|s| s.contains("Reset")),
+            "expected a Reset system line, got: {:?}",
             system_lines(&app)
         );
     }
