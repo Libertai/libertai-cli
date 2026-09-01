@@ -582,10 +582,7 @@ async fn run_async(
                 let hook_cfg = Arc::clone(&hook_cfg);
                 handle
                     .prompt(prompt.clone(), move |event| {
-                        crate::commands::code_hooks::run_post_tool_hooks(
-                            hook_cfg.as_ref(),
-                            &event,
-                        );
+                        crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
                         crate::commands::code_hooks::run_tool_start_hooks(
                             hook_cfg.as_ref(),
                             &event,
@@ -598,10 +595,7 @@ async fn run_async(
                 let hook_cfg = Arc::clone(&hook_cfg);
                 handle
                     .continue_turn(move |event| {
-                        crate::commands::code_hooks::run_post_tool_hooks(
-                            hook_cfg.as_ref(),
-                            &event,
-                        );
+                        crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
                         crate::commands::code_hooks::run_tool_start_hooks(
                             hook_cfg.as_ref(),
                             &event,
@@ -626,10 +620,7 @@ async fn run_async(
             code_retry::abortable_sleep_ms(delay_ms, || false);
             // Strip the failed request's partial output so the resume
             // streams from a clean tail.
-            let _ = handle
-                .session_mut()
-                .revert_incomplete_response()
-                .await;
+            let _ = handle.session_mut().revert_incomplete_response().await;
         };
         crate::commands::code_hooks::run_stop_hooks(cfg.as_ref());
         crate::commands::code_hooks::run_post_tool_batch_hooks(cfg.as_ref());
@@ -668,10 +659,7 @@ async fn run_async(
                 let renderer = Arc::clone(&renderer);
                 handle
                     .prompt(prompt.clone(), move |event| {
-                        crate::commands::code_hooks::run_post_tool_hooks(
-                            hook_cfg.as_ref(),
-                            &event,
-                        );
+                        crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
                         crate::commands::code_hooks::run_tool_start_hooks(
                             hook_cfg.as_ref(),
                             &event,
@@ -687,10 +675,7 @@ async fn run_async(
                 let renderer = Arc::clone(&renderer);
                 handle
                     .continue_turn(move |event| {
-                        crate::commands::code_hooks::run_post_tool_hooks(
-                            hook_cfg.as_ref(),
-                            &event,
-                        );
+                        crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
                         crate::commands::code_hooks::run_tool_start_hooks(
                             hook_cfg.as_ref(),
                             &event,
@@ -715,10 +700,7 @@ async fn run_async(
                 code_retry::DEFAULT_MAX_RETRIES,
             );
             code_retry::abortable_sleep_ms(delay_ms, || false);
-            let _ = handle
-                .session_mut()
-                .revert_incomplete_response()
-                .await;
+            let _ = handle.session_mut().revert_incomplete_response().await;
         }
     };
     let elapsed_secs = match renderer.lock() {
