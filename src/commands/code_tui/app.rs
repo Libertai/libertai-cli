@@ -21,8 +21,8 @@ use anyhow::Context;
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
 use crate::commands::code_context_tool;
 use crate::commands::code_cron;
-use crate::commands::code_retry;
 use crate::commands::code_diff::EditJournal;
+use crate::commands::code_retry;
 // (M6/#15) Workflow engine — registry threaded through the tool factory +
 // the `/workflows` viewer reads it.
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
