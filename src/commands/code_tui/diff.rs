@@ -11,6 +11,7 @@
 //! caps the output at [`MAX_DIFF_LINES`] so a huge diff can't freeze the
 //! viewer.
 
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use crate::commands::code_tui::highlight;
@@ -153,9 +154,21 @@ pub fn parse_diff(diff: &str) -> Vec<Line<'static>> {
         };
 
         let mut spans = Vec::with_capacity(4);
-        spans.push(Span::styled(format_gutter_num(old_num), muted));
-        spans.push(Span::styled(format_gutter_num(new_num), muted));
-        spans.push(Span::styled(format!("{sign} "), style));
+        // GitHub-style background tint on added/removed lines. The tint
+        // is a wash: any span without its own bg (the syntect spans, the
+        // plain body span) picks it up so the whole row is shaded while
+        // the highlight colors stay intact.
+        let tint = match kind {
+            LineKind::Added => theme::diff_add_bg(),
+            LineKind::Removed => theme::diff_remove_bg(),
+            LineKind::Context => Style::default(),
+        };
+        let tinted = tint.bg.is_some();
+        let body_style = tint.patch(style);
+        let gutter_style = body_style.patch(muted);
+        spans.push(Span::styled(format_gutter_num(old_num), gutter_style));
+        spans.push(Span::styled(format_gutter_num(new_num), gutter_style));
+        spans.push(Span::styled(format!("{sign} "), body_style));
         // Highlight added/removed body lines when the language is known and
         // the body fits a reasonable budget (mirrors render_code_lines'
         // overflow guard). Context lines stay plain (dim) — git already
@@ -172,10 +185,18 @@ pub fn parse_diff(diff: &str) -> Vec<Line<'static>> {
             Some(ts) => {
                 // Apply the line-kind style as a base by pushing the
                 // sign already; highlight spans carry their own colors.
-                spans.extend(ts);
+                // Patch the tint bg onto each so the wash covers the row.
+                if tinted {
+                    spans.extend(ts.into_iter().map(|mut s| {
+                        s.style = s.style.patch(tint);
+                        s
+                    }));
+                } else {
+                    spans.extend(ts);
+                }
             }
             None => {
-                spans.push(Span::styled(body.to_string(), style));
+                spans.push(Span::styled(body.to_string(), body_style));
             }
         }
         lines.push(Line::from(spans));
@@ -316,17 +337,23 @@ index 111..222 100644
         assert_eq!(ctx.spans[2].content, "  "); // sign + trailing space
         assert_eq!(ctx.spans[3].content, "context line");
         assert_eq!(ctx.spans[3].style, theme::muted());
-        // removed: old=2, new blank, sign '-', error color.
+        // removed: old=2, new blank, sign '-', error color + tint bg.
         let rem = &lines[6];
         assert_eq!(rem.spans[0].content, "    2");
         assert_eq!(rem.spans[1].content, "     "); // blank gutter
-        assert_eq!(rem.spans[2].style, theme::error());
+        assert_eq!(
+            rem.spans[2].style,
+            theme::diff_remove_bg().patch(theme::error())
+        );
         assert_eq!(rem.spans[2].content, "- ");
-        // added: old blank, new=2, sign '+', success color.
+        // added: old blank, new=2, sign '+', success color + tint bg.
         let add = &lines[7];
         assert_eq!(add.spans[0].content, "     ");
         assert_eq!(add.spans[1].content, "    2");
-        assert_eq!(add.spans[2].style, theme::success());
+        assert_eq!(
+            add.spans[2].style,
+            theme::diff_add_bg().patch(theme::success())
+        );
         assert_eq!(add.spans[2].content, "+ ");
         // counts summary last: 1 insertion / 1 deletion.
         let counts = &lines[8];

@@ -19,6 +19,7 @@ use pi::sdk::{create_agent_session, AgentEvent};
 
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi, NotifyOutcome, PromptChoice};
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
+use crate::commands::code_retry;
 use crate::commands::code_sandbox::{build_command_wrapper, strict_support_error, SandboxMode};
 use crate::commands::code_session::{
     build_session_options, list_past_sessions, most_recent_session, CodeSessionConfig,
@@ -572,14 +573,64 @@ async fn run_async(
     if print {
         // --print contract: raw deltas on stdout (scripts parse it),
         // minimal dim notices on stderr, no spinner, no markdown.
-        let msg = handle
-            .prompt(prompt, move |event| {
-                crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
-                crate::commands::code_hooks::run_tool_start_hooks(hook_cfg.as_ref(), &event);
-                render(event);
-            })
-            .await
-            .map_err(anyhow::Error::new)?;
+        // Retry transient provider errors, resuming the turn from the
+        // last completed state (see code_retry for the pattern).
+        let mut retry_loop = code_retry::RetryLoop::with_default_limit();
+        let mut first_attempt = true;
+        let msg = loop {
+            let result = if first_attempt {
+                let hook_cfg = Arc::clone(&hook_cfg);
+                handle
+                    .prompt(prompt.clone(), move |event| {
+                        crate::commands::code_hooks::run_post_tool_hooks(
+                            hook_cfg.as_ref(),
+                            &event,
+                        );
+                        crate::commands::code_hooks::run_tool_start_hooks(
+                            hook_cfg.as_ref(),
+                            &event,
+                        );
+                        render(event);
+                    })
+                    .await
+            } else {
+                // Resume path: re-issues only the failed provider request.
+                let hook_cfg = Arc::clone(&hook_cfg);
+                handle
+                    .continue_turn(move |event| {
+                        crate::commands::code_hooks::run_post_tool_hooks(
+                            hook_cfg.as_ref(),
+                            &event,
+                        );
+                        crate::commands::code_hooks::run_tool_start_hooks(
+                            hook_cfg.as_ref(),
+                            &event,
+                        );
+                        render(event);
+                    })
+                    .await
+            };
+            first_attempt = false;
+            let Err(err) = result else {
+                break result.expect("checked");
+            };
+            let Some(delay_ms) = retry_loop.next_retry(&err) else {
+                return Err(anyhow::Error::new(err));
+            };
+            let (dim, reset) = crate::commands::output::stderr_dim_pair();
+            eprintln!(
+                "{dim}retry {}/{}: {err} (waiting {delay_ms}ms){reset}",
+                retry_loop.attempt(),
+                code_retry::DEFAULT_MAX_RETRIES,
+            );
+            code_retry::abortable_sleep_ms(delay_ms, || false);
+            // Strip the failed request's partial output so the resume
+            // streams from a clean tail.
+            let _ = handle
+                .session_mut()
+                .revert_incomplete_response()
+                .await;
+        };
         crate::commands::code_hooks::run_stop_hooks(cfg.as_ref());
         crate::commands::code_hooks::run_post_tool_batch_hooks(cfg.as_ref());
 
@@ -606,15 +657,69 @@ async fn run_async(
     )));
     let result = {
         let renderer = Arc::clone(&renderer);
-        handle
-            .prompt(prompt, move |event| {
-                crate::commands::code_hooks::run_post_tool_hooks(hook_cfg.as_ref(), &event);
-                crate::commands::code_hooks::run_tool_start_hooks(hook_cfg.as_ref(), &event);
-                if let Ok(mut renderer) = renderer.lock() {
-                    renderer.on_event(&event);
-                }
-            })
-            .await
+        // Retry transient provider errors (429/5xx/connection resets),
+        // resuming the turn from the last completed state after each
+        // failure — same contract as the TUI bg-thread loop.
+        let mut retry_loop = code_retry::RetryLoop::with_default_limit();
+        let mut first_attempt = true;
+        loop {
+            let result = if first_attempt {
+                let hook_cfg = Arc::clone(&hook_cfg);
+                let renderer = Arc::clone(&renderer);
+                handle
+                    .prompt(prompt.clone(), move |event| {
+                        crate::commands::code_hooks::run_post_tool_hooks(
+                            hook_cfg.as_ref(),
+                            &event,
+                        );
+                        crate::commands::code_hooks::run_tool_start_hooks(
+                            hook_cfg.as_ref(),
+                            &event,
+                        );
+                        if let Ok(mut renderer) = renderer.lock() {
+                            renderer.on_event(&event);
+                        }
+                    })
+                    .await
+            } else {
+                // Resume path: re-issues only the failed provider request.
+                let hook_cfg = Arc::clone(&hook_cfg);
+                let renderer = Arc::clone(&renderer);
+                handle
+                    .continue_turn(move |event| {
+                        crate::commands::code_hooks::run_post_tool_hooks(
+                            hook_cfg.as_ref(),
+                            &event,
+                        );
+                        crate::commands::code_hooks::run_tool_start_hooks(
+                            hook_cfg.as_ref(),
+                            &event,
+                        );
+                        if let Ok(mut renderer) = renderer.lock() {
+                            renderer.on_event(&event);
+                        }
+                    })
+                    .await
+            };
+            first_attempt = false;
+            let Err(err) = result else {
+                break Ok(result.expect("checked"));
+            };
+            let Some(delay_ms) = retry_loop.next_retry(&err) else {
+                break Err(err);
+            };
+            let (dim, reset) = crate::commands::output::stderr_dim_pair();
+            eprintln!(
+                "{dim}retry {}/{}: {err} (waiting {delay_ms}ms){reset}",
+                retry_loop.attempt(),
+                code_retry::DEFAULT_MAX_RETRIES,
+            );
+            code_retry::abortable_sleep_ms(delay_ms, || false);
+            let _ = handle
+                .session_mut()
+                .revert_incomplete_response()
+                .await;
+        }
     };
     let elapsed_secs = match renderer.lock() {
         Ok(mut renderer) => {

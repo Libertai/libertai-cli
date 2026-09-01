@@ -167,7 +167,7 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
         {
             lines.push(Line::from(Span::styled(
                 "─".repeat(width.saturating_sub(2)),
-                theme::muted(),
+                theme::separator(),
             )));
             continue;
         }
@@ -511,12 +511,12 @@ fn render_table(rows: &[String], width: usize) -> Vec<Line<'static>> {
     // Divider: one `─` run per column, sized to the column width, joined
     // by `─┼─` so it reads as a table border under the header.
     let divider: Vec<Span<'static>> = (0..ncol)
-        .map(|i| Span::styled("─".repeat(col_widths[i]), theme::muted()))
+        .map(|i| Span::styled("─".repeat(col_widths[i]), theme::separator()))
         .collect();
     let mut div_spans = Vec::with_capacity(divider.len() * 2);
     for (i, d) in divider.into_iter().enumerate() {
         if i > 0 {
-            div_spans.push(Span::styled("─┼─".to_string(), theme::muted()));
+            div_spans.push(Span::styled("─┼─".to_string(), theme::separator()));
         }
         div_spans.push(d);
     }
@@ -891,10 +891,13 @@ fn render_code_block(code: &[&str], lang: &str, width: usize) -> Vec<Line<'stati
     // Dim header naming the language (or "(code)" if empty) above the
     // top border, so fenced blocks read as code at a glance.
     let label = if lang.is_empty() { "(code)" } else { lang };
-    lines.push(Line::from(Span::styled(label.to_string(), theme::muted())));
-    lines.push(Line::from(Span::styled(border.clone(), theme::muted())));
+    lines.push(Line::from(Span::styled(
+        label.to_string(),
+        theme::separator(),
+    )));
+    lines.push(Line::from(Span::styled(border.clone(), theme::separator())));
     lines.extend(render_code_lines(code, lang, width));
-    lines.push(Line::from(Span::styled(border, theme::muted())));
+    lines.push(Line::from(Span::styled(border, theme::separator())));
     lines
 }
 
@@ -906,7 +909,10 @@ fn render_code_block(code: &[&str], lang: &str, width: usize) -> Vec<Line<'stati
 fn render_code_block_open(code: &[&str], lang: &str, width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let label = if lang.is_empty() { "(code)" } else { lang };
-    lines.push(Line::from(Span::styled(label.to_string(), theme::muted())));
+    lines.push(Line::from(Span::styled(
+        label.to_string(),
+        theme::separator(),
+    )));
     lines.extend(render_code_lines(code, lang, width));
     lines
 }
@@ -1099,7 +1105,6 @@ fn strip_all_osc8_labels(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Color;
     use std::sync::Mutex;
 
     // The OSC-8 capability flag (`OSC8_ENABLED`) and the `LIBERTAI_OSC8` env
@@ -1320,10 +1325,10 @@ mod tests {
             "code block should be header + border + 3 wrapped code + border, got {}",
             lines.len()
         );
-        // The header line names the language and is dim (muted).
+        // The header line names the language and is dim (separator).
         let header = &lines[0];
         assert_eq!(header.spans.len(), 1);
-        assert_eq!(header.spans[0].style, theme::muted());
+        assert_eq!(header.spans[0].style, theme::separator());
         assert!(
             header.spans[0].content.contains("rust"),
             "header should name the lang 'rust', got {:?}",
@@ -1358,8 +1363,8 @@ mod tests {
         assert_eq!(h1_style, theme::bold_accent(), "h1 uses bold_accent");
         assert_eq!(h3_style, theme::bold_muted(), "h3 uses bold_muted");
         // Sanity: the difference is the fg color.
-        assert_eq!(h1_style.fg, Some(Color::Cyan));
-        assert_eq!(h3_style.fg, Some(Color::DarkGray));
+        assert_eq!(h1_style.fg, Some(theme::ACCENT));
+        assert_eq!(h3_style.fg, Some(theme::MUTED));
     }
 
     #[test]
@@ -1626,7 +1631,7 @@ mod tests {
             .find(|s| s.content.contains("\x1b]8;;"))
             .expect("link span");
         assert!(link.style.add_modifier.contains(Modifier::UNDERLINED));
-        assert_eq!(link.style.fg, Some(Color::Cyan));
+        assert_eq!(link.style.fg, Some(theme::ACCENT));
     }
 
     #[test]
@@ -2169,7 +2174,7 @@ mod tests {
         let mods = link.style.add_modifier;
         assert!(mods.contains(Modifier::BOLD), "link is bold (outer layer)");
         assert!(mods.contains(Modifier::UNDERLINED), "link is underlined");
-        assert_eq!(link.style.fg, Some(Color::Cyan), "link keeps accent fg");
+        assert_eq!(link.style.fg, Some(theme::ACCENT), "link keeps accent fg");
     }
 
     #[test]

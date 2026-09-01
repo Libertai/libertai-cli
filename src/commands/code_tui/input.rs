@@ -70,7 +70,9 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
         let scroll = app.input_scroll.min(layout.len().saturating_sub(1));
         let end = (scroll + height.max(1)).min(layout.len());
 
-        let cursor_style = Style::default().bg(Color::Cyan).fg(Color::Black);
+        let cursor_style = Style::default()
+            .bg(theme::ACCENT)
+            .fg(ratatui::style::Color::Black);
         let mut rows: Vec<Line> = Vec::with_capacity(end - scroll);
         for (vidx, vrow) in layout[scroll..end].iter().enumerate() {
             let text = input_layout::row_text(&lines_src[vrow.line_idx], vrow);

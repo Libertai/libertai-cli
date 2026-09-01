@@ -6,7 +6,7 @@ use crate::config::{
     DEFAULT_CODE_AUTO_COMPACTION_ENABLED, DEFAULT_CODE_COMPACTION_KEEP_RECENT_TOKENS,
     DEFAULT_CODE_COMPACTION_RESERVE_TOKENS, DEFAULT_CODE_COMPACTION_TOKEN_BUDGET_COMPACT,
     DEFAULT_CODE_MODEL, DEFAULT_CODE_PROVIDER, DEFAULT_CODE_TURN_NOTIFICATIONS, DEFAULT_FAST_MODEL,
-    DEFAULT_HTTP_TIMEOUT_SECS, DEFAULT_IMAGE_MODEL, DEFAULT_OPUS_MODEL,
+    DEFAULT_FABLE_MODEL, DEFAULT_HTTP_TIMEOUT_SECS, DEFAULT_IMAGE_MODEL, DEFAULT_OPUS_MODEL,
     DEFAULT_SMART_APPROVAL_ENABLED, DEFAULT_SMART_APPROVAL_MODEL,
 };
 
@@ -46,6 +46,9 @@ fn set(key: &str, value: &str) -> Result<()> {
         }
         "launcher_defaults.sonnet_model" => {
             cfg.launcher_defaults.sonnet_model = value.to_string()
+        }
+        "launcher_defaults.fable_model" => {
+            cfg.launcher_defaults.fable_model = value.to_string()
         }
         "launcher_defaults.haiku_model" => {
             cfg.launcher_defaults.haiku_model = value.to_string()
@@ -123,6 +126,7 @@ fn unset(key: &str) -> Result<()> {
             cfg.default_image_model = DEFAULT_IMAGE_MODEL.into();
             cfg.launcher_defaults.opus_model = DEFAULT_OPUS_MODEL.into();
             cfg.launcher_defaults.sonnet_model = DEFAULT_FAST_MODEL.into();
+            cfg.launcher_defaults.fable_model = DEFAULT_FABLE_MODEL.into();
             cfg.launcher_defaults.haiku_model = DEFAULT_FAST_MODEL.into();
             cfg.http_timeout_secs = DEFAULT_HTTP_TIMEOUT_SECS;
             cfg.check_for_updates = DEFAULT_CHECK_FOR_UPDATES;
@@ -144,6 +148,7 @@ fn unset(key: &str) -> Result<()> {
         "launcher_defaults" => {
             cfg.launcher_defaults.opus_model = DEFAULT_OPUS_MODEL.into();
             cfg.launcher_defaults.sonnet_model = DEFAULT_FAST_MODEL.into();
+            cfg.launcher_defaults.fable_model = DEFAULT_FABLE_MODEL.into();
             cfg.launcher_defaults.haiku_model = DEFAULT_FAST_MODEL.into();
         }
         "launcher_defaults.opus_model" => {
@@ -151,6 +156,9 @@ fn unset(key: &str) -> Result<()> {
         }
         "launcher_defaults.sonnet_model" => {
             cfg.launcher_defaults.sonnet_model = DEFAULT_FAST_MODEL.into()
+        }
+        "launcher_defaults.fable_model" => {
+            cfg.launcher_defaults.fable_model = DEFAULT_FABLE_MODEL.into()
         }
         "launcher_defaults.haiku_model" => {
             cfg.launcher_defaults.haiku_model = DEFAULT_FAST_MODEL.into()

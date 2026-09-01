@@ -90,7 +90,7 @@ libertai agents                                         # dashboard of running s
 
 A coding agent built on [`pi_agent_rust`](https://github.com/Dicklesworthstone/pi_agent_rust)
 as a linked library — no Node runtime, no subprocess, one binary. It defaults
-to `glm-5.2-thinking` on the `libertai` provider; both are configurable and
+to `glm-5.3-thinking` on the `libertai` provider; both are configurable and
 switchable mid-session with `/model`.
 
 ### Tools
@@ -499,8 +499,8 @@ third party's.
 
 ```sh
 libertai claude                         # Claude Code
-libertai claude --opus glm-5.2          # override a single tier
-libertai opencode --model libertai/glm-5.2
+libertai claude --opus glm-5.3          # override a single tier
+libertai opencode --model libertai/glm-5.3
 libertai aider
 libertai claw
 libertai hermes
@@ -509,7 +509,7 @@ libertai run -- <any command>           # generic env-var injection
 
 | Launcher | What it does |
 | --- | --- |
-| `libertai claude` | Sets `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`, remaps the opus/sonnet/haiku tiers to LibertAI models, pins the main and subagent models, disables telemetry and non-essential traffic, then execs `claude`. `--model`, `--opus`, `--sonnet`, `--haiku`. |
+| `libertai claude` | Sets `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`, remaps the opus/sonnet/fable/haiku tiers to LibertAI models, pins the main and subagent models, disables telemetry and non-essential traffic, then execs `claude`. `--model`, `--opus`, `--sonnet`, `--fable`, `--haiku`. |
 | `libertai opencode` | Writes an idempotent `provider.libertai` block into `~/.config/opencode/opencode.json` (pointing at `<api_base>/v1`, key via `{env:LIBERTAI_API_KEY}`), exports the key, and appends `--model libertai/<default_code_model>` unless you passed your own. Other keys and providers in that file are preserved. |
 | `libertai aider` | `run` preset for [Aider](https://aider.chat); auto-passes `--model openai/<default_code_model>` and `--read ~/.config/libertai/aider-instructions.md`. |
 | `libertai claw` | `run` preset for [Claw Code](https://github.com/ultraworkers/claw-code); auto-passes `--model openai/<default_code_model>` — claw's Anthropic path doesn't strip a routing prefix, so the OpenAI-compatible route is the one that works against a LibertAI backend. |
@@ -639,8 +639,8 @@ key you never touched tracks future upgrades automatically.
 ```toml
 api_base            = "https://api.libertai.io"
 account_base        = "https://api.libertai.io"
-default_chat_model  = "glm-5.2"
-default_code_model  = "glm-5.2-thinking"
+default_chat_model  = "glm-5.3-flash"
+default_code_model  = "glm-5.3-thinking"
 default_code_provider = "libertai"
 default_image_model = "z-image-turbo"
 http_timeout_secs   = 600
@@ -655,8 +655,9 @@ status_line_template              = ""
 
 # tiers for the third-party launchers
 [launcher_defaults]
-opus_model   = "glm-5.2"
-sonnet_model = "glm-5.2"
+opus_model   = "glm-5.3"
+sonnet_model = "glm-5.3-flash"
+fable_model  = "glm-5.3"
 haiku_model  = "qwen3.6-35b-a3b"
 
 # MCP servers exposed to `libertai code`
@@ -676,7 +677,7 @@ api_key = "LTAI_..."
 Set and reset values with:
 
 ```sh
-libertai config set default_code_model glm-5.2-thinking
+libertai config set default_code_model glm-5.3-thinking
 libertai config set launcher_defaults.opus_model gemma-4-31b-it
 libertai config unset default_chat_model
 libertai config unset launcher_defaults          # all three launcher tiers

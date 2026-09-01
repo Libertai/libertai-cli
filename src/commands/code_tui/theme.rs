@@ -1,6 +1,6 @@
 //! Semantic color palette and glyph system for the ratatui TUI.
 //!
-//! One accent (cyan), semantic colors for status, dim gray for
+//! One accent (sky blue), semantic colors for status, cool gray for
 //! metadata. No gradients, no neon, no purple. Pure black/white
 //! banned — use `Reset` (terminal default) for backgrounds.
 
@@ -11,22 +11,34 @@ use ratatui::style::{Color, Modifier, Style};
 // ---------------------------------------------------------------------------
 
 /// Brand accent — used for the prompt `❯`, tool markers, and brand elements.
-pub const ACCENT: Color = Color::Cyan;
+/// Soft sky blue (sky-400): distinct from the white primary text without the
+/// harshness of the old ANSI cyan.
+pub const ACCENT: Color = Color::Rgb(56, 189, 248);
 
-/// Success — completed agents, allow.
-pub const SUCCESS: Color = Color::Green;
+/// Success — completed agents, allow, diff additions.
+pub const SUCCESS: Color = Color::Rgb(74, 222, 128);
 
 /// Warning — needs input, plan mode.
-pub const WARNING: Color = Color::Yellow;
+pub const WARNING: Color = Color::Rgb(251, 191, 36);
 
-/// Error — failed agents, deny.
-pub const ERROR: Color = Color::Red;
+/// Error — failed agents, deny, diff removals.
+pub const ERROR: Color = Color::Rgb(248, 113, 113);
 
 /// Informational.
-pub const INFO: Color = Color::Blue;
+pub const INFO: Color = Color::Rgb(96, 165, 250);
 
 /// Muted text — metadata, previews, dividers.
-pub const MUTED: Color = Color::DarkGray;
+pub const MUTED: Color = Color::Rgb(148, 163, 184);
+
+/// Separator — rule lines, borders, dividers. One step dimmer than
+/// [`MUTED`] so structural chrome recedes behind content.
+pub const SEPARATOR: Color = Color::Rgb(71, 85, 105);
+
+/// Background tint for added diff lines (muted green, GitHub-style).
+pub const DIFF_ADD_BG: Color = Color::Rgb(22, 43, 34);
+
+/// Background tint for removed diff lines (muted red, GitHub-style).
+pub const DIFF_REMOVE_BG: Color = Color::Rgb(52, 30, 32);
 
 /// Primary text — terminal default.
 pub const PRIMARY: Color = Color::Reset;
@@ -68,6 +80,25 @@ pub fn dim_accent() -> Style {
 /// Dim muted — faint secondary hints (e.g. the "esc to stop" suffix).
 pub fn dim_muted() -> Style {
     Style::default().fg(MUTED).add_modifier(Modifier::DIM)
+}
+
+/// Separator — rule lines, borders, table dividers, code-block frames.
+/// Structurally dimmer than content so chrome recedes; paired with
+/// [`SEPARATOR`] (a full style fn so callers never hand-build it).
+pub fn separator() -> Style {
+    Style::default().fg(SEPARATOR)
+}
+
+/// Diff line background tint for added lines — GitHub-style muted green.
+/// The caller keeps its own fg (often syntect-highlighted); only the
+/// background is set so the tint reads as a wash, not a highlight.
+pub fn diff_add_bg() -> Style {
+    Style::default().bg(DIFF_ADD_BG)
+}
+
+/// Diff line background tint for removed lines — GitHub-style muted red.
+pub fn diff_remove_bg() -> Style {
+    Style::default().bg(DIFF_REMOVE_BG)
 }
 
 /// Success — completed status.

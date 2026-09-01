@@ -38,11 +38,7 @@ pub fn draw_header(frame: &mut Frame, area: Rect, count: usize, focused: bool) {
     let line = Line::from(vec![
         Span::styled(
             glyph::DIVIDER.to_string().repeat(dash_count),
-            if focused {
-                theme::accent()
-            } else {
-                theme::muted()
-            },
+            theme::separator(),
         ),
         Span::styled(label, style),
     ]);

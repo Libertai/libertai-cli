@@ -609,7 +609,7 @@ _libertai() {
             return 0
             ;;
         libertai__subcmd__claude)
-            opts="-h -V --model --opus --sonnet --haiku --help --version [ARGS]..."
+            opts="-h -V --model --opus --sonnet --fable --haiku --help --version [ARGS]..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -624,6 +624,10 @@ _libertai() {
                     return 0
                     ;;
                 --sonnet)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --fable)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

@@ -161,6 +161,7 @@ complete -c libertai -n "__fish_libertai_using_subcommand run" -s V -l version -
 complete -c libertai -n "__fish_libertai_using_subcommand claude" -l model -d 'Override all three model tiers at once' -r
 complete -c libertai -n "__fish_libertai_using_subcommand claude" -l opus -r
 complete -c libertai -n "__fish_libertai_using_subcommand claude" -l sonnet -r
+complete -c libertai -n "__fish_libertai_using_subcommand claude" -l fable -r
 complete -c libertai -n "__fish_libertai_using_subcommand claude" -l haiku -r
 complete -c libertai -n "__fish_libertai_using_subcommand claude" -s h -l help -d 'Print help'
 complete -c libertai -n "__fish_libertai_using_subcommand claude" -s V -l version -d 'Print version'

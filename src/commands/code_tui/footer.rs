@@ -121,7 +121,7 @@ pub fn draw_todo(frame: &mut Frame, area: Rect, items: &[crate::commands::code_t
     let mut lines: Vec<Line> = Vec::with_capacity(items.len() + 1);
     lines.push(Line::from(vec![
         Span::raw("  "),
-        Span::styled("⎯ task list ⎯", theme::dim_muted()),
+        Span::styled("⎯ task list ⎯", theme::separator()),
     ]));
 
     for item in items {
@@ -141,12 +141,13 @@ pub fn draw_todo(frame: &mut Frame, area: Rect, items: &[crate::commands::code_t
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Draw the rule line (status bar): `─ model ─ tokens ─ mode ─ cost ─`.
-///
-/// When a `/statusline` template is configured (`app.bar.status_line_template`
-/// non-empty), the expanded template replaces the default spans. Otherwise the
-/// default chips are shown: model, context-% + token k-count, cost, mode,
-/// cwd basename, git branch, and the agent tab hint.
+/// Draw the rule line (status bar). The status chips are rendered on a
+/// full-width separator rule so the line reads as a clean horizontal
+/// divider between the transcript and the input bar:
+/// `────── model ── ctx 3% ── ~$0.01 ───────`
+/// The rule is drawn as an alternating sequence of dash spans and chip
+/// spans; the layout is computed from the area width so it always spans
+/// the terminal exactly.
 pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
     let mode = app.mode.get();
 
@@ -186,57 +187,59 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    let mut spans = Vec::new();
+    // Default chips: rendered on a full-width separator rule. Each chip
+    // is a styled span sequence; the rule dashes are distributed in the
+    // gaps between them.
+    let mut chips: Vec<Vec<Span>> = Vec::new();
 
     // Model label.
-    spans.push(Span::styled(
-        &app.bar.model_label,
+    chips.push(vec![Span::styled(
+        app.bar.model_label.clone(),
         ratatui::style::Style::default()
             .fg(theme::MUTED)
             .add_modifier(Modifier::BOLD),
-    ));
+    )]);
 
     // Context usage: percentage first (more useful), then the k-count.
+    let mut ctx_spans: Vec<Span> = Vec::new();
     if app.bar.context_window > 0 {
         let pct = context_percent(app.bar.input_tokens, app.bar.context_window);
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(format!("ctx {pct}%"), theme::muted()));
+        ctx_spans.push(Span::styled(format!("ctx {pct}%"), theme::muted()));
         // Token k-count alongside the percentage.
         if app.bar.input_tokens >= 1000 {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                format!("{:.1}k", app.bar.input_tokens as f64 / 1000.0),
+            ctx_spans.push(Span::styled(
+                format!(" · {:.1}k", app.bar.input_tokens as f64 / 1000.0),
                 theme::muted(),
             ));
         } else if app.bar.input_tokens > 0 {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                format!("{}tok", app.bar.input_tokens),
+            ctx_spans.push(Span::styled(
+                format!(" · {}tok", app.bar.input_tokens),
                 theme::muted(),
             ));
         }
     } else if app.bar.input_tokens > 0 {
         // No context window known — fall back to a bare token count.
-        spans.push(Span::raw("  "));
         if app.bar.input_tokens < 1000 {
-            spans.push(Span::styled(
+            ctx_spans.push(Span::styled(
                 format!("{}tok", app.bar.input_tokens),
                 theme::muted(),
             ));
         } else {
-            spans.push(Span::styled(
+            ctx_spans.push(Span::styled(
                 format!("{:.1}k", app.bar.input_tokens as f64 / 1000.0),
                 theme::muted(),
             ));
         }
+    }
+    if !ctx_spans.is_empty() {
+        chips.push(ctx_spans);
     }
 
     // Estimated cost. Mirrors the legacy `~$` semantics (the template
     // expander and `/status` both prefix `~` and suppress $0.00), so the
     // default-chip path does too: a zero session cost renders no chip.
     if let Some(cost) = app.bar.estimated_cost.filter(|c| *c > 0.0) {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(format!("~${cost:.2}"), theme::muted()));
+        chips.push(vec![Span::styled(format!("~${cost:.2}"), theme::muted())]);
     }
 
     // Mode.
@@ -247,8 +250,7 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
         Mode::Bypass => "bypass",
     };
     if !mode_label.is_empty() {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(mode_label, theme::warning()));
+        chips.push(vec![Span::styled(mode_label, theme::warning())]);
     }
 
     // cwd chip — basename only; the full path lives in /status.
@@ -258,24 +260,21 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
             .and_then(|name| name.to_str())
             .filter(|name| !name.is_empty());
         if let Some(name) = basename {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(format!("· {name}"), theme::muted()));
+            chips.push(vec![Span::styled(name.to_string(), theme::muted())]);
         }
     }
 
-    // git branch chip — `· git: <branch>` (plain prefix; no branch glyph in
+    // git branch chip — `git: <branch>` (plain prefix; no branch glyph in
     // the theme yet, so a plain `git:` avoids a missing-glyph box).
     if let Some(branch) = &app.bar.git_branch {
         if !branch.is_empty() {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(format!("· git: {branch}"), theme::muted()));
+            chips.push(vec![Span::styled(format!("git: {branch}"), theme::muted())]);
         }
     }
 
     // Tab hint when agents are present and not already focused.
     let agent_count = app.registry.total_count();
     if agent_count > 0 {
-        spans.push(Span::raw("  "));
         let hint = match app.focus {
             crate::commands::code_tui::app::Focus::Input => {
                 format!(
@@ -286,8 +285,68 @@ pub fn draw_rule(frame: &mut Frame, area: Rect, app: &App) {
             }
             crate::commands::code_tui::app::Focus::Agents => "[esc] back to input".to_string(),
         };
-        spans.push(Span::styled(hint, theme::accent()));
+        chips.push(vec![Span::styled(hint, theme::accent())]);
     }
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans_on_rule(
+            chips,
+            area.width as usize,
+            theme::glyph::DIVIDER,
+            theme::separator(),
+        ))),
+        area,
+    );
+}
+
+/// Lay out status chips on a full-width separator rule.
+///
+/// The chips are separated by dash runs so the whole line spans exactly
+/// `width` cells: `──── claude-3 ── ctx 3% ── ~$0.01 ────────`. Dashes are
+/// distributed left-to-right in the remaining space; the last leftover
+/// dashes are appended on the right so the line is always flush.
+pub(crate) fn spans_on_rule(
+    chips: Vec<Vec<Span<'static>>>,
+    width: usize,
+    dash: char,
+    rule_style: ratatui::style::Style,
+) -> Vec<Span<'static>> {
+    use unicode_width::UnicodeWidthStr;
+
+    const GAP: usize = 1; // dashes of rule between chips (each side)
+
+    let chip_width = |spans: &[Span]| spans.iter().map(|s| s.content.width()).sum::<usize>();
+
+    let mut chips = chips;
+    // Degenerate widths: draw nothing (can't fit a rule).
+    if width < 2 || chips.is_empty() {
+        return Vec::new();
+    }
+    // Drop chips that individually overflow the line — better a shorter
+    // rule than an overlong one.
+    chips.retain(|c| chip_width(c) + 2 <= width);
+
+    let total_chip_w: usize = chips.iter().map(|c| chip_width(c)).sum();
+    let n = chips.len();
+    let gaps = n + 1;
+    let leftover = width.saturating_sub(total_chip_w + gaps * GAP);
+
+    // Spread the leftover dashes evenly across the gaps: each gap gets
+    // GAP + leftover/gaps, and the first `leftover % gaps` gaps get one
+    // more so the rule spans exactly `width`.
+    let gap_len = |i: usize| GAP + leftover / gaps + usize::from(i < leftover % gaps);
+
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, chip) in chips.iter().enumerate() {
+        spans.push(Span::styled(
+            dash.to_string().repeat(gap_len(i)),
+            rule_style,
+        ));
+        spans.extend(chip.iter().cloned());
+    }
+    spans.push(Span::styled(
+        dash.to_string().repeat(gap_len(gaps - 1)),
+        rule_style,
+    ));
+    spans
 }

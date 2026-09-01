@@ -9,6 +9,7 @@ pub fn claude(
     model: Option<String>,
     opus: Option<String>,
     sonnet: Option<String>,
+    fable: Option<String>,
     haiku: Option<String>,
     mut args: Vec<String>,
 ) -> Result<()> {
@@ -29,6 +30,9 @@ pub fn claude(
     let sonnet_model = sonnet
         .or_else(|| model.clone())
         .unwrap_or_else(|| cfg.launcher_defaults.sonnet_model.clone());
+    let fable_model = fable
+        .or_else(|| model.clone())
+        .unwrap_or_else(|| cfg.launcher_defaults.fable_model.clone());
     let haiku_model = haiku
         .or_else(|| model.clone())
         .unwrap_or_else(|| cfg.launcher_defaults.haiku_model.clone());
@@ -43,6 +47,7 @@ pub fn claude(
         ("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into()),
         ("ANTHROPIC_DEFAULT_OPUS_MODEL".into(), opus_model),
         ("ANTHROPIC_DEFAULT_SONNET_MODEL".into(), sonnet_model),
+        ("ANTHROPIC_DEFAULT_FABLE_MODEL".into(), fable_model),
         ("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), haiku_model),
         // Force an explicit auto-compact window so Claude Code treats the
         // model's context window as `source:"env"` rather than the
@@ -64,28 +69,22 @@ pub fn claude(
         ("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "200000".into()),
     ]);
 
-    // The tier vars above only remap the `opus`/`sonnet`/`haiku` *aliases*.
-    // They do not control how subagents (the Task/Agent tool) pick a model:
-    // Claude Code resolves a subagent's model as
+    // The tier vars above remap the `opus`/`sonnet`/`fable`/`haiku` aliases
+    // used in `model:` frontmatter and elsewhere, but they do not control
+    // how subagents (the Task/Agent tool) pick a model: Claude Code resolves a
+    // subagent's model as
     //   CLAUDE_CODE_SUBAGENT_MODEL → per-invocation `model` → the subagent
     //   definition's `model` frontmatter → the main conversation's model.
-    // Some agent definitions pin a tier alias we don't remap (`fable`), or a
-    // hardcoded Anthropic id like `claude-opus-4-8`, and the Fable-5
-    // safety-classifier fallback reruns flagged requests on "Opus 4.8". Any of
-    // those emits a model id the LibertAI backend doesn't know, so the
-    // subagent fails with "model … doesn't exist" — the "sometimes" failure
-    // when `--model` is passed.
+    // Some agent definitions pin a hardcoded Anthropic id like
+    // `claude-opus-4-8`, which emits a model id the LibertAI backend
+    // doesn't know, so the subagent fails with "model … doesn't exist" —
+    // the "sometimes" failure when `--model` is passed.
     //
     // When the user asks for a single uniform model, force every subagent onto
     // it via CLAUDE_CODE_SUBAGENT_MODEL (precedence 1, above frontmatter and
-    // the per-invocation `model` param). We deliberately do NOT set
-    // ANTHROPIC_DEFAULT_FABLE_MODEL: that would make Claude Code treat our
-    // model as Fable 5 and *activate* the Opus-4.8 fallback machinery. Leaving
-    // it unset keeps the fable alias from being recognized, and
-    // CLAUDE_CODE_SUBAGENT_MODEL overrides any `model: fable` frontmatter
-    // anyway. We only force subagents when `--model` is given; without it the
-    // tier defaults (gemma/qwen) are all valid LibertAI ids and subagents keep
-    // their tier differentiation.
+    // the per-invocation `model` param). We only force subagents when
+    // `--model` is given; without it the tier defaults are all valid
+    // LibertAI ids and subagents keep their tier differentiation.
     if let Some(m) = &model {
         env.push(("CLAUDE_CODE_SUBAGENT_MODEL".into(), m.clone()));
     }

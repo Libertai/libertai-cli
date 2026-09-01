@@ -147,6 +147,8 @@ pub enum Command {
         #[arg(long)]
         sonnet: Option<String>,
         #[arg(long)]
+        fable: Option<String>,
+        #[arg(long)]
         haiku: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -640,9 +642,10 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             model,
             opus,
             sonnet,
+            fable,
             haiku,
             args,
-        } => crate::commands::launchers::claude(model, opus, sonnet, haiku, args),
+        } => crate::commands::launchers::claude(model, opus, sonnet, fable, haiku, args),
         Command::Opencode { model, args } => crate::commands::launchers::opencode(model, args),
         Command::Aider { model, args } => crate::commands::launchers::aider(model, args),
         Command::Claw { model, args } => crate::commands::launchers::claw(model, args),
