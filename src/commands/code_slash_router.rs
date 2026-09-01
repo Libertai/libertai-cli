@@ -203,6 +203,12 @@ pub enum BgCommand {
         /// Persist the discovered catalog into config (`/mcp probe --save`).
         save: bool,
     },
+    /// `/mcp reset` — drop the process-global persistent MCP client sessions.
+    /// Routed to the bg thread (not run inline) because
+    /// `reset_mcp_cli_sessions()` takes the client mutexes, which the bg side
+    /// can hold across an in-flight tool call — doing it on the render thread
+    /// could freeze the UI on `.lock()` until the call's timeout.
+    McpReset,
 }
 
 /// Result of a non-printing shell-escape run, for the TUI to render as

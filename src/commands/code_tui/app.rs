@@ -194,6 +194,11 @@ pub enum AgentMsg {
     System(String),
     /// Result from a slash command executed on the background thread.
     CommandResult(String),
+    /// The bg thread persisted a new on-disk config (e.g. `/mcp probe --save`
+    /// merged the discovered catalog). The main thread swaps `app.cfg` to this
+    /// so later in-TUI config writers (`/notify`, …) don't clone+save a stale
+    /// snapshot and silently revert the merge. Boxed — `Config` is large.
+    ConfigReloaded(Box<LibertaiConfig>),
     /// An OSC52 clipboard-write sequence (`\x1b]52;c;<base64>\x07`) assembled
     /// on the bg thread from the last assistant response. Distinct from
     /// `CommandResult` (a transcript line): the OSC52 bytes must land on
@@ -2193,9 +2198,21 @@ fn spawn_background(
                                                 &report,
                                             );
                                             match crate::config::save(&disk_cfg) {
-                                                Ok(()) => code_mcp::render_probe_save_summary(
-                                                    &report, &outcome,
-                                                ),
+                                                Ok(()) => {
+                                                    // Refresh the main thread's
+                                                    // Arc<Config> so later in-TUI
+                                                    // config writers (/notify, …)
+                                                    // don't clone+save a stale
+                                                    // snapshot and revert the merge.
+                                                    let _ = agent_tx.send(
+                                                        AgentMsg::ConfigReloaded(Box::new(
+                                                            disk_cfg.clone(),
+                                                        )),
+                                                    );
+                                                    code_mcp::render_probe_save_summary(
+                                                        &report, &outcome,
+                                                    )
+                                                }
                                                 Err(e) => format!(
                                                     "probe --save: saving config failed: {e:#}"
                                                 ),
@@ -2215,6 +2232,13 @@ fn spawn_background(
                                     );
                                     code_mcp::render_probe_report(&report)
                                 }
+                            }
+                            // `/mcp reset` — drop cached MCP client sessions on
+                            // the bg thread (see BgCommand::McpReset for why not
+                            // inline on the render thread).
+                            BgCommand::McpReset => {
+                                let n = crate::commands::code_hooks::reset_mcp_cli_sessions();
+                                format!("Reset {n} cached MCP session(s).")
                             }
                         };
                         if !text.is_empty() {
@@ -6502,12 +6526,14 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::McpProbe { save: true }));
                 }
                 code_ui::McpCommand::Reset => {
-                    // Draining the in-process client caches is cheap (no
-                    // network), so do it inline on the main thread.
-                    let dropped = crate::commands::code_hooks::reset_mcp_cli_sessions();
-                    app.transcript.push(TranscriptEntry::System(format!(
-                        "Reset {dropped} cached MCP session(s)."
-                    )));
+                    // Route to the bg thread: reset_mcp_cli_sessions() takes the
+                    // MCP client mutexes, which the bg side can hold across an
+                    // in-flight tool call — doing it on the render thread could
+                    // freeze the UI on `.lock()` until the call's timeout.
+                    app.transcript.push(TranscriptEntry::System(
+                        "Resetting MCP sessions…".to_string(),
+                    ));
+                    let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::McpReset));
                 }
                 code_ui::McpCommand::Usage => {
                     app.transcript
@@ -8617,6 +8643,11 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.transcript.push(TranscriptEntry::System(text));
             app.transcript.push(TranscriptEntry::Blank);
             autoscroll(app);
+        }
+        AgentMsg::ConfigReloaded(config) => {
+            // Swap in the freshly-persisted config so later in-TUI writers
+            // (/notify, …) build on the merged catalog, not a stale snapshot.
+            app.cfg = Arc::new(*config);
         }
         // (todo-fix) Stash the latest task list for the pinned overlay.
         // No transcript entry — the list renders in place above the
@@ -16280,23 +16311,24 @@ task = "Do the thing"
         }
     }
 
-    // `/mcp reset` runs INLINE (no bg command — draining the in-process client
-    // caches is cheap), pushes a "Reset N…" system line, and returns no action.
+    // `/mcp reset` routes to the bg thread (BgCommand::McpReset) — NOT inline —
+    // so the render thread never blocks on the MCP client mutex. It pushes a
+    // "Resetting…" placeholder and returns no action.
     #[test]
-    fn slash_mcp_reset_runs_inline_no_bg_command() {
+    fn slash_mcp_reset_routes_to_bg_thread() {
         let mut app = test_app();
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
 
         let action = handle_slash_command(&mut app, "/mcp reset", &cmd_tx);
 
         assert!(action.is_none(), "/mcp reset must not return an action");
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::McpReset)) => {}
+            other => panic!("expected RunReadOnly(McpReset), got {other:?}"),
+        }
         assert!(
-            cmd_rx.try_recv().is_err(),
-            "/mcp reset must not send a bg command (runs inline)"
-        );
-        assert!(
-            system_lines(&app).iter().any(|s| s.contains("Reset")),
-            "expected a Reset system line, got: {:?}",
+            system_lines(&app).iter().any(|s| s.contains("Resetting")),
+            "expected a Resetting placeholder, got: {:?}",
             system_lines(&app)
         );
     }

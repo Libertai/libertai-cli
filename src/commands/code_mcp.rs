@@ -18,16 +18,12 @@ use crate::config::{
     McpToolConfig,
 };
 
-// `Eq` is intentionally dropped from the probe types: a discovered tool's
-// `input_schema` is a `serde_json::Value`, which is `PartialEq` but not `Eq`.
-// The existing tests only use `assert_eq!` (which needs `PartialEq`), so this
-// is a no-op for consumers.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpProbeReport {
     pub servers: Vec<McpServerProbe>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerProbe {
     pub name: String,
     pub transport: String,
@@ -43,7 +39,7 @@ pub struct McpServerProbe {
 
 /// A tool discovered via a live `tools/list` — the full object, not just the
 /// name. `input_schema` is the raw JSON Schema the server returned.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpDiscoveredTool {
     pub name: String,
     pub description: String,
@@ -770,6 +766,11 @@ pub struct ServerMergeCounts {
     pub added: usize,
     pub updated: usize,
     pub kept_disabled: usize,
+    /// Tools whose `inputSchema` could not be represented in TOML (nested
+    /// JSON null, heterogeneous array, NaN) — stored WITHOUT the schema so one
+    /// exotic server can't make the whole `config::save` fail. The tool is
+    /// still registered (unconstrained arguments).
+    pub schema_dropped: usize,
 }
 
 /// The outcome of [`merge_probe_into_config`]: per-server counts plus the
@@ -829,6 +830,12 @@ pub fn render_probe_save_summary(report: &McpProbeReport, outcome: &MergeOutcome
         if counts.kept_disabled > 0 {
             out.push_str(&format!(" ({} kept disabled)", counts.kept_disabled));
         }
+        if counts.schema_dropped > 0 {
+            out.push_str(&format!(
+                " ({} tool(s) saved without an unrepresentable schema)",
+                counts.schema_dropped
+            ));
+        }
         out.push('\n');
     }
     for name in &outcome.skipped_error {
@@ -843,9 +850,15 @@ pub fn render_probe_save_summary(report: &McpProbeReport, outcome: &MergeOutcome
             }
         }
     }
-    out.push_str(
-        "Saved to config. New tools take effect next session; /mcp reset drops cached connections.\n",
-    );
+    // Only claim a save happened when something actually merged; otherwise say
+    // so plainly (e.g. no servers configured, or all probes errored).
+    if outcome.merged.is_empty() {
+        out.push_str("Nothing to save (no servers discovered).\n");
+    } else {
+        out.push_str(
+            "Saved to config. New tools take effect next session; /mcp reset drops cached connections.\n",
+        );
+    }
     out
 }
 
@@ -897,9 +910,13 @@ fn merge_tools(
     counts: &mut ServerMergeCounts,
 ) {
     for tool in discovered {
+        let (schema, dropped) = toml_safe_schema(tool.input_schema.as_ref());
+        if dropped {
+            counts.schema_dropped += 1;
+        }
         if let Some(current) = existing.iter_mut().find(|t| t.name == tool.name) {
             current.description = tool.description.clone();
-            current.input_schema = tool.input_schema.clone();
+            current.input_schema = schema;
             counts.updated += 1;
             if !current.enabled {
                 counts.kept_disabled += 1;
@@ -909,10 +926,32 @@ fn merge_tools(
                 name: tool.name.clone(),
                 enabled: true,
                 description: tool.description.clone(),
-                input_schema: tool.input_schema.clone(),
+                input_schema: schema,
             });
             counts.added += 1;
         }
+    }
+}
+
+/// Return a schema safe to persist in TOML, plus whether it had to be dropped.
+/// `config::save` serializes the WHOLE config atomically, so a single schema
+/// that TOML can't represent (nested JSON null, heterogeneous array, NaN)
+/// would fail the entire save. We round-trip each schema in isolation and drop
+/// (`None`) any that won't serialize, so one exotic server can't block the
+/// rest of the catalog. A dropped schema just means the tool registers with
+/// unconstrained arguments — it's still callable.
+fn toml_safe_schema(schema: Option<&serde_json::Value>) -> (Option<serde_json::Value>, bool) {
+    let Some(schema) = schema else {
+        return (None, false);
+    };
+    #[derive(serde::Serialize)]
+    struct Probe<'a> {
+        s: &'a serde_json::Value,
+    }
+    if toml::to_string(&Probe { s: schema }).is_ok() {
+        (Some(schema.clone()), false)
+    } else {
+        (None, true)
     }
 }
 
@@ -1149,6 +1188,101 @@ mod tests {
         let t = &decoded.mcp_servers["srv"].tools[0];
         assert_eq!(t.name, "a");
         assert_eq!(t.input_schema.as_ref().unwrap()["type"], "object");
+    }
+
+    #[test]
+    fn merge_drops_toml_unrepresentable_schema_but_keeps_tool() {
+        // A heterogeneous array (mixed types) has no TOML representation, so
+        // config::save would fail for the WHOLE config. The tool must still be
+        // saved (unconstrained), the schema dropped, and the rest serialize.
+        let mut cfg = server_with_tools(vec![]);
+        let exotic = McpDiscoveredTool {
+            name: "x".to_string(),
+            description: "exotic".to_string(),
+            input_schema: Some(json!({"enum": [1, "two", true, null]})),
+        };
+        let report = probe_with_tools(McpProbeStatus::Ok, vec![exotic]);
+        let outcome = merge_probe_into_config(&mut cfg, &report);
+        let cat = &cfg.mcp_servers["srv"].tools;
+        assert_eq!(cat.len(), 1, "tool still registered");
+        assert!(
+            cat[0].input_schema.is_none(),
+            "unrepresentable schema dropped"
+        );
+        assert_eq!(outcome.merged[0].1.schema_dropped, 1);
+        // The whole config must now serialize.
+        toml::to_string(&cfg).expect("config with dropped schema serializes");
+    }
+
+    #[test]
+    fn merge_adds_resources_and_prompts_with_args() {
+        let mut cfg = server_with_tools(vec![]);
+        let report = McpProbeReport {
+            servers: vec![McpServerProbe {
+                name: "srv".to_string(),
+                transport: "stdio".to_string(),
+                status: McpProbeStatus::Ok,
+                tools: vec![],
+                resources: vec![McpDiscoveredResource {
+                    uri: "file:///a".to_string(),
+                    name: "A".to_string(),
+                    description: "res A".to_string(),
+                    mime_type: "text/plain".to_string(),
+                }],
+                prompts: vec![McpDiscoveredPrompt {
+                    name: "review".to_string(),
+                    description: "review prompt".to_string(),
+                    arguments: vec![
+                        McpDiscoveredPromptArg {
+                            name: "path".to_string(),
+                            description: "file".to_string(),
+                            required: true,
+                        },
+                        McpDiscoveredPromptArg {
+                            name: "style".to_string(),
+                            description: String::new(),
+                            required: false,
+                        },
+                    ],
+                }],
+                diagnostics: vec![],
+            }],
+        };
+        merge_probe_into_config(&mut cfg, &report);
+        let entry = &cfg.mcp_servers["srv"];
+        // Resource merged with all fields.
+        assert_eq!(entry.resources.len(), 1);
+        assert_eq!(entry.resources[0].uri, "file:///a");
+        assert_eq!(entry.resources[0].mime_type, "text/plain");
+        assert!(entry.resources[0].enabled);
+        // Prompt merged and its arguments mapped 1:1 (name/desc/required).
+        assert_eq!(entry.prompts.len(), 1);
+        let args = &entry.prompts[0].arguments;
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].name, "path");
+        assert!(args[0].required);
+        assert_eq!(args[1].name, "style");
+        assert!(!args[1].required);
+    }
+
+    #[test]
+    fn render_probe_report_lists_tools_and_diagnostics() {
+        let report = probe_with_tools(McpProbeStatus::Ok, vec![tool("echo", "Echo text")]);
+        let text = render_probe_report(&report);
+        assert!(text.contains("srv (stdio) — ok"), "{text}");
+        assert!(text.contains("tool echo"), "{text}");
+        assert!(text.contains("Echo text"), "{text}");
+    }
+
+    #[test]
+    fn render_save_summary_reports_nothing_when_empty() {
+        let report = McpProbeReport { servers: vec![] };
+        let summary = render_probe_save_summary(&report, &MergeOutcome::default());
+        assert!(
+            summary.contains("Nothing to save"),
+            "empty save must not claim success: {summary}"
+        );
+        assert!(!summary.contains("Saved to config"));
     }
 
     #[test]
