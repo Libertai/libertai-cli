@@ -168,7 +168,9 @@ fn classify_ip(ip: IpAddr) -> HostClass {
         IpAddr::V6(v6) => {
             // AWS IMDSv6: `fd00:ec2::254` → `fd00:0ec2::0254`
             if v6.octets()
-                == [0xfd, 0x00, 0x0e, 0xc2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x54]
+                == [
+                    0xfd, 0x00, 0x0e, 0xc2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x54,
+                ]
             {
                 return HostClass::Metadata;
             }
@@ -247,10 +249,8 @@ fn check_url_policy(
         return Err("non-http(s) URL");
     }
     match classify_url(url) {
-        HostClass::Metadata if !allow_metadata => {
-            Err("refusing to fetch cloud metadata endpoint \
-                 (set LIBERTAI_FETCH_ALLOW_METADATA=1 to override)")
-        }
+        HostClass::Metadata if !allow_metadata => Err("refusing to fetch cloud metadata endpoint \
+                 (set LIBERTAI_FETCH_ALLOW_METADATA=1 to override)"),
         HostClass::Private if initial_class == HostClass::Public => {
             Err("refusing redirect from public URL to private/link-local IP")
         }
@@ -510,11 +510,17 @@ mod tests {
     #[test]
     fn classify_ipv4_private_ranges() {
         for s in [
-            "http://127.0.0.1/", "http://127.255.255.255/",
-            "http://10.0.0.1/", "http://10.255.255.255/",
-            "http://172.16.0.1/", "http://172.31.255.255/",
-            "http://192.168.1.1/", "http://0.0.0.0/",
-            "http://169.254.0.1/", "http://100.64.0.1/", "http://100.127.255.255/",
+            "http://127.0.0.1/",
+            "http://127.255.255.255/",
+            "http://10.0.0.1/",
+            "http://10.255.255.255/",
+            "http://172.16.0.1/",
+            "http://172.31.255.255/",
+            "http://192.168.1.1/",
+            "http://0.0.0.0/",
+            "http://169.254.0.1/",
+            "http://100.64.0.1/",
+            "http://100.127.255.255/",
         ] {
             let url = Url::parse(s).unwrap();
             let class = classify_url(&url);
@@ -524,7 +530,12 @@ mod tests {
 
     #[test]
     fn classify_ipv4_public_ranges() {
-        for s in ["http://1.1.1.1/", "http://8.8.8.8/", "http://172.32.0.1/", "http://11.0.0.1/"] {
+        for s in [
+            "http://1.1.1.1/",
+            "http://8.8.8.8/",
+            "http://172.32.0.1/",
+            "http://11.0.0.1/",
+        ] {
             let url = Url::parse(s).unwrap();
             let class = classify_url(&url);
             assert!(matches!(class, HostClass::Public), "{s} -> {class:?}");
@@ -569,8 +580,7 @@ mod tests {
     #[test]
     fn policy_allows_public_to_public() {
         let target = Url::parse("http://1.1.1.1/").unwrap();
-        check_url_policy(&target, HostClass::Public, false)
-            .expect("public → public allowed");
+        check_url_policy(&target, HostClass::Public, false).expect("public → public allowed");
     }
 
     #[test]
@@ -578,8 +588,7 @@ mod tests {
         // Direct localhost dev-server workflow: agent fetches its own
         // local service, possibly via a self-redirect.
         let target = Url::parse("http://127.0.0.1:3000/").unwrap();
-        check_url_policy(&target, HostClass::Private, false)
-            .expect("private → private allowed");
+        check_url_policy(&target, HostClass::Private, false).expect("private → private allowed");
     }
 
     #[test]
@@ -610,10 +619,12 @@ mod tests {
     fn policy_blocks_metadata_regardless_of_initial() {
         let target = Url::parse("http://169.254.169.254/").unwrap();
         // From a private origin (e.g. local dev server redirecting to IMDS):
-        let err = check_url_policy(&target, HostClass::Private, false).expect_err("metadata blocked");
+        let err =
+            check_url_policy(&target, HostClass::Private, false).expect_err("metadata blocked");
         assert!(err.contains("metadata"), "got: {err}");
         // From a public origin:
-        let err = check_url_policy(&target, HostClass::Public, false).expect_err("metadata blocked");
+        let err =
+            check_url_policy(&target, HostClass::Public, false).expect_err("metadata blocked");
         assert!(err.contains("metadata"), "got: {err}");
     }
 
@@ -622,8 +633,7 @@ mod tests {
         let target = Url::parse("http://169.254.169.254/").unwrap();
         check_url_policy(&target, HostClass::Private, true)
             .expect("metadata allowed with override");
-        check_url_policy(&target, HostClass::Public, true)
-            .expect("metadata allowed with override");
+        check_url_policy(&target, HostClass::Public, true).expect("metadata allowed with override");
     }
 
     #[test]
@@ -713,8 +723,11 @@ mod tests {
             let h = format!("Location: {target_url_for_redirect}")
                 .parse::<tiny_http::Header>()
                 .unwrap();
-            let _ = req
-                .respond(tiny_http::Response::from_string("").with_status_code(302).with_header(h));
+            let _ = req.respond(
+                tiny_http::Response::from_string("")
+                    .with_status_code(302)
+                    .with_header(h),
+            );
         });
         let page = local_fetch(&origin_url, 1000).expect("private → private redirect allowed");
         assert_eq!(page.title, "Backend");

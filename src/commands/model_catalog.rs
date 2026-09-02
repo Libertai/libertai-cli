@@ -667,8 +667,7 @@ mod tests {
         );
         // `-thinking` variants inherit the base model's vision capability.
         assert_eq!(
-            opencode_model_entry("qwen3.6-35b-a3b-thinking", Some(&cat))["modalities"]
-                ["input"],
+            opencode_model_entry("qwen3.6-35b-a3b-thinking", Some(&cat))["modalities"]["input"],
             json!(["text", "image"])
         );
         // Non-vision models declare text-only input.

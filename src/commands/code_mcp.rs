@@ -1365,11 +1365,12 @@ mod tests {
 
     #[test]
     fn render_save_summary_shows_counts_and_dropped_schema() {
-        let mut counts = ServerMergeCounts::default();
-        counts.added = 2;
-        counts.updated = 1;
-        counts.kept_disabled = 1;
-        counts.schema_dropped = 1;
+        let counts = ServerMergeCounts {
+            added: 2,
+            updated: 1,
+            kept_disabled: 1,
+            schema_dropped: 1,
+        };
         let outcome = MergeOutcome {
             merged: vec![("srv".to_string(), counts)],
             skipped_error: vec!["broken".to_string()],
