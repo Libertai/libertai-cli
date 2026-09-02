@@ -575,7 +575,8 @@ pub enum SkillsAction {
         #[arg(long)]
         project: bool,
     },
-    /// Remove the bundled skills installed by this CLI.
+    /// Remove the bundled skills installed by this CLI, from both Claude
+    /// Code's and OpenCode's skill dirs.
     Uninstall {
         #[arg(long)]
         project: bool,

@@ -1779,7 +1779,7 @@ _libertai__subcmd__help__subcmd__skills_commands() {
     local commands; commands=(
 'list:List the bundled skills this CLI knows how to install' \
 'install:Install (or refresh) the bundled skills into Claude Code'\''s skill dir. Defaults to the user-wide location (\`~/.claude/skills/\`); pass \`--project\` to install into \`.claude/skills/\` in the current directory' \
-'uninstall:Remove the bundled skills installed by this CLI' \
+'uninstall:Remove the bundled skills installed by this CLI, from both Claude Code'\''s and OpenCode'\''s skill dirs' \
     )
     _describe -t commands 'libertai help skills commands' commands "$@"
 }
@@ -2251,7 +2251,7 @@ _libertai__subcmd__skills_commands() {
     local commands; commands=(
 'list:List the bundled skills this CLI knows how to install' \
 'install:Install (or refresh) the bundled skills into Claude Code'\''s skill dir. Defaults to the user-wide location (\`~/.claude/skills/\`); pass \`--project\` to install into \`.claude/skills/\` in the current directory' \
-'uninstall:Remove the bundled skills installed by this CLI' \
+'uninstall:Remove the bundled skills installed by this CLI, from both Claude Code'\''s and OpenCode'\''s skill dirs' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'libertai skills commands' commands "$@"
@@ -2261,7 +2261,7 @@ _libertai__subcmd__skills__subcmd__help_commands() {
     local commands; commands=(
 'list:List the bundled skills this CLI knows how to install' \
 'install:Install (or refresh) the bundled skills into Claude Code'\''s skill dir. Defaults to the user-wide location (\`~/.claude/skills/\`); pass \`--project\` to install into \`.claude/skills/\` in the current directory' \
-'uninstall:Remove the bundled skills installed by this CLI' \
+'uninstall:Remove the bundled skills installed by this CLI, from both Claude Code'\''s and OpenCode'\''s skill dirs' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'libertai skills help commands' commands "$@"

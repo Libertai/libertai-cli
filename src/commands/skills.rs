@@ -36,7 +36,7 @@ pub fn run(action: SkillsAction) -> Result<()> {
     match action {
         SkillsAction::List => list(),
         SkillsAction::Install { project } => install(Host::Claude, project, true),
-        SkillsAction::Uninstall { project } => uninstall(Host::Claude, project),
+        SkillsAction::Uninstall { project } => uninstall_all(project),
     }
 }
 
@@ -69,6 +69,26 @@ pub fn install(host: Host, project: bool, force: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Hosts whose skill dirs this CLI writes to, and so must be able to clean up.
+const INSTALL_HOSTS: &[Host] = &[Host::Claude, Host::OpenCode];
+
+/// Removes the bundled skills from every host this CLI writes to. `skills
+/// install` only writes the Claude copy, but the opencode launcher installs
+/// its own via `install_if_missing`, so uninstalling one host would strand
+/// the other. A host that fails to clean up doesn't stop the rest.
+pub fn uninstall_all(project: bool) -> Result<()> {
+    let mut first_err = None;
+    for host in INSTALL_HOSTS.iter().copied() {
+        if let Err(e) = uninstall(host, project) {
+            first_err.get_or_insert(e);
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 pub fn uninstall(host: Host, project: bool) -> Result<()> {
@@ -141,6 +161,32 @@ fn skills_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The opencode launcher installs its own copies via `install_if_missing`,
+    /// so an uninstall that only knew about Claude would strand them.
+    #[test]
+    fn uninstall_covers_the_opencode_copies_the_launcher_installs() {
+        let dirs: Vec<PathBuf> = INSTALL_HOSTS
+            .iter()
+            .map(|h| {
+                skills_dir(
+                    *h,
+                    false,
+                    Path::new("/cwd"),
+                    Path::new("/home/u"),
+                    Some(Path::new("/xdg")),
+                )
+            })
+            .collect();
+        assert!(
+            dirs.contains(&PathBuf::from("/home/u/.claude/skills")),
+            "{dirs:?}"
+        );
+        assert!(
+            dirs.contains(&PathBuf::from("/xdg/opencode/skills")),
+            "{dirs:?}"
+        );
+    }
 
     #[test]
     fn claude_global_skills_dir_is_home_dot_claude() {
