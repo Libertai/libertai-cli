@@ -179,9 +179,19 @@ fn sync_opencode_config(cfg: &Config) -> Result<(PathBuf, usize)> {
     // model entries. `None` (offline) degrades to id-only entries.
     let catalog = crate::commands::model_catalog::load();
 
+    // Models already registered under our provider entry, so a failed
+    // `/v1/models` fetch below degrades to "keep what we have" instead of
+    // silently dropping models the user depends on (e.g. the `--model` id).
+    let existing_ids: Vec<String> = root
+        .pointer("/provider/libertai/models")
+        .and_then(Value::as_object)
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+
     // Fetch available models from the server. Fall back to the tier defaults
-    // if the call fails (offline, stale key, transient 5xx) so `opencode`
-    // still launches with *something* that works.
+    // and the already-registered models if the call fails (offline, stale
+    // key, transient 5xx) so `opencode` still launches with *something*
+    // that works.
     let tier_defaults = [
         cfg.default_chat_model.clone(),
         cfg.default_code_model.clone(),
@@ -198,10 +208,10 @@ fn sync_opencode_config(cfg: &Config) -> Result<(PathBuf, usize)> {
             .collect(),
         Err(e) => {
             eprintln!(
-                "opencode: could not list models from {} ({e}); using tier defaults only",
+                "opencode: could not list models from {} ({e}); keeping existing models",
                 cfg.api_base
             );
-            Vec::new()
+            existing_ids
         }
     };
     // Always include the tier defaults so `--model libertai/<tier>` resolves

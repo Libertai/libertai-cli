@@ -448,9 +448,12 @@ pub fn opencode_keep(id: &str, catalog: Option<&Catalog>) -> bool {
 /// the catalog. `cost` values are USD per million tokens (opencode's
 /// models.dev convention). `reasoning` follows the id: LibertAI serves
 /// `<base>-thinking` as the reasoning variant, so a base id is not reasoning.
-/// `attachment` (opencode's image-support flag) mirrors the catalog's vision
-/// capability; without it opencode treats every model as text-only and
-/// silently drops images. Models unknown to the catalog get no `attachment`
+/// `attachment` (opencode's legacy image-support flag) mirrors the catalog's
+/// vision capability, and `modalities` is written alongside it — opencode
+/// 1.18+ derives the actual `input.image` capability from
+/// `modalities.input`, not from `attachment`; without it opencode treats
+/// every model as text-only and refuses attached images even when
+/// `attachment` is true. Models unknown to the catalog get neither key
 /// (opencode's conservative default), matching how `cost` is omitted.
 pub fn opencode_model_entry(id: &str, catalog: Option<&Catalog>) -> Value {
     let model = catalog.and_then(|c| c.find_text(id));
@@ -472,6 +475,14 @@ pub fn opencode_model_entry(id: &str, catalog: Option<&Catalog>) -> Value {
     );
     if let Some(c) = caps {
         entry.insert("attachment".to_string(), Value::Bool(c.vision));
+        let mut input = vec!["text"];
+        if c.vision {
+            input.push("image");
+        }
+        entry.insert(
+            "modalities".to_string(),
+            json!({ "input": input, "output": ["text"] }),
+        );
     }
     if let Some(p) = model.and_then(CatalogModel::text_pricing) {
         entry.insert(
@@ -644,17 +655,39 @@ mod tests {
             opencode_model_entry("qwen3.6-35b-a3b", Some(&cat))["attachment"],
             true
         );
+        // opencode 1.18+ gates image input on `modalities.input`, not on the
+        // legacy `attachment` flag — both must name vision support.
+        assert_eq!(
+            opencode_model_entry("qwen3.6-35b-a3b", Some(&cat))["modalities"]["input"],
+            json!(["text", "image"])
+        );
+        assert_eq!(
+            opencode_model_entry("qwen3.6-35b-a3b", Some(&cat))["modalities"]["output"],
+            json!(["text"])
+        );
         // `-thinking` variants inherit the base model's vision capability.
         assert_eq!(
-            opencode_model_entry("qwen3.6-35b-a3b-thinking", Some(&cat))["attachment"],
-            true
+            opencode_model_entry("qwen3.6-35b-a3b-thinking", Some(&cat))["modalities"]
+                ["input"],
+            json!(["text", "image"])
+        );
+        // Non-vision models declare text-only input.
+        assert_eq!(
+            opencode_model_entry("hermes-3-8b-tee", Some(&cat))["modalities"]["input"],
+            json!(["text"])
         );
         // Unknown / offline: no claim either way (opencode defaults to false).
         assert!(opencode_model_entry("brand-new-model", None)
             .get("attachment")
             .is_none());
+        assert!(opencode_model_entry("brand-new-model", None)
+            .get("modalities")
+            .is_none());
         assert!(opencode_model_entry("brand-new-model", Some(&cat))
             .get("attachment")
+            .is_none());
+        assert!(opencode_model_entry("brand-new-model", Some(&cat))
+            .get("modalities")
             .is_none());
     }
 
