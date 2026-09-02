@@ -433,11 +433,11 @@ pub fn enrich_pi_model_entry(entry: &mut Map<String, Value>, catalog: &Catalog) 
 const OPENCODE_FALLBACK_CONTEXT: u32 = 200_000;
 const OPENCODE_FALLBACK_OUTPUT: u32 = 16_384;
 
-/// Whether a `/v1/models` id should appear as a chat model in opencode. Drops
-/// only models the catalog classifies as non-text (image, embedding, audio,
-/// search); keeps text models and any id the catalog doesn't list, so new or
-/// offline models still surface.
-pub fn opencode_keep(id: &str, catalog: Option<&Catalog>) -> bool {
+/// Whether a `/v1/models` id may be offered as a chat model. The listing also
+/// carries image, embedding, audio and search ids, which every writer that
+/// registers chat models must drop. Keeps text models and any id the catalog
+/// doesn't list, so new or offline models still surface.
+pub fn is_chat_model(id: &str, catalog: Option<&Catalog>) -> bool {
     match catalog {
         Some(cat) if cat.knows(id) => cat.find_text(id).is_some(),
         _ => true,
@@ -622,16 +622,16 @@ mod tests {
     }
 
     #[test]
-    fn opencode_keep_drops_only_known_non_text() {
+    fn is_chat_model_drops_only_known_non_text() {
         let cat = fixture_catalog();
-        assert!(opencode_keep("qwen3.6-35b-a3b", Some(&cat)));
-        assert!(opencode_keep("qwen3.6-35b-a3b-thinking", Some(&cat)));
-        assert!(!opencode_keep("z-image-turbo", Some(&cat)));
-        assert!(!opencode_keep("bge-m3", Some(&cat)));
-        assert!(!opencode_keep("search/google", Some(&cat)));
+        assert!(is_chat_model("qwen3.6-35b-a3b", Some(&cat)));
+        assert!(is_chat_model("qwen3.6-35b-a3b-thinking", Some(&cat)));
+        assert!(!is_chat_model("z-image-turbo", Some(&cat)));
+        assert!(!is_chat_model("bge-m3", Some(&cat)));
+        assert!(!is_chat_model("search/google", Some(&cat)));
         // Unknown to the catalog, or no catalog at all: kept (err to inclusion).
-        assert!(opencode_keep("brand-new-model", Some(&cat)));
-        assert!(opencode_keep("bge-m3", None));
+        assert!(is_chat_model("brand-new-model", Some(&cat)));
+        assert!(is_chat_model("bge-m3", None));
     }
 
     #[test]
