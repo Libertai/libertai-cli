@@ -2202,7 +2202,16 @@ fn spawn_background(
                                         )));
                                         continue;
                                     }
-                                    Err(_) => cfg.as_ref().clone(),
+                                    // Read-only path: fall back to the in-memory
+                                    // snapshot but tell the user, so a broken
+                                    // hand-edited config.toml is debuggable.
+                                    Err(e) => {
+                                        let _ = agent_tx.send(AgentMsg::System(format!(
+                                            "note: using in-memory config; disk config failed to \
+                                             load: {e:#}"
+                                        )));
+                                        cfg.as_ref().clone()
+                                    }
                                 };
                                 let report = code_mcp::probe_configured_servers(
                                     &probe_cfg,
@@ -2226,10 +2235,14 @@ fn spawn_background(
                                                 // Nothing actually changed — do
                                                 // NOT rewrite config.toml (that
                                                 // would drop comments / fields
-                                                // unknown to this binary).
-                                                "MCP catalog already up to date; \
-                                                 config left unchanged."
-                                                    .to_string()
+                                                // unknown to this binary). Still
+                                                // render the FULL summary so a
+                                                // run where every probe errored
+                                                // reports the failures, not a
+                                                // misleading "up to date".
+                                                code_mcp::render_probe_save_summary(
+                                                    &report, &outcome, false,
+                                                )
                                             } else {
                                                 match crate::config::save(&fresh) {
                                                     Ok(()) => {
@@ -2239,7 +2252,7 @@ fn spawn_background(
                                                             )),
                                                         );
                                                         code_mcp::render_probe_save_summary(
-                                                            &report, &outcome,
+                                                            &report, &outcome, true,
                                                         )
                                                     }
                                                     Err(e) => format!(

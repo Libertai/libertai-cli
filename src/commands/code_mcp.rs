@@ -818,9 +818,17 @@ pub fn render_probe_report(report: &McpProbeReport) -> String {
     out
 }
 
-/// Render the `--save` summary after merging into config.
+/// Render the `--save` summary. `saved` says whether the config was actually
+/// written (false when the merge produced no change): the per-server counts,
+/// `skipped_error` (probe failed) lines, and warnings ALWAYS render — so a run
+/// where every server's probe errored reports the failures rather than
+/// misleadingly claiming "up to date" — and only the trailer differs.
 #[must_use]
-pub fn render_probe_save_summary(report: &McpProbeReport, outcome: &MergeOutcome) -> String {
+pub fn render_probe_save_summary(
+    report: &McpProbeReport,
+    outcome: &MergeOutcome,
+    saved: bool,
+) -> String {
     let mut out = String::new();
     for (name, counts) in &outcome.merged {
         out.push_str(&format!(
@@ -850,14 +858,15 @@ pub fn render_probe_save_summary(report: &McpProbeReport, outcome: &MergeOutcome
             }
         }
     }
-    // Only claim a save happened when something actually merged; otherwise say
-    // so plainly (reads correctly next to any "probe failed" lines above).
-    if outcome.merged.is_empty() {
-        out.push_str("Nothing merged (no servers discovered or all probes failed).\n");
-    } else {
+    if saved {
         out.push_str(
-            "Saved to config. New tools take effect next session; /mcp reset drops cached connections.\n",
+            "Saved to config. New tools take effect after you restart `libertai code` \
+             (a /clear in this session won't pick them up); /mcp reset drops cached connections.\n",
         );
+    } else if outcome.merged.is_empty() && outcome.skipped_error.is_empty() {
+        out.push_str("Nothing to probe (no servers configured).\n");
+    } else {
+        out.push_str("No changes to save; config left unchanged.\n");
     }
     out
 }
@@ -921,11 +930,16 @@ fn merge_tools(
             counts.schema_dropped += 1;
         }
         if let Some(current) = existing.iter_mut().find(|t| t.name == tool.name) {
-            current.description = tool.description.clone();
-            current.input_schema = schema;
-            counts.updated += 1;
-            if !current.enabled {
-                counts.kept_disabled += 1;
+            // Only count an update when the metadata actually changed, so the
+            // summary's "N updated" never overstates a metadata-identical
+            // re-probe.
+            if current.description != tool.description || current.input_schema != schema {
+                current.description = tool.description.clone();
+                current.input_schema = schema;
+                counts.updated += 1;
+                if !current.enabled {
+                    counts.kept_disabled += 1;
+                }
             }
         } else {
             existing.push(McpToolConfig {
@@ -970,12 +984,17 @@ fn merge_resources(
 ) {
     for res in discovered {
         if let Some(current) = existing.iter_mut().find(|r| r.uri == res.uri) {
-            current.name = res.name.clone();
-            current.description = res.description.clone();
-            current.mime_type = res.mime_type.clone();
-            counts.updated += 1;
-            if !current.enabled {
-                counts.kept_disabled += 1;
+            if current.name != res.name
+                || current.description != res.description
+                || current.mime_type != res.mime_type
+            {
+                current.name = res.name.clone();
+                current.description = res.description.clone();
+                current.mime_type = res.mime_type.clone();
+                counts.updated += 1;
+                if !current.enabled {
+                    counts.kept_disabled += 1;
+                }
             }
         } else {
             existing.push(McpResourceConfig {
@@ -1006,11 +1025,13 @@ fn merge_prompts(
             })
             .collect();
         if let Some(current) = existing.iter_mut().find(|p| p.name == prompt.name) {
-            current.description = prompt.description.clone();
-            current.arguments = args;
-            counts.updated += 1;
-            if !current.enabled {
-                counts.kept_disabled += 1;
+            if current.description != prompt.description || current.arguments != args {
+                current.description = prompt.description.clone();
+                current.arguments = args;
+                counts.updated += 1;
+                if !current.enabled {
+                    counts.kept_disabled += 1;
+                }
             }
         } else {
             existing.push(McpPromptConfig {
@@ -1285,11 +1306,26 @@ mod tests {
     #[test]
     fn render_save_summary_reports_nothing_when_empty() {
         let report = McpProbeReport { servers: vec![] };
-        let summary = render_probe_save_summary(&report, &MergeOutcome::default());
+        let summary = render_probe_save_summary(&report, &MergeOutcome::default(), false);
         assert!(
-            summary.contains("Nothing merged"),
+            summary.contains("Nothing to probe"),
             "empty save must not claim success: {summary}"
         );
+        assert!(!summary.contains("Saved to config"));
+    }
+
+    #[test]
+    fn all_probes_errored_reports_failures_not_up_to_date() {
+        // The no-op save branch (nothing changed) must still surface the
+        // per-server failures, not claim the catalog is fine.
+        let report = probe_with_tools(McpProbeStatus::Error, vec![]);
+        let mut cfg = server_with_tools(vec![]);
+        let outcome = merge_probe_into_config(&mut cfg, &report);
+        assert_eq!(outcome.skipped_error, vec!["srv".to_string()]);
+        // saved = false (nothing merged), yet the failure must render.
+        let summary = render_probe_save_summary(&report, &outcome, false);
+        assert!(summary.contains("srv: probe failed"), "{summary}");
+        assert!(summary.contains("No changes to save"), "{summary}");
         assert!(!summary.contains("Saved to config"));
     }
 
@@ -1319,7 +1355,7 @@ mod tests {
         assert!(outcome.skipped_error.is_empty());
         // …and the warning surfaces in the summary so the user knows the
         // catalog may be incomplete.
-        let summary = render_probe_save_summary(&report, &outcome);
+        let summary = render_probe_save_summary(&report, &outcome, true);
         assert!(summary.contains("srv: 1 added"), "{summary}");
         assert!(
             summary.contains("warning — prompts/list: timed out"),
@@ -1339,7 +1375,7 @@ mod tests {
             skipped_error: vec!["broken".to_string()],
         };
         let report = McpProbeReport { servers: vec![] };
-        let summary = render_probe_save_summary(&report, &outcome);
+        let summary = render_probe_save_summary(&report, &outcome, true);
         assert!(summary.contains("srv: 2 added, 1 updated"), "{summary}");
         assert!(summary.contains("1 kept disabled"), "{summary}");
         assert!(
