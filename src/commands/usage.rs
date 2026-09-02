@@ -8,7 +8,8 @@ use chrono::{DateTime, Local, Utc};
 use std::io::IsTerminal;
 
 use crate::client::{
-    get_subscription, refresh_session, ClassifiedError, ErrorClass, Subscription, TokenPair,
+    error_class, get_subscription, refresh_session, ClassifiedError, ErrorClass, Subscription,
+    TokenPair,
 };
 use crate::commands::login::{browser_sso_access_token, open_url};
 use crate::commands::output::Styler;
@@ -27,6 +28,15 @@ pub fn run(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Whether a failed refresh means the stored session is dead. Only a rejected
+/// credential does: `refresh_session` also returns `Err` for connect/DNS/TLS
+/// timeouts, any non-2xx status, and a malformed body, none of which say the
+/// token is invalid. Unclassified errors are treated as transient — keeping a
+/// dead token costs one retry, discarding a live one costs a browser sign-in.
+fn should_clear_refresh_token(err: &anyhow::Error) -> bool {
+    error_class(err) == Some(ErrorClass::Auth)
+}
+
 /// Refresh-first auth: rotate the stored refresh token into a fresh access
 /// token (persisting the rotation), else fall back to a browser sign-in that
 /// captures a new refresh token for next time. Persists `cfg` on success.
@@ -38,11 +48,15 @@ fn acquire_access_token(cfg: &mut Config) -> Result<String> {
                 config::save(cfg)?;
                 return Ok(pair.access_token);
             }
-            Err(_) => {
-                // Expired/revoked/rotated-away — drop it and sign in fresh.
+            // Expired/revoked/rotated-away — drop it and sign in fresh.
+            Err(e) if should_clear_refresh_token(&e) => {
                 cfg.auth.refresh_token = None;
                 config::save(cfg)?;
             }
+            // Network blips and 5xx say nothing about the token's validity;
+            // clearing it here would cost the user an interactive sign-in to
+            // recover from a transient failure.
+            Err(e) => return Err(e),
         }
     }
 
@@ -221,6 +235,26 @@ fn print_human(sub: &Subscription, now: DateTime<Utc>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_rejected_credentials_clear_the_stored_session() {
+        for (class, clear) in [
+            (ErrorClass::Auth, true),
+            (ErrorClass::Network, false),
+            (ErrorClass::Api, false),
+        ] {
+            let err = ClassifiedError::classified(class, "boom");
+            assert_eq!(
+                should_clear_refresh_token(&err),
+                clear,
+                "{class:?} classified wrongly"
+            );
+        }
+        assert!(
+            !should_clear_refresh_token(&anyhow::anyhow!("unclassified")),
+            "an unclassified error must not discard the session"
+        );
+    }
     use chrono::{TimeZone, Utc};
 
     #[test]
