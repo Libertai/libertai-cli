@@ -1504,10 +1504,7 @@ fn run_mcp_tool_hook_with_config(
         .unwrap_or_default();
     let _ = reader.join();
     let stdout = mcp_tool_output_text(&response);
-    let is_error = response
-        .get("isError")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    let is_error = mcp_result_is_error(&response);
     HookRun {
         status: if is_error { 1 } else { 0 },
         stdout,
@@ -1517,6 +1514,17 @@ fn run_mcp_tool_hook_with_config(
             stderr_text
         },
     }
+}
+
+/// MCP signals tool-level failure inside an otherwise successful result, via
+/// `isError`. Every caller that turns a result into a run status must consult
+/// it — reporting status 0 hands the model an error message as if it were a
+/// normal answer, so nothing retries and error filtering never fires.
+fn mcp_result_is_error(result: &serde_json::Value) -> bool {
+    result
+        .get("isError")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 pub fn call_mcp_tool_with_config(
@@ -1599,15 +1607,19 @@ pub fn call_mcp_method_with_config(
         )
     };
     match result {
-        Ok(result) => McpToolCallRun {
-            status: 0,
-            stdout: mcp_result_output_text(&result),
-            stderr: String::new(),
-            transport,
-            timeout_ms: timeout.as_millis() as u64,
-            elapsed_ms: started.elapsed().as_millis() as u64,
-            raw: Some(result),
-        },
+        Ok(result) => {
+            let is_error = mcp_result_is_error(&result);
+            let text = mcp_result_output_text(&result);
+            McpToolCallRun {
+                status: if is_error { 1 } else { 0 },
+                stdout: text.clone(),
+                stderr: if is_error { text } else { String::new() },
+                transport,
+                timeout_ms: timeout.as_millis() as u64,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                raw: Some(result),
+            }
+        }
         Err(e) => McpToolCallRun {
             status: 1,
             stdout: String::new(),
@@ -1873,10 +1885,7 @@ fn run_mcp_http_tool_hook(
         }
     };
     let stdout = mcp_tool_output_text(&response);
-    let is_error = response
-        .get("isError")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    let is_error = mcp_result_is_error(&response);
     HookRun {
         status: if is_error { 1 } else { 0 },
         stdout,
@@ -2167,10 +2176,7 @@ fn run_mcp_legacy_sse_tool_hook(
         }
     };
     let stdout = mcp_tool_output_text(&response);
-    let is_error = response
-        .get("isError")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    let is_error = mcp_result_is_error(&response);
     HookRun {
         status: if is_error { 1 } else { 0 },
         stdout,
@@ -4019,6 +4025,49 @@ mod tests {
             "docs-subscribe-test",
             &server
         ));
+    }
+
+    #[test]
+    fn mcp_method_reports_is_error_results_as_failures() {
+        let server = McpServerConfig {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                concat!(
+                    "read init; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}}}'; ",
+                    "read initialized; ",
+                    "read call; ",
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"repository not found\"}],\"isError\":true}}'; ",
+                    "sleep 1;"
+                )
+                .to_string(),
+            ],
+            env: HashMap::new(),
+            ..McpServerConfig::default()
+        };
+        let cfg = Config {
+            mcp_servers: HashMap::from([("failing-test".to_string(), server)]),
+            ..Config::default()
+        };
+        let run = call_mcp_method_with_config(
+            &cfg,
+            "failing-test",
+            "tools/call",
+            json!({"name":"clone","arguments":{}}),
+            Some(2),
+        );
+        // A tool-level failure must not reach the model as a successful call.
+        assert_eq!(
+            run.status, 1,
+            "stdout: {} stderr: {}",
+            run.stdout, run.stderr
+        );
+        assert!(
+            run.stderr.contains("repository not found"),
+            "{}",
+            run.stderr
+        );
     }
 
     #[test]
