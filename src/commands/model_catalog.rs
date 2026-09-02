@@ -448,11 +448,15 @@ pub fn opencode_keep(id: &str, catalog: Option<&Catalog>) -> bool {
 /// the catalog. `cost` values are USD per million tokens (opencode's
 /// models.dev convention). `reasoning` follows the id: LibertAI serves
 /// `<base>-thinking` as the reasoning variant, so a base id is not reasoning.
+/// `attachment` (opencode's image-support flag) mirrors the catalog's vision
+/// capability; without it opencode treats every model as text-only and
+/// silently drops images. Models unknown to the catalog get no `attachment`
+/// (opencode's conservative default), matching how `cost` is omitted.
 pub fn opencode_model_entry(id: &str, catalog: Option<&Catalog>) -> Value {
     let model = catalog.and_then(|c| c.find_text(id));
+    let caps = model.and_then(CatalogModel::text_capabilities);
 
-    let context = model
-        .and_then(CatalogModel::text_capabilities)
+    let context = caps
         .and_then(|c| c.context_window)
         .unwrap_or(OPENCODE_FALLBACK_CONTEXT);
 
@@ -466,6 +470,9 @@ pub fn opencode_model_entry(id: &str, catalog: Option<&Catalog>) -> Value {
         "limit".to_string(),
         json!({ "context": context, "output": OPENCODE_FALLBACK_OUTPUT }),
     );
+    if let Some(c) = caps {
+        entry.insert("attachment".to_string(), Value::Bool(c.vision));
+    }
     if let Some(p) = model.and_then(CatalogModel::text_pricing) {
         entry.insert(
             "cost".to_string(),
@@ -623,10 +630,32 @@ mod tests {
         assert_eq!(e["name"], "hermes-3-8b-tee");
         assert_eq!(e["reasoning"], false);
         assert_eq!(e["limit"]["context"], 16_000);
+        assert_eq!(e["attachment"], false, "hermes fixture has no vision");
         assert_eq!(e["cost"]["input"], 0.15);
         assert_eq!(e["cost"]["output"], 0.6);
         assert_eq!(e["cost"]["cache_read"], 0.05);
         assert_eq!(e["cost"]["cache_write"], 0.0);
+    }
+
+    #[test]
+    fn opencode_entry_declares_vision_models_as_attachment_capable() {
+        let cat = fixture_catalog();
+        assert_eq!(
+            opencode_model_entry("qwen3.6-35b-a3b", Some(&cat))["attachment"],
+            true
+        );
+        // `-thinking` variants inherit the base model's vision capability.
+        assert_eq!(
+            opencode_model_entry("qwen3.6-35b-a3b-thinking", Some(&cat))["attachment"],
+            true
+        );
+        // Unknown / offline: no claim either way (opencode defaults to false).
+        assert!(opencode_model_entry("brand-new-model", None)
+            .get("attachment")
+            .is_none());
+        assert!(opencode_model_entry("brand-new-model", Some(&cat))
+            .get("attachment")
+            .is_none());
     }
 
     #[test]
