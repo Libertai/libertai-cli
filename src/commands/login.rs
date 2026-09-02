@@ -93,11 +93,10 @@ pub fn browser_sso_login(cfg: &mut Config, client: &str, open: impl FnOnce(&str)
     let created =
         create_cli_api_key(cfg, &pair.access_token, &host).context("creating CLI API key")?;
 
+    reset_identity(&mut cfg.auth);
     cfg.auth.expires_at = created.expires_at;
     cfg.auth.api_key = Some(created.full_key);
     cfg.auth.refresh_token = Some(pair.refresh_token);
-    cfg.auth.wallet_address = None;
-    cfg.auth.chain = None;
     Ok(())
 }
 
@@ -404,10 +403,30 @@ fn login_with_api_key(cfg: &mut Config, term: &Term) -> Result<()> {
     };
     list_models(&probe).context("verifying API key via /v1/models")?;
 
-    cfg.auth.api_key = Some(key);
-    cfg.auth.expires_at = None; // pasted keys carry no CLI expiry
-    cfg.auth.refresh_token = None; // clear any stale session from a different account
+    reset_identity(&mut cfg.auth);
+    cfg.auth.api_key = Some(key); // a pasted key carries no expiry or session
     Ok(())
+}
+
+/// Clears every account-scoped credential, keeping only `device_id` — a
+/// per-install identifier whose whole point is to survive login cycles. Both
+/// login paths start here: `keys` dispatches on `wallet_address`/`chain`, so a
+/// field one path forgot to clear would authenticate as the previous account.
+/// Destructured exhaustively, so a new `Auth` field must be classified here.
+fn reset_identity(auth: &mut Auth) {
+    let Auth {
+        api_key,
+        wallet_address,
+        chain,
+        expires_at,
+        device_id: _,
+        refresh_token,
+    } = auth;
+    *api_key = None;
+    *wallet_address = None;
+    *chain = None;
+    *expires_at = None;
+    *refresh_token = None;
 }
 
 pub(crate) fn open_url(url: &str) -> Result<()> {
@@ -444,7 +463,26 @@ pub(crate) fn open_url(url: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_manual_code;
+    use super::{parse_manual_code, reset_identity};
+    use crate::config::Auth;
+
+    #[test]
+    fn reset_identity_clears_every_account_field_but_keeps_the_device_id() {
+        let mut auth = Auth {
+            api_key: Some("LTAI_old".into()),
+            wallet_address: Some("0xold".into()),
+            chain: Some("base".into()),
+            expires_at: Some("2026-01-01T00:00:00Z".into()),
+            device_id: Some("dev-1".into()),
+            refresh_token: Some("rt_old".into()),
+        };
+        reset_identity(&mut auth);
+
+        // Serialization is the oracle: every field skips when None, so only
+        // the device id may remain.
+        let rendered = toml::to_string_pretty(&auth).expect("serializing auth");
+        assert_eq!(rendered.trim(), r#"device_id = "dev-1""#, "{rendered}");
+    }
 
     #[test]
     fn parses_a_full_redirect_url() {
