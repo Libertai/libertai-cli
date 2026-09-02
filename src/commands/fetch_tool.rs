@@ -363,10 +363,11 @@ fn strip_to_text(html: &str, max_chars: usize) -> String {
     // Drop <script>, <style>, <noscript>, and HTML comments wholesale —
     // they're noise for an LLM and often dwarf the visible body.
     let mut buf = String::with_capacity(html.len());
-    let bytes = html.as_bytes();
+    // `to_ascii_lowercase` leaves non-ASCII bytes untouched, so byte offsets
+    // into `lower` and `html` stay interchangeable.
     let lower = html.to_ascii_lowercase();
     let mut i = 0;
-    while i < bytes.len() {
+    while i < html.len() {
         if let Some(skip) = skip_block(&lower, i, "<script", "</script>")
             .or_else(|| skip_block(&lower, i, "<style", "</style>"))
             .or_else(|| skip_block(&lower, i, "<noscript", "</noscript>"))
@@ -375,8 +376,13 @@ fn strip_to_text(html: &str, max_chars: usize) -> String {
             i = skip;
             continue;
         }
-        buf.push(bytes[i] as char);
-        i += 1;
+        // `i` is always a char boundary: the skips land just past an ASCII
+        // delimiter and every other step advances by one whole char.
+        let Some(ch) = html[i..].chars().next() else {
+            break;
+        };
+        buf.push(ch);
+        i += ch.len_utf8();
     }
     // Tag-strip + entity-decode, then collapse whitespace.
     let stripped = strip_tags(&buf);
@@ -410,22 +416,18 @@ fn skip_comment(lower: &str, i: usize) -> Option<usize> {
 
 fn strip_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
     let mut in_tag = false;
-    while i < bytes.len() {
-        let c = bytes[i];
+    for ch in s.chars() {
         if in_tag {
-            if c == b'>' {
+            if ch == '>' {
                 in_tag = false;
                 out.push(' ');
             }
-        } else if c == b'<' {
+        } else if ch == '<' {
             in_tag = true;
         } else {
-            out.push(c as char);
+            out.push(ch);
         }
-        i += 1;
     }
     out
 }
@@ -495,6 +497,31 @@ mod tests {
     #[test]
     fn strip_decodes_entities() {
         assert_eq!(strip_to_text("a &amp; b &lt;c&gt;", 100), "a & b <c>");
+    }
+
+    #[test]
+    fn strip_preserves_non_ascii_text() {
+        assert_eq!(
+            strip_to_text("<p>Café — naïve 日本語</p>", 100),
+            "Café — naïve 日本語"
+        );
+        // Multi-byte text either side of a dropped block, and inside a tag the
+        // stripper has to walk past.
+        assert_eq!(
+            strip_to_text(
+                "一<script>var s = '二';</script><a href=\"/三\">四</a>",
+                100
+            ),
+            "一 四"
+        );
+    }
+
+    #[test]
+    fn strip_truncates_by_chars_not_bytes() {
+        let body = "日".repeat(200);
+        let out = strip_to_text(&body, 50);
+        assert!(out.starts_with(&"日".repeat(50)), "{out}");
+        assert!(out.contains("…[truncated; first 50 chars]"), "{out}");
     }
 
     #[test]
