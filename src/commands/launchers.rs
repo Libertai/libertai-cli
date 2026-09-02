@@ -192,13 +192,14 @@ fn sync_opencode_config(cfg: &Config) -> Result<(PathBuf, usize)> {
     // and the already-registered models if the call fails (offline, stale
     // key, transient 5xx) so `opencode` still launches with *something*
     // that works.
-    let tier_defaults = [
-        cfg.default_chat_model.clone(),
-        cfg.default_code_model.clone(),
-        cfg.launcher_defaults.opus_model.clone(),
-        cfg.launcher_defaults.sonnet_model.clone(),
-        cfg.launcher_defaults.haiku_model.clone(),
-    ];
+    let tier_defaults: Vec<String> = [
+        cfg.default_chat_model.as_str(),
+        cfg.default_code_model.as_str(),
+    ]
+    .into_iter()
+    .chain(cfg.launcher_defaults.tiers())
+    .map(str::to_string)
+    .collect();
     let mut ids: Vec<String> = match crate::client::list_models(cfg) {
         Ok(list) => list
             .data

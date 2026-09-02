@@ -306,6 +306,20 @@ pub struct LauncherDefaults {
 }
 
 impl LauncherDefaults {
+    /// Every alias tier, for callers that must cover all of them (opencode
+    /// model registration, `status`). Destructured exhaustively so a new
+    /// tier field fails to compile here instead of being silently skipped by
+    /// one consumer.
+    pub fn tiers(&self) -> [&str; 4] {
+        let LauncherDefaults {
+            opus_model,
+            sonnet_model,
+            fable_model,
+            haiku_model,
+        } = self;
+        [opus_model, sonnet_model, fable_model, haiku_model]
+    }
+
     fn is_default(&self) -> bool {
         is_default_opus_model(&self.opus_model)
             && is_default_sonnet_model(&self.sonnet_model)
@@ -1587,6 +1601,19 @@ pub fn mask_key(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tiers_covers_every_launcher_alias() {
+        let d = LauncherDefaults {
+            opus_model: "o".into(),
+            sonnet_model: "s".into(),
+            fable_model: "f".into(),
+            haiku_model: "h".into(),
+        };
+        // Every consumer that force-registers or displays the aliases reads
+        // this; a tier missing here is a tier one of them silently drops.
+        assert_eq!(d.tiers(), ["o", "s", "f", "h"]);
+    }
 
     #[test]
     fn masked_auth_never_renders_credentials_verbatim() {
