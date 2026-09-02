@@ -28,6 +28,7 @@ fn set(key: &str, value: &str) -> Result<()> {
     match key {
         "api_base" => cfg.api_base = value.to_string(),
         "account_base" => cfg.account_base = value.to_string(),
+        "search_base" => cfg.search_base = value.to_string(),
         "default_chat_model" => cfg.default_chat_model = value.to_string(),
         "default_code_model" => cfg.default_code_model = value.to_string(),
         "default_code_provider" => cfg.default_code_provider = value.to_string(),
@@ -124,6 +125,7 @@ fn reset_key(cfg: &mut Config, key: &str) -> Result<()> {
             // `unset all` resets tunables, not identity or installed state.
             cfg.api_base = d.api_base;
             cfg.account_base = d.account_base;
+            cfg.search_base = d.search_base;
             cfg.default_chat_model = d.default_chat_model;
             cfg.default_code_model = d.default_code_model;
             cfg.default_code_provider = d.default_code_provider;
@@ -142,6 +144,7 @@ fn reset_key(cfg: &mut Config, key: &str) -> Result<()> {
         }
         "api_base" => cfg.api_base = d.api_base,
         "account_base" => cfg.account_base = d.account_base,
+        "search_base" => cfg.search_base = d.search_base,
         "default_chat_model" => cfg.default_chat_model = d.default_chat_model,
         "default_code_model" => cfg.default_code_model = d.default_code_model,
         "default_code_provider" => cfg.default_code_provider = d.default_code_provider,
@@ -204,6 +207,7 @@ mod tests {
     const RESETTABLE_KEYS: &[&str] = &[
         "api_base",
         "account_base",
+        "search_base",
         "default_chat_model",
         "default_code_model",
         "default_code_provider",
@@ -231,6 +235,7 @@ mod tests {
         Config {
             api_base: "https://wrong.example".into(),
             account_base: "https://wrong.example".into(),
+            search_base: "https://wrong.example".into(),
             default_chat_model: "wrong-chat".into(),
             default_code_model: "wrong-code".into(),
             default_code_provider: "wrong-provider".into(),
