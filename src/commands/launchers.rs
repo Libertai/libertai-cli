@@ -205,7 +205,7 @@ fn sync_opencode_config(cfg: &Config) -> Result<(PathBuf, usize)> {
             .data
             .into_iter()
             .map(|m| m.id)
-            .filter(|id| crate::commands::model_catalog::opencode_keep(id, catalog.as_ref()))
+            .filter(|id| crate::commands::model_catalog::is_chat_model(id, catalog.as_ref()))
             .collect(),
         Err(e) => {
             eprintln!(

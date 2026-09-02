@@ -119,6 +119,24 @@ pub fn run(refresh: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Listing ids that belong in pi's chat catalog and aren't registered yet.
+/// The `/v1/models` listing also carries image, embedding and search ids;
+/// registering one would offer it as a selectable chat model in `/model` and
+/// over ACP, where it fails at generation time.
+fn missing_chat_model_ids(
+    list: &ModelList,
+    registered: &[String],
+    catalog: Option<&Catalog>,
+) -> Vec<String> {
+    list.data
+        .iter()
+        .map(|e| e.id.as_str())
+        .filter(|id| model_catalog::is_chat_model(id, catalog))
+        .filter(|id| !registered.iter().any(|r| r == id))
+        .map(str::to_string)
+        .collect()
+}
+
 /// `--refresh`: sync the live `/v1/models` listing into the model catalog
 /// persisted in pi's `models.json` (`providers.libertai.models`).
 ///
@@ -163,15 +181,14 @@ fn refresh_persisted_catalog(
             )
         })?;
 
-    let mut added = 0usize;
-    for entry in &list.data {
-        let present = models
-            .iter()
-            .any(|m| m.get("id").and_then(|id| id.as_str()) == Some(entry.id.as_str()));
-        if !present {
-            models.push(model_catalog::new_pi_model_entry(&entry.id, catalog));
-            added += 1;
-        }
+    let registered: Vec<String> = models
+        .iter()
+        .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(str::to_string))
+        .collect();
+    let to_add = missing_chat_model_ids(list, &registered, catalog);
+    let added = to_add.len();
+    for id in to_add {
+        models.push(model_catalog::new_pi_model_entry(&id, catalog));
     }
 
     if added > 0 {
@@ -180,4 +197,55 @@ fn refresh_persisted_catalog(
             .with_context(|| format!("writing {}", models_path.display()))?;
     }
     Ok(added)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::ModelEntry;
+
+    fn listing(ids: &[&str]) -> ModelList {
+        ModelList {
+            data: ids
+                .iter()
+                .map(|id| ModelEntry {
+                    id: (*id).to_string(),
+                    owned_by: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn fixture_catalog() -> Catalog {
+        model_catalog::parse_aggregate(include_str!(
+            "../../tests/fixtures/ltai_pricing_aggregate.json"
+        ))
+        .expect("fixture parses")
+    }
+
+    #[test]
+    fn refresh_skips_non_chat_models_from_the_listing() {
+        let cat = fixture_catalog();
+        let list = listing(&[
+            "qwen3.6-35b-a3b",
+            "z-image-turbo",
+            "bge-m3",
+            "search/google",
+        ]);
+        assert_eq!(
+            missing_chat_model_ids(&list, &[], Some(&cat)),
+            vec!["qwen3.6-35b-a3b".to_string()],
+        );
+    }
+
+    #[test]
+    fn refresh_skips_already_registered_ids() {
+        let cat = fixture_catalog();
+        let list = listing(&["qwen3.6-35b-a3b", "qwen3.6-35b-a3b-thinking"]);
+        let registered = vec!["qwen3.6-35b-a3b".to_string()];
+        assert_eq!(
+            missing_chat_model_ids(&list, &registered, Some(&cat)),
+            vec!["qwen3.6-35b-a3b-thinking".to_string()],
+        );
+    }
 }
