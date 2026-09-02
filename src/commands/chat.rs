@@ -415,22 +415,7 @@ fn send_turn(
     if !is_sse {
         let body = resp.text().unwrap_or_default();
         let shown = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-            let msg = v
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    v.get("error")
-                        .and_then(|e| e.as_str())
-                        .map(|s| s.to_string())
-                })
-                .or_else(|| {
-                    v.get("message")
-                        .and_then(|m| m.as_str())
-                        .map(|s| s.to_string())
-                });
-            match msg {
+            match error_message(&v) {
                 Some(m) => format!("error: {m}"),
                 None => {
                     let t = truncate_2k(&body);
@@ -469,35 +454,18 @@ fn send_turn(
                 break;
             }
         };
-        // SSE: only `data:` lines carry JSON payloads. Skip blank lines,
-        // `:` comments, `event:`, `id:`, and anything else without
-        // attempting to parse it as JSON.
-        let payload = match line.strip_prefix("data: ") {
-            Some(p) => p,
-            None => continue,
-        };
-        if payload.is_empty() {
-            continue;
-        }
-        if payload == "[DONE]" {
-            break;
-        }
-        let v: serde_json::Value = match serde_json::from_str(payload) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if let Some(delta) = v
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("delta"))
-            .and_then(|d| d.get("content"))
-            .and_then(|c| c.as_str())
-        {
-            if !delta.is_empty() {
-                clear_spinner(&mut pb);
+        match parse_frame(&line) {
+            Frame::Ignore => continue,
+            Frame::Done => break,
+            Frame::Error(msg) => {
+                stream_err = Some(anyhow::anyhow!(msg));
+                break;
             }
-            sink.push(delta);
-            assistant.push_str(delta);
+            Frame::Delta(delta) => {
+                clear_spinner(&mut pb);
+                sink.push(&delta);
+                assistant.push_str(&delta);
+            }
         }
     }
 
@@ -514,9 +482,16 @@ fn send_turn(
         return;
     }
 
-    if interrupted && assistant.is_empty() {
-        // Nothing arrived before the cancel: drop the user turn so a
-        // retry doesn't double it.
+    if assistant.is_empty() {
+        // Nothing arrived: drop the user turn so a retry doesn't double it,
+        // and never store an empty assistant turn — it would be replayed on
+        // every later request in the session.
+        if !interrupted {
+            eprintln!(
+                "{} the server ended the stream without sending any content",
+                paint("error:", Accent::Error, accents)
+            );
+        }
         history.pop();
         return;
     }
@@ -527,6 +502,66 @@ fn send_turn(
     });
 }
 
+/// What one SSE line means to the stream loop.
+enum Frame {
+    /// Not a `data:` line, or a payload with nothing to act on.
+    Ignore,
+    Done,
+    Delta(String),
+    Error(String),
+}
+
+/// Classifies one SSE line. Every outcome the loop can act on is decided
+/// here, so a payload shape that isn't handled shows up as `Ignore` in one
+/// place rather than as silence at the end of the stream.
+fn parse_frame(line: &str) -> Frame {
+    // Only `data:` lines carry JSON. Blank lines, `:` comments, `event:` and
+    // `id:` are skipped without attempting to parse them.
+    let Some(payload) = line.strip_prefix("data: ") else {
+        return Frame::Ignore;
+    };
+    if payload.is_empty() {
+        return Frame::Ignore;
+    }
+    if payload == "[DONE]" {
+        return Frame::Done;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return Frame::Ignore;
+    };
+    // A failure after the SSE headers arrives as an ordinary frame.
+    if v.get("error").is_some() {
+        return Frame::Error(error_message(&v).unwrap_or_else(|| truncate_2k(payload)));
+    }
+    match v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("delta"))
+        .and_then(|d| d.get("content"))
+        .and_then(|c| c.as_str())
+    {
+        Some(delta) if !delta.is_empty() => Frame::Delta(delta.to_string()),
+        _ => Frame::Ignore,
+    }
+}
+
+/// Server-side error message carried by a JSON body or an SSE frame, in any
+/// of the shapes LibertAI's gateway and upstream providers use. Shared so a
+/// failure is surfaced identically whether it arrives before the stream
+/// starts or in the middle of one.
+fn error_message(v: &serde_json::Value) -> Option<String> {
+    v.get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .map(str::to_string)
+        .or_else(|| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .or_else(|| {
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
+}
+
 fn truncate_2k(s: &str) -> String {
     const LIMIT: usize = 2048;
     if s.chars().count() > LIMIT {
@@ -535,5 +570,66 @@ fn truncate_2k(s: &str) -> String {
         out
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn error_message_reads_every_shape() {
+        assert_eq!(
+            error_message(&json!({"error": {"message": "maximum context length exceeded"}})),
+            Some("maximum context length exceeded".to_string())
+        );
+        assert_eq!(
+            error_message(&json!({"error": "upstream timeout"})),
+            Some("upstream timeout".to_string())
+        );
+        assert_eq!(
+            error_message(&json!({"message": "bad gateway"})),
+            Some("bad gateway".to_string())
+        );
+    }
+
+    #[test]
+    fn mid_stream_error_frame_stops_the_stream() {
+        let line = r#"data: {"error":{"message":"maximum context length exceeded"}}"#;
+        match parse_frame(line) {
+            Frame::Error(msg) => assert_eq!(msg, "maximum context length exceeded"),
+            _ => panic!("a mid-stream error frame must not be ignored"),
+        }
+    }
+
+    #[test]
+    fn parse_frame_classifies_ordinary_lines() {
+        assert!(matches!(
+            parse_frame(r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#),
+            Frame::Delta(d) if d == "hi"
+        ));
+        assert!(matches!(parse_frame("data: [DONE]"), Frame::Done));
+        assert!(matches!(parse_frame(": keep-alive"), Frame::Ignore));
+        assert!(matches!(parse_frame("event: message"), Frame::Ignore));
+        assert!(matches!(parse_frame("data: not json"), Frame::Ignore));
+        assert!(matches!(
+            parse_frame(r#"data: {"choices":[{"delta":{}}]}"#),
+            Frame::Ignore
+        ));
+    }
+
+    #[test]
+    fn error_message_ignores_ordinary_stream_frames() {
+        let chunk = json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "choices": [{"delta": {"content": "hello"}}],
+        });
+        assert_eq!(error_message(&chunk), None);
+        assert!(
+            chunk.get("error").is_none(),
+            "a normal chunk must not trip the error branch"
+        );
     }
 }
