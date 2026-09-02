@@ -851,9 +851,9 @@ pub fn render_probe_save_summary(report: &McpProbeReport, outcome: &MergeOutcome
         }
     }
     // Only claim a save happened when something actually merged; otherwise say
-    // so plainly (e.g. no servers configured, or all probes errored).
+    // so plainly (reads correctly next to any "probe failed" lines above).
     if outcome.merged.is_empty() {
-        out.push_str("Nothing to save (no servers discovered).\n");
+        out.push_str("Nothing merged (no servers discovered or all probes failed).\n");
     } else {
         out.push_str(
             "Saved to config. New tools take effect next session; /mcp reset drops cached connections.\n",
@@ -883,6 +883,12 @@ fn summarize_desc(desc: &str) -> String {
 /// - a discovered item updates an existing config entry's metadata but
 ///   PRESERVES its `enabled` flag; a new item is appended `enabled: true`;
 /// - existing config entries not seen in discovery are left in place.
+///
+/// The server is the source of truth for a discovered tool's metadata: on the
+/// update path a hand-written `input_schema` (or `description`) IS overwritten
+/// with what the server reports — including replaced with `None` when the
+/// server sends no schema or one that can't be represented in TOML. Only the
+/// `enabled` flag and entries the server didn't mention are preserved.
 ///
 /// The caller persists `cfg` with `config::save`.
 pub fn merge_probe_into_config(cfg: &mut Config, report: &McpProbeReport) -> MergeOutcome {
@@ -948,7 +954,9 @@ fn toml_safe_schema(schema: Option<&serde_json::Value>) -> (Option<serde_json::V
     struct Probe<'a> {
         s: &'a serde_json::Value,
     }
-    if toml::to_string(&Probe { s: schema }).is_ok() {
+    // Use the SAME entry point `config::save` uses (`to_string_pretty`) so this
+    // check can't diverge from the actual serialization that must succeed.
+    if toml::to_string_pretty(&Probe { s: schema }).is_ok() {
         (Some(schema.clone()), false)
     } else {
         (None, true)
@@ -1279,10 +1287,67 @@ mod tests {
         let report = McpProbeReport { servers: vec![] };
         let summary = render_probe_save_summary(&report, &MergeOutcome::default());
         assert!(
-            summary.contains("Nothing to save"),
+            summary.contains("Nothing merged"),
             "empty save must not claim success: {summary}"
         );
         assert!(!summary.contains("Saved to config"));
+    }
+
+    #[test]
+    fn warning_status_server_is_still_merged() {
+        // A partial probe (one sub-list failed) is Warning, not Error, and its
+        // discovered tools MUST still be written to the catalog.
+        let mut cfg = server_with_tools(vec![]);
+        let report = McpProbeReport {
+            servers: vec![McpServerProbe {
+                name: "srv".to_string(),
+                transport: "stdio".to_string(),
+                status: McpProbeStatus::Warning,
+                tools: vec![tool("a", "A")],
+                resources: vec![],
+                prompts: vec![],
+                diagnostics: vec!["prompts/list: timed out".to_string()],
+            }],
+        };
+        let outcome = merge_probe_into_config(&mut cfg, &report);
+        assert_eq!(
+            cfg.mcp_servers["srv"].tools.len(),
+            1,
+            "warning server still merges"
+        );
+        assert_eq!(outcome.merged.len(), 1);
+        assert!(outcome.skipped_error.is_empty());
+        // …and the warning surfaces in the summary so the user knows the
+        // catalog may be incomplete.
+        let summary = render_probe_save_summary(&report, &outcome);
+        assert!(summary.contains("srv: 1 added"), "{summary}");
+        assert!(
+            summary.contains("warning — prompts/list: timed out"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn render_save_summary_shows_counts_and_dropped_schema() {
+        let mut counts = ServerMergeCounts::default();
+        counts.added = 2;
+        counts.updated = 1;
+        counts.kept_disabled = 1;
+        counts.schema_dropped = 1;
+        let outcome = MergeOutcome {
+            merged: vec![("srv".to_string(), counts)],
+            skipped_error: vec!["broken".to_string()],
+        };
+        let report = McpProbeReport { servers: vec![] };
+        let summary = render_probe_save_summary(&report, &outcome);
+        assert!(summary.contains("srv: 2 added, 1 updated"), "{summary}");
+        assert!(summary.contains("1 kept disabled"), "{summary}");
+        assert!(
+            summary.contains("saved without an unrepresentable schema"),
+            "{summary}"
+        );
+        assert!(summary.contains("broken: probe failed"), "{summary}");
+        assert!(summary.contains("Saved to config"), "{summary}");
     }
 
     #[test]

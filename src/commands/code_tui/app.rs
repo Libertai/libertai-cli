@@ -86,6 +86,13 @@ const MAX_TRANSCRIPT_ENTRIES: usize = 5000;
 /// primary tail surface.
 const MAX_AGENT_LOG_LINES: usize = 4000;
 
+/// Per-REQUEST timeout for an `/mcp probe` list call. NOTE: it is per request,
+/// not per server — a server does ~4 requests (initialize + 3 lists) and
+/// servers are probed serially, so one slow server can take ~4×this and
+/// several unreachable servers keep the "Probing…" placeholder up for minutes
+/// with no cancellation. Kept modest for that reason.
+const MCP_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Estimated average bytes per log line, used to size the tail byte-budget
 /// [`read_agent_log`] asks [`code_ui::read_log_tail`] for. Agent log lines are
 /// the `libertai code --print` combined stdout+stderr: mostly short tool /
@@ -2179,58 +2186,73 @@ fn spawn_background(
                             // `--save` merges into the on-disk truth, not this
                             // thread's stale Arc.
                             BgCommand::McpProbe { save } => {
-                                // `--save` is MUTATING: a load failure (TOML
-                                // error from an in-flight hand edit, permissions,
-                                // enforce_https_bases rejection) must ABORT, not
-                                // fall back to the in-memory snapshot and then
-                                // overwrite the on-disk config. The read-only
-                                // (non-save) path may fall back safely.
-                                let loaded = crate::config::load();
-                                if save {
-                                    match loaded {
-                                        Ok(mut disk_cfg) => {
-                                            let report = code_mcp::probe_configured_servers(
-                                                &disk_cfg,
-                                                std::time::Duration::from_secs(10),
-                                            );
+                                // A config is needed just to know which servers
+                                // to probe. `--save` is MUTATING, so a load
+                                // failure (TOML error from an in-flight hand
+                                // edit, permissions, enforce_https_bases) must
+                                // ABORT rather than probe against — and later
+                                // overwrite with — a fallback snapshot. The
+                                // read-only path may fall back safely.
+                                let probe_cfg = match crate::config::load() {
+                                    Ok(c) => c,
+                                    Err(e) if save => {
+                                        let _ = agent_tx.send(AgentMsg::CommandResult(format!(
+                                            "probe --save: could not load config (aborting to \
+                                             avoid overwriting it): {e:#}"
+                                        )));
+                                        continue;
+                                    }
+                                    Err(_) => cfg.as_ref().clone(),
+                                };
+                                let report = code_mcp::probe_configured_servers(
+                                    &probe_cfg,
+                                    MCP_PROBE_TIMEOUT,
+                                );
+                                if !save {
+                                    code_mcp::render_probe_report(&report)
+                                } else {
+                                    // The probe can take tens of seconds; RELOAD
+                                    // a fresh config right before merge+save so a
+                                    // concurrent main-thread write (e.g. /notify)
+                                    // isn't clobbered — the race window shrinks
+                                    // from the whole probe to a few ms.
+                                    match crate::config::load() {
+                                        Ok(mut fresh) => {
+                                            let before = fresh.mcp_servers.clone();
                                             let outcome = code_mcp::merge_probe_into_config(
-                                                &mut disk_cfg,
-                                                &report,
+                                                &mut fresh, &report,
                                             );
-                                            match crate::config::save(&disk_cfg) {
-                                                Ok(()) => {
-                                                    // Refresh the main thread's
-                                                    // Arc<Config> so later in-TUI
-                                                    // config writers (/notify, …)
-                                                    // don't clone+save a stale
-                                                    // snapshot and revert the merge.
-                                                    let _ = agent_tx.send(
-                                                        AgentMsg::ConfigReloaded(Box::new(
-                                                            disk_cfg.clone(),
-                                                        )),
-                                                    );
-                                                    code_mcp::render_probe_save_summary(
-                                                        &report, &outcome,
-                                                    )
+                                            if fresh.mcp_servers == before {
+                                                // Nothing actually changed — do
+                                                // NOT rewrite config.toml (that
+                                                // would drop comments / fields
+                                                // unknown to this binary).
+                                                "MCP catalog already up to date; \
+                                                 config left unchanged."
+                                                    .to_string()
+                                            } else {
+                                                match crate::config::save(&fresh) {
+                                                    Ok(()) => {
+                                                        let _ = agent_tx.send(
+                                                            AgentMsg::ConfigReloaded(Box::new(
+                                                                fresh.clone(),
+                                                            )),
+                                                        );
+                                                        code_mcp::render_probe_save_summary(
+                                                            &report, &outcome,
+                                                        )
+                                                    }
+                                                    Err(e) => format!(
+                                                        "probe --save: saving config failed: {e:#}"
+                                                    ),
                                                 }
-                                                Err(e) => format!(
-                                                    "probe --save: saving config failed: {e:#}"
-                                                ),
                                             }
                                         }
                                         Err(e) => format!(
-                                            "probe --save: could not load config (aborting to \
-                                             avoid overwriting it): {e:#}"
+                                            "probe --save: could not reload config to merge \
+                                             (aborting to avoid overwriting it): {e:#}"
                                         ),
                                     }
-                                } else {
-                                    let disk_cfg =
-                                        loaded.unwrap_or_else(|_| cfg.as_ref().clone());
-                                    let report = code_mcp::probe_configured_servers(
-                                        &disk_cfg,
-                                        std::time::Duration::from_secs(10),
-                                    );
-                                    code_mcp::render_probe_report(&report)
                                 }
                             }
                             // `/mcp reset` — drop cached MCP client sessions on
