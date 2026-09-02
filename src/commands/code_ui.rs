@@ -1923,10 +1923,25 @@ pub(crate) fn start_background_agent(
 }
 
 fn started_background_agent(child: Child, log_path: PathBuf) -> StartedBackgroundAgent {
-    StartedBackgroundAgent {
-        pid: child.id(),
-        log_path,
-    }
+    let pid = child.id();
+    reap_in_background(child);
+    StartedBackgroundAgent { pid, log_path }
+}
+
+/// Waits on `child` from a detached thread so it can't linger as a zombie.
+/// Liveness is probed with `kill(pid, 0)`, which succeeds for a zombie — an
+/// unwaited child would read as "still working" forever inside a long-lived
+/// TUI. Dropping a `Child` does not wait, so something must.
+fn reap_in_background(mut child: Child) {
+    std::thread::Builder::new()
+        .name("libertai-bg-reaper".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })
+        // A thread we can't spawn just means the pid stays a zombie until the
+        // process exits; that's the pre-existing behaviour, not worth failing
+        // an already-running agent over.
+        .ok();
 }
 
 fn background_agent_command(exe: &Path, launch: &BackgroundAgentLaunch) -> Command {
@@ -4459,6 +4474,36 @@ fn queued_spinner_suffix(queued: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The zombie a dropped `Child` leaves behind is indistinguishable from a
+    /// live process to `kill(pid, 0)`, which is how the TUI polls agent
+    /// liveness — so an unreaped child reads as "Working" forever.
+    #[cfg(unix)]
+    #[test]
+    fn started_background_agent_reaps_the_child() {
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawning test child");
+        let started = started_background_agent(child, PathBuf::from("/dev/null"));
+
+        let mut gone = false;
+        for _ in 0..200 {
+            if unsafe { libc::kill(started.pid as i32, 0) } != 0 {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            gone,
+            "pid {} still probes as alive; the child was never waited on",
+            started.pid
+        );
+    }
     use super::*;
 
     // Test-only imports: these symbols are no longer used by production code
