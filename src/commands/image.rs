@@ -66,12 +66,23 @@ pub fn run(
 }
 
 pub(crate) fn numbered_path(out: &str, i: usize) -> String {
-    match out.rfind('.') {
+    let path = Path::new(out);
+    // The extension search is confined to the file name: a dot in a parent
+    // component ("../shots/cat", "out.d/cat") is not an extension separator,
+    // and splitting there would number a directory instead of the file.
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or(out);
+    let numbered = match name.rfind('.') {
         Some(idx) if idx > 0 => {
-            let (stem, ext) = out.split_at(idx);
+            let (stem, ext) = name.split_at(idx);
             format!("{stem}-{i}{ext}")
         }
-        _ => format!("{out}-{i}.png"),
+        _ => format!("{name}-{i}.png"),
+    };
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            parent.join(numbered).to_string_lossy().into_owned()
+        }
+        _ => numbered,
     }
 }
 
@@ -83,6 +94,16 @@ mod tests {
     fn numbered_inserts_before_extension() {
         assert_eq!(numbered_path("foo.png", 0), "foo-0.png");
         assert_eq!(numbered_path("out/dir/a.jpeg", 3), "out/dir/a-3.jpeg");
+    }
+
+    #[test]
+    fn numbered_ignores_dots_in_parent_directories() {
+        // `-o ../shots/cat` used to split on the dot in `..`, producing
+        // `.-0./shots/cat` — a directory that does not exist, so the write
+        // failed after the images had already been generated and paid for.
+        assert_eq!(numbered_path("../shots/cat", 0), "../shots/cat-0.png");
+        assert_eq!(numbered_path("out.d/cat", 1), "out.d/cat-1.png");
+        assert_eq!(numbered_path("./a.b/c.png", 2), "./a.b/c-2.png");
     }
 
     #[test]
