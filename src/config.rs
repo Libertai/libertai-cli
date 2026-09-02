@@ -1291,6 +1291,22 @@ pub struct Auth {
     pub refresh_token: Option<String>,
 }
 
+impl Auth {
+    /// A copy safe to print, with credential material reduced to `abcd****wxyz`.
+    /// Every field is listed explicitly: adding one to `Auth` breaks this
+    /// literal, which forces a decision about whether it may be shown in full.
+    pub fn masked(&self) -> Auth {
+        Auth {
+            api_key: self.api_key.as_deref().map(mask_key),
+            refresh_token: self.refresh_token.as_deref().map(mask_key),
+            wallet_address: self.wallet_address.clone(),
+            chain: self.chain.clone(),
+            expires_at: self.expires_at.clone(),
+            device_id: self.device_id.clone(),
+        }
+    }
+}
+
 fn default_api_base() -> String {
     DEFAULT_API_BASE.into()
 }
@@ -1571,6 +1587,33 @@ pub fn mask_key(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn masked_auth_never_renders_credentials_verbatim() {
+        let auth = Auth {
+            api_key: Some("LTAI_live_0123456789abcdef".into()),
+            refresh_token: Some("rt_0123456789abcdefghijklmnop".into()),
+            wallet_address: Some("0xdeadbeef".into()),
+            chain: Some("base".into()),
+            expires_at: Some("2026-01-01T00:00:00Z".into()),
+            device_id: Some("dev-1".into()),
+        };
+        let rendered = toml::to_string_pretty(&auth.masked()).expect("serializing auth");
+        for secret in [
+            auth.api_key.as_deref().unwrap(),
+            auth.refresh_token.as_deref().unwrap(),
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "{secret} leaked into rendered config:\n{rendered}"
+            );
+        }
+        // Non-credential fields stay legible — masking them would make
+        // `config show` useless for diagnosing which account is signed in.
+        assert!(rendered.contains("0xdeadbeef"), "{rendered}");
+        assert!(rendered.contains("2026-01-01T00:00:00Z"), "{rendered}");
+        assert!(rendered.contains("dev-1"), "{rendered}");
+    }
     use serde_json::json;
 
     #[test]

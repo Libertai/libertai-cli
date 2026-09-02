@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 
 use crate::cli::ConfigAction;
-use crate::config::{self, config_path, mask_key, Config};
+use crate::config::{self, config_path, Config};
 
 pub fn run(action: ConfigAction) -> Result<()> {
     match action {
@@ -17,9 +17,7 @@ pub fn run(action: ConfigAction) -> Result<()> {
 
 fn show() -> Result<()> {
     let mut cfg = config::load()?;
-    if let Some(k) = cfg.auth.api_key.as_ref() {
-        cfg.auth.api_key = Some(mask_key(k));
-    }
+    cfg.auth = cfg.auth.masked();
     let rendered = toml::to_string_pretty(&cfg).context("serializing config")?;
     println!("{rendered}");
     Ok(())
