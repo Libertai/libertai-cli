@@ -127,8 +127,14 @@ mod tests {
 
     #[test]
     fn should_retry_classifies_transient_errors() {
-        assert!(should_retry(&PiError::provider("x", "429 rate limit exceeded")));
-        assert!(should_retry(&PiError::provider("x", "503 service unavailable")));
+        assert!(should_retry(&PiError::provider(
+            "x",
+            "429 rate limit exceeded"
+        )));
+        assert!(should_retry(&PiError::provider(
+            "x",
+            "503 service unavailable"
+        )));
         assert!(should_retry(&PiError::provider(
             "x",
             "connection reset by peer"

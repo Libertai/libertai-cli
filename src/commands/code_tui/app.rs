@@ -21,8 +21,8 @@ use anyhow::Context;
 use crate::commands::code_approvals::{ApprovalState, ApprovalUi, PromptChoice};
 use crate::commands::code_context_tool;
 use crate::commands::code_cron;
-use crate::commands::code_retry;
 use crate::commands::code_diff::EditJournal;
+use crate::commands::code_retry;
 // (M6/#15) Workflow engine — registry threaded through the tool factory +
 // the `/workflows` viewer reads it.
 use crate::commands::code_factory::{FactoryFeatures, LibertaiToolFactory, Mode, ModeFlag};
@@ -32,6 +32,7 @@ use crate::commands::code_hooks::{
     SessionHookGuard,
 };
 use crate::commands::code_identity_prompt;
+use crate::commands::code_mcp;
 use crate::commands::code_mode_prompt;
 use crate::commands::code_pr_comments;
 use crate::commands::code_session::{
@@ -84,6 +85,13 @@ const MAX_TRANSCRIPT_ENTRIES: usize = 5000;
 /// `diff.rs::MAX_DIFF_LINES` (2000) but generous since agent logs are the
 /// primary tail surface.
 const MAX_AGENT_LOG_LINES: usize = 4000;
+
+/// Per-REQUEST timeout for an `/mcp probe` list call. NOTE: it is per request,
+/// not per server — a server does ~4 requests (initialize + 3 lists) and
+/// servers are probed serially, so one slow server can take ~4×this and
+/// several unreachable servers keep the "Probing…" placeholder up for minutes
+/// with no cancellation. Kept modest for that reason.
+const MCP_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Estimated average bytes per log line, used to size the tail byte-budget
 /// [`read_agent_log`] asks [`code_ui::read_log_tail`] for. Agent log lines are
@@ -193,6 +201,11 @@ pub enum AgentMsg {
     System(String),
     /// Result from a slash command executed on the background thread.
     CommandResult(String),
+    /// The bg thread persisted a new on-disk config (e.g. `/mcp probe --save`
+    /// merged the discovered catalog). The main thread swaps `app.cfg` to this
+    /// so later in-TUI config writers (`/notify`, …) don't clone+save a stale
+    /// snapshot and silently revert the merge. Boxed — `Config` is large.
+    ConfigReloaded(Box<LibertaiConfig>),
     /// An OSC52 clipboard-write sequence (`\x1b]52;c;<base64>\x07`) assembled
     /// on the bg thread from the last assistant response. Distinct from
     /// `CommandResult` (a transcript line): the OSC52 bytes must land on
@@ -2166,6 +2179,101 @@ fn spawn_background(
                                         Err(e) => format!("commit failed: {e:#}"),
                                     }
                                 }
+                            }
+                            // `/mcp probe [--save]` — live-discover each MCP
+                            // server's tools/resources/prompts (BLOCKING network
+                            // + child processes). Reload config from disk so
+                            // `--save` merges into the on-disk truth, not this
+                            // thread's stale Arc.
+                            BgCommand::McpProbe { save } => {
+                                // A config is needed just to know which servers
+                                // to probe. `--save` is MUTATING, so a load
+                                // failure (TOML error from an in-flight hand
+                                // edit, permissions, enforce_https_bases) must
+                                // ABORT rather than probe against — and later
+                                // overwrite with — a fallback snapshot. The
+                                // read-only path may fall back safely.
+                                let probe_cfg = match crate::config::load() {
+                                    Ok(c) => c,
+                                    Err(e) if save => {
+                                        let _ = agent_tx.send(AgentMsg::CommandResult(format!(
+                                            "probe --save: could not load config (aborting to \
+                                             avoid overwriting it): {e:#}"
+                                        )));
+                                        continue;
+                                    }
+                                    // Read-only path: fall back to the in-memory
+                                    // snapshot but tell the user, so a broken
+                                    // hand-edited config.toml is debuggable.
+                                    Err(e) => {
+                                        let _ = agent_tx.send(AgentMsg::System(format!(
+                                            "note: using in-memory config; disk config failed to \
+                                             load: {e:#}"
+                                        )));
+                                        cfg.as_ref().clone()
+                                    }
+                                };
+                                let report = code_mcp::probe_configured_servers(
+                                    &probe_cfg,
+                                    MCP_PROBE_TIMEOUT,
+                                );
+                                if !save {
+                                    code_mcp::render_probe_report(&report)
+                                } else {
+                                    // The probe can take tens of seconds; RELOAD
+                                    // a fresh config right before merge+save so a
+                                    // concurrent main-thread write (e.g. /notify)
+                                    // isn't clobbered — the race window shrinks
+                                    // from the whole probe to a few ms.
+                                    match crate::config::load() {
+                                        Ok(mut fresh) => {
+                                            let before = fresh.mcp_servers.clone();
+                                            let outcome = code_mcp::merge_probe_into_config(
+                                                &mut fresh, &report,
+                                            );
+                                            if fresh.mcp_servers == before {
+                                                // Nothing actually changed — do
+                                                // NOT rewrite config.toml (that
+                                                // would drop comments / fields
+                                                // unknown to this binary). Still
+                                                // render the FULL summary so a
+                                                // run where every probe errored
+                                                // reports the failures, not a
+                                                // misleading "up to date".
+                                                code_mcp::render_probe_save_summary(
+                                                    &report, &outcome, false,
+                                                )
+                                            } else {
+                                                match crate::config::save(&fresh) {
+                                                    Ok(()) => {
+                                                        let _ = agent_tx.send(
+                                                            AgentMsg::ConfigReloaded(Box::new(
+                                                                fresh.clone(),
+                                                            )),
+                                                        );
+                                                        code_mcp::render_probe_save_summary(
+                                                            &report, &outcome, true,
+                                                        )
+                                                    }
+                                                    Err(e) => format!(
+                                                        "probe --save: saving config failed: {e:#}"
+                                                    ),
+                                                }
+                                            }
+                                        }
+                                        Err(e) => format!(
+                                            "probe --save: could not reload config to merge \
+                                             (aborting to avoid overwriting it): {e:#}"
+                                        ),
+                                    }
+                                }
+                            }
+                            // `/mcp reset` — drop cached MCP client sessions on
+                            // the bg thread (see BgCommand::McpReset for why not
+                            // inline on the render thread).
+                            BgCommand::McpReset => {
+                                let n = crate::commands::code_hooks::reset_mcp_cli_sessions();
+                                format!("Reset {n} cached MCP session(s).")
                             }
                         };
                         if !text.is_empty() {
@@ -6438,15 +6546,29 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                     app.transcript
                         .push(TranscriptEntry::System(code_slash_router::mcp_open_text()));
                 }
-                code_ui::McpCommand::Probe | code_ui::McpCommand::ProbeSave => {
+                code_ui::McpCommand::Probe => {
+                    // Live discovery is BLOCKING (network + child processes) —
+                    // run it on the bg thread; the report rides back as a
+                    // CommandResult system line.
+                    app.transcript
+                        .push(TranscriptEntry::System("Probing MCP servers…".to_string()));
+                    let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::McpProbe { save: false }));
+                }
+                code_ui::McpCommand::ProbeSave => {
                     app.transcript.push(TranscriptEntry::System(
-                        "/mcp probe not yet supported in TUI".to_string(),
+                        "Probing MCP servers and saving the catalog…".to_string(),
                     ));
+                    let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::McpProbe { save: true }));
                 }
                 code_ui::McpCommand::Reset => {
+                    // Route to the bg thread: reset_mcp_cli_sessions() takes the
+                    // MCP client mutexes, which the bg side can hold across an
+                    // in-flight tool call — doing it on the render thread could
+                    // freeze the UI on `.lock()` until the call's timeout.
                     app.transcript.push(TranscriptEntry::System(
-                        "/mcp reset not yet supported in TUI".to_string(),
+                        "Resetting MCP sessions…".to_string(),
                     ));
+                    let _ = cmd_tx.send(Cmd::RunReadOnly(BgCommand::McpReset));
                 }
                 code_ui::McpCommand::Usage => {
                     app.transcript
@@ -8556,6 +8678,11 @@ fn handle_agent_msg(app: &mut App, msg: AgentMsg, cmd_tx: &mpsc::Sender<Cmd>) {
             app.transcript.push(TranscriptEntry::System(text));
             app.transcript.push(TranscriptEntry::Blank);
             autoscroll(app);
+        }
+        AgentMsg::ConfigReloaded(config) => {
+            // Swap in the freshly-persisted config so later in-TUI writers
+            // (/notify, …) build on the merged catalog, not a stale snapshot.
+            app.cfg = Arc::new(*config);
         }
         // (todo-fix) Stash the latest task list for the pinned overlay.
         // No transcript entry — the list renders in place above the
@@ -16171,6 +16298,72 @@ task = "Do the thing"
         assert!(
             system_lines(&app).iter().any(|s| s.contains("diff")),
             "/diff should push a 'diff…' placeholder, got: {:?}",
+            system_lines(&app)
+        );
+    }
+
+    // `/mcp probe` routes `Cmd::RunReadOnly(BgCommand::McpProbe { save: false })`
+    // (blocking discovery on the bg thread), pushing a "Probing…" placeholder,
+    // and returns no action.
+    #[test]
+    fn slash_mcp_probe_routes_bg_command_without_save() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/mcp probe", &cmd_tx);
+
+        assert!(action.is_none(), "/mcp probe must not return an action");
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::McpProbe { save })) => {
+                assert!(!save, "/mcp probe must route save:false");
+            }
+            other => panic!("expected RunReadOnly(McpProbe), got {other:?}"),
+        }
+        assert!(
+            system_lines(&app).iter().any(|s| s.contains("Probing MCP")),
+            "expected a Probing placeholder, got: {:?}",
+            system_lines(&app)
+        );
+    }
+
+    // `/mcp probe --save` routes the same command with `save: true`.
+    #[test]
+    fn slash_mcp_probe_save_routes_bg_command_with_save() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/mcp probe --save", &cmd_tx);
+
+        assert!(
+            action.is_none(),
+            "/mcp probe --save must not return an action"
+        );
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::McpProbe { save })) => {
+                assert!(save, "/mcp probe --save must route save:true");
+            }
+            other => panic!("expected RunReadOnly(McpProbe {{ save:true }}), got {other:?}"),
+        }
+    }
+
+    // `/mcp reset` routes to the bg thread (BgCommand::McpReset) — NOT inline —
+    // so the render thread never blocks on the MCP client mutex. It pushes a
+    // "Resetting…" placeholder and returns no action.
+    #[test]
+    fn slash_mcp_reset_routes_to_bg_thread() {
+        let mut app = test_app();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+        let action = handle_slash_command(&mut app, "/mcp reset", &cmd_tx);
+
+        assert!(action.is_none(), "/mcp reset must not return an action");
+        match cmd_rx.try_recv() {
+            Ok(Cmd::RunReadOnly(BgCommand::McpReset)) => {}
+            other => panic!("expected RunReadOnly(McpReset), got {other:?}"),
+        }
+        assert!(
+            system_lines(&app).iter().any(|s| s.contains("Resetting")),
+            "expected a Resetting placeholder, got: {:?}",
             system_lines(&app)
         );
     }
