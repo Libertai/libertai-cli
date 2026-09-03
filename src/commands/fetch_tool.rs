@@ -8,7 +8,7 @@
 //! The result envelope keeps the same `{ text, cite }` shape the FE
 //! renderer expects so `parseCitations` keeps working unchanged.
 
-use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -166,6 +166,12 @@ fn classify_ip(ip: IpAddr) -> HostClass {
             HostClass::Public
         }
         IpAddr::V6(v6) => {
+            // Several v6 forms embed a v4 address that the predicates below
+            // do not see; they have to be classified as the address they
+            // carry.
+            if let Some(v4) = embedded_ipv4(&v6) {
+                return classify_ip(IpAddr::V4(v4));
+            }
             // AWS IMDSv6: `fd00:ec2::254` → `fd00:0ec2::0254`
             if v6.octets()
                 == [
@@ -184,6 +190,27 @@ fn classify_ip(ip: IpAddr) -> HostClass {
             HostClass::Public
         }
     }
+}
+
+/// The v4 address an IPv6 literal carries, if any: `::ffff:a.b.c.d`
+/// (RFC 4291 IPv4-mapped), `64:ff9b::a.b.c.d` (RFC 6052 NAT64 well-known
+/// prefix, which routes to the v4 address on an IPv6-only network), or
+/// `::a.b.c.d` (RFC 4291 IPv4-compatible, deprecated).
+fn embedded_ipv4(v6: &Ipv6Addr) -> Option<Ipv4Addr> {
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return Some(v4);
+    }
+    let o = v6.octets();
+    let embedded = Ipv4Addr::new(o[12], o[13], o[14], o[15]);
+    if o[..4] == [0x00, 0x64, 0xff, 0x9b] && o[4..12].iter().all(|b| *b == 0) {
+        return Some(embedded);
+    }
+    // `::` and `::1` are the unspecified and loopback addresses, not
+    // IPv4-compatible ones — folding them would reclassify loopback as public.
+    if o[..12].iter().all(|b| *b == 0) && !matches!(o[12..], [0, 0, 0, 0] | [0, 0, 0, 1]) {
+        return Some(embedded);
+    }
+    None
 }
 
 fn is_ipv6_unique_local(v6: &Ipv6Addr) -> bool {
@@ -602,6 +629,71 @@ mod tests {
             classify_url(&Url::parse("http://[fd00:ec2::254]/").unwrap()),
             HostClass::Metadata
         ));
+    }
+
+    #[test]
+    fn classify_ipv4_mapped_ipv6_uses_the_embedded_v4_class() {
+        assert!(matches!(
+            classify_url(&Url::parse("http://[::ffff:169.254.169.254]/").unwrap()),
+            HostClass::Metadata
+        ));
+        assert!(matches!(
+            classify_url(&Url::parse("http://[::ffff:127.0.0.1]/").unwrap()),
+            HostClass::Private
+        ));
+        assert!(matches!(
+            classify_url(&Url::parse("http://[::ffff:10.0.0.1]/").unwrap()),
+            HostClass::Private
+        ));
+        assert!(matches!(
+            classify_url(&Url::parse("http://[::ffff:1.1.1.1]/").unwrap()),
+            HostClass::Public
+        ));
+    }
+
+    /// `::a.b.c.d` (RFC 4291 IPv4-compatible) and `64:ff9b::a.b.c.d`
+    /// (RFC 6052 NAT64 well-known prefix) also carry a v4 address. The NAT64
+    /// form genuinely routes to it on an IPv6-only network.
+    #[test]
+    fn classify_other_v4_carrying_ipv6_forms_by_the_embedded_v4() {
+        assert!(matches!(
+            classify_url(&Url::parse("http://[64:ff9b::169.254.169.254]/").unwrap()),
+            HostClass::Metadata
+        ));
+        assert!(matches!(
+            classify_url(&Url::parse("http://[64:ff9b::127.0.0.1]/").unwrap()),
+            HostClass::Private
+        ));
+        assert!(matches!(
+            classify_url(&Url::parse("http://[::169.254.169.254]/").unwrap()),
+            HostClass::Metadata
+        ));
+        assert!(matches!(
+            classify_url(&Url::parse("http://[::127.0.0.1]/").unwrap()),
+            HostClass::Private
+        ));
+        // `::` and `::1` are not IPv4-compatible addresses; folding them to a
+        // v4 address would reclassify loopback as public.
+        assert!(matches!(
+            classify_url(&Url::parse("http://[::1]/").unwrap()),
+            HostClass::Private
+        ));
+        assert!(matches!(
+            classify_url(&Url::parse("http://[::]/").unwrap()),
+            HostClass::Private
+        ));
+        assert!(matches!(
+            classify_url(&Url::parse("http://[64:ff9b::1.1.1.1]/").unwrap()),
+            HostClass::Public
+        ));
+    }
+
+    #[test]
+    fn policy_blocks_redirect_to_ipv4_mapped_loopback() {
+        let target = Url::parse("http://[::ffff:127.0.0.1]:3000/").unwrap();
+        let err = check_url_policy(&target, HostClass::Public, false)
+            .expect_err("public → ::ffff:127.0.0.1 must be refused");
+        assert!(err.contains("private/link-local"), "{err}");
     }
 
     #[test]
