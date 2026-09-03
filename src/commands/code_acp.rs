@@ -49,6 +49,7 @@
 
 use anyhow::{Context, Result};
 
+use crate::commands::code_sandbox::SandboxMode;
 use crate::commands::{code_identity_prompt, code_memory, code_models, code_session};
 use crate::config;
 
@@ -56,11 +57,33 @@ use crate::config;
 /// running. Anything tempted to write to stdout can check it.
 pub const ACP_MODE_ENV: &str = "LIBERTAI_ACP";
 
+/// ACP's tools are built inside pi's protocol server, which takes no bash
+/// command wrapper, so a sandbox cannot be applied on this path. Refusing to
+/// start beats honouring `--sandbox` in name only.
+fn reject_unsupported_sandbox(sandbox: SandboxMode) -> Result<()> {
+    // The CLI pillar is trusted, so `auto` resolves to `off` — the same
+    // resolution `libertai code` performs.
+    if matches!(
+        sandbox.resolve(/* is_untrusted = */ false),
+        SandboxMode::Off
+    ) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "--sandbox is not supported with --acp: the ACP server builds its own \
+         tools and cannot wrap bash in a sandbox.\n\
+         Re-run without --sandbox (unset LIBERTAI_SANDBOX if it is set in your \
+         environment) to accept an unsandboxed ACP session."
+    )
+}
+
 /// Run the ACP server on stdin/stdout until the client disconnects.
 ///
 /// `model` / `provider` mirror `libertai code`'s flags; unset falls back to
 /// the config defaults.
-pub fn run(model: Option<String>, provider: Option<String>) -> Result<()> {
+pub fn run(model: Option<String>, provider: Option<String>, sandbox: SandboxMode) -> Result<()> {
+    reject_unsupported_sandbox(sandbox)?;
+
     let cfg = config::load()?;
     let model = model.unwrap_or_else(|| cfg.default_code_model.clone());
     let provider = provider.unwrap_or_else(|| cfg.default_code_provider.clone());
@@ -161,6 +184,20 @@ fn build_acp_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// pi's ACP server builds its own tool registry and takes no bash command
+    /// wrapper, so a sandbox request cannot be applied on this path. Starting
+    /// unsandboxed anyway would silently drop an explicit security request.
+    #[test]
+    fn sandbox_modes_that_cannot_be_applied_are_refused() {
+        let err = reject_unsupported_sandbox(SandboxMode::Strict)
+            .expect_err("--sandbox=strict must refuse to start under --acp");
+        assert!(err.to_string().contains("--sandbox"), "{err}");
+
+        reject_unsupported_sandbox(SandboxMode::Off).expect("off is the default");
+        reject_unsupported_sandbox(SandboxMode::Auto)
+            .expect("auto resolves to off for the CLI pillar");
+    }
 
     /// The whole point of the adapter: an editor connecting over ACP must get
     /// LibertAI, not whatever other provider happens to be registered first.
