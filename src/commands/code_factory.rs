@@ -866,9 +866,13 @@ impl ToolFactory for LibertaiToolFactory {
         //      and execution go through the same approval wrapper as pi's
         //      built-in mutating tools.
         if self.features.notebook {
-            wrapped.push(Box::new(NotebookReadTool::new()));
+            wrapped.push(Box::new(NotebookReadTool::new(cwd.to_path_buf())));
             let notebook_edit = ApprovalTool::new(
-                self.wrap_path_safety(Box::new(NotebookEditTool::new()), cwd, safe_root.as_ref()),
+                self.wrap_path_safety(
+                    Box::new(NotebookEditTool::new(cwd.to_path_buf())),
+                    cwd,
+                    safe_root.as_ref(),
+                ),
                 Arc::clone(&self.approvals),
                 self.mode.clone(),
                 Arc::clone(&self.ui),
@@ -880,7 +884,7 @@ impl ToolFactory for LibertaiToolFactory {
             wrapped.push(Box::new(notebook_edit));
             let notebook_execute = ApprovalTool::new(
                 self.wrap_path_safety(
-                    Box::new(NotebookExecuteTool::new()),
+                    Box::new(NotebookExecuteTool::new(cwd.to_path_buf())),
                     cwd,
                     safe_root.as_ref(),
                 ),

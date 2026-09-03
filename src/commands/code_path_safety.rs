@@ -169,7 +169,9 @@ fn sensitive_path_reason(path: &Path) -> Option<String> {
     None
 }
 
-fn resolve_user_path(path: &Path, cwd: &Path) -> PathBuf {
+/// Resolve a user-supplied tool path the way the guard does. Mutating tools
+/// must resolve identically or the path checked is not the path written.
+pub fn resolve_user_path(path: &Path, cwd: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {

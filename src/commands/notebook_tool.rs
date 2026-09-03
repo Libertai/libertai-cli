@@ -1,7 +1,7 @@
 //! Native `.ipynb` tools for `libertai code`.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,8 @@ use serde_json::{json, Value};
 use pi::model::{ContentBlock, ImageContent, TextContent};
 use pi::sdk::{Result as PiResult, Tool, ToolExecution, ToolOutput, ToolUpdate};
 use pi::tools::ToolEffects;
+
+use crate::commands::code_path_safety::resolve_user_path;
 
 const READ_NAME: &str = "notebook_read";
 const EDIT_NAME: &str = "notebook_edit";
@@ -53,45 +55,33 @@ struct NotebookExecuteInput {
     max_chars: Option<usize>,
 }
 
-pub struct NotebookReadTool;
+pub struct NotebookReadTool {
+    cwd: PathBuf,
+}
 
 impl NotebookReadTool {
-    pub const fn new() -> Self {
-        Self
+    pub fn new(cwd: PathBuf) -> Self {
+        Self { cwd }
     }
 }
 
-impl Default for NotebookReadTool {
-    fn default() -> Self {
-        Self::new()
-    }
+pub struct NotebookEditTool {
+    cwd: PathBuf,
 }
-
-pub struct NotebookEditTool;
 
 impl NotebookEditTool {
-    pub const fn new() -> Self {
-        Self
+    pub fn new(cwd: PathBuf) -> Self {
+        Self { cwd }
     }
 }
 
-impl Default for NotebookEditTool {
-    fn default() -> Self {
-        Self::new()
-    }
+pub struct NotebookExecuteTool {
+    cwd: PathBuf,
 }
-
-pub struct NotebookExecuteTool;
 
 impl NotebookExecuteTool {
-    pub const fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for NotebookExecuteTool {
-    fn default() -> Self {
-        Self::new()
+    pub fn new(cwd: PathBuf) -> Self {
+        Self { cwd }
     }
 }
 
@@ -137,15 +127,20 @@ Use this instead of raw JSON reads when inspecting notebooks."
             .max_chars
             .unwrap_or(MAX_READ_CHARS)
             .clamp(1_000, 50_000);
-        let notebook = match read_notebook(&parsed.path) {
+        let path = resolve_user_path(Path::new(&parsed.path), &self.cwd);
+        let notebook = match read_notebook(&path) {
             Ok(v) => v,
             Err(e) => return Ok(err_output(&e)),
         };
-        let summary =
-            match summarize_notebook(&parsed.path, &notebook, parsed.cell_index, max_chars) {
-                Ok(v) => v,
-                Err(e) => return Ok(err_output(&e)),
-            };
+        let summary = match summarize_notebook(
+            &path.to_string_lossy(),
+            &notebook,
+            parsed.cell_index,
+            max_chars,
+        ) {
+            Ok(v) => v,
+            Err(e) => return Ok(err_output(&e)),
+        };
         Ok(notebook_output(&summary, &notebook, false))
     }
 
@@ -194,7 +189,7 @@ cells while preserving the rest of the notebook JSON."
             Err(e) => return Ok(err_output(&format!("invalid `notebook_edit` payload: {e}"))),
         };
 
-        let result = match edit_notebook_file(&parsed) {
+        let result = match edit_notebook_file(&parsed, &self.cwd) {
             Ok(v) => v,
             Err(e) => return Ok(err_output(&e)),
         };
@@ -256,15 +251,17 @@ then return a compact cell/output summary. This mutates notebook outputs and sho
             .unwrap_or(DEFAULT_EXECUTE_TIMEOUT_SECS)
             .clamp(1, MAX_EXECUTE_TIMEOUT_SECS);
 
-        let report = match execute_notebook_file(&parsed.path, timeout) {
+        let path = resolve_user_path(Path::new(&parsed.path), &self.cwd);
+        let report = match execute_notebook_file(&path, timeout) {
             Ok(report) => report,
             Err(e) => return Ok(err_output(&e)),
         };
-        let notebook = match read_notebook(&parsed.path) {
+        let notebook = match read_notebook(&path) {
             Ok(v) => v,
             Err(e) => return Ok(err_output(&e)),
         };
-        let summary = match summarize_notebook(&parsed.path, &notebook, None, max_chars) {
+        let summary = match summarize_notebook(&path.to_string_lossy(), &notebook, None, max_chars)
+        {
             Ok(v) => v,
             Err(e) => return Ok(err_output(&e)),
         };
@@ -280,21 +277,22 @@ then return a compact cell/output summary. This mutates notebook outputs and sho
     }
 }
 
-fn read_notebook(path: &str) -> Result<Value, String> {
+fn read_notebook(path: &Path) -> Result<Value, String> {
     ensure_ipynb(path)?;
-    let raw = fs::read_to_string(path).map_err(|e| format!("failed to read {path}: {e}"))?;
-    serde_json::from_str(&raw).map_err(|e| format!("failed to parse notebook JSON in {path}: {e}"))
+    let raw =
+        fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    serde_json::from_str(&raw)
+        .map_err(|e| format!("failed to parse notebook JSON in {}: {e}", path.display()))
 }
 
-fn execute_notebook_file(path: &str, timeout_seconds: u64) -> Result<String, String> {
+fn execute_notebook_file(path: &Path, timeout_seconds: u64) -> Result<String, String> {
     ensure_ipynb(path)?;
-    let notebook_path = Path::new(path);
-    if !notebook_path.is_file() {
-        return Err(format!("notebook does not exist: {path}"));
+    if !path.is_file() {
+        return Err(format!("notebook does not exist: {}", path.display()));
     }
-    let notebook_path = notebook_path
+    let notebook_path = path
         .canonicalize()
-        .map_err(|e| format!("failed to resolve notebook path {path}: {e}"))?;
+        .map_err(|e| format!("failed to resolve notebook path {}: {e}", path.display()))?;
     let args = jupyter_execute_args(notebook_path.to_string_lossy().as_ref(), timeout_seconds);
     let mut command = Command::new("jupyter");
     command.args(&args);
@@ -325,7 +323,8 @@ fn execute_notebook_file(path: &str, timeout_seconds: u64) -> Result<String, Str
                     ));
                 }
                 return Ok(format!(
-                    "executed notebook in place: {path}\nstdout:\n{}\nstderr:\n{}",
+                    "executed notebook in place: {}\nstdout:\n{}\nstderr:\n{}",
+                    path.display(),
                     truncate_output(&stdout),
                     truncate_output(&stderr)
                 ));
@@ -335,7 +334,8 @@ fn execute_notebook_file(path: &str, timeout_seconds: u64) -> Result<String, Str
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(format!(
-                        "notebook execution timed out after {timeout_seconds}s: {path}"
+                        "notebook execution timed out after {timeout_seconds}s: {}",
+                        path.display()
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -368,9 +368,10 @@ fn truncate_output(text: &str) -> String {
     out
 }
 
-fn edit_notebook_file(input: &NotebookEditInput) -> Result<String, String> {
-    ensure_ipynb(&input.path)?;
-    let mut notebook = read_notebook(&input.path)?;
+fn edit_notebook_file(input: &NotebookEditInput, cwd: &Path) -> Result<String, String> {
+    let path = resolve_user_path(Path::new(&input.path), cwd);
+    ensure_ipynb(&path)?;
+    let mut notebook = read_notebook(&path)?;
     let mode = input.mode.clone().unwrap_or(EditMode::Replace);
     let cells = notebook
         .get_mut("cells")
@@ -427,8 +428,8 @@ fn edit_notebook_file(input: &NotebookEditInput) -> Result<String, String> {
 
     let out = serde_json::to_string_pretty(&notebook)
         .map_err(|e| format!("failed to serialize notebook: {e}"))?;
-    fs::write(&input.path, format!("{out}\n"))
-        .map_err(|e| format!("failed to write {}: {e}", input.path))?;
+    fs::write(&path, format!("{out}\n"))
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
 
     let mode_label = match mode {
         EditMode::Replace => "replaced",
@@ -437,16 +438,20 @@ fn edit_notebook_file(input: &NotebookEditInput) -> Result<String, String> {
     };
     Ok(format!(
         "{mode_label} cell {} in {}",
-        input.cell_index, input.path
+        input.cell_index,
+        path.display()
     ))
 }
 
-fn ensure_ipynb(path: &str) -> Result<(), String> {
-    let ext = Path::new(path).extension().and_then(|e| e.to_str());
+fn ensure_ipynb(path: &Path) -> Result<(), String> {
+    let ext = path.extension().and_then(|e| e.to_str());
     if ext == Some("ipynb") {
         Ok(())
     } else {
-        Err(format!("notebook tools only accept .ipynb files: {path}"))
+        Err(format!(
+            "notebook tools only accept .ipynb files: {}",
+            path.display()
+        ))
     }
 }
 
@@ -841,6 +846,40 @@ mod tests {
         })
     }
 
+    /// The path-safety guard resolves a relative `path` against the session
+    /// cwd. The write has to resolve the same way: for a subagent running in
+    /// an isolated worktree the session cwd and the process cwd are different
+    /// directories, and the process cwd is outside the approved tree.
+    #[test]
+    fn edit_resolves_relative_paths_against_the_session_cwd() {
+        let session = tempfile::tempdir().expect("session cwd");
+        fs::write(
+            session.path().join("nb.ipynb"),
+            serde_json::to_string(&sample_notebook()).expect("serialize fixture"),
+        )
+        .expect("write fixture");
+
+        let input = NotebookEditInput {
+            path: "nb.ipynb".to_string(),
+            cell_index: 0,
+            mode: Some(EditMode::Replace),
+            source: Some("# Edited".to_string()),
+            cell_type: None,
+        };
+        edit_notebook_file(&input, session.path()).expect("edit succeeds");
+
+        let edited =
+            fs::read_to_string(session.path().join("nb.ipynb")).expect("read edited notebook");
+        assert!(
+            edited.contains("# Edited"),
+            "session-cwd notebook untouched"
+        );
+        assert!(
+            !Path::new("nb.ipynb").exists(),
+            "edit landed in the process cwd instead of the session cwd"
+        );
+    }
+
     #[test]
     fn summarize_all_cells() {
         let summary = summarize_notebook("demo.ipynb", &sample_notebook(), None, 10_000).unwrap();
@@ -918,7 +957,7 @@ mod tests {
 
     #[test]
     fn rejects_non_notebook_paths() {
-        let err = ensure_ipynb("notes.json").unwrap_err();
+        let err = ensure_ipynb(Path::new("notes.json")).unwrap_err();
         assert!(err.contains(".ipynb"));
     }
 
@@ -987,32 +1026,42 @@ mod tests {
         .unwrap();
 
         let path_str = path.to_string_lossy().to_string();
-        edit_notebook_file(&NotebookEditInput {
-            path: path_str.clone(),
-            cell_index: 0,
-            mode: Some(EditMode::Replace),
-            source: Some("## Updated\n".to_string()),
-            cell_type: Some("markdown".to_string()),
-        })
+        let cwd = std::env::temp_dir();
+        edit_notebook_file(
+            &NotebookEditInput {
+                path: path_str.clone(),
+                cell_index: 0,
+                mode: Some(EditMode::Replace),
+                source: Some("## Updated\n".to_string()),
+                cell_type: Some("markdown".to_string()),
+            },
+            &cwd,
+        )
         .unwrap();
-        edit_notebook_file(&NotebookEditInput {
-            path: path_str.clone(),
-            cell_index: 1,
-            mode: Some(EditMode::Insert),
-            source: Some("print(42)\n".to_string()),
-            cell_type: Some("code".to_string()),
-        })
+        edit_notebook_file(
+            &NotebookEditInput {
+                path: path_str.clone(),
+                cell_index: 1,
+                mode: Some(EditMode::Insert),
+                source: Some("print(42)\n".to_string()),
+                cell_type: Some("code".to_string()),
+            },
+            &cwd,
+        )
         .unwrap();
-        edit_notebook_file(&NotebookEditInput {
-            path: path_str.clone(),
-            cell_index: 2,
-            mode: Some(EditMode::Delete),
-            source: None,
-            cell_type: None,
-        })
+        edit_notebook_file(
+            &NotebookEditInput {
+                path: path_str.clone(),
+                cell_index: 2,
+                mode: Some(EditMode::Delete),
+                source: None,
+                cell_type: None,
+            },
+            &cwd,
+        )
         .unwrap();
 
-        let edited = read_notebook(&path_str).unwrap();
+        let edited = read_notebook(&path).unwrap();
         let cells = edited.get("cells").and_then(Value::as_array).unwrap();
         assert_eq!(cells.len(), 2);
         assert_eq!(source_to_string(cells[0].get("source")), "## Updated\n");
