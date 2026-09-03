@@ -134,6 +134,45 @@ fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> std::
     child.wait_with_output().expect("acp output")
 }
 
+/// `--sandbox` cannot be applied on the ACP path, so requesting one must stop
+/// the server from starting. The non-ACP path already refuses rather than run
+/// unsandboxed after an explicit opt-in; `--acp` has to hold the same line,
+/// including when the mode arrives via `LIBERTAI_SANDBOX` from the editor's
+/// inherited environment.
+#[test]
+fn acp_refuses_to_start_when_a_sandbox_was_requested() {
+    for env_mode in [None, Some("strict")] {
+        let acp_env = AcpEnv::new();
+        let mut cmd = acp_env.command();
+        match env_mode {
+            Some(mode) => cmd.env("LIBERTAI_SANDBOX", mode),
+            None => cmd.arg("--sandbox=strict"),
+        };
+        let child = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn libertai code --acp with a sandbox request");
+        let output = wait_with_timeout(child, Duration::from_secs(60));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(
+            !output.status.success(),
+            "ACP started despite a sandbox request ({env_mode:?}); stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("--sandbox"),
+            "refusal does not name the flag ({env_mode:?}):\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "refusal wrote to the protocol wire: {:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
 /// Parse stdout as the ACP wire format: newline-delimited JSON-RPC messages.
 /// Fails loudly (printing the offending bytes) on anything else, which is
 /// exactly the failure an editor would hit.

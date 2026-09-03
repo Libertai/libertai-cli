@@ -293,7 +293,9 @@ pub enum Command {
         /// agent. ACP is Zed's editor↔agent standard (also supported by
         /// the JetBrains IDEs); it is line-delimited JSON-RPC 2.0, so
         /// stdout carries protocol frames and nothing else — logs and
-        /// warnings go to stderr. Not for interactive use: point your
+        /// warnings go to stderr. Refuses to start under `--sandbox`
+        /// (or `LIBERTAI_SANDBOX`): the protocol server builds its own
+        /// tools and cannot wrap bash. Not for interactive use: point your
         /// editor at `libertai code --acp`. See the README for Zed and
         /// JetBrains setup.
         #[arg(
@@ -673,7 +675,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             dangerously_skip_permissions,
         } => {
             if acp {
-                return crate::commands::code_acp::run(model, provider);
+                return crate::commands::code_acp::run(model, provider, sandbox);
             }
             crate::commands::code::run(
                 model,
