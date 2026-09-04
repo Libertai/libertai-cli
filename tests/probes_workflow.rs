@@ -70,3 +70,17 @@ fn selftest_async_and_pipeline_prelude_work_offline() {
     .stderr(predicate::str::contains("pipeline: [11,21,31]"))
     .stderr(predicate::str::contains("completed"));
 }
+
+/// A script that never awaits never returns to the drive loop, so the
+/// wall-clock check there cannot fire. Only QuickJS's interrupt callback can
+/// stop it — without one, `libertai code` spun a core for the process
+/// lifetime and the run stayed "running" forever.
+#[test]
+fn selftest_synchronous_infinite_loop_is_interrupted_by_the_timeout() {
+    let mut cmd = selftest_cmd("while (true) {}");
+    cmd.env("LIBERTAI_WORKFLOW_TIMEOUT_SECS", "2");
+    cmd.timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("timeout"));
+}

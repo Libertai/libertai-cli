@@ -388,7 +388,13 @@ impl WorkflowBridge {
     }
 
     fn in_flight(&self) -> u64 {
-        self.in_flight.load(Ordering::Relaxed)
+        // Acquire pairs with the Release on the decrement, so a reader that
+        // sees 0 also sees the completion the task pushed before decrementing.
+        self.in_flight.load(Ordering::Acquire)
+    }
+
+    fn has_pending_completions(&self) -> bool {
+        !self.completions.lock().unwrap().is_empty()
     }
 }
 
@@ -699,6 +705,7 @@ async fn spawn_phase_agent_task(
         ctx.bash_wrapper.clone(),
         prompt,
         spec,
+        Arc::clone(&handle),
     )
     .await;
     let completion = match result {
@@ -729,8 +736,10 @@ async fn spawn_phase_agent_task(
             PendingCompletion::Reject { id, message: e }
         }
     };
+    // Push BEFORE decrementing, and decrement with Release: the drive loop
+    // reads `in_flight` first, so seeing 0 guarantees this push is visible.
     ctx.bridge.completions.lock().unwrap().push(completion);
-    ctx.bridge.in_flight.fetch_sub(1, Ordering::Relaxed);
+    ctx.bridge.in_flight.fetch_sub(1, Ordering::Release);
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,6 +1146,25 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
     // can't escape the `with` closure. The drive loop detects completion via
     // `rt.idle()` + the in-flight counter, not via this return.
     //
+    let timeout_secs = std::env::var(ENV_TIMEOUT_SECS)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let deadline = Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+    // The script body is evaluated synchronously up to its first await, and
+    // a loop that never awaits never returns to the drive loop — so the
+    // wall-clock check there cannot fire and the memory/stack limits above
+    // don't apply either. QuickJS's interrupt callback is the only thing
+    // that can stop `while (true) {}`. Sampled on a counter so the common
+    // case doesn't read the clock on every callback.
+    let mut interrupt_ticks: u32 = 0;
+    rt.set_interrupt_handler(Some(Box::new(move || {
+        interrupt_ticks = interrupt_ticks.wrapping_add(1);
+        interrupt_ticks % 1024 == 0 && Instant::now() > deadline
+    })))
+    .await;
+
     // (WF-A1) The arrow `=>` was missing here — `(async () {…})()` is a
     // SyntaxError, so every script failed instantly and the run still
     // reported "completed (0 agents)". The `.then` chain (WF-D) captures
@@ -1165,7 +1193,13 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
     // code logged and fell through to "completed (0 agents)".
     let mut eval_failed: Option<String> = None;
     if let Err(e) = eval_ok {
-        let msg = format!("script error: {e}");
+        // Past the deadline the error is the interrupt handler firing, not a
+        // bug in the script — say which.
+        let msg = if Instant::now() > deadline {
+            format!("script exceeded the {timeout_secs}s workflow timeout without awaiting")
+        } else {
+            format!("script error: {e}")
+        };
         if let Some(on_update) = &ctx.on_update {
             on_update(ToolUpdate {
                 content: vec![ContentBlock::Text(TextContent::new(format!(
@@ -1181,12 +1215,6 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
         }
         eval_failed = Some(msg);
     }
-
-    let timeout_secs = std::env::var(ENV_TIMEOUT_SECS)
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_TIMEOUT_SECS);
-    let deadline = Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     let mut timed_out = false;
     loop {
@@ -1231,9 +1259,14 @@ async fn run_workflow_async(ctx: &WorkflowRunCtx) -> WorkflowRunResult {
         // Drain JS microtasks (resolve/reject callbacks, promise chains).
         rt.idle().await;
 
-        // Termination: JS idle AND no in-flight subagents.
+        // Termination: JS idle, no in-flight subagents, and nothing left in
+        // the completion queue. The queue must be checked, and checked AFTER
+        // `in_flight`: a task pushes its completion and only then decrements,
+        // so `in_flight == 0` alone can hold with a completion still queued —
+        // breaking there strands the `await agent(...)` that was waiting on it
+        // and the run reports success with no result.
         let js_idle = !rt.is_job_pending().await;
-        if js_idle && ctx.bridge.in_flight() == 0 {
+        if js_idle && ctx.bridge.in_flight() == 0 && !ctx.bridge.has_pending_completions() {
             break;
         }
         // Wall-clock safety net.
@@ -1725,6 +1758,7 @@ async fn run_phase_agent(
     bash_command_wrapper: Option<Vec<String>>,
     prompt: String,
     spec: PhaseAgentSpec,
+    agent_handle: Arc<AgentHandle>,
 ) -> Result<PhaseAgentResult, String> {
     let filtered = spec.tools;
     let prompt = match &spec.schema {
@@ -1786,11 +1820,12 @@ async fn run_phase_agent(
         .await
         .map_err(|e| format!("session init failed: {e}"))?;
     handle.set_max_tokens(Some(DEFAULT_MAX_TOKENS));
+    // The registry slot starts empty (`AgentRegistration` has no abort
+    // field), so it must be filled here or `/agents` stop and Cmd::StopAgent
+    // find nothing to abort and the agent runs to the timeout. Mirrors
+    // `code_task`'s register → set_abort → prompt_with_abort order.
     let (abort_handle, abort_signal) = AbortHandle::new();
-    // The handle's abort slot was already set during registration in the
-    // caller; re-setting here would clobber. Instead we keep the signal
-    // for prompt_with_abort and rely on the WorkflowAgentGuard for cleanup.
-    let _ = abort_handle;
+    agent_handle.set_abort(abort_handle);
 
     // (WF-C) Capture the validated structured_output payload from the
     // agent's tool events (interior mutability — the event callback is a
@@ -1823,6 +1858,34 @@ async fn run_phase_agent(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+
+    /// The drive loop's termination test must consider the completion queue,
+    /// not just `in_flight`: a finished task pushes its completion and only
+    /// then decrements the counter, so this exact state — counter at zero,
+    /// completion still queued — is reachable, and breaking there strands the
+    /// `await agent(...)` waiting on it.
+    #[test]
+    fn bridge_reports_pending_completions_after_in_flight_hits_zero() {
+        let bridge = WorkflowBridge::new();
+        bridge.in_flight.fetch_add(1, Ordering::Relaxed);
+        bridge
+            .completions
+            .lock()
+            .unwrap()
+            .push(PendingCompletion::Resolve {
+                id: "wf-call-1".to_string(),
+                json: "\"done\"".to_string(),
+            });
+        bridge.in_flight.fetch_sub(1, Ordering::Release);
+
+        assert_eq!(bridge.in_flight(), 0);
+        assert!(
+            bridge.has_pending_completions(),
+            "a queued completion must keep the drive loop alive"
+        );
+        assert_eq!(bridge.drain_completions().len(), 1);
+        assert!(!bridge.has_pending_completions(), "drained");
+    }
 
     struct AllowingUi;
 
