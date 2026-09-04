@@ -46,6 +46,7 @@ use serde_json::json;
 use crate::commands::chat_render::MarkdownStream;
 use crate::commands::code_approvals::ApprovalState;
 use crate::commands::code_factory::{is_path_edit_tool, Mode, ModeFlag};
+use crate::commands::code_sandbox::SandboxMode;
 use crate::config::Config as LibertaiConfig;
 
 /// ANSI dim/bold helpers for cooked output (agent streaming phase).
@@ -1839,6 +1840,13 @@ pub(crate) struct BackgroundAgentLaunch {
     /// Optional sub-agent to run the session as. Emitted as
     /// `--agent <name>` on the spawned `libertai code` argv.
     pub agent: Option<String>,
+    /// Sandbox mode the parent resolved. Emitted as `--sandbox <mode>` so
+    /// the detached child sandboxes bash the same way the parent would —
+    /// the child cannot re-derive it, since only the parent saw the flag.
+    pub sandbox: SandboxMode,
+    /// Session file to resume, already resolved by the parent. Emitted as
+    /// `--resume <path>`.
+    pub resume_path: Option<PathBuf>,
     /// Team name when this run is a teammate in a team. Emitted as
     /// `LIBERTAI_TEAM=<name>` env var on the child process so the
     /// child's factory registers the `team_task` tool.
@@ -1857,6 +1865,10 @@ pub(crate) struct BackgroundAgentLaunch {
 pub(crate) struct StartedBackgroundAgent {
     pub pid: u32,
     pub log_path: PathBuf,
+    /// Spawn timestamp. The run id derives from it, so callers must print
+    /// THIS value: a second clock read yields a different id than the one
+    /// persisted in the record.
+    pub started_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1925,7 +1937,11 @@ pub(crate) fn start_background_agent(
 fn started_background_agent(child: Child, log_path: PathBuf) -> StartedBackgroundAgent {
     let pid = child.id();
     reap_in_background(child);
-    StartedBackgroundAgent { pid, log_path }
+    StartedBackgroundAgent {
+        pid,
+        log_path,
+        started_at_ms: now_epoch_ms(),
+    }
 }
 
 /// Waits on `child` from a detached thread so it can't linger as a zombie.
@@ -2003,8 +2019,30 @@ fn background_agent_args(exe: &Path, launch: &BackgroundAgentLaunch) -> Vec<Stri
             args.push(agent.clone());
         }
     }
+    // The parent already resolved `auto`, so only a concrete mode is
+    // emitted. Off is the default — leaving it off keeps the argv (and the
+    // `libertai agents` listing) unchanged for the common case.
+    if launch.sandbox != SandboxMode::Off {
+        if let Some(label) = sandbox_mode_label(launch.sandbox) {
+            args.push("--sandbox".to_string());
+            args.push(label);
+        }
+    }
+    if let Some(resume) = launch.resume_path.as_ref() {
+        args.push("--resume".to_string());
+        args.push(resume.display().to_string());
+    }
     args.push(launch.prompt.clone());
     args
+}
+
+/// The `--sandbox=<mode>` value string for a resolved mode, from clap's
+/// own value-enum names so the argv can never drift from what the CLI
+/// accepts.
+fn sandbox_mode_label(mode: SandboxMode) -> Option<String> {
+    use clap::ValueEnum;
+    mode.to_possible_value()
+        .map(|value| value.get_name().to_string())
 }
 
 fn is_lcode_executable(exe: &Path) -> bool {
@@ -2054,7 +2092,7 @@ fn background_agent_record(
 ) -> BackgroundAgentRecord {
     let mut launched_argv = vec![exe.display().to_string()];
     launched_argv.extend(background_agent_args(exe, launch));
-    let started_at_ms = now_epoch_ms();
+    let started_at_ms = started.started_at_ms;
     BackgroundAgentRecord {
         pid: started.pid,
         run_id: background_agent_run_id(started.pid, started_at_ms),
@@ -5863,6 +5901,8 @@ mod tests {
             prompt: "Use the task tool".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             agent: None,
+            sandbox: SandboxMode::Off,
+            resume_path: None,
             team: None,
             teammate_name: None,
             approval_socket_path: None,
@@ -5897,6 +5937,92 @@ mod tests {
     }
 
     #[test]
+    fn background_agent_args_emit_sandbox_and_resume() {
+        // Both are resolved by the parent and cannot be re-derived by the
+        // child, so they have to travel on the argv. Without them a
+        // `--bg --sandbox=strict` run is silently unsandboxed and a
+        // `--bg --continue` run silently starts a fresh session.
+        let launch = BackgroundAgentLaunch {
+            name: "reviewer".to_string(),
+            provider: String::new(),
+            model: String::new(),
+            mode: Mode::Normal,
+            prompt: "Run review".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            agent: None,
+            sandbox: SandboxMode::Strict,
+            resume_path: Some(PathBuf::from("/tmp/sessions/one.jsonl")),
+            team: None,
+            teammate_name: None,
+            approval_socket_path: None,
+        };
+        assert_eq!(
+            background_agent_args(Path::new("/usr/bin/lcode"), &launch),
+            vec![
+                "--print",
+                "--sandbox",
+                "strict",
+                "--resume",
+                "/tmp/sessions/one.jsonl",
+                "Run review"
+            ]
+        );
+    }
+
+    #[test]
+    fn background_agent_args_omit_default_sandbox() {
+        let launch = BackgroundAgentLaunch {
+            name: "reviewer".to_string(),
+            provider: String::new(),
+            model: String::new(),
+            mode: Mode::Normal,
+            prompt: "Run review".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            agent: None,
+            sandbox: SandboxMode::Off,
+            resume_path: None,
+            team: None,
+            teammate_name: None,
+            approval_socket_path: None,
+        };
+        assert_eq!(
+            background_agent_args(Path::new("/usr/bin/lcode"), &launch),
+            vec!["--print", "Run review"]
+        );
+    }
+
+    #[test]
+    fn started_background_agent_run_id_matches_the_persisted_record() {
+        // The announced run id and the record's id come from one timestamp;
+        // a second clock read makes `libertai agents` find no such run.
+        let launch = BackgroundAgentLaunch {
+            name: "reviewer".to_string(),
+            provider: String::new(),
+            model: String::new(),
+            mode: Mode::Normal,
+            prompt: "Run review".to_string(),
+            cwd: PathBuf::from("/tmp/project"),
+            agent: None,
+            sandbox: SandboxMode::Off,
+            resume_path: None,
+            team: None,
+            teammate_name: None,
+            approval_socket_path: None,
+        };
+        let started = StartedBackgroundAgent {
+            pid: 4242,
+            log_path: PathBuf::from("/tmp/reviewer.log"),
+            started_at_ms: 1_700_000_000_000,
+        };
+        let record = background_agent_record(&launch, &started, Path::new("/usr/bin/lcode"));
+        assert_eq!(record.started_at_ms, started.started_at_ms);
+        assert_eq!(
+            record.run_id,
+            background_agent_run_id(started.pid, started.started_at_ms)
+        );
+    }
+
+    #[test]
     fn background_agent_args_skip_empty_provider_model_and_accept_edits_flag() {
         let launch = BackgroundAgentLaunch {
             name: "reviewer".to_string(),
@@ -5906,6 +6032,8 @@ mod tests {
             prompt: "Run review".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             agent: None,
+            sandbox: SandboxMode::Off,
+            resume_path: None,
             team: None,
             teammate_name: None,
             approval_socket_path: None,
@@ -5926,6 +6054,8 @@ mod tests {
             prompt: "Run review\nwith details".to_string(),
             cwd: PathBuf::from("/tmp/project"),
             agent: None,
+            sandbox: SandboxMode::Off,
+            resume_path: None,
             team: None,
             teammate_name: None,
             approval_socket_path: None,
@@ -5933,6 +6063,7 @@ mod tests {
         let started = StartedBackgroundAgent {
             pid: 4242,
             log_path: PathBuf::from("/tmp/reviewer.log"),
+            started_at_ms: 1_700_000_000_000,
         };
         let record = background_agent_record(&launch, &started, Path::new("/usr/bin/lcode"));
         assert_eq!(record.pid, 4242);

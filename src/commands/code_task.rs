@@ -324,6 +324,9 @@ impl Tool for TaskTool {
         features.image = false;
         let cfg = Arc::new(cfg.clone());
         let factory = LibertaiToolFactory {
+            // Subagents run in-process; nothing here spawns a `libertai code`
+            // that would need the mode back on its argv.
+            sandbox: crate::commands::code_sandbox::SandboxMode::Off,
             mode: self.mode.clone(),
             approvals: Arc::clone(&self.approvals),
             ui: Arc::clone(&self.ui),

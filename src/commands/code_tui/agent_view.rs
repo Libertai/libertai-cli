@@ -661,6 +661,10 @@ fn dispatch(
         mode: config.mode,
         prompt: prompt.to_string(),
         cwd,
+        // `libertai agents` has no `--sandbox` flag of its own, so there is
+        // no session sandbox to inherit here.
+        sandbox: crate::commands::code_sandbox::SandboxMode::Off,
+        resume_path: None,
         team: None,
         teammate_name: None,
         agent: config.agent.clone(),

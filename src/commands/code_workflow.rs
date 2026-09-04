@@ -1735,6 +1735,9 @@ async fn run_phase_agent(
     let mut features = crate::commands::code_factory::FactoryFeatures::cli_defaults();
     features.image = false;
     let factory = LibertaiToolFactory {
+        // Phase agents run in-process; nothing here spawns a `libertai code`
+        // that would need the mode back on its argv.
+        sandbox: crate::commands::code_sandbox::SandboxMode::Off,
         mode: mode.clone(),
         approvals: Arc::clone(&approvals),
         ui: Arc::clone(&ui),

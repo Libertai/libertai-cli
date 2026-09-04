@@ -130,24 +130,6 @@ pub fn run(
         Some(build_oneshot_prompt(&args, print)?)
     };
 
-    // --bg: spawn a detached `libertai code` for the prompt and return
-    // to the shell. The run shows up in `libertai agents`. Requires a
-    // prompt (the trailing args); conflicts with --print (enforced by
-    // clap) and the interactive REPL.
-    if bg {
-        return run_background(
-            &cfg,
-            &model,
-            &provider,
-            mode,
-            name,
-            agent,
-            team,
-            teammate,
-            oneshot_prompt,
-        );
-    }
-
     // Resolve --resume / --continue into an explicit session path, if any.
     let resume_path = resolve_resume_path(resume, continue_recent, print)?;
 
@@ -160,6 +142,10 @@ pub fn run(
     // When the user explicitly asked for strict, bail loudly if the
     // platform/distro can't deliver it — silently running unsandboxed
     // when the user opted in is worse than refusing to start.
+    //
+    // Sandbox and resume resolution both precede the `--bg` branch: the
+    // detached child needs them on its argv, and an unavailable strict
+    // sandbox must refuse to start on every path, not just this one.
     if matches!(sandbox, SandboxMode::Strict) {
         if let Some(reason) = strict_support_error() {
             anyhow::bail!(
@@ -168,6 +154,32 @@ pub fn run(
             );
         }
     }
+
+    // --agent applies to every path. Resolving it here (rather than only
+    // under --bg) is what makes `--print --agent <name>` honour the
+    // sub-agent — the argv that `background_agent_args` emits for a
+    // teammate, and what `libertai agents --agent` runs.
+    let (model, oneshot_prompt) = resolve_agent_dispatch(agent.as_deref(), &model, oneshot_prompt)?;
+
+    // --bg: spawn a detached `libertai code` for the prompt and return
+    // to the shell. The run shows up in `libertai agents`. Requires a
+    // prompt (the trailing args); conflicts with --print (enforced by
+    // clap) and the interactive REPL.
+    if bg {
+        return run_background(
+            &cfg,
+            &model,
+            &provider,
+            mode,
+            sandbox,
+            resume_path,
+            name,
+            team,
+            teammate,
+            oneshot_prompt,
+        );
+    }
+
     let bash_command_wrapper = build_command_wrapper(
         sandbox,
         &std::env::current_dir().map_err(|e| anyhow::anyhow!("cwd lookup failed: {e}"))?,
@@ -247,7 +259,8 @@ pub fn run(
             ))
             // (M4/#23) Thread the parent's bash wrapper so spawned subagents
             // inherit the sandbox.
-            .with_bash_command_wrapper(bash_command_wrapper.clone()),
+            .with_bash_command_wrapper(bash_command_wrapper.clone())
+            .with_sandbox(sandbox),
         );
 
         runtime.block_on(async move {
@@ -276,6 +289,7 @@ pub fn run(
             mode,
             resume_path,
             bash_command_wrapper,
+            sandbox,
             Arc::new(cfg),
             crate::commands::code_team::AgentRegistry::new(),
         )
@@ -386,13 +400,65 @@ fn prompt_bypass_consent() -> Result<()> {
 /// child receives the already-embedded prompt, so the launch's `agent`
 /// field is left `None`.
 #[allow(clippy::too_many_arguments)]
+/// Resolve `--agent <name>` for every launch path: validate the name
+/// against the discovered sub-agents, apply the agent's model override,
+/// and rewrite the prompt into a task-tool dispatch.
+///
+/// The name is validated even with no prompt (the interactive REPL), so a
+/// typo fails loudly instead of silently running the default agent.
+fn resolve_agent_dispatch(
+    agent: Option<&str>,
+    model: &str,
+    prompt: Option<String>,
+) -> Result<(String, Option<String>)> {
+    let Some(agent_name) = agent.map(str::trim).filter(|n| !n.is_empty()) else {
+        return Ok((model.to_string(), prompt));
+    };
+    let cwd = std::env::current_dir().map_err(|e| anyhow::anyhow!("cwd lookup failed: {e}"))?;
+    let agents = crate::commands::code_agents::discover_agents(&cwd)?;
+    let agent_def = agents
+        .iter()
+        .find(|a| a.name == agent_name)
+        .or_else(|| agents.iter().find(|a| a.name.starts_with(agent_name)))
+        .ok_or_else(|| {
+            let suffix = if agents.is_empty() {
+                "no named sub-agents are configured".to_string()
+            } else {
+                format!(
+                    "available sub-agents: {}",
+                    agents
+                        .iter()
+                        .map(|a| a.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            anyhow::anyhow!("unknown agent `{agent_name}` ({suffix})")
+        })?;
+    let resolved_model = agent_def.model.as_deref().unwrap_or(model).to_string();
+    let dispatch = prompt.map(|prompt| {
+        let isolation = if agent_def.worktree {
+            " and isolation: \"worktree\""
+        } else {
+            ""
+        };
+        format!(
+            "Use the task tool with subagent_type \"{}\"{} for this focused task:\n\n{}\n\nReturn the named sub-agent's findings and cite any files or commands it used.",
+            agent_def.name, isolation, prompt
+        )
+    });
+    Ok((resolved_model, dispatch))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_background(
     _cfg: &LibertaiConfig,
     model: &str,
     provider: &str,
     mode: Mode,
+    sandbox: SandboxMode,
+    resume_path: Option<PathBuf>,
     name: Option<String>,
-    agent: Option<String>,
     team: Option<String>,
     teammate: Option<String>,
     prompt: Option<String>,
@@ -402,49 +468,7 @@ fn run_background(
     };
     let prompt = prompt
         .ok_or_else(|| anyhow::anyhow!("--bg requires a prompt (pass it as trailing args)"))?;
-
-    // --agent <name>: load the agent definition, build a task-tool
-    // dispatch prompt, and apply the agent's model override if any.
-    let (model, prompt) = if let Some(agent_name) = agent.as_ref() {
-        let cwd = std::env::current_dir().map_err(|e| anyhow::anyhow!("cwd lookup failed: {e}"))?;
-        let agents = crate::commands::code_agents::discover_agents(&cwd)?;
-        let agent_def = agents
-            .iter()
-            .find(|a| a.name == agent_name.as_str())
-            .or_else(|| {
-                agents
-                    .iter()
-                    .find(|a| a.name.starts_with(agent_name.as_str()))
-            })
-            .ok_or_else(|| {
-                let suffix = if agents.is_empty() {
-                    "no named sub-agents are configured".to_string()
-                } else {
-                    format!(
-                        "available sub-agents: {}",
-                        agents
-                            .iter()
-                            .map(|a| a.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                };
-                anyhow::anyhow!("unknown agent `{agent_name}` ({suffix})")
-            })?;
-        let isolation = if agent_def.worktree {
-            " and isolation: \"worktree\""
-        } else {
-            ""
-        };
-        let task_prompt = format!(
-            "Use the task tool with subagent_type \"{}\"{} for this focused task:\n\n{}\n\nReturn the named sub-agent's findings and cite any files or commands it used.",
-            agent_def.name, isolation, prompt
-        );
-        let resolved_model = agent_def.model.as_deref().unwrap_or(model).to_string();
-        (resolved_model, task_prompt)
-    } else {
-        (model.to_string(), prompt)
-    };
+    let model = model.to_string();
 
     let display_name = name.unwrap_or_else(|| slug_from_prompt(&prompt));
     let cwd = std::env::current_dir().map_err(|e| anyhow::anyhow!("cwd lookup failed: {e}"))?;
@@ -456,16 +480,14 @@ fn run_background(
         prompt,
         cwd,
         agent: None,
+        sandbox,
+        resume_path,
         team,
         teammate_name: teammate,
         approval_socket_path: None,
     };
     let started = start_background_agent(&launch)?;
-    let started_at_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let run_id = background_agent_run_id(started.pid, started_at_ms);
+    let run_id = background_agent_run_id(started.pid, started.started_at_ms);
     println!("backgrounded · {run_id} · {display_name}");
     println!("  libertai agents             open the agent view");
     println!("  libertai agents --json      machine-readable listing");
