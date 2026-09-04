@@ -246,6 +246,10 @@ pub struct LibertaiToolFactory {
     /// when the parent runs with no wrapper (`SandboxMode::Off`, the
     /// default).
     pub bash_command_wrapper: Option<Vec<String>>,
+    /// Sandbox mode this session resolved. Only needed by tools that spawn
+    /// a fresh `libertai code` process (`spawn_team`) and so must put the
+    /// mode back on its argv; in-process bash uses `bash_command_wrapper`.
+    pub sandbox: crate::commands::code_sandbox::SandboxMode,
     /// (M5/#7) Override the cwd the `skill` tool scans for skills. The
     /// subagent factory sets this to the PARENT's cwd (the dir the
     /// subagent's skill prompt was built from), because a subagent runs
@@ -319,6 +323,7 @@ impl LibertaiToolFactory {
             team,
             teammate_name,
             bash_command_wrapper: None,
+            sandbox: crate::commands::code_sandbox::SandboxMode::Off,
             skill_cwd: None,
             context_snapshot: None,
             cron_store: None,
@@ -354,6 +359,7 @@ impl LibertaiToolFactory {
             team,
             teammate_name,
             bash_command_wrapper: None,
+            sandbox: crate::commands::code_sandbox::SandboxMode::Off,
             skill_cwd: None,
             context_snapshot: None,
             cron_store: None,
@@ -392,6 +398,7 @@ impl LibertaiToolFactory {
             team,
             teammate_name,
             bash_command_wrapper: None,
+            sandbox: crate::commands::code_sandbox::SandboxMode::Off,
             skill_cwd: None,
             context_snapshot: None,
             cron_store: None,
@@ -443,6 +450,14 @@ impl LibertaiToolFactory {
     /// session build time from `code_sandbox::build_command_wrapper`.
     pub fn with_bash_command_wrapper(mut self, wrapper: Option<Vec<String>>) -> Self {
         self.bash_command_wrapper = wrapper;
+        self
+    }
+
+    /// Set the resolved sandbox mode, so `spawn_team` can pass it on to the
+    /// teammate processes it launches.
+    #[must_use]
+    pub fn with_sandbox(mut self, sandbox: crate::commands::code_sandbox::SandboxMode) -> Self {
+        self.sandbox = sandbox;
         self
     }
 
@@ -514,6 +529,7 @@ impl LibertaiToolFactory {
             teammate_name: self.teammate_name.clone(),
             // Subagents inherit the parent's bash wrapper (M4/#23).
             bash_command_wrapper: self.bash_command_wrapper.clone(),
+            sandbox: self.sandbox,
             // Subagents inherit the skill-scan override (the parent cwd)
             // so their `skill` tool scans the dir their prompt was built
             // from, not their worktree (M5/#7).
@@ -699,6 +715,7 @@ impl ToolFactory for LibertaiToolFactory {
                     cwd.to_path_buf(),
                     self.mode.clone(),
                     Arc::clone(&self.registry),
+                    self.sandbox,
                 )),
                 Arc::clone(&self.approvals),
                 self.mode.clone(),

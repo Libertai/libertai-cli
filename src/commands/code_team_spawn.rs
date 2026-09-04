@@ -14,7 +14,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -180,6 +179,7 @@ pub fn spawn_team(
     provider: &str,
     model: &str,
     mode: Mode,
+    sandbox: crate::commands::code_sandbox::SandboxMode,
     registry: Option<&crate::commands::code_team::AgentRegistry>,
     approval_socket_path: Option<&std::path::Path>,
 ) -> Result<Vec<SpawnedTeammate>> {
@@ -204,15 +204,19 @@ pub fn spawn_team(
             prompt: format_teammate_prompt(&teammate.task, team_name, &teammate.name),
             cwd: cwd.to_path_buf(),
             agent: Some(teammate.agent.clone()),
+            sandbox,
+            // A teammate always starts a fresh session.
+            resume_path: None,
             team: Some(team_name.to_string()),
             teammate_name: Some(teammate.name.clone()),
             approval_socket_path: approval_socket_path.map(std::path::PathBuf::from),
         };
         let started = start_background_agent(&launch)
             .with_context(|| format!("spawning teammate `{}`", teammate.name))?;
-        // run_id needs a timestamp; compute it right after spawn, mirroring
-        // code_ui::background_agent_record which calls now_epoch_ms() post-spawn.
-        let started_at_ms = now_epoch_ms();
+        // The run id must come from the spawn timestamp the record was
+        // persisted with; a second clock read here yields an id that matches
+        // no record.
+        let started_at_ms = started.started_at_ms;
         let run_id = background_agent_run_id(started.pid, started_at_ms);
 
         // Register the teammate in the parent's agent registry so the
@@ -359,15 +363,6 @@ fn clip(s: &str, max: usize) -> String {
     }
     let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
     format!("{}…", &s[..end])
-}
-
-/// Current epoch time in milliseconds. Matches `code_ui::now_epoch_ms`
-/// (which is private there), used to stamp a `run_id` right after spawn.
-fn now_epoch_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

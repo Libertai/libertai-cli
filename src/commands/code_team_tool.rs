@@ -55,14 +55,23 @@ pub struct SpawnTeamTool {
     cwd: PathBuf,
     mode: ModeFlag,
     registry: Arc<AgentRegistry>,
+    /// Passed to every teammate's argv so a sandboxed session doesn't spawn
+    /// unsandboxed teammates.
+    sandbox: crate::commands::code_sandbox::SandboxMode,
 }
 
 impl SpawnTeamTool {
-    pub fn new(cwd: PathBuf, mode: ModeFlag, registry: Arc<AgentRegistry>) -> Self {
+    pub fn new(
+        cwd: PathBuf,
+        mode: ModeFlag,
+        registry: Arc<AgentRegistry>,
+        sandbox: crate::commands::code_sandbox::SandboxMode,
+    ) -> Self {
         Self {
             cwd,
             mode,
             registry,
+            sandbox,
         }
     }
 }
@@ -207,6 +216,7 @@ impl Tool for SpawnTeamTool {
             &provider,
             &model,
             self.mode.get(),
+            self.sandbox,
             Some(&self.registry),
             approval_socket_path.as_deref(),
         ) {
@@ -294,6 +304,7 @@ mod tests {
             PathBuf::from("/tmp"),
             ModeFlag::new(crate::commands::code_factory::Mode::Normal),
             AgentRegistry::new(),
+            crate::commands::code_sandbox::SandboxMode::Off,
         )
         .parameters();
         assert_eq!(tool_schema["required"], schema["required"]);

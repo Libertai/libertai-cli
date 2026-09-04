@@ -497,6 +497,10 @@ pub struct App {
     /// shell escape. Seeded in `run()` from the same local passed to
     /// `spawn_background`/`build_session`.
     pub bash_command_wrapper: Option<Vec<String>>,
+    /// Sandbox mode this session resolved. Children spawned from the TUI
+    /// (`/agent`, teammates) must be launched with the same mode — they
+    /// cannot re-derive it, since only the parent process saw the flag.
+    pub sandbox: crate::commands::code_sandbox::SandboxMode,
     /// Custom slash commands discovered at startup via
     /// `code_slash_registry::discover`. Tier 3 of `handle_slash_command`
     /// resolves against this cache. A `/reload` could re-discover later
@@ -1022,6 +1026,7 @@ async fn build_session(
     registry: Arc<AgentRegistry>,
     resume_path: Option<PathBuf>,
     bash_command_wrapper: Option<Vec<String>>,
+    sandbox: crate::commands::code_sandbox::SandboxMode,
     agent_tx: &mpsc::Sender<AgentMsg>,
     approvals: Arc<ApprovalState>,
     edit_journal: Arc<EditJournal>,
@@ -1047,6 +1052,7 @@ async fn build_session(
         // (M4/#23) Thread the parent's bash wrapper so spawned subagents
         // inherit the sandbox.
         .with_bash_command_wrapper(bash_command_wrapper.clone())
+        .with_sandbox(sandbox)
         // (M5/#16) Share the context snapshot so `context_status` +
         // `request_compaction` read the same atomics the main-thread
         // `Usage` handler writes + `TurnEnd` drains.
@@ -1429,6 +1435,7 @@ fn spawn_background(
     registry: Arc<AgentRegistry>,
     resume_path: Option<PathBuf>,
     bash_command_wrapper: Option<Vec<String>>,
+    sandbox: crate::commands::code_sandbox::SandboxMode,
     approvals: Arc<ApprovalState>,
     edit_journal: Arc<EditJournal>,
     context_snapshot: Arc<code_context_tool::ContextSnapshot>,
@@ -1464,6 +1471,7 @@ fn spawn_background(
                 Arc::clone(&registry),
                 resume_path,
                 bash_command_wrapper.clone(),
+                sandbox,
                 &agent_tx,
                 Arc::clone(&approvals),
                 Arc::clone(&edit_journal),
@@ -1791,6 +1799,7 @@ fn spawn_background(
                             Arc::clone(&registry),
                             None, // fresh session
                             bash_command_wrapper.clone(),
+                            sandbox,
                             &agent_tx,
                             Arc::clone(&approvals),
                             Arc::clone(&edit_journal),
@@ -2350,6 +2359,7 @@ pub fn run(
     initial_mode: Mode,
     resume_path: Option<PathBuf>,
     bash_command_wrapper: Option<Vec<String>>,
+    sandbox: crate::commands::code_sandbox::SandboxMode,
     cfg: Arc<LibertaiConfig>,
     registry: Arc<AgentRegistry>,
 ) -> anyhow::Result<()> {
@@ -2534,6 +2544,7 @@ pub fn run(
         Arc::clone(&registry),
         resume_path,
         bash_command_wrapper,
+        sandbox,
         approvals_for_bg,
         edit_journal_for_bg,
         context_snapshot_for_bg,
@@ -2619,6 +2630,7 @@ pub fn run(
         last_shell_command: None,
         pending_shell_contexts: Vec::new(),
         bash_command_wrapper: bash_command_wrapper_for_app,
+        sandbox,
         custom_commands: Vec::new(),
         pr_comment_drafts: Vec::new(),
         dirty: true, // force the first frame (run_loop only draws when dirty)
@@ -4447,12 +4459,14 @@ fn build_team_invocation(
 /// Supported form: `/agent <agent> <task...>` (the `<agent>` is a sub-agent
 /// name; the remainder is the task prompt). The launch is marked as a plain
 /// background run (no team / teammate context).
+#[allow(clippy::too_many_arguments)]
 fn build_agent_invocation(
     rest: &str,
     cwd: &Path,
     provider: &str,
     model: &str,
     mode: Mode,
+    sandbox: crate::commands::code_sandbox::SandboxMode,
     approval_socket_path: Option<&std::path::Path>,
 ) -> anyhow::Result<BackgroundAgentLaunch> {
     let rest = rest.trim();
@@ -4472,6 +4486,9 @@ fn build_agent_invocation(
         prompt: task.to_string(),
         cwd: cwd.to_path_buf(),
         agent: Some(name.to_string()),
+        sandbox,
+        // A `/agent` run resumes nothing — it is a fresh task session.
+        resume_path: None,
         team: None,
         teammate_name: None,
         // (Issue-1) A background `/agent` run spawned from inside the TUI
@@ -7362,6 +7379,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                         &provider,
                         &model,
                         mode,
+                        app.sandbox,
                         Some(&app.registry),
                         app.approval_socket_path.as_deref(),
                     ) {
@@ -7435,6 +7453,7 @@ fn handle_slash_command(app: &mut App, input: &str, cmd_tx: &mpsc::Sender<Cmd>) 
                 &provider,
                 &model,
                 mode,
+                app.sandbox,
                 app.approval_socket_path.as_deref(),
             ) {
                 Ok(launch) => {
@@ -9240,6 +9259,7 @@ mod tests {
             last_shell_command: None,
             pending_shell_contexts: Vec::new(),
             bash_command_wrapper: None,
+            sandbox: crate::commands::code_sandbox::SandboxMode::Off,
             custom_commands: Vec::new(),
             pr_comment_drafts: Vec::new(),
             dirty: true,
@@ -11654,11 +11674,18 @@ task = "Do the thing"
             "openai",
             "gpt-4o",
             Mode::AcceptEdits,
+            crate::commands::code_sandbox::SandboxMode::Strict,
             None,
         )
         .expect("agent parses");
         assert_eq!(launch.name, "coder");
         assert_eq!(launch.prompt, "fix the parser");
+        // The session's sandbox reaches the spawned child's argv — without
+        // it a sandboxed session spawns unsandboxed agents.
+        assert_eq!(
+            launch.sandbox,
+            crate::commands::code_sandbox::SandboxMode::Strict
+        );
         assert_eq!(launch.provider, "openai");
         assert_eq!(launch.model, "gpt-4o");
         assert_eq!(launch.mode, Mode::AcceptEdits);
@@ -11685,6 +11712,7 @@ task = "Do the thing"
             "openai",
             "gpt-4o",
             Mode::Normal,
+            crate::commands::code_sandbox::SandboxMode::Off,
             Some(sock.as_path()),
         )
         .expect("agent parses");
@@ -12501,16 +12529,32 @@ task = "Do the thing"
     #[test]
     fn build_agent_invocation_missing_task_is_usage_error() {
         let cwd = PathBuf::from(".");
-        let err = build_agent_invocation("coder", &cwd, "openai", "gpt-4o", Mode::Normal, None)
-            .expect_err("no task should error");
+        let err = build_agent_invocation(
+            "coder",
+            &cwd,
+            "openai",
+            "gpt-4o",
+            Mode::Normal,
+            crate::commands::code_sandbox::SandboxMode::Off,
+            None,
+        )
+        .expect_err("no task should error");
         assert!(format!("{err:#}").contains("usage:"), "err: {err:#}");
     }
 
     #[test]
     fn build_agent_invocation_empty_is_usage_error() {
         let cwd = PathBuf::from(".");
-        let err = build_agent_invocation("   ", &cwd, "openai", "gpt-4o", Mode::Normal, None)
-            .expect_err("empty rest should error");
+        let err = build_agent_invocation(
+            "   ",
+            &cwd,
+            "openai",
+            "gpt-4o",
+            Mode::Normal,
+            crate::commands::code_sandbox::SandboxMode::Off,
+            None,
+        )
+        .expect_err("empty rest should error");
         assert!(format!("{err:#}").contains("usage:"), "err: {err:#}");
     }
 
