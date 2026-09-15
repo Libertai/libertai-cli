@@ -2533,6 +2533,10 @@ pub fn run(
     // read-only slash arms (`/changelog`, `/tree`, `/pr_comments`) shell out
     // against a stable path instead of re-resolving `current_dir()` per call.
     let session_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // Replay path for `--continue`/`--resume` transcript seeding below. The
+    // `resume_path` value itself moves into `spawn_background`, so snapshot
+    // it first.
+    let replay_resume_path = resume_path.clone();
     let _bg_thread = spawn_background(
         agent_tx,
         cmd_rx,
@@ -2651,6 +2655,24 @@ pub fn run(
     app.transcript
         .push(TranscriptEntry::System(welcome_entry(&app.bar.model_label)));
     app.transcript.push(TranscriptEntry::Blank);
+
+    // `--continue`/`--resume`: seed the scrollback with the prior
+    // conversation so the TUI opens on the resumed history instead of a
+    // blank screen. (The agent-side history is rehydrated by pi from the
+    // same file — this is display-only.) Skipped when the replay yields
+    // nothing (unreadable/empty file), leaving just the banner.
+    if let Some(resume) = replay_resume_path.as_ref() {
+        let replayed = replay_resume_entries(resume);
+        if !replayed.is_empty() {
+            app.transcript.push(TranscriptEntry::System(format!(
+                "→ resumed {} messages from {}",
+                replayed.len(),
+                resume.display()
+            )));
+            app.transcript.extend(replayed);
+            app.transcript.push(TranscriptEntry::Blank);
+        }
+    }
 
     // Discover custom slash commands once at startup (cheap filesystem
     // scan) so Tier 3 of `handle_slash_command` can resolve them without a
@@ -8340,6 +8362,167 @@ fn autoscroll(app: &mut App) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Resume replay (--continue / --resume)
+// ---------------------------------------------------------------------------
+
+/// Cap on the number of transcript entries replayed from a resumed session
+/// file. Mirrors the live ring buffer's [`MAX_TRANSCRIPT_ENTRIES`] bound so
+/// a huge prior session cannot flood (or dominate the startup cost of) the
+/// scrollback; older entries simply drop off the top like the live ring.
+pub(crate) const MAX_RESUME_REPLAY_ENTRIES: usize = MAX_TRANSCRIPT_ENTRIES;
+
+/// Cap on the number of *lines* read from a resumed session file before the
+/// replay mapping begins. The mapping itself is O(lines); bounding the read
+/// keeps a pathological multi-gigabyte session file from stalling TUI startup
+/// on startup. Generous enough for any real session (≈ one entry per line,
+/// [`MAX_RESUME_REPLAY_ENTRIES`] above applies afterward).
+const RESUME_REPLAY_MAX_LINES: usize = 100_000;
+
+/// Replay a resumed session JSONL file into transcript entries for display.
+///
+/// Reads the file **line by line** (line 1 is the `SessionHeader`, which
+/// fails to deserialize as a `SessionEntry` and is skipped); each subsequent
+/// line is parsed as a pi `SessionEntry` and mapped to the same
+/// [`TranscriptEntry`] variants the live `AgentMsg` path produces, so a
+/// resumed session reads identically to one that was never closed. Parse
+/// failures are silently skipped — a session tail can be mid-write, and a
+/// display-only replay must never abort startup.
+///
+/// The result is capped to the LAST [`MAX_RESUME_REPLAY_ENTRIES`] entries
+/// (tail), mirroring the live transcript ring buffer.
+fn replay_resume_entries(path: &std::path::Path) -> Vec<TranscriptEntry> {
+    use std::io::BufRead;
+
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        // Display-only: a missing/unreadable file must not crash startup —
+        // the agent-side history (pi's own rehydration) still works.
+        Err(_) => return Vec::new(),
+    };
+
+    let reader = std::io::BufReader::new(file);
+    let mut entries = Vec::new();
+    for (line_no, line) in reader.lines().enumerate() {
+        let Ok(line) = line else { break };
+        // Line 1 (index 0) is the SessionHeader, not an entry. Malformed
+        // lines are skipped rather than fatal (see doc comment).
+        if line_no == 0 || line.trim().is_empty() {
+            continue;
+        }
+        // Bound the read: a pathological multi-gigabyte session file must
+        // not stall TUI startup on replay mapping.
+        if line_no > RESUME_REPLAY_MAX_LINES {
+            break;
+        }
+        let Ok(pi::session::SessionEntry::Message(msg)) =
+            serde_json::from_str::<pi::session::SessionEntry>(&line)
+        else {
+            continue;
+        };
+        match msg.message {
+            pi::session::SessionMessage::User { content, .. } => {
+                let text = user_content_text(&content);
+                if !text.trim().is_empty() {
+                    entries.push(TranscriptEntry::User(text));
+                }
+            }
+            pi::session::SessionMessage::Assistant { message, .. } => {
+                assistant_message_entries(&message.content, &mut entries);
+            }
+            pi::session::SessionMessage::ToolResult {
+                tool_name,
+                content,
+                is_error,
+                ..
+            } => {
+                // Reuse the live-path renderers: round-trip the content
+                // blocks back into the `{"content": [...]}` Value shape
+                // `render_tool_output`/`full_tool_output`/`is_tool_error`
+                // already understand (they extract Text blocks from the
+                // `content` array).
+                let Ok(blocks) = serde_json::to_value(&content) else {
+                    continue;
+                };
+                let value = serde_json::json!({ "content": blocks, "is_error": is_error });
+                let rendered = render_tool_output(&value);
+                if rendered.is_empty() && !is_error {
+                    continue;
+                }
+                let name = tool_name.rsplit(" · ").next().unwrap_or("").to_string();
+                entries.push(TranscriptEntry::ToolResult {
+                    name,
+                    output: rendered.clone(),
+                    full_output: full_tool_output(&value),
+                    is_error: is_tool_error(&value) || is_error,
+                });
+            }
+            // Custom/BashExecution/CompactionSummary/BranchSummary have no
+            // direct transcript counterpart on the live path — skip them
+            // (the agent still sees them in its rehydrated history).
+            _ => {}
+        }
+    }
+    if entries.len() > MAX_RESUME_REPLAY_ENTRIES {
+        let drop_n = entries.len() - MAX_RESUME_REPLAY_ENTRIES;
+        entries.drain(0..drop_n);
+    }
+    entries
+}
+
+/// Extract the display text from a user message's content: Plain text or Text
+/// blocks concatenated (images and other block types have no scrollback
+/// representation on the live path either).
+fn user_content_text(content: &pi::model::UserContent) -> String {
+    use pi::model::{ContentBlock, UserContent};
+    match content {
+        UserContent::Text(text) => text.clone(),
+        UserContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(""),
+    }
+}
+
+/// Map an assistant message's content blocks to transcript entries:
+/// concatenated Text blocks become one `Assistant` entry (mirroring the
+/// TextDelta coalescing on the live path) and ToolCall blocks become
+/// `Tool` markers with the same `tool_preview` detail the live path uses.
+fn assistant_message_entries(content: &[pi::model::ContentBlock], entries: &mut Vec<TranscriptEntry>) {
+    use pi::model::ContentBlock;
+    let mut text = String::new();
+    for block in content {
+        match block {
+            ContentBlock::Text(block) => text.push_str(&block.text),
+            ContentBlock::ToolCall(call) => {
+                let detail = crate::commands::code_tool_preview::tool_preview(
+                    &call.name,
+                    &call.arguments,
+                );
+                let detail = detail
+                    .strip_prefix(&call.name)
+                    .map(str::trim_start)
+                    .unwrap_or("")
+                    .to_string();
+                entries.push(TranscriptEntry::Tool {
+                    name: call.name.clone(),
+                    detail,
+                });
+            }
+            // Thinking/RedactedThinking/Image have no live-path transcript
+            // entry — skip, matching the live renderer.
+            _ => {}
+        }
+    }
+    if !text.trim().is_empty() {
+        entries.push(TranscriptEntry::Assistant(text));
+    }
+}
+
 /// Reset transcript, render cache, scroll position, and status-bar occupancy
 /// for `/clear` (and its `/new` alias). Called from the `Action::ClearTranscript`
 /// arm of the run loop; extracted so the reset is unit-testable.
@@ -8993,6 +9176,182 @@ mod tests {
             pid: None,
             log_path: None,
         }
+    }
+
+    // ------------------------------------------------------------------
+    // replay_resume_entries (--continue/--resume transcript seeding)
+    // ------------------------------------------------------------------
+
+    /// Write a session JSONL fixture: a header line followed by entry lines
+    /// (pre-serialized JSON strings), then run the replay mapper on it.
+    fn replay_fixture(header: serde_json::Value, entries: &[serde_json::Value]) -> Vec<TranscriptEntry> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut body = String::new();
+        body.push_str(&serde_json::to_string(&header).unwrap());
+        for e in entries {
+            body.push('\n');
+            body.push_str(&serde_json::to_string(e).unwrap());
+        }
+        std::fs::write(&path, body).unwrap();
+        replay_resume_entries(&path)
+    }
+
+    fn session_header() -> serde_json::Value {
+        serde_json::json!({
+            "type": "session",
+            "version": 1,
+            "id": "test-session",
+            "timestamp": "2026-09-15T00:00:00Z",
+            "cwd": "/tmp",
+        })
+    }
+
+    #[test]
+    fn replay_resume_skips_header_malformed_and_nonmessages() {
+        let entries = replay_fixture(
+            session_header(),
+            &[
+                // A well-formed user message (role nested inside `message` —
+                // the real on-disk shape).
+                serde_json::json!({
+                    "type": "message",
+                    "timestamp": "2026-09-15T00:00:00Z",
+                    "message": {
+                        "role": "user",
+                        "content": "hello there",
+                        "timestamp": 0,
+                    },
+                }),
+                // A non-message entry (label) — skipped, not fatal.
+                serde_json::json!({
+                    "type": "label",
+                    "timestamp": "2026-09-15T00:00:00Z",
+                    "targetId": "abc",
+                    "label": null,
+                }),
+                // Garbage — skipped, not fatal.
+                serde_json::json!({ "type": "garbage" }),
+            ],
+        );
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            &entries[0],
+            TranscriptEntry::User(t) if t == "hello there"
+        ));
+    }
+
+    #[test]
+    fn replay_resume_maps_assistant_and_tool_results() {
+        let entries = replay_fixture(
+            session_header(),
+            &[
+                serde_json::json!({
+                    "type": "message",
+                    "timestamp": "2026-09-15T00:00:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            { "type": "text", "text": "Running it." },
+                            {
+                                "type": "toolCall",
+                                "id": "call-1",
+                                "name": "bash",
+                                "arguments": { "command": "ls" },
+                            },
+                        ],
+                        "api": "messages",
+                        "provider": "anthropic",
+                        "model": "claude",
+                        "usage": {
+                            "input": 1,
+                            "output": 1,
+                            "cacheRead": 0,
+                            "cacheWrite": 0,
+                            "totalTokens": 2,
+                            "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 }
+                        },
+                        "stopReason": "stop",
+                        "timestamp": 0,
+                    },
+                }),
+                serde_json::json!({
+                    "type": "message",
+                    "timestamp": "2026-09-15T00:00:00Z",
+                    "message": {
+                        "role": "toolResult",
+                        "toolCallId": "call-1",
+                        "toolName": "bash",
+                        "content": [ { "type": "text", "text": "file.txt" } ],
+                        "isError": false,
+                        "timestamp": 0,
+                    },
+                }),
+            ],
+        );
+        assert_eq!(entries.len(), 3);
+        // Text block → Assistant, appended AFTER the ToolCall marker that
+        // preceded it in the content array (live-path ordering).
+        assert!(matches!(&entries[0], TranscriptEntry::Tool { name, .. } if name == "bash"));
+        assert!(matches!(&entries[1], TranscriptEntry::Assistant(t) if t == "Running it."));
+        assert!(matches!(
+            &entries[2],
+            TranscriptEntry::ToolResult { name, output, is_error, .. }
+                if name == "bash" && output == "file.txt" && !*is_error
+        ));
+    }
+
+    #[test]
+    fn replay_resume_marks_tool_errors() {
+        let entries = replay_fixture(
+            session_header(),
+            &[serde_json::json!({
+                "type": "message",
+                "timestamp": "2026-09-15T00:00:00Z",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "call-2",
+                    "toolName": "bash",
+                    "content": [ { "type": "text", "text": "command failed" } ],
+                    "isError": true,
+                    "timestamp": 0,
+                },
+            })],
+        );
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            &entries[0],
+            TranscriptEntry::ToolResult { is_error: true, .. }
+        ));
+    }
+
+    #[test]
+    fn replay_resume_missing_file_is_empty() {
+        assert!(replay_resume_entries(&PathBuf::from("/nonexistent/session.jsonl")).is_empty());
+    }
+
+    #[test]
+    fn replay_resume_caps_to_tail() {
+        let mut entries = Vec::new();
+        for i in 0..(MAX_RESUME_REPLAY_ENTRIES + 10) {
+            entries.push(serde_json::json!({
+                "type": "message",
+                "timestamp": "2026-09-15T00:00:00Z",
+                "message": {
+                    "role": "user",
+                    "content": format!("msg {i}"),
+                    "timestamp": 0,
+                },
+            }));
+        }
+        let replayed = replay_fixture(session_header(), &entries);
+        assert_eq!(replayed.len(), MAX_RESUME_REPLAY_ENTRIES);
+        // The TAIL is kept (oldest dropped), mirroring the live ring.
+        assert!(
+            matches!(&replayed[0], TranscriptEntry::User(t) if t == "msg 10"),
+            "expected tail, got {:?}",
+            &replayed[0]
+        );
     }
 
     fn register_with_status(
