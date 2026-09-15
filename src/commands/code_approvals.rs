@@ -379,9 +379,19 @@ pub fn approval_subject_with_base(
                 };
                 (suggested, slabel, prefix, Some(root))
             } else {
+                // (Re-prompt fix, round 2) A bare single-token command
+                // (`ls`, `git`, `make`) records the ROOT-tier wildcard
+                // (`ls *`), not an exact rule: the user's mental model of
+                // "always allow ls" is "the ls binary", but an exact rule
+                // matches only the byte-identical invocation, so
+                // `ls Cargo.lock` re-prompted right after `ls` was
+                // approved. The bare prefix matches too
+                // (`bash_wildcard_matches` strips a trailing ` *`),
+                // so plain `ls` still re-matches its own rule.
+                let root_pat = format!("{first_token} *");
                 (
-                    AllowRule::exact(tool, first_token.clone()),
-                    format!("bash({first_token})"),
+                    AllowRule::wildcard(tool, root_pat.clone()),
+                    format!("bash({root_pat})"),
                     None,
                     None,
                 )
@@ -2609,18 +2619,20 @@ mod tests {
 
     #[test]
     fn subject_bash_single_token_is_exact() {
-        // A bare binary with no args records an exact rule (no wildcard),
-        // and offers no broader tiers.
+        // A bare binary with no args records the root-tier wildcard rule
+        // (`git *`) — "always allow git" means the git binary, not the
+        // byte-identical invocation (re-prompt fix, round 2). No broader
+        // tiers are offered: the suggested rule already IS the root.
         let input = serde_json::json!({"command": "git"});
         let subj = approval_subject("bash", &input);
         assert_eq!(subj.value, "git");
         assert_eq!(subj.suggested_rule.tool, "bash");
         assert!(
-            !subj.suggested_rule.wildcard,
-            "single-token bash rule is exact"
+            subj.suggested_rule.wildcard,
+            "single-token bash rule is the root wildcard"
         );
-        assert_eq!(subj.suggested_rule.pattern, "git");
-        assert_eq!(subj.suggested_label, "bash(git)");
+        assert_eq!(subj.suggested_rule.pattern, "git *");
+        assert_eq!(subj.suggested_label, "bash(git *)");
         assert!(subj.prefix_rule.is_none());
         assert!(subj.root_rule.is_none());
         assert!(subj.domain_rule.is_none());
@@ -2724,6 +2736,35 @@ mod tests {
         assert!(
             state.is_pre_allowed("bash", &subject2.value),
             "`ls *.txt` must be pre-allowed by the session-scoped `ls *` rule"
+        );
+    }
+
+    /// User-reported scenario (round 2): approve a BARE `ls` with [a] Always,
+    /// then the agent runs `ls Cargo.lock` — the exact single-token rule
+    /// recorded before round 2 matched only the byte-identical command, so
+    /// any invocation with args re-prompted.
+    #[test]
+    fn simulation_bare_ls_then_ls_with_args_is_pre_allowed() {
+        // Step 1: agent calls `bash` with a bare `ls`.
+        let subject1 = approval_subject("bash", &serde_json::json!({"command": "ls"}));
+        assert_eq!(subject1.value, "ls");
+        assert_eq!(subject1.suggested_rule.pattern, "ls *");
+
+        // Step 2: user picks [a] Always — records `ls *`.
+        let state = ApprovalState::new();
+        state.record_always(subject1.suggested_rule.clone());
+
+        // Step 3: agent calls `ls Cargo.lock` — pre-allowed by `ls *`.
+        let subject2 = approval_subject("bash", &serde_json::json!({"command": "ls Cargo.lock"}));
+        assert!(
+            state.is_pre_allowed("bash", &subject2.value),
+            "`ls Cargo.lock` must be pre-allowed by the `ls *` rule recorded for bare `ls`"
+        );
+
+        // And the bare repeat too.
+        assert!(
+            state.is_pre_allowed("bash", "ls"),
+            "bare `ls` must still re-match its own recorded rule"
         );
     }
 
@@ -2888,26 +2929,27 @@ mod tests {
     #[test]
     fn rule_for_choice_falls_back_when_no_candidate() {
         // A bare `git` (no args) has no prefix/root/domain tiers; the scope
-        // choices fall back to the suggested (exact) rule rather than None.
+        // choices fall back to the suggested rule (root wildcard after the
+        // re-prompt fix, round 2) rather than None.
         let input = serde_json::json!({"command": "git"});
         let subj = approval_subject("bash", &input);
         assert_eq!(
             rule_for_choice(&PromptChoice::Prefix, &subj)
                 .unwrap()
                 .pattern,
-            "git"
+            "git *"
         );
         assert_eq!(
             rule_for_choice(&PromptChoice::GrantRoot, &subj)
                 .unwrap()
                 .pattern,
-            "git"
+            "git *"
         );
         assert_eq!(
             rule_for_choice(&PromptChoice::Domain, &subj)
                 .unwrap()
                 .pattern,
-            "git"
+            "git *"
         );
     }
 
