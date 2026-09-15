@@ -491,15 +491,39 @@ pub(crate) fn approval_choices() -> &'static [(
 )] {
     use crate::commands::code_approvals::PromptChoice;
     &[
-        ("[y] Allow", theme::SUCCESS, PromptChoice::Allow),
-        ("[s] Session", theme::WARNING, PromptChoice::AllowSession),
-        ("[a] Always", theme::ACCENT, PromptChoice::AlwaysAllow),
+        ("[y] Allow — run this once", theme::SUCCESS, PromptChoice::Allow),
+        (
+            "[s] Session — allow for this session",
+            theme::WARNING,
+            PromptChoice::AllowSession,
+        ),
+        (
+            "[a] Always — save rule, never ask",
+            theme::ACCENT,
+            PromptChoice::AlwaysAllow,
+        ),
         // (M4/#10) Per-call scope choices, dim so the primary y/s/a flow
         // stays visually dominant.
-        ("[p] Prefix", theme::MUTED, PromptChoice::Prefix),
-        ("[r] Root", theme::MUTED, PromptChoice::GrantRoot),
-        ("[o] Domain", theme::MUTED, PromptChoice::Domain),
-        ("[n]/Esc Deny", theme::ERROR, PromptChoice::Deny),
+        (
+            "[p] Prefix — always allow this command pattern",
+            theme::MUTED,
+            PromptChoice::Prefix,
+        ),
+        (
+            "[r] Root — always allow this whole tool",
+            theme::MUTED,
+            PromptChoice::GrantRoot,
+        ),
+        (
+            "[o] Domain — always allow under this directory",
+            theme::MUTED,
+            PromptChoice::Domain,
+        ),
+        (
+            "[n]/Esc Deny — refuse this call",
+            theme::ERROR,
+            PromptChoice::Deny,
+        ),
     ]
 }
 
