@@ -381,10 +381,13 @@ pub fn approval_subject_with_base(
                     // `rm ./x *` rather than `rm *`. Narrow-but-living
                     // beats broad-and-silent for tools with destructive
                     // power. (The user can still pick [r] Root
-                    // explicitly to trust the whole binary.)
-                    Some(second)
-                        if second != first_token && dangerous_bash_binary(&first_token) =>
-                    {
+                    // explicitly to trust the whole binary.) No
+                    // `second != first_token` guard here, unlike arm 1:
+                    // a degenerate `rm rm` would otherwise fall through
+                    // to the root tier — the exact widening this arm
+                    // exists to prevent — instead of recording the
+                    // harmless narrow `rm rm *`.
+                    Some(second) if dangerous_bash_binary(&first_token) => {
                         let prefix_pat = format!("{first_token} {second} *");
                         Some(AllowRule::wildcard(tool, prefix_pat.clone()))
                     }
@@ -630,9 +633,24 @@ fn cmd_trimmed_has_args(cmd: &str) -> bool {
 /// `wget`, `nc`, `ssh`). For these, a non-subcommand first argument keeps the
 /// NARROW prefix-tier rule instead of widening to the root (`rm *`); the user
 /// can still explicitly pick [r] Root to trust the whole binary.
+///
+/// (Review round 3) Shells and interpreters are included too: `bash
+/// deploy.sh` has a non-subcommand first arg, and root-tier trust of a
+/// shell/interpreter (`bash *`) is arbitrary command execution — the
+/// same silent widening this arm exists to prevent. `find`/`xargs` join
+/// for their `-delete`/`-exec` escape hatches.
+///
+/// Known bypass, acknowledged: the list matches only the BARE token, so
+/// a path-qualified invocation (`/bin/rm ./x`) or a wrapper prefix
+/// (`env rm ./x`) misses it and suggests the root tier (and `env *`
+/// root trust is effectively a shell escape). Fixing this needs argument
+/// introspection (quoting-aware splitting, stripping `env`/`nohup`
+/// prefixes, resolving PATH binaries) — out of scope for this heuristic;
+/// the [p]/[r] labels always show the scope being trusted.
 const DANGEROUS_BASH_BINARIES: &[&str] = &[
     "rm", "dd", "chmod", "chown", "sudo", "doas", "su", "curl", "wget", "nc", "ncat", "ssh", "scp",
-    "kill", "killall", "mkfs", "shred", "truncate", "sync",
+    "kill", "killall", "mkfs", "shred", "truncate", "sync", "sh", "bash", "zsh", "dash", "ksh",
+    "python", "python3", "node", "perl", "ruby", "find", "xargs",
 ];
 
 /// True when `bin` (the first token of a bash command) names a binary whose
@@ -2919,6 +2937,43 @@ mod tests {
         );
         assert_eq!(subj.suggested_rule.pattern, "sudo");
         assert_eq!(subj.suggested_label, "bash(sudo)");
+    }
+
+    /// (Review round 3) Shells and interpreters must get the narrow
+    /// prefix tier, not the root: one [a] press on `bash deploy.sh`
+    /// must not record `bash *` (arbitrary command execution).
+    #[test]
+    fn shells_and_interpreters_keep_narrow_rule() {
+        for cmd in [
+            "sh script.sh",
+            "bash deploy.sh",
+            "zsh run.zsh",
+            "python script.py",
+            "python3 script.py",
+            "node server.js",
+            "perl script.pl",
+            "ruby app.rb",
+        ] {
+            let subj = approval_subject("bash", &serde_json::json!({"command": cmd}));
+            assert_eq!(
+                subj.suggested_rule.pattern,
+                format!("{cmd} *"),
+                "{cmd} must record the narrow prefix rule, not the root tier"
+            );
+        }
+    }
+
+    /// (Review round 3) Degenerate `rm rm` must not fall through to the
+    /// root tier: the narrow `rm rm *` rule is recorded instead.
+    #[test]
+    fn degenerate_repeated_token_keeps_narrow_rule() {
+        let subj = approval_subject("bash", &serde_json::json!({"command": "rm rm"}));
+        assert_eq!(subj.suggested_rule.pattern, "rm rm *");
+        assert_eq!(
+            subj.root_rule.as_ref().map(|r| r.pattern.as_str()),
+            Some("rm *"),
+            "root tier still offered explicitly"
+        );
     }
 
     #[test]
