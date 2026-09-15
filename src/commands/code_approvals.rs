@@ -354,11 +354,18 @@ pub fn approval_subject_with_base(
                 // i.e. trust the whole binary) is offered as `GrantRoot`.
                 // The matched VALUE stays the full command so a too-broad
                 // rule can't widen what the user already approved mid-prompt.
+                //
+                // (Re-prompt fix) The PREFIX tier only exists when the
+                // second token is subcommand-like (`run`, `status`); a
+                // variable-argument token (`ls ./`) yields a dead-narrow
+                // `ls ./ *` rule that re-prompts on every subsequent call,
+                // so the suggested rule falls through to the ROOT tier
+                // (`ls *`).
                 let root_pat = format!("{first_token} *");
                 let root = AllowRule::wildcard(tool, root_pat.clone());
                 let first_two = first_two_tokens(cmd);
                 let prefix = match first_two {
-                    Some(second) if second != first_token => {
+                    Some(second) if second != first_token && looks_like_subcommand(&second) => {
                         let prefix_pat = format!("{first_token} {second} *");
                         Some(AllowRule::wildcard(tool, prefix_pat.clone()))
                     }
@@ -570,6 +577,25 @@ fn cmd_trimmed_has_args(cmd: &str) -> bool {
     // Split on any whitespace run; >1 non-empty token means args follow the
     // binary. (A trailing-space-only command like "npm " yields one token.)
     cmd.split_whitespace().count() > 1
+}
+
+/// (M4/#10) True when `token` looks like a subcommand identifier — a word
+/// the user reads as part of the command ("run" in `npm run`, "status" in
+/// `git status`) — rather than a variable argument (`./`, `*.txt`, `-la`,
+/// a path, a number). Only subcommand-style second tokens get a PREFIX
+/// tier: `npm run *` narrows trust meaningfully, but `ls ./ *` matches
+/// almost nothing the user will actually type next, so "always allow"
+/// re-prompted on every subsequent `ls` invocation with a different arg
+/// (the user-reported re-prompt bug). For argument-style tokens the
+/// suggested rule falls back to the ROOT tier (`ls *`), which matches
+/// the expectation that approving `ls ./` trusts `ls`.
+fn looks_like_subcommand(token: &str) -> bool {
+    let mut chars = token.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Match `text` against a `*`-wildcard pattern.
@@ -2652,6 +2678,68 @@ mod tests {
     }
 
     // ── rule ↔ command round-trip ─────────────────────────────────────
+
+    /// User-reported scenario (simulation): approve `ls ./` with [a] Always
+    /// or [s] Session, then the agent runs `ls *.txt` — the user expects
+    /// the second call to be pre-allowed, not re-prompted.
+    #[test]
+    fn simulation_ls_then_ls_txt_is_pre_allowed() {
+        // ── Step 1: agent calls `bash` with `ls ./` ──────────────────────
+        let input1 = serde_json::json!({"command": "ls ./"});
+        let subject1 = approval_subject("bash", &input1);
+
+        // What the modal shows / what gets recorded:
+        assert_eq!(subject1.value, "ls ./");
+        assert_eq!(subject1.suggested_rule.pattern, "ls *");
+        assert_eq!(subject1.suggested_label, "bash(ls *)");
+
+        // ── Step 2: user picks [a] Always ───────────────────────────────
+        let state = ApprovalState::new();
+        state.record_always(subject1.suggested_rule.clone());
+
+        // ── Step 3: agent calls `bash` with `ls *.txt` ──────────────────
+        let input2 = serde_json::json!({"command": "ls *.txt"});
+        let subject2 = approval_subject("bash", &input2);
+        assert_eq!(subject2.value, "ls *.txt");
+
+        let pre_allowed = state.is_pre_allowed("bash", &subject2.value);
+        assert!(
+            pre_allowed,
+            "`ls *.txt` must be pre-allowed by the `ls *` rule recorded for `ls ./` — \
+             otherwise the user gets re-prompted for every ls invocation"
+        );
+    }
+
+    /// Same scenario but with [s] Session instead of [a] Always.
+    #[test]
+    fn simulation_ls_then_ls_txt_session_rule() {
+        let input1 = serde_json::json!({"command": "ls ./"});
+        let subject1 = approval_subject("bash", &input1);
+
+        let state = ApprovalState::new();
+        state.record_session(subject1.suggested_rule.clone());
+
+        let input2 = serde_json::json!({"command": "ls *.txt"});
+        let subject2 = approval_subject("bash", &input2);
+        assert!(
+            state.is_pre_allowed("bash", &subject2.value),
+            "`ls *.txt` must be pre-allowed by the session-scoped `ls *` rule"
+        );
+    }
+
+    /// Even a plain repeat of the exact same command must re-match its own
+    /// recorded rule (the most basic expectation of "always allow").
+    #[test]
+    fn simulation_exact_repeat_is_pre_allowed() {
+        let input = serde_json::json!({"command": "ls ./"});
+        let subject = approval_subject("bash", &input);
+        let state = ApprovalState::new();
+        state.record_always(subject.suggested_rule.clone());
+        assert!(
+            state.is_pre_allowed("bash", "ls ./"),
+            "re-running the exact approved command must not re-prompt"
+        );
+    }
 
     #[test]
     fn bash_wildcard_rule_does_not_cover_chained_commands() {
