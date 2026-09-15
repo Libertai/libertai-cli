@@ -315,10 +315,11 @@ pub fn approval_subject_with_base(
             // `"<bin> <subcmd> *"` when the args start with a
             // subcommand-like token (see the branch below). A single
             // token also records the root wildcard `<bin> *` (the
-            // re-prompt fix, round 2), so both branches of the
-            // has-args split record a root-tier-or-narrower rule. The
-            // label shows the scope so the user knows they're trusting
-            // the binary, not the exact command.
+            // re-prompt fix, round 2) — except a BARE DANGEROUS binary
+            // (`rm`, `sudo`, `bash`, …) which keeps the exact rule; see
+            // the bare-dangerous branch below. The label shows the scope
+            // so the user knows they're trusting the binary, not the
+            // exact command.
             let first_token = first_bash_token(cmd);
             // The missing-command placeholder + an all-whitespace command have
             // no real binary to key on — fall back to an exact rule on the
@@ -369,7 +370,11 @@ pub fn approval_subject_with_base(
                 let root = AllowRule::wildcard(tool, root_pat.clone());
                 let first_two = first_two_tokens(cmd);
                 let prefix = match first_two {
-                    Some(second) if second != first_token && looks_like_subcommand(&second) => {
+                    Some(second)
+                        if second != first_token
+                            && looks_like_subcommand(&second)
+                            && has_known_subcommands(&first_token) =>
+                    {
                         let prefix_pat = format!("{first_token} {second} *");
                         Some(AllowRule::wildcard(tool, prefix_pat.clone()))
                     }
@@ -406,13 +411,16 @@ pub fn approval_subject_with_base(
                 // whole-binary wildcard: the middle-ground arm below
                 // exists precisely so one [a] press doesn't silently trust
                 // `rm *` — a bare `sudo` shouldn't trust the whole binary
-                // either when `sudo -v` records `sudo -v *`. The user can
-                // still pick [r] Root explicitly for whole-binary trust.
+                // either when `sudo -v` records `sudo -v *`. Whole-binary
+                // trust is NOT the default, but [r] Root offers it
+                // explicitly via `root_rule` (rule_for_choice resolves it
+                // below), so the escape hatch is real, not just documented.
+                let root_pat = format!("{first_token} *");
                 (
                     AllowRule::exact(tool, first_token.clone()),
                     format!("bash({first_token})"),
                     None,
-                    None,
+                    Some(AllowRule::wildcard(tool, root_pat)),
                 )
             } else {
                 // (Re-prompt fix, round 2) A bare single-token command
@@ -647,16 +655,67 @@ fn cmd_trimmed_has_args(cmd: &str) -> bool {
 /// introspection (quoting-aware splitting, stripping `env`/`nohup`
 /// prefixes, resolving PATH binaries) — out of scope for this heuristic;
 /// the [p]/[r] labels always show the scope being trusted.
+///
+/// (Review round 4) Also included: `env` (self-noted shell escape),
+/// `make` (arbitrary build steps), `awk` (`system()`), `sed` (GNU `e`
+/// flag), editors/pagers with `!`/`-c` shell escapes (`vi`, `vim`,
+/// `nvim`, `less`, `more`, `man`), package runners (`pip`, `pip3`,
+/// `npx`), and wrapper prefixes (`timeout`, `nohup`, `watch`) that can
+/// precede a dangerous binary.
 const DANGEROUS_BASH_BINARIES: &[&str] = &[
     "rm", "dd", "chmod", "chown", "sudo", "doas", "su", "curl", "wget", "nc", "ncat", "ssh", "scp",
     "kill", "killall", "mkfs", "shred", "truncate", "sync", "sh", "bash", "zsh", "dash", "ksh",
-    "python", "python3", "node", "perl", "ruby", "find", "xargs",
+    "python", "python3", "node", "perl", "ruby", "find", "xargs", "env", "make", "awk", "sed",
+    "vi", "vim", "nvim", "less", "more", "man", "pip", "pip3", "npx", "timeout", "nohup", "watch",
 ];
 
 /// True when `bin` (the first token of a bash command) names a binary whose
 /// whole-binary trust should not be the silent default for "always allow".
 fn dangerous_bash_binary(bin: &str) -> bool {
     DANGEROUS_BASH_BINARIES.contains(&bin)
+}
+
+/// (Review round 4) Binaries with a well-known subcommand grammar. For
+/// these, an identifier-style second token is trusted as a subcommand
+/// (`git status`); for every OTHER binary an identifier-like token is
+/// presumed a variable ARGUMENT (`mkdir foo`, `cat config`), so the
+/// suggested rule falls to the root tier instead of a dead-narrow
+/// prefix. Kills the documented false-positive class where `mkdir foo`
+/// then `mkdir dist` re-prompted.
+const KNOWN_SUBCOMMAND_BINARIES: &[&str] = &[
+    "git",
+    "npm",
+    "npx",
+    "pnpm",
+    "yarn",
+    "cargo",
+    "rustup",
+    "docker",
+    "kubectl",
+    "helm",
+    "terraform",
+    "gcloud",
+    "aws",
+    "az",
+    "gh",
+    "go",
+    "uv",
+    "podman",
+    "systemctl",
+    "composer",
+    "gem",
+    "brew",
+    "apt",
+    "dnf",
+    "pacman",
+    "tmux",
+    "git-lfs",
+];
+
+/// True when `bin` has a known subcommand grammar (identifier-like
+/// second tokens read as subcommands).
+fn has_known_subcommands(bin: &str) -> bool {
+    KNOWN_SUBCOMMAND_BINARIES.contains(&bin)
 }
 
 /// (M4/#10) True when `token` looks like a subcommand identifier — a word
@@ -673,11 +732,12 @@ fn dangerous_bash_binary(bin: &str) -> bool {
 /// Known false-positive class, documented for future readers: an
 /// identifier-style VARIABLE argument (`echo hello`, `mkdir foo`,
 /// `touch file`, `cat config`) reads as subcommand-like to this lexical
-/// heuristic, so those record the dead-narrow prefix rule
-/// (`echo hello *`) and the re-prompt bug persists for them by design —
-/// `mkdir foo` then `mkdir dist` still prompts. A lexical heuristic
-/// can't distinguish `git status` from `mkdir foo` without a
-/// per-binary subcommand table; the escape hatch is [r] Root.
+/// heuristic. Mitigated (review round 4) by requiring
+/// [`has_known_subcommands`] on the binary — `git status` gets the
+/// prefix tier, `mkdir foo` falls to the root tier — so the residual
+/// false positives are subcommand-looking tokens on KNOWN binaries
+/// (`git foo` for an unusual `git foo`) where the narrow rule is the
+/// conservative outcome anyway. The escape hatch is [r] Root.
 fn looks_like_subcommand(token: &str) -> bool {
     let mut chars = token.chars();
     match chars.next() {
@@ -2974,6 +3034,29 @@ mod tests {
             Some("rm *"),
             "root tier still offered explicitly"
         );
+    }
+
+    /// (Review round 4) Identifier-like VARIABLE arguments on unknown
+    /// binaries must fall to the root tier, not a dead-narrow prefix —
+    /// `mkdir foo` then `mkdir dist` must not re-prompt.
+    #[test]
+    fn unknown_binary_identifier_arg_gets_root_not_prefix() {
+        for cmd in [
+            "cat config",
+            "mkdir foo",
+            "touch file",
+            "echo hello",
+            "cp src dst",
+            "mv old new",
+        ] {
+            let subj = approval_subject("bash", &serde_json::json!({"command": cmd}));
+            let bin = cmd.split_whitespace().next().unwrap();
+            assert_eq!(
+                subj.suggested_rule.pattern,
+                format!("{bin} *"),
+                "{cmd} must suggest the root tier for an unknown-subcommand binary"
+            );
+        }
     }
 
     #[test]
