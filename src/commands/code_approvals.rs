@@ -311,8 +311,12 @@ pub fn approval_subject_with_base(
             // approved mid-prompt); only the recorded rule narrows to the
             // binary. When the command has args we record a wildcard
             // `"<bin> *"` (matches the binary followed by any args, but
-            // NOT a bare invocation of a differently-named binary); when
-            // it's a single token we record the exact binary name. The
+            // NOT a bare invocation of a differently-named binary) — or
+            // `"<bin> <subcmd> *"` when the args start with a
+            // subcommand-like token (see the branch below). A single
+            // token also records the root wildcard `<bin> *` (the
+            // re-prompt fix, round 2), so both branches of the
+            // has-args split record a root-tier-or-narrower rule. The
             // label shows the scope so the user knows they're trusting
             // the binary, not the exact command.
             let first_token = first_bash_token(cmd);
@@ -366,6 +370,20 @@ pub fn approval_subject_with_base(
                 let first_two = first_two_tokens(cmd);
                 let prefix = match first_two {
                     Some(second) if second != first_token && looks_like_subcommand(&second) => {
+                        let prefix_pat = format!("{first_token} {second} *");
+                        Some(AllowRule::wildcard(tool, prefix_pat.clone()))
+                    }
+                    // (Review safety middle ground) For a known-dangerous
+                    // binary with a non-subcommand first arg (`rm ./x`,
+                    // `curl http://…`), don't silently widen [a] to the
+                    // whole binary — keep the narrow prefix-tier rule the
+                    // old code produced, so one [a] press trusts
+                    // `rm ./x *` rather than `rm *`. Narrow-but-living
+                    // beats broad-and-silent for tools with destructive
+                    // power. (The user can still pick [r] Root
+                    // explicitly to trust the whole binary.)
+                    _ if dangerous_bash_binary(&first_token) && first_two.is_some() => {
+                        let second = first_two.unwrap();
                         let prefix_pat = format!("{first_token} {second} *");
                         Some(AllowRule::wildcard(tool, prefix_pat.clone()))
                     }
@@ -581,12 +599,31 @@ fn parent_dir_wildcard(resolved: &str) -> Option<String> {
 
 /// (Issue-2) True when the trimmed command has at least one whitespace-separated
 /// argument after the first token — i.e. it's `<bin> <args...>` rather than a
-/// bare `<bin>`. Decides whether the recorded rule is a `"<bin> *"` wildcard
-/// (has args) or an exact `"<bin>"` (no args).
+/// bare `<bin>`. Decides which of the two recording arms builds the suggested
+/// rule: with args it's the prefix-or-root tier (`<bin> <subcmd> *` or
+/// `<bin> *`, see `looks_like_subcommand`); bare it's the root wildcard
+/// `<bin> *` (re-prompt fix, round 2).
 fn cmd_trimmed_has_args(cmd: &str) -> bool {
     // Split on any whitespace run; >1 non-empty token means args follow the
     // binary. (A trailing-space-only command like "npm " yields one token.)
     cmd.split_whitespace().count() > 1
+}
+
+/// Binaries whose whole-binary trust is rarely what a user means by one
+/// "always allow" press: destructive primitives (`rm`, `dd`, `chmod`), privilege
+/// escalation (`sudo`, `doas`), and network fetch-and-pipe vectors (`curl`,
+/// `wget`, `nc`, `ssh`). For these, a non-subcommand first argument keeps the
+/// NARROW prefix-tier rule instead of widening to the root (`rm *`); the user
+/// can still explicitly pick [r] Root to trust the whole binary.
+const DANGEROUS_BASH_BINARIES: &[&str] = &[
+    "rm", "dd", "chmod", "chown", "sudo", "doas", "su", "curl", "wget", "nc", "ncat", "ssh", "scp",
+    "kill", "killall", "mkfs", "shred", "truncate", "sync",
+];
+
+/// True when `bin` (the first token of a bash command) names a binary whose
+/// whole-binary trust should not be the silent default for "always allow".
+fn dangerous_bash_binary(bin: &str) -> bool {
+    DANGEROUS_BASH_BINARIES.contains(&bin)
 }
 
 /// (M4/#10) True when `token` looks like a subcommand identifier — a word
@@ -2618,7 +2655,7 @@ mod tests {
     }
 
     #[test]
-    fn subject_bash_single_token_is_exact() {
+    fn subject_bash_single_token_is_root_wildcard() {
         // A bare binary with no args records the root-tier wildcard rule
         // (`git *`) — "always allow git" means the git binary, not the
         // byte-identical invocation (re-prompt fix, round 2). No broader
@@ -2704,6 +2741,18 @@ mod tests {
         assert_eq!(subject1.value, "ls ./");
         assert_eq!(subject1.suggested_rule.pattern, "ls *");
         assert_eq!(subject1.suggested_label, "bash(ls *)");
+        // Tier layout the fix relies on: no prefix tier for the
+        // non-subcommand arg, root tier present and equal to the
+        // suggested rule.
+        assert!(
+            subject1.prefix_rule.is_none(),
+            "no prefix tier for a variable-argument token"
+        );
+        assert_eq!(
+            subject1.root_rule.as_ref().map(|r| &r.pattern),
+            Some(&subject1.suggested_rule.pattern),
+            "root tier present and equal to the suggested rule"
+        );
 
         // ── Step 2: user picks [a] Always ───────────────────────────────
         let state = ApprovalState::new();
@@ -2770,6 +2819,69 @@ mod tests {
 
     /// Even a plain repeat of the exact same command must re-match its own
     /// recorded rule (the most basic expectation of "always allow").
+    /// Table test for the subcommand heuristic: the boundary between
+    /// "subcommand-like" tokens (prefix tier) and variable-argument
+    /// tokens (root tier for safe binaries, narrow tier for dangerous
+    /// ones).
+    #[test]
+    fn looks_like_subcommand_table() {
+        // Positive: identifier-style tokens read as part of the command.
+        for positive in [
+            "run",
+            "status",
+            "build",
+            "install",
+            "push",
+            "build-all",
+            "force_push",
+        ] {
+            assert!(
+                looks_like_subcommand(positive),
+                "{positive:?} should look like a subcommand"
+            );
+        }
+        // Negative: flags, paths, globs, versions, empty.
+        for negative in [
+            "-rf",
+            "--watch",
+            "./",
+            "*.txt",
+            "Cargo.lock",
+            "v1.1",
+            "/etc/passwd",
+            "",
+            "42",
+        ] {
+            assert!(
+                !looks_like_subcommand(negative),
+                "{negative:?} should NOT look like a subcommand"
+            );
+        }
+    }
+
+    /// (Review safety middle ground) A dangerous binary with a
+    /// non-subcommand first arg keeps the NARROW prefix-tier rule
+    /// (`rm ./x *`), not the root tier (`rm *`).
+    #[test]
+    fn dangerous_binary_keeps_narrow_rule() {
+        let subj = approval_subject("bash", &serde_json::json!({"command": "rm ./x"}));
+        assert_eq!(subj.suggested_rule.pattern, "rm ./x *");
+        assert_eq!(subj.suggested_label, "bash(rm ./x *)");
+        // Root tier is still offered explicitly.
+        assert_eq!(
+            subj.root_rule.as_ref().map(|r| r.pattern.as_str()),
+            Some("rm *")
+        );
+    }
+
+    /// ...but a subcommand-like arg on a dangerous binary still gets the
+    /// normal prefix tier (`sudo ufw status *`-style trust).
+    #[test]
+    fn dangerous_binary_with_subcommand_gets_prefix() {
+        let subj = approval_subject("bash", &serde_json::json!({"command": "sudo ufw"}));
+        assert_eq!(subj.suggested_rule.pattern, "sudo ufw *");
+    }
+
     #[test]
     fn simulation_exact_repeat_is_pre_allowed() {
         let input = serde_json::json!({"command": "ls ./"});
