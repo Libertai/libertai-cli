@@ -382,8 +382,9 @@ pub fn approval_subject_with_base(
                     // beats broad-and-silent for tools with destructive
                     // power. (The user can still pick [r] Root
                     // explicitly to trust the whole binary.)
-                    _ if dangerous_bash_binary(&first_token) && first_two.is_some() => {
-                        let second = first_two.unwrap();
+                    Some(second)
+                        if second != first_token && dangerous_bash_binary(&first_token) =>
+                    {
                         let prefix_pat = format!("{first_token} {second} *");
                         Some(AllowRule::wildcard(tool, prefix_pat.clone()))
                     }
@@ -396,6 +397,20 @@ pub fn approval_subject_with_base(
                     None => (root.clone(), format!("bash({root_pat})")),
                 };
                 (suggested, slabel, prefix, Some(root))
+            } else if dangerous_bash_binary(&first_token) {
+                // (Review inconsistency fix) A BARE dangerous binary
+                // (`sudo`, `rm`) keeps the old exact rule rather than the
+                // whole-binary wildcard: the middle-ground arm below
+                // exists precisely so one [a] press doesn't silently trust
+                // `rm *` — a bare `sudo` shouldn't trust the whole binary
+                // either when `sudo -v` records `sudo -v *`. The user can
+                // still pick [r] Root explicitly for whole-binary trust.
+                (
+                    AllowRule::exact(tool, first_token.clone()),
+                    format!("bash({first_token})"),
+                    None,
+                    None,
+                )
             } else {
                 // (Re-prompt fix, round 2) A bare single-token command
                 // (`ls`, `git`, `make`) records the ROOT-tier wildcard
@@ -636,6 +651,15 @@ fn dangerous_bash_binary(bin: &str) -> bool {
 /// (the user-reported re-prompt bug). For argument-style tokens the
 /// suggested rule falls back to the ROOT tier (`ls *`), which matches
 /// the expectation that approving `ls ./` trusts `ls`.
+///
+/// Known false-positive class, documented for future readers: an
+/// identifier-style VARIABLE argument (`echo hello`, `mkdir foo`,
+/// `touch file`, `cat config`) reads as subcommand-like to this lexical
+/// heuristic, so those record the dead-narrow prefix rule
+/// (`echo hello *`) and the re-prompt bug persists for them by design —
+/// `mkdir foo` then `mkdir dist` still prompts. A lexical heuristic
+/// can't distinguish `git status` from `mkdir foo` without a
+/// per-binary subcommand table; the escape hatch is [r] Root.
 fn looks_like_subcommand(token: &str) -> bool {
     let mut chars = token.chars();
     match chars.next() {
@@ -2817,8 +2841,6 @@ mod tests {
         );
     }
 
-    /// Even a plain repeat of the exact same command must re-match its own
-    /// recorded rule (the most basic expectation of "always allow").
     /// Table test for the subcommand heuristic: the boundary between
     /// "subcommand-like" tokens (prefix tier) and variable-argument
     /// tokens (root tier for safe binaries, narrow tier for dangerous
@@ -2880,6 +2902,23 @@ mod tests {
     fn dangerous_binary_with_subcommand_gets_prefix() {
         let subj = approval_subject("bash", &serde_json::json!({"command": "sudo ufw"}));
         assert_eq!(subj.suggested_rule.pattern, "sudo ufw *");
+    }
+
+    /// Even a plain repeat of the exact same command must re-match its own
+    /// recorded rule (the most basic expectation of "always allow").
+    /// (Review inconsistency fix) A BARE dangerous binary keeps the exact
+    /// rule — one [a] press on bare `sudo` must not trust `sudo *` when
+    /// `sudo -v` records `sudo -v *`.
+    #[test]
+    fn bare_dangerous_binary_keeps_exact_rule() {
+        let subj = approval_subject("bash", &serde_json::json!({"command": "sudo"}));
+        assert_eq!(subj.value, "sudo");
+        assert!(
+            !subj.suggested_rule.wildcard,
+            "bare sudo records an exact rule"
+        );
+        assert_eq!(subj.suggested_rule.pattern, "sudo");
+        assert_eq!(subj.suggested_label, "bash(sudo)");
     }
 
     #[test]
