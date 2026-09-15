@@ -491,7 +491,11 @@ pub(crate) fn approval_choices() -> &'static [(
 )] {
     use crate::commands::code_approvals::PromptChoice;
     &[
-        ("[y] Allow — run this once", theme::SUCCESS, PromptChoice::Allow),
+        (
+            "[y] Allow — run this once",
+            theme::SUCCESS,
+            PromptChoice::Allow,
+        ),
         (
             "[s] Session — allow for this session",
             theme::WARNING,
