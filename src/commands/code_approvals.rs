@@ -311,10 +311,15 @@ pub fn approval_subject_with_base(
             // approved mid-prompt); only the recorded rule narrows to the
             // binary. When the command has args we record a wildcard
             // `"<bin> *"` (matches the binary followed by any args, but
-            // NOT a bare invocation of a differently-named binary); when
-            // it's a single token we record the exact binary name. The
-            // label shows the scope so the user knows they're trusting
-            // the binary, not the exact command.
+            // NOT a bare invocation of a differently-named binary) — or
+            // `"<bin> <subcmd> *"` when the args start with a
+            // subcommand-like token (see the branch below). A single
+            // token also records the root wildcard `<bin> *` (the
+            // re-prompt fix, round 2) — except a BARE DANGEROUS binary
+            // (`rm`, `sudo`, `bash`, …) which keeps the exact rule; see
+            // the bare-dangerous branch below. The label shows the scope
+            // so the user knows they're trusting the binary, not the
+            // exact command.
             let first_token = first_bash_token(cmd);
             // The missing-command placeholder + an all-whitespace command have
             // no real binary to key on — fall back to an exact rule on the
@@ -354,11 +359,40 @@ pub fn approval_subject_with_base(
                 // i.e. trust the whole binary) is offered as `GrantRoot`.
                 // The matched VALUE stays the full command so a too-broad
                 // rule can't widen what the user already approved mid-prompt.
+                //
+                // (Re-prompt fix) The PREFIX tier only exists when the
+                // second token is subcommand-like (`run`, `status`); a
+                // variable-argument token (`ls ./`) yields a dead-narrow
+                // `ls ./ *` rule that re-prompts on every subsequent call,
+                // so the suggested rule falls through to the ROOT tier
+                // (`ls *`).
                 let root_pat = format!("{first_token} *");
                 let root = AllowRule::wildcard(tool, root_pat.clone());
                 let first_two = first_two_tokens(cmd);
                 let prefix = match first_two {
-                    Some(second) if second != first_token => {
+                    Some(second)
+                        if second != first_token
+                            && looks_like_subcommand(&second)
+                            && has_known_subcommands(&first_token) =>
+                    {
+                        let prefix_pat = format!("{first_token} {second} *");
+                        Some(AllowRule::wildcard(tool, prefix_pat.clone()))
+                    }
+                    // (Review safety middle ground) For a known-dangerous
+                    // binary with a non-subcommand first arg (`rm ./x`,
+                    // `curl http://…`), don't silently widen [a] to the
+                    // whole binary — keep the narrow prefix-tier rule the
+                    // old code produced, so one [a] press trusts
+                    // `rm ./x *` rather than `rm *`. Narrow-but-living
+                    // beats broad-and-silent for tools with destructive
+                    // power. (The user can still pick [r] Root
+                    // explicitly to trust the whole binary.) No
+                    // `second != first_token` guard here, unlike arm 1:
+                    // a degenerate `rm rm` would otherwise fall through
+                    // to the root tier — the exact widening this arm
+                    // exists to prevent — instead of recording the
+                    // harmless narrow `rm rm *`.
+                    Some(second) if dangerous_bash_binary(&first_token) => {
                         let prefix_pat = format!("{first_token} {second} *");
                         Some(AllowRule::wildcard(tool, prefix_pat.clone()))
                     }
@@ -371,10 +405,37 @@ pub fn approval_subject_with_base(
                     None => (root.clone(), format!("bash({root_pat})")),
                 };
                 (suggested, slabel, prefix, Some(root))
-            } else {
+            } else if dangerous_bash_binary(&first_token) {
+                // (Review inconsistency fix) A BARE dangerous binary
+                // (`sudo`, `rm`) keeps the old exact rule rather than the
+                // whole-binary wildcard: the middle-ground arm below
+                // exists precisely so one [a] press doesn't silently trust
+                // `rm *` — a bare `sudo` shouldn't trust the whole binary
+                // either when `sudo -v` records `sudo -v *`. Whole-binary
+                // trust is NOT the default, but [r] Root offers it
+                // explicitly via `root_rule` (rule_for_choice resolves it
+                // below), so the escape hatch is real, not just documented.
+                let root_pat = format!("{first_token} *");
                 (
                     AllowRule::exact(tool, first_token.clone()),
                     format!("bash({first_token})"),
+                    None,
+                    Some(AllowRule::wildcard(tool, root_pat)),
+                )
+            } else {
+                // (Re-prompt fix, round 2) A bare single-token command
+                // (`ls`, `git`, `make`) records the ROOT-tier wildcard
+                // (`ls *`), not an exact rule: the user's mental model of
+                // "always allow ls" is "the ls binary", but an exact rule
+                // matches only the byte-identical invocation, so
+                // `ls Cargo.lock` re-prompted right after `ls` was
+                // approved. The bare prefix matches too
+                // (`bash_wildcard_matches` strips a trailing ` *`),
+                // so plain `ls` still re-matches its own rule.
+                let root_pat = format!("{first_token} *");
+                (
+                    AllowRule::wildcard(tool, root_pat.clone()),
+                    format!("bash({root_pat})"),
                     None,
                     None,
                 )
@@ -564,12 +625,126 @@ fn parent_dir_wildcard(resolved: &str) -> Option<String> {
 
 /// (Issue-2) True when the trimmed command has at least one whitespace-separated
 /// argument after the first token — i.e. it's `<bin> <args...>` rather than a
-/// bare `<bin>`. Decides whether the recorded rule is a `"<bin> *"` wildcard
-/// (has args) or an exact `"<bin>"` (no args).
+/// bare `<bin>`. Decides which of the two recording arms builds the suggested
+/// rule: with args it's the prefix-or-root tier (`<bin> <subcmd> *` or
+/// `<bin> *`, see `looks_like_subcommand`); bare it's the root wildcard
+/// `<bin> *` (re-prompt fix, round 2).
 fn cmd_trimmed_has_args(cmd: &str) -> bool {
     // Split on any whitespace run; >1 non-empty token means args follow the
     // binary. (A trailing-space-only command like "npm " yields one token.)
     cmd.split_whitespace().count() > 1
+}
+
+/// Binaries whose whole-binary trust is rarely what a user means by one
+/// "always allow" press: destructive primitives (`rm`, `dd`, `chmod`), privilege
+/// escalation (`sudo`, `doas`), and network fetch-and-pipe vectors (`curl`,
+/// `wget`, `nc`, `ssh`). For these, a non-subcommand first argument keeps the
+/// NARROW prefix-tier rule instead of widening to the root (`rm *`); the user
+/// can still explicitly pick [r] Root to trust the whole binary.
+///
+/// (Review round 3) Shells and interpreters are included too: `bash
+/// deploy.sh` has a non-subcommand first arg, and root-tier trust of a
+/// shell/interpreter (`bash *`) is arbitrary command execution — the
+/// same silent widening this arm exists to prevent. `find`/`xargs` join
+/// for their `-delete`/`-exec` escape hatches.
+///
+/// Known bypass, acknowledged: the list matches only the BARE token, so
+/// a path-qualified invocation (`/bin/rm ./x`) or a wrapper prefix
+/// (`env rm ./x`) misses it and suggests the root tier (and `env *`
+/// root trust is effectively a shell escape). Fixing this needs argument
+/// introspection (quoting-aware splitting, stripping `env`/`nohup`
+/// prefixes, resolving PATH binaries) — out of scope for this heuristic;
+/// the [p]/[r] labels always show the scope being trusted.
+///
+/// (Review round 4) Also included: `env` (self-noted shell escape),
+/// `make` (arbitrary build steps), `awk` (`system()`), `sed` (GNU `e`
+/// flag), editors/pagers with `!`/`-c` shell escapes (`vi`, `vim`,
+/// `nvim`, `less`, `more`, `man`), package runners (`pip`, `pip3`,
+/// `npx`), and wrapper prefixes (`timeout`, `nohup`, `watch`) that can
+/// precede a dangerous binary.
+const DANGEROUS_BASH_BINARIES: &[&str] = &[
+    "rm", "dd", "chmod", "chown", "sudo", "doas", "su", "curl", "wget", "nc", "ncat", "ssh", "scp",
+    "kill", "killall", "mkfs", "shred", "truncate", "sync", "sh", "bash", "zsh", "dash", "ksh",
+    "python", "python3", "node", "perl", "ruby", "find", "xargs", "env", "make", "awk", "sed",
+    "vi", "vim", "nvim", "less", "more", "man", "pip", "pip3", "npx", "timeout", "nohup", "watch",
+];
+
+/// True when `bin` (the first token of a bash command) names a binary whose
+/// whole-binary trust should not be the silent default for "always allow".
+fn dangerous_bash_binary(bin: &str) -> bool {
+    DANGEROUS_BASH_BINARIES.contains(&bin)
+}
+
+/// (Review round 4) Binaries with a well-known subcommand grammar. For
+/// these, an identifier-style second token is trusted as a subcommand
+/// (`git status`); for every OTHER binary an identifier-like token is
+/// presumed a variable ARGUMENT (`mkdir foo`, `cat config`), so the
+/// suggested rule falls to the root tier instead of a dead-narrow
+/// prefix. Kills the documented false-positive class where `mkdir foo`
+/// then `mkdir dist` re-prompted.
+const KNOWN_SUBCOMMAND_BINARIES: &[&str] = &[
+    "git",
+    "npm",
+    "npx",
+    "pnpm",
+    "yarn",
+    "cargo",
+    "rustup",
+    "docker",
+    "kubectl",
+    "helm",
+    "terraform",
+    "gcloud",
+    "aws",
+    "az",
+    "gh",
+    "go",
+    "uv",
+    "podman",
+    "systemctl",
+    "composer",
+    "gem",
+    "brew",
+    "apt",
+    "dnf",
+    "pacman",
+    "tmux",
+    "git-lfs",
+];
+
+/// True when `bin` has a known subcommand grammar (identifier-like
+/// second tokens read as subcommands).
+fn has_known_subcommands(bin: &str) -> bool {
+    KNOWN_SUBCOMMAND_BINARIES.contains(&bin)
+}
+
+/// (M4/#10) True when `token` looks like a subcommand identifier — a word
+/// the user reads as part of the command ("run" in `npm run`, "status" in
+/// `git status`) — rather than a variable argument (`./`, `*.txt`, `-la`,
+/// a path, a number). Only subcommand-style second tokens get a PREFIX
+/// tier: `npm run *` narrows trust meaningfully, but `ls ./ *` matches
+/// almost nothing the user will actually type next, so "always allow"
+/// re-prompted on every subsequent `ls` invocation with a different arg
+/// (the user-reported re-prompt bug). For argument-style tokens the
+/// suggested rule falls back to the ROOT tier (`ls *`), which matches
+/// the expectation that approving `ls ./` trusts `ls`.
+///
+/// Known false-positive class, documented for future readers: an
+/// identifier-style VARIABLE argument (`echo hello`, `mkdir foo`,
+/// `touch file`, `cat config`) reads as subcommand-like to this lexical
+/// heuristic. Mitigated (review round 4) by requiring
+/// [`has_known_subcommands`] on the binary — `git status` gets the
+/// prefix tier, `mkdir foo` falls to the root tier — so the residual
+/// false positives are subcommand-looking tokens on KNOWN binaries
+/// (`git foo` for an unusual `git foo`) where the narrow rule is the
+/// conservative outcome anyway. The escape hatch is [r] Root.
+fn looks_like_subcommand(token: &str) -> bool {
+    let mut chars = token.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Match `text` against a `*`-wildcard pattern.
@@ -2582,19 +2757,21 @@ mod tests {
     }
 
     #[test]
-    fn subject_bash_single_token_is_exact() {
-        // A bare binary with no args records an exact rule (no wildcard),
-        // and offers no broader tiers.
+    fn subject_bash_single_token_is_root_wildcard() {
+        // A bare binary with no args records the root-tier wildcard rule
+        // (`git *`) — "always allow git" means the git binary, not the
+        // byte-identical invocation (re-prompt fix, round 2). No broader
+        // tiers are offered: the suggested rule already IS the root.
         let input = serde_json::json!({"command": "git"});
         let subj = approval_subject("bash", &input);
         assert_eq!(subj.value, "git");
         assert_eq!(subj.suggested_rule.tool, "bash");
         assert!(
-            !subj.suggested_rule.wildcard,
-            "single-token bash rule is exact"
+            subj.suggested_rule.wildcard,
+            "single-token bash rule is the root wildcard"
         );
-        assert_eq!(subj.suggested_rule.pattern, "git");
-        assert_eq!(subj.suggested_label, "bash(git)");
+        assert_eq!(subj.suggested_rule.pattern, "git *");
+        assert_eq!(subj.suggested_label, "bash(git *)");
         assert!(subj.prefix_rule.is_none());
         assert!(subj.root_rule.is_none());
         assert!(subj.domain_rule.is_none());
@@ -2652,6 +2829,247 @@ mod tests {
     }
 
     // ── rule ↔ command round-trip ─────────────────────────────────────
+
+    /// User-reported scenario (simulation): approve `ls ./` with [a] Always
+    /// or [s] Session, then the agent runs `ls *.txt` — the user expects
+    /// the second call to be pre-allowed, not re-prompted.
+    #[test]
+    fn simulation_ls_then_ls_txt_is_pre_allowed() {
+        // ── Step 1: agent calls `bash` with `ls ./` ──────────────────────
+        let input1 = serde_json::json!({"command": "ls ./"});
+        let subject1 = approval_subject("bash", &input1);
+
+        // What the modal shows / what gets recorded:
+        assert_eq!(subject1.value, "ls ./");
+        assert_eq!(subject1.suggested_rule.pattern, "ls *");
+        assert_eq!(subject1.suggested_label, "bash(ls *)");
+        // Tier layout the fix relies on: no prefix tier for the
+        // non-subcommand arg, root tier present and equal to the
+        // suggested rule.
+        assert!(
+            subject1.prefix_rule.is_none(),
+            "no prefix tier for a variable-argument token"
+        );
+        assert_eq!(
+            subject1.root_rule.as_ref().map(|r| &r.pattern),
+            Some(&subject1.suggested_rule.pattern),
+            "root tier present and equal to the suggested rule"
+        );
+
+        // ── Step 2: user picks [a] Always ───────────────────────────────
+        let state = ApprovalState::new();
+        state.record_always(subject1.suggested_rule.clone());
+
+        // ── Step 3: agent calls `bash` with `ls *.txt` ──────────────────
+        let input2 = serde_json::json!({"command": "ls *.txt"});
+        let subject2 = approval_subject("bash", &input2);
+        assert_eq!(subject2.value, "ls *.txt");
+
+        let pre_allowed = state.is_pre_allowed("bash", &subject2.value);
+        assert!(
+            pre_allowed,
+            "`ls *.txt` must be pre-allowed by the `ls *` rule recorded for `ls ./` — \
+             otherwise the user gets re-prompted for every ls invocation"
+        );
+    }
+
+    /// Same scenario but with [s] Session instead of [a] Always.
+    #[test]
+    fn simulation_ls_then_ls_txt_session_rule() {
+        let input1 = serde_json::json!({"command": "ls ./"});
+        let subject1 = approval_subject("bash", &input1);
+
+        let state = ApprovalState::new();
+        state.record_session(subject1.suggested_rule.clone());
+
+        let input2 = serde_json::json!({"command": "ls *.txt"});
+        let subject2 = approval_subject("bash", &input2);
+        assert!(
+            state.is_pre_allowed("bash", &subject2.value),
+            "`ls *.txt` must be pre-allowed by the session-scoped `ls *` rule"
+        );
+    }
+
+    /// User-reported scenario (round 2): approve a BARE `ls` with [a] Always,
+    /// then the agent runs `ls Cargo.lock` — the exact single-token rule
+    /// recorded before round 2 matched only the byte-identical command, so
+    /// any invocation with args re-prompted.
+    #[test]
+    fn simulation_bare_ls_then_ls_with_args_is_pre_allowed() {
+        // Step 1: agent calls `bash` with a bare `ls`.
+        let subject1 = approval_subject("bash", &serde_json::json!({"command": "ls"}));
+        assert_eq!(subject1.value, "ls");
+        assert_eq!(subject1.suggested_rule.pattern, "ls *");
+
+        // Step 2: user picks [a] Always — records `ls *`.
+        let state = ApprovalState::new();
+        state.record_always(subject1.suggested_rule.clone());
+
+        // Step 3: agent calls `ls Cargo.lock` — pre-allowed by `ls *`.
+        let subject2 = approval_subject("bash", &serde_json::json!({"command": "ls Cargo.lock"}));
+        assert!(
+            state.is_pre_allowed("bash", &subject2.value),
+            "`ls Cargo.lock` must be pre-allowed by the `ls *` rule recorded for bare `ls`"
+        );
+
+        // And the bare repeat too.
+        assert!(
+            state.is_pre_allowed("bash", "ls"),
+            "bare `ls` must still re-match its own recorded rule"
+        );
+    }
+
+    /// Table test for the subcommand heuristic: the boundary between
+    /// "subcommand-like" tokens (prefix tier) and variable-argument
+    /// tokens (root tier for safe binaries, narrow tier for dangerous
+    /// ones).
+    #[test]
+    fn looks_like_subcommand_table() {
+        // Positive: identifier-style tokens read as part of the command.
+        for positive in [
+            "run",
+            "status",
+            "build",
+            "install",
+            "push",
+            "build-all",
+            "force_push",
+        ] {
+            assert!(
+                looks_like_subcommand(positive),
+                "{positive:?} should look like a subcommand"
+            );
+        }
+        // Negative: flags, paths, globs, versions, empty.
+        for negative in [
+            "-rf",
+            "--watch",
+            "./",
+            "*.txt",
+            "Cargo.lock",
+            "v1.1",
+            "/etc/passwd",
+            "",
+            "42",
+        ] {
+            assert!(
+                !looks_like_subcommand(negative),
+                "{negative:?} should NOT look like a subcommand"
+            );
+        }
+    }
+
+    /// (Review safety middle ground) A dangerous binary with a
+    /// non-subcommand first arg keeps the NARROW prefix-tier rule
+    /// (`rm ./x *`), not the root tier (`rm *`).
+    #[test]
+    fn dangerous_binary_keeps_narrow_rule() {
+        let subj = approval_subject("bash", &serde_json::json!({"command": "rm ./x"}));
+        assert_eq!(subj.suggested_rule.pattern, "rm ./x *");
+        assert_eq!(subj.suggested_label, "bash(rm ./x *)");
+        // Root tier is still offered explicitly.
+        assert_eq!(
+            subj.root_rule.as_ref().map(|r| r.pattern.as_str()),
+            Some("rm *")
+        );
+    }
+
+    /// ...but a subcommand-like arg on a dangerous binary still gets the
+    /// normal prefix tier (`sudo ufw status *`-style trust).
+    #[test]
+    fn dangerous_binary_with_subcommand_gets_prefix() {
+        let subj = approval_subject("bash", &serde_json::json!({"command": "sudo ufw"}));
+        assert_eq!(subj.suggested_rule.pattern, "sudo ufw *");
+    }
+
+    /// Even a plain repeat of the exact same command must re-match its own
+    /// recorded rule (the most basic expectation of "always allow").
+    /// (Review inconsistency fix) A BARE dangerous binary keeps the exact
+    /// rule — one [a] press on bare `sudo` must not trust `sudo *` when
+    /// `sudo -v` records `sudo -v *`.
+    #[test]
+    fn bare_dangerous_binary_keeps_exact_rule() {
+        let subj = approval_subject("bash", &serde_json::json!({"command": "sudo"}));
+        assert_eq!(subj.value, "sudo");
+        assert!(
+            !subj.suggested_rule.wildcard,
+            "bare sudo records an exact rule"
+        );
+        assert_eq!(subj.suggested_rule.pattern, "sudo");
+        assert_eq!(subj.suggested_label, "bash(sudo)");
+    }
+
+    /// (Review round 3) Shells and interpreters must get the narrow
+    /// prefix tier, not the root: one [a] press on `bash deploy.sh`
+    /// must not record `bash *` (arbitrary command execution).
+    #[test]
+    fn shells_and_interpreters_keep_narrow_rule() {
+        for cmd in [
+            "sh script.sh",
+            "bash deploy.sh",
+            "zsh run.zsh",
+            "python script.py",
+            "python3 script.py",
+            "node server.js",
+            "perl script.pl",
+            "ruby app.rb",
+        ] {
+            let subj = approval_subject("bash", &serde_json::json!({"command": cmd}));
+            assert_eq!(
+                subj.suggested_rule.pattern,
+                format!("{cmd} *"),
+                "{cmd} must record the narrow prefix rule, not the root tier"
+            );
+        }
+    }
+
+    /// (Review round 3) Degenerate `rm rm` must not fall through to the
+    /// root tier: the narrow `rm rm *` rule is recorded instead.
+    #[test]
+    fn degenerate_repeated_token_keeps_narrow_rule() {
+        let subj = approval_subject("bash", &serde_json::json!({"command": "rm rm"}));
+        assert_eq!(subj.suggested_rule.pattern, "rm rm *");
+        assert_eq!(
+            subj.root_rule.as_ref().map(|r| r.pattern.as_str()),
+            Some("rm *"),
+            "root tier still offered explicitly"
+        );
+    }
+
+    /// (Review round 4) Identifier-like VARIABLE arguments on unknown
+    /// binaries must fall to the root tier, not a dead-narrow prefix —
+    /// `mkdir foo` then `mkdir dist` must not re-prompt.
+    #[test]
+    fn unknown_binary_identifier_arg_gets_root_not_prefix() {
+        for cmd in [
+            "cat config",
+            "mkdir foo",
+            "touch file",
+            "echo hello",
+            "cp src dst",
+            "mv old new",
+        ] {
+            let subj = approval_subject("bash", &serde_json::json!({"command": cmd}));
+            let bin = cmd.split_whitespace().next().unwrap();
+            assert_eq!(
+                subj.suggested_rule.pattern,
+                format!("{bin} *"),
+                "{cmd} must suggest the root tier for an unknown-subcommand binary"
+            );
+        }
+    }
+
+    #[test]
+    fn simulation_exact_repeat_is_pre_allowed() {
+        let input = serde_json::json!({"command": "ls ./"});
+        let subject = approval_subject("bash", &input);
+        let state = ApprovalState::new();
+        state.record_always(subject.suggested_rule.clone());
+        assert!(
+            state.is_pre_allowed("bash", "ls ./"),
+            "re-running the exact approved command must not re-prompt"
+        );
+    }
 
     #[test]
     fn bash_wildcard_rule_does_not_cover_chained_commands() {
@@ -2800,26 +3218,27 @@ mod tests {
     #[test]
     fn rule_for_choice_falls_back_when_no_candidate() {
         // A bare `git` (no args) has no prefix/root/domain tiers; the scope
-        // choices fall back to the suggested (exact) rule rather than None.
+        // choices fall back to the suggested rule (root wildcard after the
+        // re-prompt fix, round 2) rather than None.
         let input = serde_json::json!({"command": "git"});
         let subj = approval_subject("bash", &input);
         assert_eq!(
             rule_for_choice(&PromptChoice::Prefix, &subj)
                 .unwrap()
                 .pattern,
-            "git"
+            "git *"
         );
         assert_eq!(
             rule_for_choice(&PromptChoice::GrantRoot, &subj)
                 .unwrap()
                 .pattern,
-            "git"
+            "git *"
         );
         assert_eq!(
             rule_for_choice(&PromptChoice::Domain, &subj)
                 .unwrap()
                 .pattern,
-            "git"
+            "git *"
         );
     }
 

@@ -8492,17 +8492,18 @@ fn user_content_text(content: &pi::model::UserContent) -> String {
 /// concatenated Text blocks become one `Assistant` entry (mirroring the
 /// TextDelta coalescing on the live path) and ToolCall blocks become
 /// `Tool` markers with the same `tool_preview` detail the live path uses.
-fn assistant_message_entries(content: &[pi::model::ContentBlock], entries: &mut Vec<TranscriptEntry>) {
+fn assistant_message_entries(
+    content: &[pi::model::ContentBlock],
+    entries: &mut Vec<TranscriptEntry>,
+) {
     use pi::model::ContentBlock;
     let mut text = String::new();
     for block in content {
         match block {
             ContentBlock::Text(block) => text.push_str(&block.text),
             ContentBlock::ToolCall(call) => {
-                let detail = crate::commands::code_tool_preview::tool_preview(
-                    &call.name,
-                    &call.arguments,
-                );
+                let detail =
+                    crate::commands::code_tool_preview::tool_preview(&call.name, &call.arguments);
                 let detail = detail
                     .strip_prefix(&call.name)
                     .map(str::trim_start)
@@ -9184,7 +9185,10 @@ mod tests {
 
     /// Write a session JSONL fixture: a header line followed by entry lines
     /// (pre-serialized JSON strings), then run the replay mapper on it.
-    fn replay_fixture(header: serde_json::Value, entries: &[serde_json::Value]) -> Vec<TranscriptEntry> {
+    fn replay_fixture(
+        header: serde_json::Value,
+        entries: &[serde_json::Value],
+    ) -> Vec<TranscriptEntry> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         let mut body = String::new();
