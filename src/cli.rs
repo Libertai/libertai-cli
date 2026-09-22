@@ -674,29 +674,29 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             args,
             dangerously_skip_permissions,
         } => {
-            if acp {
-                return crate::commands::code_acp::run(model, provider, sandbox);
-            }
-            crate::commands::code::run(
-                model,
-                provider,
-                plan,
-                mode,
-                resume,
-                continue_recent,
-                list_sessions,
-                all,
-                json,
-                sandbox,
-                print,
-                bg,
-                name,
-                agent,
-                team,
-                teammate,
-                args,
-                dangerously_skip_permissions,
-            )
+            std::process::exit(crate::commands::code_alforria::run(
+                crate::commands::code_alforria::CodeArgs {
+                    model,
+                    provider,
+                    plan,
+                    mode,
+                    resume,
+                    continue_recent,
+                    list_sessions,
+                    all,
+                    json,
+                    sandbox: sandbox != crate::commands::code_sandbox::SandboxMode::Off,
+                    print,
+                    bg,
+                    name,
+                    agent,
+                    team,
+                    teammate,
+                    acp,
+                    dangerously_skip_permissions,
+                    args,
+                },
+            ))
         }
         Command::Agents {
             cwd,
