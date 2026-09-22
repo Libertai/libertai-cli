@@ -46,8 +46,8 @@ pub fn run(args: CodeArgs) -> i32 {
         Err(err) => {
             eprintln!(
                 "Error: could not start the alforria engine ({err}).\n\
-                 `libertai code` now runs on alforria — install it with:\n\
-                 \tcargo install --git https://github.com/alforria-ai/alforria alforria"
+                 `libertai code` runs on alforria — install it with:\n\
+                 \tcurl -fsSL https://raw.githubusercontent.com/alforria-ai/alforria/main/packaging/install.sh | sh"
             );
             1
         }
