@@ -20,6 +20,7 @@
 //! `--resume <path>`, `--list-sessions`, `--sandbox`, `--plan`, `--bg`,
 //! `--name`, `--team`, `--teammate`.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 
@@ -54,8 +55,31 @@ pub fn run(args: CodeArgs) -> i32 {
     }
 }
 
-fn alforria_binary() -> &'static str {
-    "alforria"
+/// Where to find the engine: `alforria` on PATH first, then the standard
+/// install dirs (`cargo install` and the installer script) so a shell
+/// without ~/.cargo/bin on PATH still works.
+fn alforria_binary() -> PathBuf {
+    let exe = if cfg!(windows) {
+        "alforria.exe"
+    } else {
+        "alforria"
+    };
+    if let Some(found) = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(exe))
+            .find(|candidate| candidate.is_file())
+    }) {
+        return found;
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    [home.join(".cargo").join("bin"), home.join(".local").join("bin")]
+        .into_iter()
+        .map(|dir| dir.join(exe))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from(exe))
 }
 
 pub struct CodeArgs {
