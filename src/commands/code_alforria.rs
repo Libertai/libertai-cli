@@ -119,7 +119,10 @@ fn build_argv(code: &CodeArgs) -> Result<Vec<String>, String> {
     }
 
     let interactive = !code.print && code.args.is_empty();
-    let mut argv = vec![if interactive { "tui" } else { "run" }.to_string()];
+    // Bare alforria (no subcommand) launches the default TUI command; there
+    // is no "tui" subcommand, and an unknown first token falls through to
+    // the `project` positional (i.e. `alforria tui` would chdir into ./tui).
+    let mut argv: Vec<String> = if interactive { vec![] } else { vec!["run".to_string()] };
     if code.model.is_some() || !interactive {
         argv.push("--model".to_string());
         argv.push(qualified_model(code)?);
@@ -204,7 +207,7 @@ mod tests {
         code.model = None;
         code.provider = None;
         let argv = build_argv(&code).unwrap();
-        assert_eq!(argv, vec!["tui"]);
+        assert!(argv.is_empty());
     }
 
     #[test]
@@ -214,7 +217,7 @@ mod tests {
         code.provider = None;
         code.sandbox = true;
         let argv = build_argv(&code).unwrap();
-        assert_eq!(argv, vec!["tui"]);
+        assert!(argv.is_empty());
     }
 
     #[test]
@@ -235,7 +238,7 @@ mod tests {
         code.provider = Some("libertai".into());
         assert_eq!(
             build_argv(&code).unwrap(),
-            vec!["tui", "--model", "libertai/glm-5.3-thinking"]
+            vec!["--model".to_string(), "libertai/glm-5.3-thinking".to_string()]
         );
     }
 
@@ -246,7 +249,7 @@ mod tests {
         code.provider = None;
         code.dangerously_skip_permissions = true;
         let argv = build_argv(&code).unwrap();
-        assert_eq!(argv, vec!["tui", "--auto"]);
+        assert_eq!(argv, vec!["--auto".to_string()]);
     }
 
     #[test]
@@ -264,7 +267,7 @@ mod tests {
         code.provider = None;
         code.team = Some("alpha".into());
         let argv = build_argv(&code).unwrap();
-        assert_eq!(argv, vec!["tui"]);
+        assert!(argv.is_empty());
     }
 
     #[test]
@@ -273,6 +276,6 @@ mod tests {
         code.model = Some("other/any".into());
         code.provider = None;
         let argv = build_argv(&code).unwrap();
-        assert_eq!(argv, vec!["tui", "--model", "other/any"]);
+        assert_eq!(argv, vec!["--model".to_string(), "other/any".to_string()]);
     }
 }
