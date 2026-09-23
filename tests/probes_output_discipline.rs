@@ -167,27 +167,3 @@ fn keys_list_fails_cleanly_with_no_ansi() {
     assert_no_escape_bytes("keys list stdout", &out.stdout);
     assert_no_escape_bytes("keys list stderr", &out.stderr);
 }
-
-#[test]
-fn code_list_sessions_json_is_pure_and_parseable() {
-    let config_home = common::fake_config_home();
-    let pi_dir = tempfile::tempdir().expect("pi tempdir");
-    let assert = Command::cargo_bin("libertai")
-        .expect("libertai binary built")
-        .env("XDG_CONFIG_HOME", config_home.path())
-        .env("HOME", config_home.path())
-        .env("PI_CODING_AGENT_DIR", pi_dir.path())
-        .timeout(Duration::from_secs(60))
-        .args(["code", "--list-sessions", "--json"])
-        .assert()
-        .success();
-
-    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("code --list-sessions --json stdout is not pure JSON ({e}):\n{stdout}")
-    });
-    assert!(
-        value.is_array(),
-        "expected a JSON array of sessions: {value}"
-    );
-}

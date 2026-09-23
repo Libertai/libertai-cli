@@ -21,7 +21,6 @@ mod common;
 
 /// Must match the key planted by `common::fake_config_home`.
 const PROBE_KEY: &str = "LTAI_sk_probe_config_00000000000000000000";
-const ENV_REF: &str = "env:LIBERTAI_API_KEY";
 
 /// The libertai config dir that `dirs::config_dir()` resolves for a fake
 /// `$HOME` / `$XDG_CONFIG_HOME` pointing at `home`.
@@ -51,6 +50,47 @@ fn files_containing(root: &Path, needle: &str) -> Vec<PathBuf> {
         }
     }
     hits
+}
+
+#[test]
+fn logout_scrubs_plaintext_key_from_legacy_pi_models_json() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let config_dir = platform_config_dir(home.path()).join("libertai");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!("[auth]\napi_key = \"{PROBE_KEY}\"\n"),
+    )
+    .unwrap();
+
+    // Legacy pi-era models.json carrying a plaintext key. With
+    // XDG_CONFIG_HOME overridden this resolves to $XDG_CONFIG_HOME/pi,
+    // matching logout's dirs::config_dir()-based lookup.
+    let pi_dir = home.path().join("pi");
+    std::fs::create_dir_all(&pi_dir).unwrap();
+    std::fs::write(
+        pi_dir.join("models.json"),
+        format!("{{\"providers\":{{\"libertai\":{{\"apiKey\":\"{PROBE_KEY}\"}}}}}}"),
+    )
+    .unwrap();
+
+    libertai_cmd()
+        .env("XDG_CONFIG_HOME", home.path())
+        .env("HOME", home.path())
+        .args(["logout"])
+        .assert()
+        .success();
+
+    let models_json =
+        std::fs::read_to_string(pi_dir.join("models.json")).expect("models.json survives scrub");
+    assert!(
+        !models_json.contains(PROBE_KEY),
+        "models.json still contains the plaintext API key; got:\n{models_json}"
+    );
+    assert!(
+        models_json.contains("env:LIBERTAI_API_KEY"),
+        "models.json missing the env indirection; got:\n{models_json}"
+    );
 }
 
 fn libertai_cmd() -> Command {
@@ -116,128 +156,5 @@ fn logout_leaves_no_file_containing_the_key_and_keeps_prefs() {
     assert!(
         !config.contains("0xprobe"),
         "wallet_address should be cleared on logout; got:\n{config}"
-    );
-}
-
-#[test]
-fn code_dry_run_writes_env_indirection_not_plaintext_key() {
-    let home = common::fake_config_home();
-    let pi_dir = tempfile::tempdir().expect("pi tempdir");
-
-    libertai_cmd()
-        .env("XDG_CONFIG_HOME", home.path())
-        .env("HOME", home.path())
-        .env("PI_CODING_AGENT_DIR", pi_dir.path())
-        .env("LIBERTAI_DUMP_SYSTEM_PROMPT", "1")
-        .env("LIBERTAI_DUMP_AND_EXIT", "1")
-        .args(["code", "-p", "probe-ignored"])
-        .assert()
-        .success();
-
-    let models_json = std::fs::read_to_string(pi_dir.path().join("models.json"))
-        .expect("code run registers models.json");
-    assert!(
-        models_json.contains(ENV_REF),
-        "models.json missing `{ENV_REF}` indirection; got:\n{models_json}"
-    );
-    assert!(
-        !models_json.contains(PROBE_KEY),
-        "models.json contains the plaintext API key; got:\n{models_json}"
-    );
-}
-
-#[test]
-fn code_dry_run_migrates_legacy_plaintext_models_json() {
-    let home = common::fake_config_home();
-    let pi_dir = tempfile::tempdir().expect("pi tempdir");
-    // A models.json written by an older CLI version: literal libertai key,
-    // plus an unrelated provider that must be preserved verbatim.
-    std::fs::write(
-        pi_dir.path().join("models.json"),
-        format!(
-            r#"{{
-  "providers": {{
-    "libertai": {{
-      "baseUrl": "https://api.libertai.io/v1",
-      "api": "openai-completions",
-      "apiKey": "{PROBE_KEY}",
-      "authHeader": true,
-      "models": [
-        {{ "id": "legacy-model", "name": "legacy-model", "api": "openai-completions", "contextWindow": 32768 }}
-      ]
-    }},
-    "otherco": {{ "apiKey": "other-providers-secret" }}
-  }}
-}}"#
-        ),
-    )
-    .unwrap();
-
-    libertai_cmd()
-        .env("XDG_CONFIG_HOME", home.path())
-        .env("HOME", home.path())
-        .env("PI_CODING_AGENT_DIR", pi_dir.path())
-        .env("LIBERTAI_DUMP_SYSTEM_PROMPT", "1")
-        .env("LIBERTAI_DUMP_AND_EXIT", "1")
-        .args(["code", "-p", "probe-ignored"])
-        .assert()
-        .success();
-
-    let models_json = std::fs::read_to_string(pi_dir.path().join("models.json")).unwrap();
-    assert!(
-        !models_json.contains(PROBE_KEY),
-        "legacy plaintext key not migrated out of models.json; got:\n{models_json}"
-    );
-    assert!(
-        models_json.contains(ENV_REF),
-        "models.json missing `{ENV_REF}` after migration; got:\n{models_json}"
-    );
-    assert!(
-        models_json.contains("other-providers-secret"),
-        "other providers must survive the libertai merge; got:\n{models_json}"
-    );
-    assert!(
-        models_json.contains("legacy-model"),
-        "existing libertai models array must be preserved; got:\n{models_json}"
-    );
-}
-
-#[test]
-fn logout_scrubs_plaintext_key_from_pi_models_json() {
-    let home = common::fake_config_home();
-    let pi_dir = tempfile::tempdir().expect("pi tempdir");
-    std::fs::write(
-        pi_dir.path().join("models.json"),
-        format!(
-            r#"{{
-  "providers": {{
-    "libertai": {{ "baseUrl": "https://api.libertai.io/v1", "apiKey": "{PROBE_KEY}" }},
-    "otherco": {{ "apiKey": "other-providers-secret" }}
-  }}
-}}"#
-        ),
-    )
-    .unwrap();
-
-    libertai_cmd()
-        .env("XDG_CONFIG_HOME", home.path())
-        .env("HOME", home.path())
-        .env("PI_CODING_AGENT_DIR", pi_dir.path())
-        .arg("logout")
-        .assert()
-        .success();
-
-    let models_json = std::fs::read_to_string(pi_dir.path().join("models.json")).unwrap();
-    assert!(
-        !models_json.contains(PROBE_KEY),
-        "logout left the plaintext key in models.json; got:\n{models_json}"
-    );
-    assert!(
-        models_json.contains(ENV_REF),
-        "logout should swap the key for `{ENV_REF}`; got:\n{models_json}"
-    );
-    assert!(
-        models_json.contains("other-providers-secret"),
-        "logout must not touch other providers; got:\n{models_json}"
     );
 }

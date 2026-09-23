@@ -1,3 +1,4 @@
+#[allow(dead_code)] // shared across probe binaries; not every one uses it
 pub fn fake_config_home() -> tempfile::TempDir {
     let home = tempfile::tempdir().expect("config tempdir");
     for config_dir in [

@@ -107,7 +107,7 @@ pub fn run(prompt: String, model: Option<String>, images: Vec<String>) -> Result
     if markdown_enabled_stdout() {
         // TTY: pretty markdown. render_markdown guarantees a trailing
         // newline of its own.
-        pi::tui::PiConsole::new().render_markdown(content);
+        crate::commands::chat_render::MarkdownConsole::new().render_markdown(content);
     } else {
         print!("{}", raw_output(content));
     }

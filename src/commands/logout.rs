@@ -15,10 +15,14 @@
 //!     `env:` indirection, scrubbing registrations written by older versions
 //!     of `libertai code`.
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use crate::commands::code_models::MODELS_JSON_API_KEY_REF;
+/// The `apiKey` indirection pi's registry understood (legacy models.json
+/// scrub only).
+const MODELS_JSON_API_KEY_REF: &str = "env:LIBERTAI_API_KEY";
 use crate::config::{config_path, libertai_config_dir, set_file_mode_600, write_file_secure};
 
 /// `[auth]` fields that must not survive logout. `device_id` is deliberately
@@ -181,8 +185,18 @@ fn purge_stale_backups(dir: &Path) -> Result<bool> {
 /// themselves (`env:` / `file:` / `!cmd`) — untouched. Returns true when the
 /// file was rewritten.
 fn scrub_pi_models_json() -> Result<bool> {
-    let global_dir = pi::config::Config::global_dir();
-    let models_path = pi::models::default_models_path(&global_dir);
+    // pi's global dir: $XDG_CONFIG_HOME/pi (legacy scrub — pi is gone but
+    // a leftover models.json from the pi era may still hold a key).
+    let global_dir = dirs::config_dir()
+        .map(|config| config.join("pi"))
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default()
+                .join(".config")
+                .join("pi")
+        });
+    let models_path = global_dir.join("models.json");
     if !models_path.exists() {
         return Ok(false);
     }

@@ -40,19 +40,8 @@ pub enum Command {
         action: KeysAction,
     },
 
-    /// Manage plugins and marketplaces (Claude-Code compatible).
-    Plugin {
-        #[command(subcommand)]
-        action: PluginAction,
-    },
-
     /// List available models.
     Models {
-        /// Re-sync the persisted model catalog: fetches `/v1/models` and
-        /// merges any new models into pi's `models.json` so they become
-        /// selectable in `libertai code` (`/model`).
-        #[arg(long)]
-        refresh: bool,
         /// Emit the `/v1/models` listing as JSON instead of the table.
         #[arg(long)]
         json: bool,
@@ -190,7 +179,7 @@ pub enum Command {
         args: Vec<String>,
     },
 
-    /// LibertAI's own coding agent, powered by pi_agent_rust.
+    /// LibertAI's own coding agent, powered by alforria.
     ///
     /// Alias: `lcode` (as a separate binary).
     Code {
@@ -230,15 +219,10 @@ pub enum Command {
         /// message_count, …) instead of the human list.
         #[arg(long, requires = "list_sessions")]
         json: bool,
-        /// Sandbox the bash tool. `off` (default) runs bash with the
-        /// user's full host privileges. `strict` wraps it in `bwrap`
-        /// (Linux only today) with no network, read-only system dirs,
-        /// and a tmpfs `/tmp` — useful for untrusted models or
-        /// reviewing third-party agent scripts. `auto` resolves per
-        /// pillar; on the CLI that's currently the same as `off`.
-        /// Also honours the `LIBERTAI_SANDBOX` env var.
-        #[arg(long, value_enum, env = "LIBERTAI_SANDBOX", default_value_t = crate::commands::code_sandbox::SandboxMode::Off)]
-        sandbox: crate::commands::code_sandbox::SandboxMode,
+        /// Accepted for backwards compatibility; the alforria engine
+        /// has no sandbox mode, so this only prints a warning.
+        #[arg(long)]
+        sandbox: bool,
         /// Bypass ALL tool approvals: run bash, edits, and every other
         /// mutating tool without prompting — like Codex's
         /// `--ask-for-approval never` / Claude Code's
@@ -319,25 +303,6 @@ pub enum Command {
     /// without attaching, and attach when one needs you. Run without
     /// flags for the full-screen interactive view; pass `--json` for a
     /// machine-readable listing that exits without a TUI.
-    Agents {
-        /// Only show sessions started under this directory.
-        #[arg(long, value_name = "PATH")]
-        cwd: Option<String>,
-        /// Emit a JSON array of sessions and exit (no TUI).
-        #[arg(long)]
-        json: bool,
-        /// Model for sessions dispatched from the view's input.
-        #[arg(long)]
-        model: Option<String>,
-        /// Permission mode for dispatched sessions (`normal`,
-        /// `accept-edits`, `plan`).
-        #[arg(long, value_name = "MODE")]
-        permission_mode: Option<String>,
-        /// Sub-agent to run dispatched sessions as (defaults to the
-        /// built-in catch-all agent).
-        #[arg(long, value_name = "AGENT")]
-        agent: Option<String>,
-    },
 
     /// Run an MCP server exposing LibertAI web search and page fetch over stdio.
     ///
@@ -357,18 +322,6 @@ pub enum Command {
     Skills {
         #[command(subcommand)]
         action: SkillsAction,
-    },
-
-    /// Inspect the bash-sandbox configuration.
-    Sandbox {
-        #[command(subcommand)]
-        action: SandboxAction,
-    },
-
-    /// Import data from other coding agents into a LibertAI session.
-    Import {
-        #[command(subcommand)]
-        action: ImportAction,
     },
 
     /// Print a shell completion script to stdout.
@@ -394,102 +347,6 @@ pub enum Command {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ImportAction {
-    /// Claude Code transcripts (`~/.claude/projects/...`).
-    #[command(name = "claude-code")]
-    ClaudeCode {
-        #[command(subcommand)]
-        action: ClaudeCodeImportAction,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ClaudeCodeImportAction {
-    /// List Claude Code sessions discovered for the current project.
-    /// Use `--all` to scan every project Claude Code has on disk.
-    List {
-        /// Scan every project under `~/.claude/projects/`, not just
-        /// the encoded directory for the current cwd.
-        #[arg(long)]
-        all: bool,
-        /// Emit JSON instead of the human summary.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Render the live branch of a Claude Code session as a plain-text
-    /// transcript. Same source that the (still-WIP) summary import
-    /// will feed to the model; use this to preview the input.
-    Show {
-        /// Session UUID (resolved against the current cwd's encoded
-        /// project dir) or an absolute path to a `.jsonl` file.
-        id_or_path: String,
-        /// Look across every project under `~/.claude/projects/`
-        /// when resolving a bare UUID.
-        #[arg(long)]
-        all: bool,
-        /// Emit a JSON `LinearizedSession` instead of the human transcript.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Build a `/compact`-style summary of a Claude Code session by
-    /// calling the configured LibertAI chat model. Prints the summary
-    /// to stdout. The next slice wires this into a real pi session as
-    /// a `Compaction` checkpoint; for now this lets you eyeball quality.
-    Summarize {
-        /// Session UUID or absolute path (same resolver as `show`).
-        id_or_path: String,
-        /// Look across every project when resolving a bare UUID.
-        #[arg(long)]
-        all: bool,
-        /// Override the chat model (defaults to `default_chat_model`).
-        #[arg(long)]
-        model: Option<String>,
-        /// Print the constructed prompt and exit without calling the
-        /// backend — useful for inspecting what the model would see.
-        #[arg(long = "print-prompt")]
-        print_prompt: bool,
-    },
-    /// Summarise the Claude Code session and write a new pi session
-    /// file whose first entry is the resulting `/compact`-style
-    /// checkpoint. Prints the new session path on success — open it
-    /// with `libertai code --resume <path>` or pick it from the
-    /// session picker.
-    Import {
-        /// Session UUID or absolute path (same resolver as `show`).
-        id_or_path: String,
-        /// Look across every project when resolving a bare UUID.
-        #[arg(long)]
-        all: bool,
-        /// Override the chat model used for the summary call.
-        #[arg(long)]
-        model: Option<String>,
-        /// Provider written into the pi session header (defaults to
-        /// `default_code_provider` from config).
-        #[arg(long)]
-        provider: Option<String>,
-        /// Render the pi session JSONL to stdout instead of writing
-        /// it. Useful for inspecting the output shape.
-        #[arg(long)]
-        dry_run: bool,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum SandboxAction {
-    /// Print the resolved strict profile for this host: which bin /
-    /// lib / config paths would be exposed, which are present vs
-    /// missing, plus the bwrap location and the inside-sandbox PATH.
-    /// Useful for debugging when something the model wants to run
-    /// isn't reachable inside `--sandbox=strict`.
-    Info {
-        /// Emit JSON instead of the human summary. Suitable for piping
-        /// into other tools or consuming from a wrapper script.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 pub enum KeysAction {
     /// List all API keys for the current account.
     List {
@@ -507,63 +364,6 @@ pub enum KeysAction {
     },
     /// Delete an API key by id.
     Delete { id: String },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum PluginAction {
-    /// List installed plugins and their enabled/trusted state.
-    List,
-    /// Manage plugin marketplaces.
-    Marketplace {
-        #[command(subcommand)]
-        action: MarketplaceAction,
-    },
-    /// Install a plugin from an added marketplace (`name` or `name@marketplace`).
-    Install {
-        /// Plugin name, optionally qualified as `name@marketplace`.
-        name: String,
-        /// Force the external security scan before installing.
-        #[arg(long)]
-        scan: bool,
-        /// Skip the external security scan.
-        #[arg(long, conflicts_with = "scan")]
-        no_scan: bool,
-        /// Trust the plugin's hooks/MCP servers to run (no prompt).
-        #[arg(long)]
-        trust: bool,
-        /// Assume yes to prompts (non-interactive; never auto-trusts code).
-        #[arg(long, short = 'y')]
-        yes: bool,
-    },
-    /// Audit a plugin (capabilities + scan) without installing it.
-    Audit {
-        /// Plugin name, optionally qualified as `name@marketplace`.
-        name: String,
-    },
-    /// Enable an installed plugin's components.
-    Enable { name: String },
-    /// Disable an installed plugin's components.
-    Disable { name: String },
-    /// Uninstall a plugin and delete its files.
-    Remove { name: String },
-    /// Sign a plugin directory in place (writes .libertai-plugin/signature.json).
-    Sign {
-        /// Path to the plugin directory to sign.
-        path: String,
-        /// Signing key hex (with or without 0x); else $LIBERTAI_SIGNING_KEY.
-        #[arg(long)]
-        key: Option<String>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum MarketplaceAction {
-    /// Add a marketplace from a git URL or local path.
-    Add { source: String },
-    /// List added marketplaces.
-    List,
-    /// Remove an added marketplace.
-    Remove { name: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -616,8 +416,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Status { json } => crate::commands::status::run(json),
         Command::Usage { json } => crate::commands::usage::run(json),
         Command::Keys { action } => crate::commands::keys::run(action),
-        Command::Plugin { action } => crate::commands::plugin_cli::run(action),
-        Command::Models { refresh, json } => crate::commands::models::run(refresh, json),
+        Command::Models { json } => crate::commands::models::run(json),
         Command::Ask {
             prompt,
             model,
@@ -673,43 +472,32 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             acp,
             args,
             dangerously_skip_permissions,
-        } => {
-            std::process::exit(crate::commands::code_alforria::run(
-                crate::commands::code_alforria::CodeArgs {
-                    model,
-                    provider,
-                    plan,
-                    mode,
-                    resume,
-                    continue_recent,
-                    list_sessions,
-                    all,
-                    json,
-                    sandbox: sandbox != crate::commands::code_sandbox::SandboxMode::Off,
-                    print,
-                    bg,
-                    name,
-                    agent,
-                    team,
-                    teammate,
-                    acp,
-                    dangerously_skip_permissions,
-                    args,
-                },
-            ))
-        }
-        Command::Agents {
-            cwd,
-            json,
-            model,
-            permission_mode,
-            agent,
-        } => crate::commands::code_tui::agent_view::run(cwd, json, model, permission_mode, agent),
+        } => std::process::exit(crate::commands::code_alforria::run(
+            crate::commands::code_alforria::CodeArgs {
+                model,
+                provider,
+                plan,
+                mode,
+                resume,
+                continue_recent,
+                list_sessions,
+                all,
+                json,
+                sandbox,
+                print,
+                bg,
+                name,
+                agent,
+                team,
+                teammate,
+                acp,
+                dangerously_skip_permissions,
+                args,
+            },
+        )),
         Command::Mcp => crate::commands::mcp::run(),
         Command::Config { action } => crate::commands::config_cmd::run(action),
         Command::Skills { action } => crate::commands::skills::run(action),
-        Command::Sandbox { action } => crate::commands::code_sandbox_cli::run(action),
-        Command::Import { action } => crate::commands::claude_code_import_cli::run(action),
         Command::Completions { shell } => crate::commands::completions::run(shell),
         Command::Man => crate::commands::completions::man(),
     }
@@ -730,7 +518,6 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::Status { .. } => "status",
         Command::Usage { .. } => "usage",
         Command::Keys { .. } => "keys",
-        Command::Plugin { .. } => "plugin",
         Command::Models { .. } => "models",
         Command::Ask { .. } => "ask",
         Command::Chat { .. } => "chat",
@@ -744,12 +531,9 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::Claw { .. } => "claw",
         Command::Hermes { .. } => "hermes",
         Command::Code { .. } => "code",
-        Command::Agents { .. } => "agents",
         Command::Mcp => "mcp",
         Command::Config { .. } => "config",
         Command::Skills { .. } => "skills",
-        Command::Sandbox { .. } => "sandbox",
-        Command::Import { .. } => "import",
         Command::Completions { .. } => "completions",
         Command::Man => "man",
     }

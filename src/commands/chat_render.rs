@@ -17,7 +17,6 @@
 
 use std::io::{IsTerminal, Write};
 
-use pi::tui::PiConsole;
 use rich_rust::cells::{cell_len, get_character_cell_size};
 use rich_rust::renderables::Markdown;
 use rich_rust::style::Style;
@@ -64,7 +63,7 @@ pub fn markdown_enabled_stdout() -> bool {
 /// (verified against the pinned pi_agent_rust rev under a PTY).
 pub struct MarkdownStream {
     render: bool,
-    console: Option<PiConsole>,
+    console: Option<MarkdownConsole>,
     /// Buffered text not yet rendered (markdown mode only).
     pending: String,
     /// Total characters pushed (used by callers to detect empty replies).
@@ -97,7 +96,11 @@ impl MarkdownStream {
     pub fn new(render: bool) -> Self {
         Self {
             render,
-            console: if render { Some(PiConsole::new()) } else { None },
+            console: if render {
+                Some(MarkdownConsole::new())
+            } else {
+                None
+            },
             pending: String::new(),
             received: false,
             prose_emitted: false,
@@ -471,6 +474,49 @@ fn complete_block_end(buf: &str) -> Option<usize> {
     }
 
     last_boundary
+}
+
+/// rich_rust-backed markdown renderer for `libertai chat` / `ask`
+/// (PiConsole's replacement after the pi-ectomy). TTY renders styled
+/// markdown; non-TTY prints the raw block. Code fences lose pi's
+/// syntax highlighting but keep rich_rust's table/styling output.
+pub(crate) struct MarkdownConsole {
+    is_tty: bool,
+}
+
+impl MarkdownConsole {
+    pub(crate) fn new() -> Self {
+        Self {
+            is_tty: std::io::stdout().is_terminal(),
+        }
+    }
+
+    pub(crate) fn render_markdown(&self, markdown: &str) {
+        if !self.is_tty {
+            print!("{markdown}");
+            if !markdown.ends_with('\n') {
+                println!();
+            }
+            std::io::stdout().flush().ok();
+            return;
+        }
+        let width = stdout_render_width();
+        let md = Markdown::new(markdown);
+        let segments = md.render(width);
+        let console = Console::builder()
+            .force_terminal(true)
+            .width(width)
+            .file(Box::new(std::io::sink()))
+            .build();
+        let mut buf: Vec<u8> = Vec::new();
+        let _ = console.print_segments_to(&mut buf, &segments);
+        let rendered = String::from_utf8_lossy(&buf);
+        print!("{rendered}");
+        if !rendered.ends_with('\n') {
+            println!();
+        }
+        std::io::stdout().flush().ok();
+    }
 }
 
 #[cfg(test)]

@@ -1,11 +1,8 @@
-//! `libertai code` — alforria engine cutover.
+//! `libertai code` — the alforria engine, linked in-process.
 //!
-//! The pi-based engine is deprecated; `libertai code` now maps its flags
-//! onto the alforria (opencode-compatible) command surface and execs the
-//! `alforria` binary: same engine, sessions, and TUI as running alforria
-//! directly. (pi and alforria cannot coexist in one binary — both link
-//! `tree-sitter` — so this is a process boundary until the desktop app
-//! migrates off pi and the engine is linked in-process.)
+//! `libertai code` maps its flags onto the alforria (opencode-compatible)
+//! command surface and runs the engine in the same binary: no separate
+//! `alforria` install needed.
 //!
 //! Mapping table (libertai flag → alforria argv):
 //! - default / interactive REPL → `alforria tui`
@@ -20,10 +17,6 @@
 //! `--resume <path>`, `--list-sessions`, `--sandbox`, `--plan`, `--bg`,
 //! `--name`, `--team`, `--teammate`.
 
-use std::path::PathBuf;
-use std::process::Command;
-
-
 pub fn run(args: CodeArgs) -> i32 {
     let argv = match build_argv(&args) {
         Ok(argv) => argv,
@@ -36,50 +29,12 @@ pub fn run(args: CodeArgs) -> i32 {
     // env leg; users may also have authenticated via `alforria auth login`.
     if let Ok(config) = crate::config::load() {
         if let Ok(key) = crate::client::require_api_key(&config) {
-            std::env::set_var("LIBERTAI_API_KEY", key.to_string());
+            std::env::set_var("LIBERTAI_API_KEY", key);
         }
     }
-    let binary = alforria_binary();
-    let mut command = Command::new(binary);
-    let command = command.args(&argv).env_remove("LIBERTAI_SANDBOX");
-    match command.status() {
-        Ok(status) => status.code().unwrap_or(1),
-        Err(err) => {
-            eprintln!(
-                "Error: could not start the alforria engine ({err}).\n\
-                 `libertai code` runs on alforria — install it with:\n\
-                 \tcurl -fsSL https://raw.githubusercontent.com/alforria-ai/alforria/main/packaging/install.sh | sh"
-            );
-            1
-        }
-    }
-}
-
-/// Where to find the engine: `alforria` on PATH first, then the standard
-/// install dirs (`cargo install` and the installer script) so a shell
-/// without ~/.cargo/bin on PATH still works.
-fn alforria_binary() -> PathBuf {
-    let exe = if cfg!(windows) {
-        "alforria.exe"
-    } else {
-        "alforria"
-    };
-    if let Some(found) = std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(exe))
-            .find(|candidate| candidate.is_file())
-    }) {
-        return found;
-    }
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    [home.join(".cargo").join("bin"), home.join(".local").join("bin")]
-        .into_iter()
-        .map(|dir| dir.join(exe))
-        .find(|candidate| candidate.is_file())
-        .unwrap_or_else(|| PathBuf::from(exe))
+    let built: Vec<std::ffi::OsString> = argv.into_iter().map(Into::into).collect();
+    let mut ui = alforria::ui::Ui::production();
+    alforria::run(&mut ui, &built)
 }
 
 pub struct CodeArgs {
@@ -131,7 +86,11 @@ fn build_argv(code: &CodeArgs) -> Result<Vec<String>, String> {
             "session".to_string(),
             "list".to_string(),
             "--format".to_string(),
-            if code.json { "json".into() } else { "text".into() },
+            if code.json {
+                "json".into()
+            } else {
+                "text".into()
+            },
         ]);
     }
     if code.sandbox {

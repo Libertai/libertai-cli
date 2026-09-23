@@ -846,22 +846,6 @@ mod tests {
     }
 
     #[test]
-    fn enriched_entry_deserializes_as_pi_model_config() {
-        // Guard against drift from what pi actually consumes: the entry we
-        // write must round-trip through the pinned pi rev's `ModelConfig`
-        // (camelCase `contextWindow` + full `cost` object).
-        let cat = fixture_catalog();
-        let entry = new_pi_model_entry("qwen3.5-122b-a10b", Some(&cat));
-        let cfg: pi::models::ModelConfig =
-            serde_json::from_value(entry).expect("pi parses our entry");
-        assert_eq!(cfg.context_window, Some(262_144));
-        let cost = cfg.cost.expect("cost present");
-        assert_eq!(cost.input, 0.25);
-        assert_eq!(cost.output, 1.75);
-        assert_eq!(cfg.reasoning, Some(true));
-    }
-
-    #[test]
     fn catalog_json_shape_is_stable() {
         let cat = fixture_catalog();
         let v = catalog_json_for(&cat, "deepseek-v4-flash").expect("metadata");

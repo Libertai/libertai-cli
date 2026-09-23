@@ -61,9 +61,6 @@ dirs = "6"
 url = "2"
 dialoguer = { version = "0.12", default-features = false, features = ["password"] }
 indicatif = "0.18"
-# Gitignore-aware repo walker for the @-mention file autocomplete popup.
-# Already pulled in transitively via pi_agent_rust; declared directly so
-# the TUI can enumerate candidate paths itself.
 ignore = "0.4"
 owo-colors = "4"
 anyhow = "1"
@@ -94,60 +91,16 @@ tiny_http = "0.12"
 qrcode = { version = "0.14", default-features = false }
 zeroize = { version = "1", features = ["derive"] }
 
-# `libertai code` — linked pi_agent_rust. MIT + OpenAI/Anthropic rider;
-# license field above stays "MIT" for the release branch while the bundled
-# dependency rider is tracked in the pinned fork.
-#
-# Pinned to our fork at Libertai/pi_agent_rust, branch sync/upstream-20260709:
-# the fork's carried patch series rebased onto upstream 329c1f9b (2026-07-08).
-# Carried patches (highlights):
-# - pause-resume primitive for long-running tools (ToolExecution::Paused +
-#   Agent::resume_paused_tools), grafted onto upstream's effect-batching
-#   tool pipeline
-# - bash `run_in_background` + follow-up tools (`bash_output`, `kill_bash`)
-#   and the `command_wrapper` sandbox-launcher hook
-# - native `task` subagent tool + streamed child task updates
-# - `AgentSessionHandle::prompt_with_content[_with_abort]` (multimodal SDK),
-#   in-process session fork, live tool add/remove/refresh, compact
-#   instructions + compaction session overrides (P2 token-budget fast path,
-#   P3 enriched AutoCompactionEnd payload)
-# - read-path hardening: secret redaction, repeated-read dedup, stale-write
-#   warnings; `hashline_edit` op defaulting to "replace"
-# - per-project memory + git context block, PI_AGENT_NAME prompt branding,
-#   env-var hook to dump the assembled system prompt
-# - fix: import StopReason in session.rs (upstream #125 left its own CI red)
-# (set_session_name / max_tokens / set_max_tokens were dropped: upstream
-#  adopted them verbatim.)
-#
-# NOTE: this rev requires the nightly toolchain pinned in rust-toolchain.toml
-# (asupersync 0.3.4 + fsqlite use nightly features).
-pi_agent_rust = { git = "https://github.com/Libertai/pi_agent_rust", rev = "3775aae0", default-features = false }
-# NOTE: `libertai code` execs the `alforria` binary (pi and alforria cannot
-# coexist in one binary — both link tree-sitter). Once the desktop app
-# migrates off pi (ALFORRIA-MIGRATION-PLAN.md phase 3), pi goes away and
-# alforria can be linked in-process.
-asupersync = { version = "=0.3.4", default-features = false, features = ["tls-native-roots"] }
-# JavaScript workflow engine (M6 #15) — rquickjs embeds QuickJS as an
-# async-capable sandbox in which user workflow scripts call `agent()`,
-# `parallel()`, `pipeline()`, `phase()`, `log()`. pi already pulls
-# rquickjs 0.11 in transitively with these exact features, so declaring
-# it here is a zero-cost lockfile no-op (no new native compile, no new
-# transitive crates). Same version + features as pi's own dependency so
-# the lockfile stays unified. Use rquickjs (not boa) — boa would add
-# ~50 ICU4X crates.
-rquickjs = { version = "0.11", features = ["futures", "loader"] }
+# `libertai code` engine — alforria, our Rust port of opencode, linked
+# in-process (the old pi-based engine was removed with the alforria
+# cutover; see ALFORRIA-MIGRATION-PLAN.md).
+alforria = { git = "https://github.com/alforria-ai/alforria.git" }
+# Markdown → ANSI rendering for `libertai chat` / `ask` streaming output.
+rich_rust = { version = "0.2", features = ["full"] }
+# Terminal width probe for chat markdown rendering.
+crossterm = "0.29"
 async-trait = "0.1"
 futures = "0.3"
-# `libertai code` interactive REPL — raw-mode input bar, cursor control,
-# terminal-size queries. pi_agent_rust already pulls this in transitively,
-# but we declare it explicitly so `use crossterm::...` resolves cleanly.
-crossterm = "0.29"
-# Markdown → ANSI capture for the inline assistant turn marker + hanging
-# indent in `libertai code`. pi pulls rich_rust transitively but does not
-# re-export it (PiConsole's inner Console is private), so we render the
-# decorated path through our own buffer-backed Console. Same version +
-# features as pi's own dependency, so the lockfile stays unified.
-rich_rust = { version = "0.2", features = ["full"] }
 # Catch Ctrl-C during an in-flight agent stream and forward it to pi's
 # AbortHandle so the REPL survives the interrupt.
 ctrlc = "3"

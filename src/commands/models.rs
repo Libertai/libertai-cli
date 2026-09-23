@@ -1,34 +1,17 @@
 use anyhow::{Context, Result};
 
-use crate::client::{list_models, ModelList};
-use crate::commands::model_catalog::{self, Catalog};
+use crate::client::list_models;
+use crate::commands::model_catalog::{self};
 use crate::commands::output::Styler;
-use crate::config::{self, load, Config};
+use crate::config::load;
 
-pub fn run(refresh: bool, json: bool) -> Result<()> {
+pub fn run(json: bool) -> Result<()> {
     let cfg = load()?;
     let list = list_models(&cfg)?;
     // Loaded only after /v1/models succeeded, so auth/network failures keep
     // their exit codes (3/4) without ever touching the catalog endpoint.
     // `None` (offline, disabled) degrades to dashes / wire-only JSON.
     let catalog = model_catalog::load();
-
-    if refresh {
-        let added = refresh_persisted_catalog(&cfg, &list, catalog.as_ref())?;
-        // Human-facing refresh notes go to stderr so `--json` (and plain
-        // table piping) keep stdout machine-clean.
-        if added == 0 {
-            eprintln!(
-                "refreshed: {} models from /v1/models; pi models.json already up to date",
-                list.data.len()
-            );
-        } else {
-            eprintln!(
-                "refreshed: {} models from /v1/models; added {added} new model(s) to pi models.json",
-                list.data.len()
-            );
-        }
-    }
 
     if json {
         // Wire shape as returned by `/v1/models` (`{"data": [...]}`), with a
@@ -117,135 +100,4 @@ pub fn run(refresh: bool, json: bool) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// Listing ids that belong in pi's chat catalog and aren't registered yet.
-/// The `/v1/models` listing also carries image, embedding and search ids;
-/// registering one would offer it as a selectable chat model in `/model` and
-/// over ACP, where it fails at generation time.
-fn missing_chat_model_ids(
-    list: &ModelList,
-    registered: &[String],
-    catalog: Option<&Catalog>,
-) -> Vec<String> {
-    list.data
-        .iter()
-        .map(|e| e.id.as_str())
-        .filter(|id| model_catalog::is_chat_model(id, catalog))
-        .filter(|id| !registered.iter().any(|r| r == id))
-        .map(str::to_string)
-        .collect()
-}
-
-/// `--refresh`: sync the live `/v1/models` listing into the model catalog
-/// persisted in pi's `models.json` (`providers.libertai.models`).
-///
-/// There is no response cache for `/v1/models` itself — every `libertai
-/// models` run hits the API — but the *persisted* catalog that `libertai
-/// code` reads is only seeded with `default_code_model` by
-/// `code_models::ensure_libertai_registered`, so models launched after
-/// install never become selectable in `/model` until something writes
-/// them. This merges every fetched id that is missing — new entries carry
-/// real context windows and cost from the public catalog when available —
-/// while richer existing entries (e.g. hand-edited context windows) are
-/// left untouched (`ensure_libertai_registered` upgrades only our own
-/// legacy 32k placeholders).
-///
-/// Returns the number of models added.
-fn refresh_persisted_catalog(
-    cfg: &Config,
-    list: &ModelList,
-    catalog: Option<&Catalog>,
-) -> Result<usize> {
-    // Guarantees the file and the `providers.libertai` entry exist (and
-    // re-asserts baseUrl/apiKey indirection, plus catalog enrichment of
-    // existing entries) before we merge into it.
-    crate::commands::code_models::ensure_libertai_registered(cfg)?;
-
-    let global_dir = pi::config::Config::global_dir();
-    let models_path = pi::models::default_models_path(&global_dir);
-    let raw = std::fs::read_to_string(&models_path)
-        .with_context(|| format!("reading {}", models_path.display()))?;
-    let mut root: serde_json::Value =
-        serde_json::from_str(&raw).with_context(|| format!("parsing {}", models_path.display()))?;
-
-    let models = root
-        .get_mut("providers")
-        .and_then(|p| p.get_mut("libertai"))
-        .and_then(|l| l.get_mut("models"))
-        .and_then(|m| m.as_array_mut())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "providers.libertai.models missing in {} — re-run `libertai code` once to seed it",
-                models_path.display()
-            )
-        })?;
-
-    let registered: Vec<String> = models
-        .iter()
-        .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(str::to_string))
-        .collect();
-    let to_add = missing_chat_model_ids(list, &registered, catalog);
-    let added = to_add.len();
-    for id in to_add {
-        models.push(model_catalog::new_pi_model_entry(&id, catalog));
-    }
-
-    if added > 0 {
-        let serialized = serde_json::to_string_pretty(&root).context("serializing models.json")?;
-        config::write_file_secure(&models_path, serialized.as_bytes())
-            .with_context(|| format!("writing {}", models_path.display()))?;
-    }
-    Ok(added)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::client::ModelEntry;
-
-    fn listing(ids: &[&str]) -> ModelList {
-        ModelList {
-            data: ids
-                .iter()
-                .map(|id| ModelEntry {
-                    id: (*id).to_string(),
-                    owned_by: None,
-                })
-                .collect(),
-        }
-    }
-
-    fn fixture_catalog() -> Catalog {
-        model_catalog::parse_aggregate(include_str!(
-            "../../tests/fixtures/ltai_pricing_aggregate.json"
-        ))
-        .expect("fixture parses")
-    }
-
-    #[test]
-    fn refresh_skips_non_chat_models_from_the_listing() {
-        let cat = fixture_catalog();
-        let list = listing(&[
-            "qwen3.6-35b-a3b",
-            "z-image-turbo",
-            "bge-m3",
-            "search/google",
-        ]);
-        assert_eq!(
-            missing_chat_model_ids(&list, &[], Some(&cat)),
-            vec!["qwen3.6-35b-a3b".to_string()],
-        );
-    }
-
-    #[test]
-    fn refresh_skips_already_registered_ids() {
-        let cat = fixture_catalog();
-        let list = listing(&["qwen3.6-35b-a3b", "qwen3.6-35b-a3b-thinking"]);
-        let registered = vec!["qwen3.6-35b-a3b".to_string()];
-        assert_eq!(
-            missing_chat_model_ids(&list, &registered, Some(&cat)),
-            vec!["qwen3.6-35b-a3b-thinking".to_string()],
-        );
-    }
 }

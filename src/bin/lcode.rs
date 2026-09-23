@@ -43,10 +43,10 @@ struct LcodeCli {
     /// With `--list-sessions`, emit a JSON array instead of the human list.
     #[arg(long, requires = "list_sessions")]
     json: bool,
-    /// Sandbox the bash tool (`off` / `strict` / `auto`). See
-    /// `libertai code --help` for full details. Default: `off`.
-    #[arg(long, value_enum, env = "LIBERTAI_SANDBOX", default_value_t = libertai_cli::commands::code_sandbox::SandboxMode::Off)]
-    sandbox: libertai_cli::commands::code_sandbox::SandboxMode,
+    /// Accepted for backwards compatibility; the alforria engine has
+    /// no sandbox mode, so this only prints a warning.
+    #[arg(long)]
+    sandbox: bool,
     /// Print mode: one headless agent turn, then exit. See
     /// `libertai code --help` for full details.
     #[arg(long, short = 'p', conflicts_with = "list_sessions")]
