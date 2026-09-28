@@ -14,7 +14,7 @@
 //! - `--agent`, trailing prompt args → passed through
 //!
 //! Flags with no alforria equivalent emit a warning and are dropped:
-//! `--resume <path>`, `--list-sessions`, `--sandbox`, `--plan`, `--bg`,
+//! `--resume <path>`, `--sandbox`, `--plan`, `--bg`,
 //! `--name`, `--team`, `--teammate`.
 
 pub fn run(args: CodeArgs) -> i32 {
@@ -63,16 +63,17 @@ fn build_argv(code: &CodeArgs) -> Result<Vec<String>, String> {
     let mut warnings = Vec::new();
 
     if code.acp {
-        let mut argv = vec![
-            "acp".to_string(),
-            "--model".to_string(),
-            qualified_model(code)?,
-        ];
-        if let Some(agent) = &code.agent {
-            argv.push("--agent".to_string());
-            argv.push(agent.clone());
+        // alforria's `acp` accepts no --model/--agent: the session starts on
+        // the default model and switches via `session/set_model`.
+        if code.model.is_some() || code.provider.is_some() || code.agent.is_some() {
+            warnings.push(
+                "`--model`, `--provider` and `--agent` cannot be forwarded to an ACP session; it starts on the configured default model (switchable via `session/set_model`)".to_string(),
+            );
         }
-        return Ok(argv);
+        for warning in warnings {
+            eprintln!("Warning: {warning}");
+        }
+        return Ok(vec!["acp".to_string()]);
     }
 
     if code.resume.is_some() {
@@ -89,7 +90,7 @@ fn build_argv(code: &CodeArgs) -> Result<Vec<String>, String> {
             if code.json {
                 "json".into()
             } else {
-                "text".into()
+                "table".into()
             },
         ]);
     }
@@ -257,7 +258,26 @@ mod tests {
         let mut code = code_args();
         code.acp = true;
         let argv = build_argv(&code).unwrap();
-        assert_eq!(argv, vec!["acp", "--model", "libertai/test-model"]);
+        assert_eq!(argv, vec!["acp"]);
+    }
+
+    #[test]
+    fn list_sessions_maps_to_session_list() {
+        let mut code = code_args();
+        code.model = None;
+        code.provider = None;
+        code.list_sessions = true;
+        let argv = build_argv(&code).unwrap();
+        assert_eq!(
+            argv,
+            vec!["session", "list", "--format", "table"]
+        );
+        code.json = true;
+        let argv = build_argv(&code).unwrap();
+        assert_eq!(
+            argv,
+            vec!["session", "list", "--format", "json"]
+        );
     }
 
     #[test]
