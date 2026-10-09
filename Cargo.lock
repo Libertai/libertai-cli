@@ -41,7 +41,7 @@ dependencies = [
 [[package]]
 name = "alforria"
 version = "0.1.0"
-source = "git+https://github.com/alforria-ai/alforria.git#a467aa25dac0e7cd0d57c8848cb75262f728e145"
+source = "git+https://github.com/alforria-ai/alforria.git#56cce041f411c86d7c85a02982ff660603e8f894"
 dependencies = [
  "alforria-core",
  "alforria-llm",
@@ -66,7 +66,7 @@ dependencies = [
 [[package]]
 name = "alforria-core"
 version = "0.1.0"
-source = "git+https://github.com/alforria-ai/alforria.git#a467aa25dac0e7cd0d57c8848cb75262f728e145"
+source = "git+https://github.com/alforria-ai/alforria.git#56cce041f411c86d7c85a02982ff660603e8f894"
 dependencies = [
  "alforria-llm",
  "alforria-schema",
@@ -109,7 +109,7 @@ dependencies = [
 [[package]]
 name = "alforria-llm"
 version = "0.1.0"
-source = "git+https://github.com/alforria-ai/alforria.git#a467aa25dac0e7cd0d57c8848cb75262f728e145"
+source = "git+https://github.com/alforria-ai/alforria.git#56cce041f411c86d7c85a02982ff660603e8f894"
 dependencies = [
  "alforria-schema",
  "eventsource-stream",
@@ -128,7 +128,7 @@ dependencies = [
 [[package]]
 name = "alforria-schema"
 version = "0.1.0"
-source = "git+https://github.com/alforria-ai/alforria.git#a467aa25dac0e7cd0d57c8848cb75262f728e145"
+source = "git+https://github.com/alforria-ai/alforria.git#56cce041f411c86d7c85a02982ff660603e8f894"
 dependencies = [
  "chrono",
  "serde",
@@ -139,11 +139,12 @@ dependencies = [
 [[package]]
 name = "alforria-server"
 version = "0.1.0"
-source = "git+https://github.com/alforria-ai/alforria.git#a467aa25dac0e7cd0d57c8848cb75262f728e145"
+source = "git+https://github.com/alforria-ai/alforria.git#56cce041f411c86d7c85a02982ff660603e8f894"
 dependencies = [
  "alforria-core",
  "alforria-llm",
  "alforria-schema",
+ "alforria-ui",
  "axum",
  "base64",
  "flate2",
@@ -170,7 +171,7 @@ dependencies = [
 [[package]]
 name = "alforria-tui"
 version = "0.1.0"
-source = "git+https://github.com/alforria-ai/alforria.git#a467aa25dac0e7cd0d57c8848cb75262f728e145"
+source = "git+https://github.com/alforria-ai/alforria.git#56cce041f411c86d7c85a02982ff660603e8f894"
 dependencies = [
  "alforria-schema",
  "anyhow",
@@ -189,6 +190,16 @@ dependencies = [
  "sha1",
  "tokio",
  "unicode-width",
+]
+
+[[package]]
+name = "alforria-ui"
+version = "0.1.0"
+source = "git+https://github.com/alforria-ai/alforria.git#56cce041f411c86d7c85a02982ff660603e8f894"
+dependencies = [
+ "tar",
+ "tracing",
+ "zstd",
 ]
 
 [[package]]
@@ -583,6 +594,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e228eec9be7c17ccb640b59b36a5cd805ea2a564a4c5e162c2f659fea30d3b96"
 dependencies = [
  "find-msvc-tools",
+ "jobserver",
+ "libc",
  "shlex",
 ]
 
@@ -1294,6 +1307,16 @@ dependencies = [
  "libc",
  "thiserror 1.0.69",
  "winapi",
+]
+
+[[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
 ]
 
 [[package]]
@@ -2090,6 +2113,16 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "jobserver"
+version = "0.1.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
+dependencies = [
+ "getrandom 0.4.3",
+ "libc",
+]
 
 [[package]]
 name = "js-sys"
@@ -4087,6 +4120,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5276,6 +5320,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix",
+]
+
+[[package]]
 name = "yaml-rust"
 version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5406,3 +5460,31 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.0+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
