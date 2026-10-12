@@ -123,7 +123,11 @@ fn build_argv(code: &CodeArgs) -> Result<Vec<String>, String> {
     // Bare alforria (no subcommand) launches the default TUI command; there
     // is no "tui" subcommand, and an unknown first token falls through to
     // the `project` positional (i.e. `alforria tui` would chdir into ./tui).
-    let mut argv: Vec<String> = if interactive { vec![] } else { vec!["run".to_string()] };
+    let mut argv: Vec<String> = if interactive {
+        vec![]
+    } else {
+        vec!["run".to_string()]
+    };
     if code.model.is_some() || !interactive {
         argv.push("--model".to_string());
         argv.push(qualified_model(code)?);
@@ -239,7 +243,10 @@ mod tests {
         code.provider = Some("libertai".into());
         assert_eq!(
             build_argv(&code).unwrap(),
-            vec!["--model".to_string(), "libertai/glm-5.3-thinking".to_string()]
+            vec![
+                "--model".to_string(),
+                "libertai/glm-5.3-thinking".to_string()
+            ]
         );
     }
 
@@ -268,16 +275,10 @@ mod tests {
         code.provider = None;
         code.list_sessions = true;
         let argv = build_argv(&code).unwrap();
-        assert_eq!(
-            argv,
-            vec!["session", "list", "--format", "table"]
-        );
+        assert_eq!(argv, vec!["session", "list", "--format", "table"]);
         code.json = true;
         let argv = build_argv(&code).unwrap();
-        assert_eq!(
-            argv,
-            vec!["session", "list", "--format", "json"]
-        );
+        assert_eq!(argv, vec!["session", "list", "--format", "json"]);
     }
 
     #[test]
