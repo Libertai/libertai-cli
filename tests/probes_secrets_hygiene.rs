@@ -22,16 +22,22 @@ mod common;
 /// Must match the key planted by `common::fake_config_home`.
 const PROBE_KEY: &str = "LTAI_sk_probe_config_00000000000000000000";
 
+/// The config root that `dirs::config_dir()` resolves for a fake
+/// `$HOME` / `$XDG_CONFIG_HOME` pointing at `home`.
+fn platform_config_root(home: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        // dirs::config_dir() ignores XDG_CONFIG_HOME on macOS and follows
+        // $HOME/Library/Application Support instead.
+        home.join("Library").join("Application Support")
+    } else {
+        home.to_path_buf()
+    }
+}
+
 /// The libertai config dir that `dirs::config_dir()` resolves for a fake
 /// `$HOME` / `$XDG_CONFIG_HOME` pointing at `home`.
 fn platform_config_dir(home: &Path) -> PathBuf {
-    if cfg!(target_os = "macos") {
-        home.join("Library")
-            .join("Application Support")
-            .join("libertai")
-    } else {
-        home.join("libertai")
-    }
+    platform_config_root(home).join("libertai")
 }
 
 /// Recursively collect every file under `root` whose contents contain
@@ -63,10 +69,10 @@ fn logout_scrubs_plaintext_key_from_legacy_pi_models_json() {
     )
     .unwrap();
 
-    // Legacy pi-era models.json carrying a plaintext key. With
-    // XDG_CONFIG_HOME overridden this resolves to $XDG_CONFIG_HOME/pi,
-    // matching logout's dirs::config_dir()-based lookup.
-    let pi_dir = home.path().join("pi");
+    // Legacy pi-era models.json carrying a plaintext key, placed where
+    // logout's dirs::config_dir()-based lookup finds it ($XDG_CONFIG_HOME/pi
+    // on Linux, $HOME/Library/Application Support/pi on macOS).
+    let pi_dir = platform_config_root(home.path()).join("pi");
     std::fs::create_dir_all(&pi_dir).unwrap();
     std::fs::write(
         pi_dir.join("models.json"),
