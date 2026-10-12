@@ -94,7 +94,7 @@ zeroize = { version = "1", features = ["derive"] }
 # `libertai code` engine — alforria, our Rust port of opencode, linked
 # in-process (the old pi-based engine was removed with the alforria
 # cutover; see ALFORRIA-MIGRATION-PLAN.md).
-alforria = { git = "https://github.com/alforria-ai/alforria.git" }
+alforria = { git = "https://github.com/alforria-ai/alforria.git", tag = "v0.2.0" }
 # Markdown → ANSI rendering for `libertai chat` / `ask` streaming output.
 rich_rust = { version = "0.2", features = ["full"] }
 # Terminal width probe for chat markdown rendering.
