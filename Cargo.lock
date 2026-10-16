@@ -40,8 +40,8 @@ dependencies = [
 
 [[package]]
 name = "alforria"
-version = "0.2.0"
-source = "git+https://github.com/alforria-ai/alforria.git?tag=v0.2.0#2a8deff8ea8c3bdd44900a65a693f86d70b5b8d4"
+version = "0.2.1"
+source = "git+https://github.com/alforria-ai/alforria.git?tag=v0.2.1#0903e518267a0ccad6440a518fe2523eb1c5ad80"
 dependencies = [
  "alforria-core",
  "alforria-llm",
@@ -65,8 +65,8 @@ dependencies = [
 
 [[package]]
 name = "alforria-core"
-version = "0.2.0"
-source = "git+https://github.com/alforria-ai/alforria.git?tag=v0.2.0#2a8deff8ea8c3bdd44900a65a693f86d70b5b8d4"
+version = "0.2.1"
+source = "git+https://github.com/alforria-ai/alforria.git?tag=v0.2.1#0903e518267a0ccad6440a518fe2523eb1c5ad80"
 dependencies = [
  "alforria-llm",
  "alforria-schema",
@@ -108,8 +108,8 @@ dependencies = [
 
 [[package]]
 name = "alforria-llm"
-version = "0.2.0"
-source = "git+https://github.com/alforria-ai/alforria.git?tag=v0.2.0#2a8deff8ea8c3bdd44900a65a693f86d70b5b8d4"
+version = "0.2.1"
+source = "git+https://github.com/alforria-ai/alforria.git?tag=v0.2.1#0903e518267a0ccad6440a518fe2523eb1c5ad80"
 dependencies = [
  "alforria-schema",
  "eventsource-stream",
@@ -127,8 +127,8 @@ dependencies = [
 
 [[package]]
 name = "alforria-schema"
-version = "0.2.0"
-source = "git+https://github.com/alforria-ai/alforria.git?tag=v0.2.0#2a8deff8ea8c3bdd44900a65a693f86d70b5b8d4"
+version = "0.2.1"
+source = "git+https://github.com/alforria-ai/alforria.git?tag=v0.2.1#0903e518267a0ccad6440a518fe2523eb1c5ad80"
 dependencies = [
  "chrono",
  "serde",
@@ -138,8 +138,8 @@ dependencies = [
 
 [[package]]
 name = "alforria-server"
-version = "0.2.0"
-source = "git+https://github.com/alforria-ai/alforria.git?tag=v0.2.0#2a8deff8ea8c3bdd44900a65a693f86d70b5b8d4"
+version = "0.2.1"
+source = "git+https://github.com/alforria-ai/alforria.git?tag=v0.2.1#0903e518267a0ccad6440a518fe2523eb1c5ad80"
 dependencies = [
  "alforria-core",
  "alforria-llm",
@@ -170,8 +170,8 @@ dependencies = [
 
 [[package]]
 name = "alforria-tui"
-version = "0.2.0"
-source = "git+https://github.com/alforria-ai/alforria.git?tag=v0.2.0#2a8deff8ea8c3bdd44900a65a693f86d70b5b8d4"
+version = "0.2.1"
+source = "git+https://github.com/alforria-ai/alforria.git?tag=v0.2.1#0903e518267a0ccad6440a518fe2523eb1c5ad80"
 dependencies = [
  "alforria-schema",
  "anyhow",
@@ -199,8 +199,8 @@ dependencies = [
 
 [[package]]
 name = "alforria-ui"
-version = "0.2.0"
-source = "git+https://github.com/alforria-ai/alforria.git?tag=v0.2.0#2a8deff8ea8c3bdd44900a65a693f86d70b5b8d4"
+version = "0.2.1"
+source = "git+https://github.com/alforria-ai/alforria.git?tag=v0.2.1#0903e518267a0ccad6440a518fe2523eb1c5ad80"
 dependencies = [
  "tar",
  "tracing",
