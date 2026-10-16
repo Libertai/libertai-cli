@@ -431,7 +431,7 @@ pub fn enrich_pi_model_entry(entry: &mut Map<String, Value>, catalog: &Catalog) 
 
 /// Context/output limits written when the catalog can't supply a real window.
 const OPENCODE_FALLBACK_CONTEXT: u32 = 200_000;
-const OPENCODE_FALLBACK_OUTPUT: u32 = 16_384;
+const OPENCODE_FALLBACK_OUTPUT: u32 = 32_768;
 
 /// Whether a `/v1/models` id may be offered as a chat model. The listing also
 /// carries image, embedding, audio and search ids, which every writer that
