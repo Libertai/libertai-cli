@@ -8,18 +8,10 @@ pub const DEFAULT_API_BASE: &str = "https://api.libertai.io";
 // inference gateway (DEFAULT_API_BASE, which serves /v1/*).
 pub const DEFAULT_ACCOUNT_BASE: &str = "https://inference.api.libertai.io";
 pub const DEFAULT_SEARCH_BASE: &str = "https://search.libertai.io";
-// Public, unauthenticated Aleph aggregate carrying LibertAI's authoritative
-// model metadata (context windows + per-MTok pricing) — the same source the
-// website reads. The address is the LibertAI pricing wallet; override the
-// whole URL with `LIBERTAI_MODEL_CATALOG_URL` (see `commands::model_catalog`).
-pub const MODEL_CATALOG_AGGREGATE_ADDRESS: &str = "0x238224C744F4b90b4494516e074D2676ECfC6803";
-pub const DEFAULT_MODEL_CATALOG_URL: &str =
-    "https://api2.aleph.im/api/v0/aggregates/0x238224C744F4b90b4494516e074D2676ECfC6803.json?keys=LTAI_PRICING";
 pub const DEFAULT_CHAT_MODEL: &str = "glm-5.3-flash";
 // `libertai code` runs on the OpenAI-completions path, where the
 // `-thinking` variant is available — use it so the coding agent reasons
-// before acting. The thinking id is served by `/v1/models` and
-// auto-seeded into pi's catalog by `ensure_libertai_registered`.
+// before acting.
 pub const DEFAULT_CODE_MODEL: &str = "glm-5.3-thinking";
 pub const DEFAULT_CODE_PROVIDER: &str = "libertai";
 pub const DEFAULT_IMAGE_MODEL: &str = "z-image-turbo";

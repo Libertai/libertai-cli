@@ -161,11 +161,49 @@ pub fn require_api_key(cfg: &Config) -> Result<&str> {
 
 // ── Inference (OpenAI-compatible) ───────────────────────────────────────────
 
+/// One `/v1/models` entry. Metadata fields follow OpenRouter's
+/// `/api/v1/models` schema; each is absent when the API has no data for it.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ModelEntry {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owned_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+    /// Present only for chat (text-output) models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<ModelArchitecture>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<ModelPricing>,
+    /// Remaining wire fields, kept so `models --json` re-emits them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ModelArchitecture {
+    #[serde(default)]
+    pub input_modalities: Vec<String>,
+    #[serde(default)]
+    pub output_modalities: Vec<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// USD per token, normally decimal strings. Kept as raw values so one entry
+/// with an unexpected pricing shape can't fail the whole listing.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ModelPricing {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_cache_read: Option<serde_json::Value>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Mirrors the `/v1/models` wire shape (`{"data": [...]}`), so

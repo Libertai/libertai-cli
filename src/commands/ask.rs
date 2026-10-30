@@ -54,8 +54,8 @@ fn build_user_content(prompt: String, images: &[String]) -> Result<MessageConten
     Ok(MessageContent::Parts(parts))
 }
 
-/// Fail fast when the catalog says the model has no vision capability.
-/// `None` (catalog missing or model unknown) sends anyway — the API is the
+/// Fail fast when `/v1/models` says the model has no vision capability.
+/// `None` (listing failed or model unlisted) sends anyway — the API is the
 /// authority and will reject if it must.
 fn check_vision_support(model: &str, vision: Option<bool>) -> Result<()> {
     if vision == Some(false) {
@@ -67,10 +67,13 @@ fn check_vision_support(model: &str, vision: Option<bool>) -> Result<()> {
     Ok(())
 }
 
-fn catalog_vision(model: &str) -> Option<bool> {
-    let catalog = crate::commands::model_catalog::load()?;
-    let caps = catalog.find_text(model)?.text_capabilities()?;
-    Some(caps.vision)
+fn listed_vision(cfg: &crate::config::Config, model: &str) -> Option<bool> {
+    crate::client::list_models(cfg)
+        .ok()?
+        .data
+        .iter()
+        .find(|m| m.id == model)?
+        .vision()
 }
 
 pub fn run(prompt: String, model: Option<String>, images: Vec<String>) -> Result<()> {
@@ -78,7 +81,7 @@ pub fn run(prompt: String, model: Option<String>, images: Vec<String>) -> Result
     let model = model.unwrap_or_else(|| cfg.default_chat_model.clone());
 
     if !images.is_empty() {
-        check_vision_support(&model, catalog_vision(&model))?;
+        check_vision_support(&model, listed_vision(&cfg, &model))?;
     }
 
     let req = ChatRequest {
