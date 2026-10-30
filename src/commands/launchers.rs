@@ -133,16 +133,35 @@ pub fn opencode(model: Option<String>, mut args: Vec<String>) -> Result<()> {
         Err(e) => eprintln!("opencode: could not install bundled skills: {e:#}"),
     }
 
-    // Forward the model selection as `libertai/<model>` unless the user
-    // already passed --model / -m themselves.
-    let has_model_flag = args.iter().any(|a| a == "--model" || a == "-m");
-    if !has_model_flag {
-        let chosen = model.unwrap_or_else(|| cfg.default_code_model.clone());
-        args.push("--model".into());
-        args.push(format!("libertai/{chosen}"));
+    // Set via inline config: opencode 2.x's TUI rejects `--model`.
+    let chosen = model.unwrap_or_else(|| cfg.default_code_model.clone());
+    env.push((
+        "OPENCODE_CONFIG_CONTENT".into(),
+        json!({ "model": format!("libertai/{chosen}") }).to_string(),
+    ));
+
+    // opencode 2.x otherwise attaches to a shared background service, which
+    // never sees this process's env (API key, inline config).
+    let picks_server = args.iter().any(|a| a == "--server" || a == "--standalone");
+    if !picks_server && opencode_major_version().is_some_and(|v| v >= 2) {
+        args.push("--standalone".into());
     }
 
     exec_with_env("opencode", &args, env)
+}
+
+fn opencode_major_version() -> Option<u32> {
+    let out = std::process::Command::new("opencode")
+        .arg("--version")
+        .output()
+        .ok()?;
+    parse_major_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Accepts `1.2.3` and `opencode v2.2.2` style output.
+fn parse_major_version(s: &str) -> Option<u32> {
+    s.split_whitespace()
+        .find_map(|w| w.trim_start_matches('v').split('.').next()?.parse().ok())
 }
 
 fn opencode_config_path() -> Result<PathBuf> {
@@ -345,3 +364,15 @@ fn sync_aider_instructions() -> Result<PathBuf> {
 }
 
 const AIDER_INSTRUCTIONS: &str = include_str!("../skills_content/aider-instructions.md");
+
+#[cfg(test)]
+mod tests {
+    use super::parse_major_version;
+
+    #[test]
+    fn parses_opencode_version_output() {
+        assert_eq!(parse_major_version("opencode v2.2.2\n"), Some(2));
+        assert_eq!(parse_major_version("1.14.3\n"), Some(1));
+        assert_eq!(parse_major_version(""), None);
+    }
+}
