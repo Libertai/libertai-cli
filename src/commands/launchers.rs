@@ -194,59 +194,29 @@ fn sync_opencode_config(cfg: &Config) -> Result<(PathBuf, usize)> {
         json!({ "$schema": "https://opencode.ai/config.json" })
     };
 
-    // Real context windows / pricing / text-vs-non-text classification for the
-    // model entries. `None` (offline) degrades to id-only entries.
-    let catalog = crate::commands::model_catalog::load();
-
-    // Models already registered under our provider entry, so a failed
-    // `/v1/models` fetch below degrades to "keep what we have" instead of
-    // silently dropping models the user depends on (e.g. the `--model` id).
-    let existing_ids: Vec<String> = root
-        .pointer("/provider/libertai/models")
-        .and_then(Value::as_object)
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default();
-
-    // Fetch available models from the server. Fall back to the tier defaults
-    // and the already-registered models if the call fails (offline, stale
-    // key, transient 5xx) so `opencode` still launches with *something*
-    // that works.
-    let tier_defaults: Vec<String> = [
-        cfg.default_chat_model.as_str(),
-        cfg.default_code_model.as_str(),
-    ]
-    .into_iter()
-    .chain(cfg.launcher_defaults.tiers())
-    .map(str::to_string)
-    .collect();
-    let mut ids: Vec<String> = match crate::client::list_models(cfg) {
-        Ok(list) => list
-            .data
-            .into_iter()
-            .map(|m| m.id)
-            .filter(|id| crate::commands::model_catalog::is_chat_model(id, catalog.as_ref()))
-            .collect(),
+    let listed = match crate::client::list_models(cfg) {
+        Ok(list) => Some(list.data),
         Err(e) => {
             eprintln!(
                 "opencode: could not list models from {} ({e}); keeping existing models",
                 cfg.api_base
             );
-            existing_ids
+            None
         }
     };
-    // Always include the tier defaults so `--model libertai/<tier>` resolves
-    // even if the server list omits one.
-    ids.extend(tier_defaults.iter().cloned());
-    ids.sort();
-    ids.dedup();
-
-    let mut models = serde_json::Map::new();
-    for id in &ids {
-        models.insert(
-            id.clone(),
-            crate::commands::model_catalog::opencode_model_entry(id, catalog.as_ref()),
-        );
-    }
+    let tier_defaults: Vec<&str> = [
+        cfg.default_chat_model.as_str(),
+        cfg.default_code_model.as_str(),
+    ]
+    .into_iter()
+    .chain(cfg.launcher_defaults.tiers())
+    .collect();
+    let models = opencode_models(
+        listed.as_deref(),
+        root.pointer("/provider/libertai/models"),
+        &tier_defaults,
+    );
+    let model_count = models.len();
 
     let provider_entry = json!({
         "npm": "@ai-sdk/openai-compatible",
@@ -274,7 +244,41 @@ fn sync_opencode_config(cfg: &Config) -> Result<(PathBuf, usize)> {
     }
     let pretty = serde_json::to_string_pretty(&root).context("rendering opencode.json")?;
     std::fs::write(&path, pretty).with_context(|| format!("writing {}", path.display()))?;
-    Ok((path, ids.len()))
+    Ok((path, model_count))
+}
+
+/// The `provider.libertai.models` map. `listed` is the `/v1/models` listing,
+/// `None` when it couldn't be fetched: the already-registered `existing`
+/// entries are then kept as written, so an offline launch neither drops
+/// models the user depends on nor degrades their limits/cost to fallbacks.
+/// Tier defaults are always present so `--model libertai/<tier>` resolves.
+fn opencode_models(
+    listed: Option<&[crate::client::ModelEntry]>,
+    existing: Option<&Value>,
+    tier_defaults: &[&str],
+) -> serde_json::Map<String, Value> {
+    let mut models = match listed {
+        Some(list) => list
+            .iter()
+            .filter(|m| m.is_chat())
+            .map(|m| {
+                (
+                    m.id.clone(),
+                    crate::commands::model_catalog::opencode_model_entry(&m.id, Some(m)),
+                )
+            })
+            .collect(),
+        None => existing
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
+    };
+    for &id in tier_defaults {
+        models
+            .entry(id)
+            .or_insert_with(|| crate::commands::model_catalog::opencode_model_entry(id, None));
+    }
+    models
 }
 
 /// Launch Claw Code (ultraworkers/claw-code) pointed at LibertAI.
@@ -367,12 +371,53 @@ const AIDER_INSTRUCTIONS: &str = include_str!("../skills_content/aider-instructi
 
 #[cfg(test)]
 mod tests {
-    use super::parse_major_version;
+    use super::{opencode_models, parse_major_version};
+    use crate::client::ModelEntry;
+    use serde_json::{json, Value};
 
     #[test]
     fn parses_opencode_version_output() {
         assert_eq!(parse_major_version("opencode v2.2.2\n"), Some(2));
         assert_eq!(parse_major_version("1.14.3\n"), Some(1));
         assert_eq!(parse_major_version(""), None);
+    }
+
+    fn existing() -> Value {
+        json!({
+            "old-model": {"name": "old-model", "limit": {"context": 1048576, "output": 32768}},
+            "glm-5.3": {"name": "glm-5.3", "limit": {"context": 262144, "output": 32768}}
+        })
+    }
+
+    #[test]
+    fn opencode_models_offline_keeps_existing_and_adds_tier_defaults() {
+        let models = opencode_models(None, Some(&existing()), &["glm-5.3", "new-tier"]);
+        assert_eq!(models.len(), 3);
+        assert_eq!(models["old-model"], existing()["old-model"]);
+        assert_eq!(models["glm-5.3"], existing()["glm-5.3"]);
+        assert_eq!(models["new-tier"]["limit"]["context"], 200_000);
+    }
+
+    #[test]
+    fn opencode_models_listed_replaces_existing_and_drops_non_chat() {
+        let listed: Vec<ModelEntry> = serde_json::from_value(json!([
+            {
+                "id": "deepseek-v4.1-flash-1017",
+                "context_length": 1048576,
+                "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}
+            },
+            {"id": "z-image-turbo", "name": "Z-Image Turbo"}
+        ]))
+        .unwrap();
+        let models = opencode_models(Some(&listed), Some(&existing()), &["glm-5.3"]);
+        let mut ids: Vec<&str> = models.keys().map(String::as_str).collect();
+        ids.sort();
+        assert_eq!(ids, ["deepseek-v4.1-flash-1017", "glm-5.3"]);
+        assert_eq!(
+            models["deepseek-v4.1-flash-1017"]["limit"]["context"],
+            1_048_576
+        );
+        // Unlisted tier default: fallback entry, not the stale existing one.
+        assert_eq!(models["glm-5.3"]["limit"]["context"], 200_000);
     }
 }

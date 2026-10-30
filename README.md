@@ -260,8 +260,7 @@ The editor's model picker lists **every model registered in pi's registry**,
 not just LibertAI's — if you have other providers configured, they appear
 there too, and picking one routes that session to that provider rather than
 to LibertAI. Switching model mid-session goes through ACP's
-`session/set_model`. Run `libertai models --refresh` to pull new LibertAI
-models into the registry so they show up in the picker.
+`session/set_model`.
 
 ACP sessions are held in memory and are not written to pi's session store, so
 they do not appear in `libertai code --list-sessions` and cannot be resumed
@@ -445,7 +444,7 @@ compaction checkpoint. It prints the path — open it with
 | `libertai logout` | Clear saved credentials (backs up the config to `config.toml.bak.<epoch>`). |
 | `libertai status` | Current auth state and default models. `--json`. |
 | `libertai usage` | Plan tier, rolling allowance windows (5h + weekly), and prepaid credits. `--json`. |
-| `libertai models` | List models from `/v1/models`. `--json`; `--refresh` re-syncs the persisted catalog so new models become selectable in `libertai code`'s `/model`. |
+| `libertai models` | List models from `/v1/models` with context window and price. `--json`. |
 | `libertai keys list\|create\|delete` | Manage your account's API keys. `list --json`. |
 | `libertai ask <prompt>` | One-shot, non-streaming completion. `--model`, `--image` (repeatable; local file or URL, needs a vision model). |
 | `libertai chat` | Streaming chat REPL with history. `--model`, `--system`. |
@@ -466,14 +465,9 @@ compaction checkpoint. It prints the path — open it with
   `agents`, `sandbox info`, `code --list-sessions`, and `import claude-code
   list` / `show` emit machine-readable JSON. JSON is the *only* thing
   written to stdout; progress notes and human extras go to stderr.
-- **`models --json`** — keeps the `/v1/models` wire fields (`id`,
-  `owned_by`) and, when LibertAI's public model catalog is reachable
-  (fetched from an Aleph aggregate, cached on disk for 24h), adds a
-  `catalog` object per text model: `name`, `hfId`, `contextWindow`,
-  `vision`, `reasoning`, `tee`, `functionCalling`, `inputUsdPerMtok`,
-  `outputUsdPerMtok`. For alias/deprecated/`-thinking` ids the metadata
-  comes from the base entry and `resolvedId` replaces `name`/`hfId`.
-  Offline, the `catalog` key is simply absent.
+- **`models --json`** — the `/v1/models` listing as returned, including
+  its metadata fields (`name`, `context_length`, `architecture`,
+  `pricing`, `supported_parameters`; OpenRouter's schema).
 - **Styling** — ANSI colors are emitted only when the destination stream is
   a terminal; piped output is plain text. `NO_COLOR` (per
   [no-color.org](https://no-color.org)) and `TERM=dumb` disable styling
